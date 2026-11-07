@@ -61,7 +61,7 @@ public:
         rhi::GpuRef list, jobs;  // the flush's ref list block, its jobs block (32 bytes per bucket)
         std::uint32_t items = 0, buckets = 0;
         Range range;
-        std::uint32_t viewKind = 2;         // statistics: 0 main z, 1 main solid, 2 other
+        std::uint32_t viewKind = 2;         // statistics: 0 main z, 1 main solid, 2 other, 3 sun cascades
         std::uint32_t cullFlags = 0;        // bit 0: cull the clustered records (the tables below are set), bit 1: side planes only
         rhi::GpuRef views, clusters;        // the view table, the cluster table
         std::uint32_t viewSlots = 0;
@@ -85,7 +85,7 @@ public:
         // whole-range fallbacks, items with no records, runs, bad run records, exact evaluations impossible; indices of the checked flushes per view kind before / after
         std::uint64_t cullItems = 0, cullJobs = 0, cullChecked = 0, cullClusters = 0, cullExactVisible = 0, cullCovered = 0, falseNegatives = 0, extras = 0, wholeRange = 0, emptyItems = 0,
                       runs = 0, badRuns = 0, inexact = 0;
-        std::uint64_t idxBefore[3] = {}, idxAfter[3] = {}, idxFlushes[3] = {};
+        std::uint64_t idxBefore[4] = {}, idxAfter[4] = {}, idxFlushes[4] = {};
     };
     Stats& stats() { return stats_; }
     bool failed() const { return failed_; }

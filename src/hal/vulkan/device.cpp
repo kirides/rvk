@@ -192,6 +192,7 @@ void HalDevice::applyStaticOps() {
     engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
     dev_.setClusters(on(rs.nativeClusters));  // F5-1: static meshes clustered (any mode: the draws are the D3D9 model's)
     dev_.setClusterCull(on(rs.nativeClusterCull) && on(rs.nativeClusters));  // F5-2: the GPU cull of the owned draws of clustered meshes
+    dev_.setClusterCullShadows(on(rs.nativeClusterCullShadows) && on(rs.nativeClusterCull) && on(rs.nativeClusters) && on(rs.nativeOwnedShadows));  // F3-2: ... also in the sun cascades
     const bool takeOver = plan.staticTake;
     const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
@@ -285,6 +286,11 @@ void HalDevice::applyStaticOps() {
             const bool trees = on(rs.nativeOwnedTrees) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
             dev_.setSceneTrees(trees);
             staticOps_->setOwnedTrees(trees);
+        }
+        {
+            const bool shadows = on(rs.nativeOwnedShadows) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
+            dev_.setSceneShadows(shadows);  // (the cascades' z draws get their scene forms: the retained draws the owned path replays)
+            staticOps_->setOwnedShadows(shadows);
         }
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
@@ -637,7 +643,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedCheck}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

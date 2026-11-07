@@ -326,7 +326,7 @@ void OwnedCompact::collect(d3d9::Device& dev) {
                 }
                 done += want;
             }
-            const std::uint32_t kind = std::min(j.viewKind, 2u);
+            const std::uint32_t kind = std::min(j.viewKind, 3u);
             stats_.idxBefore[kind] += j.fullIndices;
             stats_.idxAfter[kind] += after;
             ++stats_.idxFlushes[kind];
@@ -392,9 +392,9 @@ void OwnedCompact::report() {
                  s.countDiffering - l.countDiffering, s.skipped - l.skipped, bytes() / 1024);
     if (s.cullItems != 0 || s.cullChecked != 0) {
         const auto pct = [](std::uint64_t a, std::uint64_t b) { return b != 0 ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0; };
-        static const char* kKind[3] = {"main z", "main solid", "other"};
+        static const char* kKind[4] = {"main z", "main solid", "other", "cascades"};
         std::string tri;
-        for (int k = 0; k < 3; ++k) {
+        for (int k = 0; k < 4; ++k) {
             const std::uint64_t f = s.idxFlushes[k] - l.idxFlushes[k];
             if (f == 0) continue;
             const std::uint64_t b = s.idxBefore[k] - l.idxBefore[k], a = s.idxAfter[k] - l.idxAfter[k];

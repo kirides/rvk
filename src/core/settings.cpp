@@ -2600,6 +2600,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.clusters", "true", false, true}, {"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeClusterCullShadows = &reg.add({
+        .key = "native.cluster_cull_shadows",
+        .label = "Native frame: cluster cull in the sun cascades",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F3-2 (frame-ownership.md 7.37), Full mode, needs native.cluster_cull + native.owned_shadows: the owned z draws of clustered meshes in the sun cascades are culled per cluster "
+                       "on the GPU against the cascade's four SIDE planes only (near and far stay open: a caster between the light and the cascade's near plane must stay), the visible clusters "
+                       "are drawn as at most 8 runs per draw. Check frames read the GPU's result back and compare it with the exact CPU test (false negatives must be 0). Off = the cascades draw "
+                       "whole ranges. rvk.log `native: cluster cull (5 s)` (the [cascades] triangle counts).",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.cluster_cull", "true", false, true}, {"native.owned_shadows", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedCheck = &reg.add({
         .key = "native.owned_check",
         .label = "Native frame: owned static check interval",
@@ -2623,6 +2638,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "(composed frames compare the plan and the templates with the composition: DIFFERING must stay 0, a difference turns it off); on the other frames the ops leave the lists at the "
                        "view's beginning and the pass draws every instance from the engine's tree objects with one row + record per instance and a few indirect calls (needs table lighting; "
                        "trees stay composed while the RT scene takes tree draws). Off = nothing changes. rvk.log `native: owned trees (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeOwnedShadows = &reg.add({
+        .key = "native.owned_shadows",
+        .label = "Native frame: owned shadow views",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs persistent owned draws (frame-ownership.md 7.36, F3-1): the sun cascades' static mesh z ops get op records per cascade (like the main view's) and, "
+                       "on the frames where the stamps hold, leave the engine's z list at the view's start and are drawn from persistent DrawRecords (cascade view slots 4..6 of the view "
+                       "table) by one indirect draw per bucket, without a composition. native.owned_check frames compare with the composition (DIFFERING / MISS must stay 0). Respects "
+                       "debug.shadow_stride (only cascades the engine renders are drawn). Off = nothing changes. rvk.log `native: owned shadows (5 s)`.",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,

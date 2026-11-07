@@ -137,6 +137,11 @@ public:
     bool ownedPersistentOn() const { return ownedPersistent_; }
     // a main view begins (frame tap, before the lists are read): false = no compaction this view (setting / prerequisites / a check frame)
     bool ownedViewBegin(void* db, void* desc);
+    // native.owned_shadows (frame-ownership.md 7.36, F3-1): the sun cascades' static mesh z ops are owned like the main view's. A cascade view begins (before its list is read):
+    // false = nothing leaves its list (setting / prerequisites / a check frame / a cascade the view table has no slot for)
+    void setOwnedShadows(bool on);
+    bool ownedShadowsOn() const { return ownedShadows_ && !ownedShadowsTripped_; }
+    bool ownedShadowViewBegin(void* db, ViewKind kind, std::int32_t cascade);
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
     bool ownedListOk(void* db, List list);
     // an op of the raw (unsorted) list: true = its record is valid, the op leaves the engine's list
@@ -790,6 +795,18 @@ private:
         std::uint64_t viewStamp = 0;
     } ownedView_;
     std::array<std::vector<Op>, 2> ownedOps_;  // the ops that left the engine's z / solid list (sorted), until their pass begins
+    // F3-1 (7.36): the owned view in progress (set at its begin): Main, or a Cascade whose op records carry `ownedViewKey_` = 1 + the cascade index (0 = the main view's) and whose
+    // draws read view table slot kViewSlotCascade0 + index. Its statistics are kept apart from the main view's.
+    bool ownedShadows_ = false, ownedShadowsTripped_ = false;
+    ViewKind ownedCur_ = ViewKind::Main;
+    // F3-1: the cascades' check / warm-up frames count the frames a cascade was rendered in (debug.shadow_stride renders them every 2nd frame while the camera stands still: the
+    // frame number's check frames (multiples of native.owned_check) would never meet a cascade view); `ownedShadowCheck_` = the cascade view in progress is a check view
+    std::uint64_t shadowFrameSerial_ = 0, shadowFrameSeen_ = ~0ull;
+    bool ownedShadowCheck_ = false;
+    std::uint64_t ownedViewKey_ = 0;
+    static std::uint64_t ownedKeyOf(ViewKind k, std::int32_t cascade) { return k == ViewKind::Cascade && cascade >= 0 && cascade < 4 ? static_cast<std::uint64_t>(cascade) + 1 : 0; }
+    static std::uint32_t ownedSlotOfKey(std::uint64_t viewKey, bool solid);
+    bool ownedBegin(void* desc, ViewKind kind, std::int32_t cascade);
     struct OwnedStats {
         static constexpr std::size_t kFallback = 8;
         std::uint64_t views = 0, owned = 0, drawnOps = 0, draws = 0, lateOps = 0, lateDraws = 0, undrawn = 0;
@@ -802,7 +819,8 @@ private:
         std::uint64_t touches = 0, lightmaps = 0, stream3 = 0;
         std::uint64_t compactNs = 0, selectNs = 0, buildNs = 0, submitNs = 0, sideNs = 0, matNs = 0, prepNs = 0;
         void add(const OwnedStats& o);
-    } ownedW_, ownedT_;
+    } ownedW_, ownedT_, ownedShadowW_, ownedShadowT_;
+    OwnedStats& ownedStats() { return ownedCur_ == ViewKind::Main ? ownedW_ : ownedShadowW_; }
     d3d9::Device::OwnedReplayStats ownedDevLast_{};
     std::unordered_map<std::uint64_t, bool> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
     std::vector<std::uint64_t> ownedPolled_;                  // material slot -> frame + 1 of the last poll made for an owned op
@@ -821,8 +839,11 @@ private:
         std::uint64_t scrubbed = 0, scrubMiss = 0, checkCompared = 0, checkSkipped = 0, checkMiss = 0, passes = 0, envChanges = 0, flushFailed = 0, arenaFailed = 0;
         std::uint64_t sigNs = 0, deriveNs = 0, observeNs = 0, flushNs = 0, windowNs = 0, items = 0, bulkNs = 0;
         void add(const PersistStats& o);
-    } persistW_, persistT_;
-    std::uint64_t persistEnvLast_[2] = {};
+    } persistW_, persistT_, persistShadowW_, persistShadowT_;
+    PersistStats& persistStats() { return ownedCur_ == ViewKind::Main ? persistW_ : persistShadowW_; }
+    std::uint64_t persistEnvLast_[8] = {};
+    void ownedShadowsOff(const char* why, std::uint64_t n);
+    void ownedShadowReport();
     std::uint64_t persistMissReported_ = 0, persistInjectSeen_ = 0, persistInjectEvery_ = 0, persistMissLogged_ = 0;
     std::uint64_t persistScrubTick_ = 0;
     std::uint32_t persistPassDraw_ = 0;

@@ -1751,6 +1751,44 @@ mov oC0, r0
         }
         bad(ref1, frame("ownedp_after_guards", 3, 3, kQuads, nullptr, nullptr, calls), "persistent draws after the refusals");
     }
+    // 6b. F3-1 (frame-ownership.md 7.36): the env epoch is kept PER VIEW SLOT: the passes of a frame with owned shadows come in the order main z, cascade 0, cascade 1, main solid and
+    // every slot keeps its epoch while nothing changed (a shared memo would move all of them every pass: every persistent draw would be derived again each frame); a viewport change
+    // (a shadow map of another size, a resolution switch) moves every slot's epoch
+    {
+        dev.setSceneIssue(true);
+        constexpr std::uint32_t kSlotsUnderTest[4] = {0, 4, 5, 1};
+        const auto epochs = [&](std::uint64_t* e, bool* ok) {
+            for (std::uint32_t i = 0; i < 4; ++i) e[i] = dev.ownedEnvEpoch(kSlotsUnderTest[i] == 1, kSlotsUnderTest[i], ok[i]);
+        };
+        std::uint64_t e1[4], e2[4], e3[4];
+        bool ok1[4], ok2[4], ok3[4];
+        epochs(e1, ok1);
+        epochs(e2, ok2);
+        const Viewport saved = dev.viewport();
+        Viewport changed = saved;
+        changed.width = saved.width / 2;
+        changed.height = saved.height / 2;
+        dev.setViewport(changed);
+        epochs(e3, ok3);
+        dev.setViewport(saved);
+        bool good = true;
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            good = good && ok1[i] && ok2[i] && ok3[i] && e1[i] == e2[i] && e3[i] != e1[i];
+            for (std::uint32_t j = i + 1; j < 4; ++j) good = good && e1[i] != e1[j];
+        }
+        if (!good) {
+            std::printf("  FAIL owned persistent: env epochs per view slot: stable %d/%d/%d/%d, moved by a viewport change %d/%d/%d/%d (ok flags %d%d%d%d)\n", e1[0] == e2[0], e1[1] == e2[1], e1[2] == e2[2], e1[3] == e2[3],
+                        e3[0] != e1[0], e3[1] != e1[1], e3[2] != e1[2], e3[3] != e1[3], ok1[0], ok1[1], ok1[2], ok1[3]);
+            ++g_failures;
+        }
+        // (back to the unchanged viewport: the check frames' ownedEnvSame must see the old epoch of slot 4 as stale now and the newest one as current)
+        epochs(e2, ok2);
+        if (!dev.ownedEnvSame(false, 4, e2[1]) || dev.ownedEnvSame(false, 4, e1[1]) || dev.ownedEnvSame(false, 5, e2[1])) {
+            std::printf("  FAIL owned persistent: ownedEnvSame per view slot\n");
+            ++g_failures;
+        }
+        dev.setSceneIssue(false);
+    }
     // 7. F2c-4b bulk observers: the records of a pass arrive in observeOwned (not before), with entered / left against the previous pass of the kind; a mid-pass flush does not
     // disturb the deltas; a per-draw (not bulk) observer sees every draw at once; the register images are loaded only on request; an ineligible kind stays per-draw
     {
@@ -2129,6 +2167,53 @@ mov oC0, v0
     dev.setClusterCull(false);
     owned("clustercull_d", 1, 0, ref[0], "D: the setting off");
     dev.setClusterCull(true);
+    // F3-2 (7.37): a sun cascade's view slot (4 .. 7) with native.cluster_cull_shadows: the cull tests the four SIDE planes only. The test's vertex shader takes the position from the
+    // object rows, so the view block only decides the cull: slot 4 = the unit clip cube (A: most clusters outside the sides: culled, B: outside: nothing, A2 half), slot 5 = a block whose
+    // NEAR plane lies at z >= 2 (every cluster of the grid is "in front of the near plane": a main-view cull would drop the whole draw, a cascade keeps it: pixels equal the reference)
+    dev.setClusterCullShadows(true);
+    fillView(4, 1.0f, 1.0f);
+    const std::uint64_t cascadeBefore = compact.stats().idxAfter[3];
+    owned("clustercull_e", 4, 0, ref[0], "E: a cascade slot, most clusters outside the side planes");
+    owned("clustercull_f", 4, 1, ref[1], "F: a cascade slot, the object outside");
+    owned("clustercull_g", 4, 2, ref[2], "G: a cascade slot, half visible");
+    fillView(5, 0.25f, 0.25f);
+    twin[5].vs0[2][3] = -2.0f;  // clip z = z - 2 < 0 for the whole grid
+    std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2));
+    owned("clustercull_h", 5, 0, ref[0], "H: a cascade slot whose near plane is beyond the object: kept (side planes only)");
+    {
+        // the control: the same block on a MAIN slot culls the whole draw (the near plane applies): the picture is empty, which differs from the reference
+        fillView(1, 0.25f, 0.25f);
+        twin[1].vs0[2][3] = -2.0f;
+        std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2));
+        const Pixels before = ref[0];
+        begin();
+        setObject(0);
+        dev.setSceneIssue(true);
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(V);
+        in.indices = ib.get();
+        in.alphaFunc = 8u;
+        const OwnedWindows ow = windows(1, 0);
+        Device::OwnedPersist out;
+        const int rc = dev.ownedDerive(cd, in, ow, tab.blockRef(slot), tab.zeroRef(), true, out);
+        tab.write(slot, out.rec, out.blk);
+        std::vector<Device::OwnedItem> items = {{&cd, out.bucketKey, slot}};
+        Device::OwnedArena arena;
+        const bool flushed = rc == 0 && dev.ownedReserve(1, arena) && dev.ownedFlush(items, arena, 1, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        const Pixels p = end("clustercull_control");
+        if (!flushed || lit(p) >= lit(before) / 4) {
+            std::printf("  FAIL cluster cull: the control (a main slot whose near plane is beyond the object) drew %u lit pixels of %u (the near plane must cull it), flushed %d\n", lit(p), lit(before), flushed);
+            ++g_failures;
+        }
+        fillView(1, 1.0f, 1.0f);
+    }
+    if (compact.stats().idxAfter[3] == cascadeBefore) {
+        std::printf("  FAIL cluster cull: no cascade flush was counted (view kind 3)\n");
+        ++g_failures;
+    }
+    dev.setClusterCullShadows(false);
+    owned("clustercull_i", 4, 0, ref[0], "I: a cascade slot with native.cluster_cull_shadows off: whole range");
     for (int i = 0; i < 4; ++i) {
         begin();
         end("clustercull_collect");  // (the read-backs of the earlier frames complete)

@@ -99,8 +99,56 @@ void StaticOps::ownedAutoOff(std::uint64_t differing) {
     spdlog::error("native: owned static turned off: {} draws DIFFERING on the check frames (the record-derived draw is not the composed one)", differing);
 }
 
-bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) {
-    OwnedStats& W = ownedW_;
+std::uint32_t StaticOps::ownedSlotOfKey(std::uint64_t viewKey, bool solid) {
+    return viewKey == 0 ? (solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ) : shader::abi::kViewSlotCascade0 + static_cast<std::uint32_t>(viewKey - 1);
+}
+
+bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) { return ownedBegin(desc, ViewKind::Main, -1); }
+
+// F3-1 (7.36): a cascade view. Nothing happens (not even the event drain: the main view's begin does it) while the setting is off
+bool StaticOps::ownedShadowViewBegin(void* /*db*/, ViewKind kind, std::int32_t cascade) {
+    if (!ownedShadows_ || ownedShadowsTripped_ || !ownedStatic_ || !ownedPersistent_) return false;
+    if (kind != ViewKind::Cascade || ownedKeyOf(kind, cascade) == 0) return false;
+    return ownedBegin(nullptr, kind, cascade);
+}
+
+void StaticOps::setOwnedShadows(bool on) {
+    if (!on) ownedShadowsTripped_ = false;
+    if (on && ownedShadowsTripped_) on = false;
+    if (on == ownedShadows_) return;
+    ownedShadows_ = on;
+    spdlog::info("native: owned shadows {}", on ? "on" : "off");
+    if (!on && recs_) {
+        // the cascades' records are dropped (their persistent slots go back); the main view's stay
+        for (auto it = recs_->map.begin(); it != recs_->map.end();) {
+            if (it->first.view != 0) it = recs_->map.erase(it);
+            else ++it;
+        }
+    }
+}
+
+void StaticOps::ownedShadowsOff(const char* why, std::uint64_t n) {
+    if (!ownedShadows_) return;
+    ownedShadows_ = false;
+    ownedShadowsTripped_ = true;
+    if (ownedCur_ != ViewKind::Main) {
+        ownedOps_[0].clear();
+        ownedView_ = {};
+    }
+    if (recs_) {
+        for (auto it = recs_->map.begin(); it != recs_->map.end();) {
+            if (it->first.view != 0) it = recs_->map.erase(it);
+            else ++it;
+        }
+    }
+    spdlog::error("native: owned shadows turned off: {} {}", n, why);
+}
+
+bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade) {
+    ownedCur_ = vkind;
+    ownedShadowCheck_ = false;
+    ownedViewKey_ = ownedKeyOf(vkind, cascade);
+    OwnedStats& W = ownedStats();
     depDrain();  // F2e-1: the engine's events since the last view mark their records (before any stamp is looked at)
     for (auto& v : ownedOps_) {
         W.undrawn += v.size();  // (ops of an earlier view whose pass never began: lost for that frame)
@@ -109,7 +157,7 @@ bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) {
     ownedView_ = {};
     if (!ownedStatic_) return false;
     ++W.views;
-    if (f2c4::enabled()) {
+    if (f2c4::enabled() && vkind == ViewKind::Main) {
         f2c4::beginFrame(dev_.stats().frames);
         ++f2c4::counters().views;
         ++f2c4::counters().curViews;
@@ -128,7 +176,16 @@ bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) {
         return false;
     }
     const std::uint64_t frame = dev_.stats().frames;
-    const sc::LeanFrame kind = sc::leanFrameKind(frame, ownedCheck_);
+    std::uint64_t kindFrame = frame;
+    if (vkind != ViewKind::Main) {
+        if (frame != shadowFrameSeen_) {
+            shadowFrameSeen_ = frame;
+            ++shadowFrameSerial_;
+        }
+        kindFrame = shadowFrameSerial_;
+    }
+    const sc::LeanFrame kind = sc::leanFrameKind(kindFrame, ownedCheck_);
+    ownedShadowCheck_ = vkind != ViewKind::Main && kind == sc::LeanFrame::Check;
     if (kind == sc::LeanFrame::Check) {
         ++W.checkViews;
         return false;
@@ -147,15 +204,16 @@ bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) {
 
 bool StaticOps::ownedListOk(void* db, List list) {
     if (!ownedView_.active) return false;
+    if (ownedCur_ != ViewKind::Main) return list == List::ZPass;  // (ExecuteShadowMap runs its z list unconditionally: the shadow database's caps say no z pre-pass)
     std::uint8_t caps = 0;
     if (list == List::ZPass) return readAt(db, 0x1590, caps) && caps != 0;  // (the z pre-pass runs: BeginZPass brackets the list)
     return readAt(db, 0x15a0, caps) && caps == 0;                          // (DoBeginRenderSolid is called)
 }
 
 bool StaticOps::ownedSelect(const Op& op) {
-    OwnedStats& W = ownedW_;
+    OwnedStats& W = ownedStats();
     ++W.seen;
-    if (f2c4::enabled()) {
+    if (f2c4::enabled() && ownedCur_ == ViewKind::Main) {
         // F2c-4-0 item 4: the context's LOD resource (ctx + 0x28) and the set of its ops' descs of this frame
         f2c4::Counters::Ctx& e = f2c4::counters().ctxCur[op.raw.context];
         e.res = get<U8*>(op.raw.context, 0x28, nullptr);
@@ -167,7 +225,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         Clock::time_point t0 = tnow();
         ~T() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
     } selTimer{W.selectNs};
-    const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
+    const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), ownedViewKey_};
     const auto it = recs_->map.find(key);
     if (it == recs_->map.end()) {
         // (not a candidate: the first reason it is not eligible, for the counters)
@@ -177,6 +235,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         return false;
     }
     const orec::OpRecord& rec = *it->second;
+    rec.lastSeen = dev_.stats().frames;
     // a record exists only for an eligible op; of recExclusion's reasons the stamps hold the overlay flags, the fade, the light list, the shader's class / sort id /
     // depth bias; what they do not: the hierarchy flag of the context and the table lighting
     if (op.list == List::Solid && !tableLit_) {
@@ -242,8 +301,8 @@ bool StaticOps::ownedSelect(const Op& op) {
 }
 
 void StaticOps::ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs) {
-    ownedW_.owned += ops.size();
-    ownedW_.compactNs += compactNs;
+    ownedStats().owned += ops.size();
+    ownedStats().compactNs += compactNs;
     ownedOps_[list == List::Solid ? 1 : 0] = std::move(ops);
 }
 
@@ -283,7 +342,7 @@ bool StaticOps::ownedMaterialsOk(const orec::OpRecord& rec) {
         std::uint64_t& ns;
         Clock::time_point t0;
         ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
-    } guard{ownedW_.matNs, tm};
+    } guard{ownedStats().matNs, tm};
     for (const std::uint32_t slot : rec.matSlots) {
         if (slot >= gpuscene::MaterialTable::kCapacity) return false;
         if (slot >= ownedPolled_.size()) ownedPolled_.resize(gpuscene::MaterialTable::kCapacity, 0);
@@ -298,7 +357,7 @@ bool StaticOps::ownedMaterialsOk(const orec::OpRecord& rec) {
 
 // the engine slot's non-drawing side effects of the op (the lean commit's order): BindLightmaps(1), the resource touches, stream 3
 void StaticOps::ownedSideEffects(const orec::OpRecord& rec) {
-    OwnedStats& W = ownedW_;
+    OwnedStats& W = ownedStats();
     struct Guard {
         std::uint64_t& ns;
         Clock::time_point t0 = tnow();
@@ -321,7 +380,7 @@ void StaticOps::ownedSideEffects(const orec::OpRecord& rec) {
 
 // one op from its record: false = not drawn (why: a Fallback code), anything queued before the refusal stays (opaque draws: a repeat changes nothing)
 bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, bool viewWinOk, int& why) {
-    OwnedStats& W = ownedW_;
+    OwnedStats& W = ownedStats();
     if (!viewWinOk) {
         why = kFbView;
         return false;
@@ -466,8 +525,10 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
 std::uint32_t StaticOps::ownedPass(bool solid) {
     std::vector<Op>& ops = ownedOps_[solid ? 1 : 0];
     if (ops.empty()) return 0;
-    OwnedStats& W = ownedW_;
-    if (!inView_ || viewKind_ != ViewKind::Main) {
+    OwnedStats& W = ownedStats();
+    PersistStats& PS = persistStats();
+    const bool mainView = ownedCur_ == ViewKind::Main;
+    if (!inView_ || viewKind_ != ownedCur_) {
         W.undrawn += ops.size();
         ops.clear();
         return 0;
@@ -496,7 +557,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         if (vt.active() && vt.ready() && dev_.sceneViewsReady()) {
             float posFix[4];
             dev_.viewPosFix(posFix);
-            if (f2c4::enabled()) {
+            if (f2c4::enabled() && mainView) {
                 // item 1: a view block that differs from the same pass's earlier one of this frame (a second main view with another camera / viewport)
                 f2c4::Counters& m = f2c4::counters();
                 std::uint64_t h = 0;
@@ -514,7 +575,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                 m.lastHash[k] = h;
                 m.lastHashFrame[k] = dev_.stats().frames;
             }
-            const std::uint32_t slot = solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ;
+            const std::uint32_t slot = ownedSlotOfKey(ownedViewKey_, solid);
             gpuscene::ViewTable::Regs regs;
             regs.vs0 = mirror_.adminVs;
             regs.vs1 = mirror_.adminVs + 12;
@@ -554,7 +615,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         for (std::size_t i = 0; i < ops.size(); ++i) {
             if (!recs_) break;
             const Op& o = ops[i];
-            const auto it = recs_->map.find(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), 0});
+            const auto it = recs_->map.find(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), ownedViewKey_});
             if (it != recs_->map.end()) {
                 ownedRecPtrs_[i] = it->second.get();
                 bound += static_cast<std::uint32_t>(it->second->draws.size());
@@ -571,16 +632,16 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                     const std::uint64_t perFrame = 16;  // (the rolling scrub: draws re-derived and compared with their slot per frame)
                     scrubStride = static_cast<std::uint32_t>(std::max<std::uint64_t>(16, (bound + perFrame / 2 - 1) / (perFrame / 2)));  // (at most one draw in 16, 8 per pass in the big ones)
                     scrubPhase = static_cast<std::uint32_t>((++persistScrubTick_ * 7919u) % scrubStride);
-                    ++persistW_.passes;
+                    ++PS.passes;
                     persistPassDraw_ = 0;
-                    dev_.ownedBulkBegin(solid);  // F2c-4b: the bulk observers' list of this pass
-                    const std::size_t kk = solid ? 1 : 0;
+                    dev_.ownedBulkBegin(solid, mainView);  // F2c-4b: the bulk observers' list of this pass (a cascade's pass: the per-draw observers' loop)
+                    const std::size_t kk = std::min<std::size_t>(viewSlotP, 7);
                     if (epoch != persistEnvLast_[kk]) {
-                        ++persistW_.envChanges;
+                        ++PS.envChanges;
                         persistEnvLast_[kk] = epoch;
                     }
                 } else {
-                    ++persistW_.arenaFailed;
+                    ++PS.arenaFailed;
                 }
             }
         }
@@ -613,21 +674,21 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     // flush queued nothing: the ops that contributed are composed instead
     std::uint32_t flushedDraws = 0;
     const auto flushItems = [&] {
-        if (persistent) {
+        if (persistent && mainView) {
             // F2c-4b: the bulk observers see the draws collected so far (before an op is composed late: its record may be dropped)
             const auto tb = tnow();
             dev_.ownedBulkFlush(false);
-            persistW_.bulkNs += ns(tb, tnow());
+            PS.bulkNs += ns(tb, tnow());
         }
         if (!persistent || ownedItems_.empty()) return;
         const auto tf = tnow();
         const bool ok = dev_.ownedFlush(ownedItems_, ownedArena_, viewSlotP, gpuscene::drawrecords().recordsRef(), gpuscene::drawrecords().recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
-        persistW_.flushNs += ns(tf, tnow());
-        persistW_.items += ownedItems_.size();
+        PS.flushNs += ns(tf, tnow());
+        PS.items += ownedItems_.size();
         flushedDraws += static_cast<std::uint32_t>(ownedItems_.size());
         std::vector<std::uint32_t> failed;
         if (!ok) {
-            ++persistW_.flushFailed;
+            ++PS.flushFailed;
             std::uint32_t last = ~0u;
             for (const std::uint32_t oi : ownedItemOp_) {
                 if (oi == last) continue;
@@ -640,7 +701,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         // (the next flush of this pass needs a block of its own: the queued indirect draws still read this one)
         if (flushedDraws < persistBound) {
             if (!dev_.ownedReserve(persistBound - flushedDraws, ownedArena_)) {
-                ++persistW_.arenaFailed;
+                ++PS.arenaFailed;
                 persistent = false;  // (the rest of the pass: the per-draw path)
             }
         }
@@ -688,10 +749,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         }
     }
     flushItems();
-    if (persistent) {
+    if (persistent && mainView) {
         const auto tb = tnow();
         dev_.ownedBulkFlush(true);  // F2c-4b: the end of the pass (the left list)
-        persistW_.bulkNs += ns(tb, tnow());
+        PS.bulkNs += ns(tb, tnow());
     }
     ownedItems_.clear();
     ownedItemOp_.clear();
@@ -705,7 +766,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     }
     finishOp();
     ops.clear();
-    if (f2c4::enabled()) {
+    if (f2c4::enabled() && mainView) {
         f2c4::Counters& m = f2c4::counters();
         const std::size_t k = solid ? 1 : 0;
         m.maxDrawsPerPass[k] = std::max<std::uint64_t>(m.maxDrawsPerPass[k], drawn);
@@ -877,7 +938,7 @@ void StaticOps::ownedMissReport(const char* where, const Op* op, const orec::Dra
 // one op from its persistent draw records: false = not drawn (why: a Fallback code); the draws it queued stay in ownedItems_ (the caller drops them)
 bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, std::uint32_t viewSlot, std::uint64_t epoch, std::uint32_t scrubStride,
                                       std::uint32_t scrubPhase, int& why) {
-    PersistStats& S = persistW_;
+    PersistStats& S = persistStats();
     const bool timers = f2c4::enabled();
     if (!ownedMaterialsOk(rec)) {
         why = kFbMaterials;
@@ -1024,12 +1085,12 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     if (!ownedPersistent_ || !ownedStatic_ || k >= rec.draws.size()) return;  // (owned_static tripped by a MISS: the slots are not used any more)
     const orec::DrawRec& r = rec.draws[k];
     orec::Persist& P = r.persist;
-    PersistStats& S = persistW_;
+    PersistStats& S = rec.key.view != 0 ? persistShadowW_ : persistW_;
     if (!P.valid || !P.handle.has()) return;  // (no persistent derivation of this draw yet)
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     gpuscene::ViewTable& vt = gpuscene::viewtable();
     const bool solid = rec.key.list == static_cast<std::uint8_t>(List::Solid);
-    const std::uint32_t viewSlot = solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ;
+    const std::uint32_t viewSlot = ownedSlotOfKey(rec.key.view, solid);
     d3d9::OwnedWindows viewWin;
     d3d9::OwnedWindows::Win objWin;
     if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !gpuscene::objecttable().windowFor(rec.stamp.objSlot, objWin))) {
@@ -1119,6 +1180,7 @@ void StaticOps::ownedReport() {
         lastDs = ds;
         if (miss != 0) ownedAutoOffMiss(miss);
     }
+    ownedShadowReport();
     if (!ownedStatic_ && ownedW_.views == 0) return;
     OwnedStats& w = ownedW_;
     ownedT_.add(w);
@@ -1159,6 +1221,70 @@ void StaticOps::ownedReport() {
     ownedIndirectLast_ = dev_.sceneStats().indirectCalls;
     ownedDevLast_ = d;
     w = {};
+}
+
+// F3-1 (7.36): the cascades' owned ops, 5 s
+void StaticOps::ownedShadowReport() {
+    OwnedStats& w = ownedShadowW_;
+    PersistStats& q = persistShadowW_;
+    if (w.views == 0 && q.passes == 0 && q.checkCompared == 0 && !(recs_ && recs_->shadowWindow.opsAll != 0)) {
+        ownedShadowW_ = {};
+        persistShadowW_ = {};
+        return;
+    }
+    ownedShadowT_.add(w);
+    persistShadowT_.add(q);
+    const auto list = [](const std::uint64_t* v, const char* const* names, std::size_t n) {
+        std::string out;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (v[i] != 0) out += std::format("{}{} {}", out.empty() ? "" : ", ", names[i], v[i]);
+        }
+        return out.empty() ? std::string("none") : out;
+    };
+    std::string left = list(w.leftExcl, orec::kExclNames, orec::kExclCount);
+    {
+        std::string stamp = list(w.leftStamp, orec::kStampNames, orec::kStampFields);
+        if (stamp != "none") left += "; stamp: " + stamp;
+        if (w.leftNoRecord != 0) left += std::format("; no record {}", w.leftNoRecord);
+        if (w.leftNotOwnable != 0) left += std::format("; not ownable {}", w.leftNotOwnable);
+        if (w.leftScene != 0) left += std::format("; not a scene draw {}", w.leftScene);
+    }
+    std::uint64_t shadowRecs = 0, shadowDraws = 0;
+    if (recs_) {
+        for (const auto& kv : recs_->map) {
+            if (kv.first.view == 0) continue;
+            ++shadowRecs;
+            shadowDraws += kv.second->draws.size();
+        }
+    }
+    const double nv = static_cast<double>(std::max<std::uint64_t>(1, w.views));
+    const std::uint64_t miss = q.scrubMiss + q.checkMiss;
+    spdlog::info("native: owned shadows (5 s): {} cascade views ({} compacted, {} check frames, {} warm-up, {} gated off), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
+                 "(fallbacks: {}), undrawn {}; left to the engine path: {}; persistent: {} passes ({} env epoch changes, {} flush failures, {} reserve failures), {} draws: reused {} ({:.1f} %), derived {} ({} rewrote the slot), refused {} "
+                 "(table full {}, observer {}), rolling scrub {} draws MISS {}; check frames: {} compared, {} skipped, MISS {}; {} cascade records / {} draws; CPU per cascade view: compaction {:.1f} us, view + windows {:.1f} us, "
+                 "material polls {:.1f} us, build {:.1f} us, side effects {:.1f} us, submit {:.1f} us, flush {:.1f} us",
+                 w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
+                 w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), w.undrawn, left, q.passes, q.envChanges, q.flushFailed, q.arenaFailed, q.draws, q.reused,
+                 q.draws != 0 ? 100.0 * static_cast<double>(q.reused) / static_cast<double>(q.draws) : 0.0, q.derived + q.scrubbed, q.derivedChanged, q.refused, q.tableFull, q.observerRefused, q.scrubbed, q.scrubMiss,
+                 q.checkCompared, q.checkSkipped, q.checkMiss, shadowRecs, shadowDraws, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
+                 static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);
+    if (recs_) {
+        // the cascades' records age out: a cascade sees other ops as the camera moves, a record that was not looked at for 1,200 frames gives its slots back
+        const std::uint64_t now = dev_.stats().frames;
+        std::uint64_t swept = 0;
+        for (auto it = recs_->map.begin(); it != recs_->map.end();) {
+            if (it->first.view != 0 && it->second->lastSeen + 1200 < now && it->second->builtFrame + 1200 < now) {
+                it = recs_->map.erase(it);
+                ++swept;
+            } else {
+                ++it;
+            }
+        }
+        if (swept != 0) spdlog::info("native: owned shadows: {} cascade records not seen for 1200 frames dropped", swept);
+    }
+    ownedShadowW_ = {};
+    persistShadowW_ = {};
+    if (miss != 0) ownedShadowsOff("MISS (a cascade's persistent draw judged valid differs from a fresh derivation)", miss);
 }
 
 }  // namespace rvk::native

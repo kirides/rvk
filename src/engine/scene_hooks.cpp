@@ -288,8 +288,8 @@ bool detourBeginZPass(void* admin, void* depthMap, bool a, bool b) {
     }
     const bool r = g_beginZPass.original(admin, depthMap, a, b);
     // F2c-3: the ops that left the main view's z list are drawn from their records (the pass began: the engine's first op would draw now)
-    if (d3d9::Device* d = device(); d != nullptr && d->phases().view() == View::Main && d->phases().pass() == Pass::DepthPrepass) {
-        if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr) t->passBegin(false);
+    if (d3d9::Device* d = device(); d != nullptr && ((d->phases().view() == View::Main && d->phases().pass() == Pass::DepthPrepass) || d->phases().view() == View::Shadow)) {
+        if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr) t->passBegin(false);  // (F3-1: a cascade's z pass too: the tap checks the view kind)
     }
     return r;
 }

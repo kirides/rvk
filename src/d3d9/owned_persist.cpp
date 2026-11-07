@@ -76,7 +76,7 @@ std::uint64_t Device::ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok)
 
 std::uint64_t Device::ownedEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok) {
     const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
-    const std::size_t k = solid ? 1 : 0;
+    const std::size_t k = ownedEnvIndex(viewSlot);
     if (ownedEnvHash_[k] != h || ownedEnvEpoch_[k] == 0) {
         ownedEnvHash_[k] = h;
         ownedEnvEpoch_[k] = ++ownedEnvCounter_;
@@ -87,7 +87,7 @@ std::uint64_t Device::ownedEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok
 bool Device::ownedEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const {
     bool ok = false;
     const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
-    const std::size_t k = solid ? 1 : 0;
+    const std::size_t k = ownedEnvIndex(viewSlot);
     return h == ownedEnvHash_[k] && epoch == ownedEnvEpoch_[k] && epoch != 0;
 }
 
@@ -344,12 +344,16 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
 
 // ---- F2c-4b bulk observers (frame-ownership.md 7.23) -------------------------------------------------------------------------------------------------
 
-void Device::ownedBulkBegin(bool solid) {
+void Device::ownedBulkBegin(bool solid, bool bulk) {
     static const bool perDraw = [] {
         char v[8];
         return GetEnvironmentVariableA("RVK_F2C4B_PERDRAW", v, sizeof(v)) != 0;
     }();
-    ownedBulkOn_ = !perDraw;
+    ownedBulkOn_ = !perDraw && bulk;
+    if (!bulk) {
+        ownedBulk_.clear();  // (a shadow view's pass: the main passes' entered / left bookkeeping is not touched)
+        return;
+    }
     const std::uint32_t k = solid ? 1u : 0u;
     ownedBulkKind_ = k;
     ownedBulk_.clear();
@@ -598,11 +602,12 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     gpuscene::OwnedCompact::Range range;
     rhi::RingAlloc jobsBlock;
     bool cullView = false;
+    const bool cascadeSlot = viewSlot >= shader::abi::kViewSlotCascade0 && viewSlot < shader::abi::kViewSlotDynamicFirst;  // F3-1 / F3-2: a sun cascade's view slot
     static thread_local std::vector<std::uint32_t> capOf, capBucket, capCursor;  // (F5-2: the argument records reserved per item / bucket)
     if (gpu) {
         // (a refusal below = the CPU path for this flush: nothing was written yet)
         // F5-2: a record with cluster rows in a main z / solid flush is culled on the GPU: up to kRunCap argument records instead of one
-        cullView = clusterCull_ && viewSlot <= shader::abi::kViewSlotMainSolid && !gpuscene::clusterstore().tableRef().null() && !sceneViews_.base.null();
+        cullView = clusterCull_ && (viewSlot <= shader::abi::kViewSlotMainSolid || (cascadeSlot && clusterCullShadows_)) && !gpuscene::clusterstore().tableRef().null() && !sceneViews_.base.null();
         capOf.assign(n, 1u);
         capBucket.assign(buckets, 0u);
         capCursor.assign(buckets + 1, 0u);
@@ -668,9 +673,9 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         job.items = n;
         job.buckets = buckets;
         job.range = range;
-        job.viewKind = viewSlot <= shader::abi::kViewSlotMainSolid ? viewSlot : 2u;
+        job.viewKind = viewSlot <= shader::abi::kViewSlotMainSolid ? viewSlot : cascadeSlot ? 3u : 2u;
         if (cullView) {
-            job.cullFlags = 1;
+            job.cullFlags = cascadeSlot ? 3u : 1u;  // (a cascade: side planes only, bit 1: the near / far planes stay open)
             job.views = sceneViews_.base;
             job.viewSlots = sceneViews_.slots;
             job.clusters = gpuscene::clusterstore().tableRef();

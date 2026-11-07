@@ -218,6 +218,7 @@ struct OpRecord {
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;
+    mutable std::uint64_t lastSeen = 0;            // F3-1: the frame the op was last looked at (a shadow view's records age out: a cascade sees different ops as the camera moves)
     // F2e-1 (frame-ownership.md 7.30): event-driven validity. `deps` = the engine objects the stamp's engine reads hang on (the LOD resource, the covered sub-meshes' materials,
     // the lightmap images, the illumination PS), registered in the DepIndex (object -> records); an engine event on one marks `dirty` and the next look re-verifies the full stamp
     // (clean again when it still holds). `shaders` = the covered shaders with their field fingerprint (no event exists for a shader's property fields: polled once per shader and
@@ -309,6 +310,8 @@ struct Stats {
 struct Store {
     std::unordered_map<Key, std::unique_ptr<OpRecord>, KeyHash> map;
     Stats window, total;
+    Stats shadowWindow, shadowTotal;         // F3-1: the cascades' ops (keys with view != 0)
+    Stats& stats(bool shadow) { return shadow ? shadowWindow : window; }
     std::uint32_t logged = 0, auditLogged = 0;
     std::uint32_t loggedBy[kFieldCount] = {};
     std::uint64_t lastFrame = 0;

@@ -244,17 +244,20 @@ void StaticOps::recEnter(const Op& op) {
     R.probes.clear();
     R.pkeys.clear();
     recNoRetain_ = false;
-    if (viewKind_ != ViewKind::Main || g_ != &groups_[static_cast<std::size_t>(Group::Static)] || op.kind != OpKind::Mesh || inNonOp_ ||
+    // F3-1 (7.36): the cascades' static mesh z ops are recorded too (key.view = 1 + the cascade), while native.owned_shadows is on
+    const bool shadowRec = ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && ownedKeyOf(viewKind_, cascade_) != 0 &&
+                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] && op.list == List::ZPass;
+    if ((viewKind_ == ViewKind::Main ? g_ != &groups_[static_cast<std::size_t>(Group::Static)] : !shadowRec) || op.kind != OpKind::Mesh || inNonOp_ ||
         (op.list != List::ZPass && op.list != List::Solid)) {
         return;
     }
     const auto t0 = tnow();
-    orec::Stats& w = R.window;
+    orec::Stats& w = R.stats(shadowRec);
     ++w.opsAll;
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* res = ptr(ctx, 0x28);
     U8* entity = ptr(ctx, 0x10);
-    R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
+    R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), shadowRec ? ownedKeyOf(viewKind_, cascade_) : 0};
     const orec::Excl ex = recExclusion(op);
     if (orec::f2dMeasure()) {
         R.f2dCls = static_cast<int>(ex);
@@ -278,6 +281,7 @@ void StaticOps::recEnter(const Op& op) {
     const auto it = R.map.find(R.key);
     if (it != R.map.end()) {
         orec::OpRecord& rec = *it->second;
+        rec.lastSeen = dev_.stats().frames;
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
         const int d = orec::firstDifference(a, st);
@@ -328,7 +332,7 @@ void StaticOps::recAudit(const Op& op) {
     const orec::OpRecord& rec = *R.cur;
     if (rec.reads.empty()) return;
     const auto t0 = tnow();
-    orec::Stats& w = R.window;
+    orec::Stats& w = R.stats(R.key.view != 0);
     ++w.auditChecked;
     if (!ret::validate(rec.reads.data(), rec.reads.size())) {
         R.auditBad = true;
@@ -369,7 +373,7 @@ void StaticOps::recComposed(const Op& op, Skip s) {
     if (ret::gLog != nullptr && recs_ && ret::gLog == &recs_->readLog) ret::gLog = nullptr;
     if (!recs_ || !recs_->active) return;
     orec::Store& R = *recs_;
-    orec::Stats& w = R.window;
+    orec::Stats& w = R.stats(R.key.view != 0);
     const auto t0 = tnow();
     const auto exclude = [&](orec::Excl e) {
         ++w.excluded[static_cast<std::size_t>(e)];
@@ -484,9 +488,9 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     if (R.cur == nullptr || k >= R.cur->draws.size()) return;
     // 7.27: the derivation + compare of a valid record is verification: check frames only (the record's validity is the stamps' job, the audit's net and the
     // owned path's own derivation; a refused derive on another frame remakes the record at the next check frame)
-    if (!gpuscene::verifyFrame()) return;
+    if (!gpuscene::verifyFrame() && !(R.key.view != 0 && ownedShadowCheck_)) return;  // (F3-1: a cascade's check view is decided by the cascades' own frame count)
     const auto t0 = tnow();
-    orec::Stats& w = R.window;
+    orec::Stats& w = R.stats(R.key.view != 0);
     const orec::OpRecord& rec = *R.cur;
     const orec::DrawRec& r = rec.draws[k];
     // ---- the derivation: the record + the per-frame inputs
@@ -678,7 +682,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
 void StaticOps::recEnd(const Op& op) {
     if (!recs_ || !recs_->active) return;
     orec::Store& R = *recs_;
-    orec::Stats& w = R.window;
+    orec::Stats& w = R.stats(R.key.view != 0);
     if (R.cur != nullptr && !R.auditBad && !R.refused && !R.wantOwnable) {
         ++w.validAtEntry;
         return;
@@ -775,6 +779,7 @@ void StaticOps::recEnd(const Op& op) {
         for (const LeanStream3& x : leanStream3_) rec->stream3Prims.push_back({x.primitive, x.on});
     }
     rec->builtFrame = dev_.stats().frames;
+    rec->lastSeen = rec->builtFrame;
     depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints
     rec->ownable = recCollect_ || leanCollect_;
     if (ret::gLog == nullptr && !R.readLog.v.empty()) {
@@ -809,6 +814,31 @@ void StaticOps::recReport() {
     orec::Store& R = *recs_;
     orec::Stats& w = R.window;
     R.total.add(w);
+    R.shadowTotal.add(R.shadowWindow);
+    if (R.shadowWindow.differing != 0) {
+        std::string why = "draws DIFFERING on the check frames";
+        for (std::size_t f = 0; f < orec::kFieldCount; ++f) {
+            if (R.shadowWindow.byField[f] != 0) why += std::format(", {} {}", orec::kFieldNames[f], R.shadowWindow.byField[f]);
+        }
+        ownedShadowsOff(why.c_str(), R.shadowWindow.differing);  // F3-1: the cascades' composed draws are not the derived ones: only the cascades go back to the engine's path
+    }
+    if (R.shadowWindow.auditDisagree != 0) spdlog::warn("native: owned shadows: MISS (audit): {} read log disagreements in 5 s while the stamps held", R.shadowWindow.auditDisagree);
+    if (R.shadowWindow.opsAll != 0) {
+        const orec::Stats& sw = R.shadowWindow;
+        std::string ex;
+        for (std::size_t i = 0; i < orec::kExclCount; ++i) {
+            if (sw.excluded[i] != 0) ex += std::format("{}{} {}", ex.empty() ? "" : ", ", orec::kExclNames[i], sw.excluded[i]);
+        }
+        std::string nd;
+        for (std::size_t i = 1; i < orec::kDeriveWhyCount; ++i) {
+            if (sw.refused[i] != 0) nd += std::format("{}{} {}", nd.empty() ? "" : ", ", orec::kDeriveWhy[i], sw.refused[i]);
+        }
+        spdlog::info("native: owned shadows records (5 s): {} eligible ops of {} ({:.1f} %), {} draws; not recorded: {}; valid at entry {}, built {}, rebuilt {}; derived {} draws (not derived: {}), compared with a scene draw {}, DIFFERING {} draws, clean {}; "
+                     "audit: {} records checked, {} DISAGREEMENTS",
+                     sw.ops, sw.opsAll, 100.0 * static_cast<double>(sw.ops) / static_cast<double>(sw.opsAll), sw.draws, ex.empty() ? "none" : ex, sw.validAtEntry, sw.built, sw.rebuilt, sw.derived, nd.empty() ? "none" : nd, sw.compared, sw.differing,
+                     sw.clean, sw.auditChecked, sw.auditDisagree);
+    }
+    R.shadowWindow = {};
     if (ownedStatic_ && w.differing != 0) ownedAutoOff(w.differing);  // F2c-3: a check frame's derived draw differs from the composed one
     // an audit disagreement = a dependency the stamps do not cover (the audit caught it and the record was rebuilt: non-fatal, but a MISS-like finding the soak counts)
     if (w.auditDisagree != 0) spdlog::warn("native: owned records: MISS (audit): {} read log disagreements in 5 s while the stamps held", w.auditDisagree);

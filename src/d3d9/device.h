@@ -875,6 +875,7 @@ public:
     bool clustersOn() const { return clusters_; }
     // F5-2 (native.cluster_cull, frame-ownership.md 7.34): the persistent owned records of clustered draws carry their cluster rows; the compaction pass culls them per view
     void setClusterCull(bool on) { clusterCull_ = on; }
+    void setClusterCullShadows(bool on) { clusterCullShadows_ = on; }  // F3-2 (7.37): the sun cascades' owned flushes cull too (side planes only)
     bool clusterCullOn() const { return clusterCull_; }
     // tests: the CPU twin of an object window's world rows (c33..c35) for the cull's check frames, in place of the object table's
     // check frames, at the present (OwnedCompact::flush): the exact per-cluster verdict from the CPU twins as they stand NOW = what the GPU reads
@@ -914,6 +915,8 @@ public:
     void viewPosFix(float out[4]) { float jx, jy; currentPosFix(out, jx, jy); }
     bool sceneViewsReady() const { return sceneV2_ && !sceneViews_.base.null() && sceneViews_.shadow != nullptr; }
     void setSceneIssue(bool on) { sceneIssue_ = on; }
+    // F3-1 (frame-ownership.md 7.36, native.owned_shadows): the sun cascades' static mesh z draws (Shadow / ShadowDepth) get their scene forms too (v1 and the v2 form of the owned path)
+    void setSceneShadows(bool on) { if (on != sceneShadows_) ++variantEpoch_; sceneShadows_ = on; }
     void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
     bool sceneDrawsActive() const { return sceneDrawsOn_ && sceneAvail_; }
@@ -1150,7 +1153,7 @@ public:
     };
     // a pass of persistent owned draws begins (z pre-pass / solid): the bulk list and the entered / left bookkeeping of the pass kind; ownedBulkFlush delivers the draws added so far
     // (`last` = the end of the pass: the `left` list goes with it). Called before an op is composed late (its record may be dropped) and at the pass's end
-    void ownedBulkBegin(bool solid);
+    void ownedBulkBegin(bool solid, bool bulk = true);  // bulk = false (a shadow view's pass, F3-1): no bulk list, the per-draw observers' loop
     void ownedBulkFlush(bool last);
     bool ownedBulkOn() const { return ownedBulkOn_; }
     struct OwnedBulkStats {
@@ -1613,6 +1616,7 @@ private:
     void clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives);
     bool clusters_ = false;
     bool clusterCull_ = false;
+    bool clusterCullShadows_ = false;
     std::function<bool(std::uint64_t, float*)> cullWorldRowsHook_;
     std::uint64_t clusterWait_ = 0;
     bool clusterUsing_ = false;
@@ -1905,6 +1909,7 @@ private:
     void submitInterned(DrawPacket& p);
     // F2b-1 (scene_draws.cpp)
     bool sceneActive() const { return sceneIssue_ && sceneDrawsOn_ && sceneAvail_; }
+    bool sceneShadows_ = false;
     void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk);
     // false: an address the scene shader reads is null, the packet stays a normal one. `viewSlot` >= 0: a scene ABI v2 packet (the record carries no view windows, c5w =
     // the bits of the pixel c5.w; the packet's ref stream carries the slot)
@@ -1942,7 +1947,9 @@ private:
     } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
     SceneRefStream sceneRefV2_[kSceneRefSlots];  // scene ABI v2: (i, slot) per view slot, ring blocks of this frame
     std::uint64_t treeEnvHash_[2] = {}, treeEnvEpoch_[2] = {}, treeEnvCounter_ = 0;  // F4-3
-    std::uint64_t ownedEnvHash_[2] = {}, ownedEnvEpoch_[2] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per pass kind (z / solid)
+    static constexpr std::size_t kOwnedEnvSlots = 8;
+    static std::size_t ownedEnvIndex(std::uint32_t viewSlot) { return viewSlot < kOwnedEnvSlots ? viewSlot : kOwnedEnvSlots - 1; }
+    std::uint64_t ownedEnvHash_[kOwnedEnvSlots] = {}, ownedEnvEpoch_[kOwnedEnvSlots] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per view slot (0 main z, 1 main solid, 4.. cascades; F3-1)
     std::vector<std::uint32_t> ownedBucketOf_, ownedBucketStart_, ownedBucketCursor_;   // ownedFlush's scratch
     std::vector<std::uint64_t> ownedBucketKeys_;
     VertexInputValues sceneViWork_;
