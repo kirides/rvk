@@ -25,6 +25,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/view_table.h"
+#include "hal/vulkan/hal_vulkan.h"
 #include "native/owned_timers.h"
 #include "native/static_ops.h"
 
@@ -303,6 +304,16 @@ void StaticOps::treeCompEnd(const Op& op) {
     tro::OpRec* old = nullptr;
     if (const auto it = T.ops.find(pend->key); it != T.ops.end()) old = it->second.get();
     const bool sameStamp = old != nullptr && old->stamp == pend->stamp;
+    // an image's api texture re-created since the old templates (another d3d9 object): not a template error, the templates are replaced below
+    bool texMoved = false;
+    if (sameStamp) {
+        for (const tro::TexMap& x : old->texMap) {
+            if (!treeTexUnchanged(x)) {
+                texMoved = true;
+                break;
+            }
+        }
+    }
     for (std::size_t k = 0; k < drawCount_; ++k) {
         sc::DrawDesc& d = *draws_[k];
         const std::uint64_t pkey = (reinterpret_cast<std::uintptr_t>(op.raw.context) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(op.raw.desc) * 0xC2B2AE3D27D4EB4Full) ^
@@ -324,7 +335,7 @@ void StaticOps::treeCompEnd(const Op& op) {
                 const bool same = packetSameDesc(d, *ot->second->desc) && d.lightN == ot->second->desc->lightN && d.lightFirst == ot->second->desc->lightFirst &&
                                   d.lightTableLit == ot->second->desc->lightTableLit && d.matSlot == ot->second->desc->matSlot;
                 d.streams[0].freq = f;
-                if (!same) {
+                if (!same && !texMoved) {
                     ++W.checkTplDiff;
                     if (T.logged < 8) {
                         ++T.logged;
@@ -335,13 +346,13 @@ void StaticOps::treeCompEnd(const Op& op) {
                         chk(d.baseVertex != o.baseVertex || d.minIndex != o.minIndex || d.numVertices != o.numVertices || d.startIndex != o.startIndex || d.primCount != o.primCount, "geometry");
                         chk(d.samplerMask != o.samplerMask || d.inheritMask != o.inheritMask, "sampler mask"); chk(d.passFlags != o.passFlags, "pass flags"); chk(d.states != o.states, "states");
                         for (int i = 0; i < 4; ++i) chk(!(d.streams[i] == o.streams[i]), "stream");
-                        for (std::uint32_t m = d.samplerMask; m != 0; m &= m - 1) { const auto st = sc::lowBit(m); chk(!(d.samplers[st] == o.samplers[st]), "sampler"); }
+                        for (std::uint32_t m = d.samplerMask; m != 0; m &= m - 1) { const auto st = sc::lowBit(m); if (!(d.samplers[st] == o.samplers[st])) { chk(true, "sampler"); what += fmt::format(" [st {}{} tex {} / {} ss {} {} {} {} {} {} {} / {} {} {} {} {} {} {}]", st, (d.inheritMask >> st) & 1 ? " inherit" : "", d.samplers[st].texture, o.samplers[st].texture, d.samplers[st].ss[0], d.samplers[st].ss[1], d.samplers[st].ss[2], d.samplers[st].ss[3], d.samplers[st].ss[4], d.samplers[st].ss[5], d.samplers[st].ss[6], o.samplers[st].ss[0], o.samplers[st].ss[1], o.samplers[st].ss[2], o.samplers[st].ss[3], o.samplers[st].ss[4], o.samplers[st].ss[5], o.samplers[st].ss[6]); } }
                         chk(d.lightN != o.lightN || d.lightFirst != o.lightFirst || d.lightTableLit != o.lightTableLit, "light params"); chk(d.matSlot != o.matSlot, "mat slot");
                         chk(d.tagSubMesh != o.tagSubMesh || d.tagMaterial != o.tagMaterial || d.tagMaterialName != o.tagMaterialName, "tag");
                         spdlog::error("native: owned trees: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template ({})", describe(op), d.treeKey, what);
                     }
                 }
-                if (!same || ot->second->stale || ot->second->r.cd->v.scenePending) {
+                if (!same || texMoved || ot->second->stale || ot->second->r.cd->v.scenePending) {
                     // replaced below
                 } else {
                     treeMissCheck(*old, *ot->second, solid);
@@ -398,10 +409,16 @@ void StaticOps::treeCompEnd(const Op& op) {
         erase();
         return;
     }
-    if (sameStamp) {
+    if (sameStamp && !texMoved) {
         // (buckets of the op's earlier compositions that this one did not draw stay)
         for (auto& kv : old->tpls) {
             if (kv.second && pend->tpls.count(kv.first) == 0) pend->tpls[kv.first] = std::move(kv.second);
+        }
+    }
+    if (sameStamp && !texMoved) {
+        // (the kept buckets' images stay verified too)
+        for (const tro::TexMap& x : old->texMap) {
+            if (std::none_of(pend->texMap.begin(), pend->texMap.end(), [&](const tro::TexMap& y) { return y.res == x.res && y.stage == x.stage; })) pend->texMap.push_back(x);
         }
     }
     T.ops[pend->key] = std::move(pend);
@@ -911,6 +928,20 @@ std::uint32_t StaticOps::treePass(bool solid) {
                 h = mix(mix(0, rec.matSlot), mt.structVersion(rec.matSlot));
             }
             if (!ok || h != rec.matHash) {
+                composeLate(op, W.lateMaterial);
+                continue;
+            }
+        }
+        // the templates' textures: a re-created api texture is another d3d9 object (the template holds the old one): compose late, the new template follows
+        {
+            bool same = true;
+            for (const tro::TexMap& x : rec.texMap) {
+                if (!treeTexUnchanged(x)) {
+                    same = false;
+                    break;
+                }
+            }
+            if (!same) {
                 composeLate(op, W.lateMaterial);
                 continue;
             }
