@@ -51,6 +51,8 @@ public:
 
     // F2c-2: the window of slot `slot`'s record without serving anything (a pure function of the slot: kind Object, base, covered); false: not ready / out of range
     bool windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) const;
+    // F5-2 (check frames): the world rows c33..c35 (12 floats) of the record a window base (windowFor's `base.bits`) points at, from the CPU twin; false = not a record's base
+    bool worldRowsAt(std::uint64_t baseBits, float world[12]) const;
 
     // once per present (engine thread, before the frame's draws are submitted): the scene table's drain, upload, read-back, 5 s log
     void flush(d3d9::Device& dev);

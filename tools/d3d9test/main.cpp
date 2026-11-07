@@ -1838,6 +1838,335 @@ mov oC0, r0
     dev.release(std::move(ib));
 }
 
+// F5-2 cluster cull through the owned path (frame-ownership.md 7.34, native.cluster_cull): a 40 x 40 grid (3,200 triangles, x / y in [-3, 3]: the viewport shows a ninth of it)
+// is drawn as a clustered static mesh by the owned persistent path (the record carries its cluster rows, the compaction pass culls with the view table's c0..c3 and the object
+// window's world rows). The picture must equal the normal draw's in four situations: (A) the grid inside a unit clip cube: most clusters culled; (B) the object moved
+// out of the view: nothing drawn; (C) a view whose frustum holds the whole grid: one run over the whole range, nothing culled; (D) the setting off. The check frames' exact
+// per-cluster evaluation on the CPU (no margin) finds no false negative; the indices submitted drop in (A) and (B).
+void testClusterCull(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP cluster cull: scene draws are not available on this device\n");
+        return;
+    }
+    // world = (x, y, z) * rows (c33..c35), fade c32.w; the clip position is the world position (the view block's c0..c3 describe the same frustum)
+    static const char* kVs = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_position o0
+dcl_color o1
+mov r0.xyz, v0
+mov r0.w, c32.w
+dp4 o0.x, r0, c33
+dp4 o0.y, r0, c34
+dp4 o0.z, r0, c35
+mov o0.w, c32.w
+mov o1, v1
+)";
+    static const char* kPs = R"(
+ps_3_0
+dcl_color v0
+mov oC0, v0
+)";
+    const auto vsV = shaderFrom(dev, kVs);
+    const auto psV = shaderFrom(dev, kPs);
+    const VertexElement kDeclC[] = {
+        {0, 0, DECLTYPE_FLOAT3, 0, 0 /*POSITION*/, 0},
+        {0, 12, DECLTYPE_D3DCOLOR, 0, 10 /*COLOR*/, 0},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    auto decl = dev.createVertexDecl(kDeclC);
+    if (!vsV || !psV || !decl) {
+        std::printf("  FAIL cluster cull: shaders / declaration\n");
+        ++g_failures;
+        return;
+    }
+    vsV->semantics.flags |= ShaderSemantics::Material;
+    vsV->semantics.ranges[static_cast<std::size_t>(Semantic::InstanceData)] = {32, 1};
+    constexpr int kN = 40;
+    struct V {
+        float x, y, z;
+        std::uint32_t color;
+    };
+    std::vector<V> verts;
+    for (int y = 0; y <= kN; ++y) {
+        for (int x = 0; x <= kN; ++x) {
+            const std::uint32_t c = 0xFF000000u | (static_cast<std::uint32_t>(x * 6) & 255u) << 16 | (static_cast<std::uint32_t>(y * 6) & 255u) << 8 | static_cast<std::uint32_t>((x * y) & 255);
+            verts.push_back({-3.0f + 6.0f * static_cast<float>(x) / kN, -3.0f + 6.0f * static_cast<float>(y) / kN, 0.5f, c});
+        }
+    }
+    std::vector<std::uint16_t> idx;
+    for (int y = 0; y < kN; ++y) {
+        for (int x = 0; x < kN; ++x) {
+            const std::uint16_t a = static_cast<std::uint16_t>(y * (kN + 1) + x), b = a + 1, c = static_cast<std::uint16_t>(a + kN + 1), d = c + 1;
+            if ((x + y) & 1) idx.insert(idx.end(), {a, b, c, b, d, c});
+            else idx.insert(idx.end(), {a, d, c, a, b, d});
+        }
+    }
+    const std::uint32_t tris = static_cast<std::uint32_t>(idx.size() / 3);
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(V)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(static_cast<std::uint32_t>(idx.size() * 2), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(V));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx.data(), idx.size() * 2);
+    ib->unlock();
+    rhi::Device* rd = dev.rhi();
+    constexpr std::uint32_t kSlots = 16, kObjPad = 512;
+    auto tableBuf = rd->createBuffer({static_cast<std::uint64_t>(kSlots) * shader::abi::kViewBlock2Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "cluster cull view table"});
+    auto objBuf = rd->createBuffer({kObjPad + 4 * 96, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "cluster cull objects"});
+    if (!tableBuf || !objBuf) {
+        std::printf("  FAIL cluster cull: view / object table buffers\n");
+        ++g_failures;
+        return;
+    }
+    const auto tw = tableBuf->shaderRef(0);
+    const rhi::GpuRef tableRef = rhi::GpuRef::fromWords(tw[0], tw[1]);
+    std::vector<shader::abi::ViewBlock2> twin(kSlots);
+    std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
+    // object records: A = identity, B = moved 10 units to the right, C = scaled 0.5 + moved to the left (half of it still visible)
+    struct Obj {
+        float rows[3][4];
+        float fade;
+    };
+    const Obj objs[3] = {{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}, 1.0f}, {{{1, 0, 0, 10}, {0, 1, 0, 0}, {0, 0, 1, 0}}, 1.0f}, {{{0.5f, 0, 0, -0.4f}, {0, 0.5f, 0, 0.2f}, {0, 0, 1, 0}}, 1.0f}};
+    {
+        auto* base = static_cast<float*>(objBuf->map());
+        std::memset(base, 0, kObjPad + 4 * 96);
+        for (std::uint32_t o = 0; o < 3; ++o) {
+            float* r = base + (kObjPad + o * 96) / 4;  // c31 .. c35
+            r[4 + 3] = objs[o].fade;                   // c32.w
+            std::memcpy(r + 8, objs[o].rows, sizeof(objs[o].rows));
+        }
+    }
+    const auto objBase = [&](std::uint32_t o) {
+        const auto w = objBuf->shaderRef(kObjPad + o * 96 - 31 * 16);
+        return rhi::GpuRef::fromWords(w[0], w[1]);
+    };
+    const auto setObject = [&](std::uint32_t o) {
+        const float c32[4] = {0, 0, 0, objs[o].fade};
+        dev.setVertexShaderConstantF(32, c32, 1);
+        dev.setVertexShaderConstantF(33, objs[o].rows[0], 3);
+    };
+    const auto fillView = [&](std::uint32_t slot, float sx, float sy) {
+        shader::abi::ViewBlock2& b = twin[slot];
+        std::memset(&b, 0, sizeof(b));
+        b.vs0[0][0] = sx;
+        b.vs0[1][1] = sy;
+        b.vs0[2][2] = 1.0f;
+        b.vs0[3][3] = 1.0f;
+        dev.viewPosFix(b.posFix);
+        std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2));
+    };
+    const auto windows = [&](std::uint32_t slot, std::uint32_t obj) {
+        OwnedWindows ow;
+        const auto set = [&](OwnedWindows::Win& w, bool vertex, std::uint32_t win, std::uint32_t covered) {
+            w.kind = OwnedWindows::Kind::View;
+            w.base = rhi::GpuRef{gpuscene::ViewTable::windowBase(tableRef, slot, vertex, win)};
+            w.covered = covered;
+        };
+        set(ow.w[0][0], true, 0, 12);
+        set(ow.w[0][1], true, 1, 19);
+        set(ow.w[1][0], false, 0, 5);
+        ow.w[0][2].kind = OwnedWindows::Kind::Object;
+        ow.w[0][2].base = objBase(obj);
+        ow.w[0][2].covered = 5;
+        ow.viewSlot = slot;
+        return ow;
+    };
+    gpuscene::ClusterStore& store = gpuscene::clusterstore();
+    const auto begin = [&] {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexDecl(decl.get());
+        dev.setVertexShader(vsV);
+        dev.setPixelShader(psV);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(V));
+        dev.setIndices(ib.get());
+    };
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    tab.setActive(true);
+    if (!tab.ensure(dev)) {
+        std::printf("  FAIL cluster cull: the draw record tables\n");
+        ++g_failures;
+        return;
+    }
+    gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
+    compact.setCheckEvery(1);
+    bool gpuCompact = false;
+    for (int i = 0; i < 1200 && !gpuCompact; ++i) {
+        gpuCompact = compact.usable(dev);
+        if (!gpuCompact) Sleep(50);
+    }
+    if (!gpuCompact) {
+        std::printf("  SKIP cluster cull: GPU compaction is not available here\n");
+        tab.setActive(false);
+        tab.destroy();
+        dev.setSceneDraws(false, 0);
+        return;
+    }
+    // (the CPU twin of the object window for the check frames: the test's own buffer stands in for the object table)
+    dev.setCullWorldRowsHook([&](std::uint64_t baseBits, float world[12]) {
+        for (std::uint32_t o = 0; o < 3; ++o) {
+            if (objBase(o).bits == baseBits) {
+                std::memcpy(world, objs[o].rows, 12 * sizeof(float));
+                return true;
+            }
+        }
+        return false;
+    });
+    const auto end = [&](const char* name) {
+        store.flush(dev);
+        tab.flush(dev);
+        compact.flush(dev);
+        dev.setSceneIssue(false);
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    const auto bad = [&](const Pixels& ref, const Pixels& p, const char* what) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) n += ref.bgra[i] != p.bgra[i];
+        if (n != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL cluster cull (%s): %u bytes differ from the normal draw\n", what, n);
+            ++g_failures;
+        }
+        return n;
+    };
+    const auto lit = [](const Pixels& p) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i + 3 < p.bgra.size(); i += 4) n += (p.bgra[i] | p.bgra[i + 1] | p.bgra[i + 2]) != 0;
+        return n;
+    };
+    // references: the normal draws of objects A, B, C
+    Pixels ref[3];
+    for (std::uint32_t o = 0; o < 3; ++o) {
+        begin();
+        setObject(o);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, static_cast<std::uint32_t>(verts.size()), 0, tris);
+        ref[o] = end("clustercull_ref");
+    }
+    if (lit(ref[0]) < 100 || lit(ref[1]) != 0 || lit(ref[2]) < 100) {
+        std::printf("  FAIL cluster cull: the references are not what the test needs (lit pixels %u / %u / %u)\n", lit(ref[0]), lit(ref[1]), lit(ref[2]));
+        ++g_failures;
+    }
+    // the clusters: ask, wait for the worker, capture the draw that takes the copy
+    dev.setClusters(true);
+    dev.setClusterCull(true);
+    dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+    dev.setSceneViews(true);
+    fillView(1, 1.0f, 1.0f);   // the unit clip cube
+    fillView(0, 0.25f, 0.25f); // x / y in [-4, 4]: the whole grid
+    Device::CachedDraw cd;
+    bool ready = false;
+    for (int i = 0; i < 1600 && !ready; ++i) {
+        begin();
+        setObject(0);
+        dev.setSceneIssue(true);
+        dev.beginCapture(&cd);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, static_cast<std::uint32_t>(verts.size()), 0, tris);
+        dev.endCapture();
+        end("clustercull_capture");
+        ready = cd.valid && cd.scenePipeline != GamePipeline::None && cd.scenePipeline2 != GamePipeline::None && cd.clusterUsing;
+        if (!ready) Sleep(25);
+    }
+    if (!ready) {
+        std::printf("  FAIL cluster cull: the draw never took the clustered copy / got its v2 pipelines (valid %d, pipelines %d / %d, clusters: using %d, requested %llu built %llu failed %llu)\n", cd.valid,
+                    static_cast<int>(cd.scenePipeline), static_cast<int>(cd.scenePipeline2), cd.clusterUsing, static_cast<unsigned long long>(store.stats().requested),
+                    static_cast<unsigned long long>(store.stats().built), static_cast<unsigned long long>(store.stats().failedBuild));
+        ++g_failures;
+        dev.setCullWorldRowsHook(nullptr);
+        compact.destroy();
+        tab.setActive(false);
+        tab.destroy();
+        store.destroy(&dev);
+        dev.setClusters(false);
+        dev.setClusterCull(false);
+        dev.setSceneViews(false);
+        dev.setSceneDraws(false, 0);
+        return;
+    }
+    std::uint32_t slot = tab.alloc();
+    const auto owned = [&](const char* name, std::uint32_t viewSlot, std::uint32_t obj, const Pixels& want, const char* what) {
+        begin();
+        setObject(obj);
+        dev.setSceneIssue(true);
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(V);
+        in.indices = ib.get();
+        in.alphaFunc = 8u;
+        const OwnedWindows ow = windows(viewSlot, obj);
+        Device::OwnedPersist out;
+        const int rc = dev.ownedDerive(cd, in, ow, tab.blockRef(slot), tab.zeroRef(), true, out);
+        if (rc != 0) {
+            std::printf("  FAIL cluster cull (%s): derive returned %d\n", what, rc);
+            ++g_failures;
+        }
+        tab.write(slot, out.rec, out.blk);
+        const bool culled = (out.rec.args[3] >> 16) != 0;
+        std::vector<Device::OwnedItem> items = {{&cd, out.bucketKey, slot}};
+        Device::OwnedArena arena;
+        if (!dev.ownedReserve(1, arena) || !dev.ownedFlush(items, arena, viewSlot, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity)) {
+            std::printf("  FAIL cluster cull (%s): the flush was refused\n", what);
+            ++g_failures;
+        }
+        const Pixels p = end(name);
+        bad(want, p, what);
+        return culled;
+    };
+    const gpuscene::OwnedCompact::Stats s0 = compact.stats();
+    const bool carriesRows = owned("clustercull_a", 1, 0, ref[0], "A: most clusters outside the clip cube");
+    if (!carriesRows) {
+        std::printf("  FAIL cluster cull: the record does not carry cluster rows (entry not Ready / contiguous, or the packet is not the copy's range)\n");
+        ++g_failures;
+    }
+    owned("clustercull_b", 1, 1, ref[1], "B: the object outside the view");
+    owned("clustercull_c", 0, 0, ref[0], "C: a frustum holding the whole grid");
+    owned("clustercull_c2", 1, 2, ref[2], "A2: scaled and moved, half visible");
+    dev.setClusterCull(false);
+    owned("clustercull_d", 1, 0, ref[0], "D: the setting off");
+    dev.setClusterCull(true);
+    for (int i = 0; i < 4; ++i) {
+        begin();
+        end("clustercull_collect");  // (the read-backs of the earlier frames complete)
+    }
+    const gpuscene::OwnedCompact::Stats& cs = compact.stats();
+    const auto d = [&](std::uint64_t a, std::uint64_t b) { return static_cast<unsigned long long>(a - b); };
+    std::printf("  cluster cull: %llu culled-capable items, %llu items checked, %llu clusters (%llu inside by the exact test, %llu drawn), false negatives %llu, extras %llu, whole-range %llu, empty %llu, runs %llu, "
+                "inexact %llu; indices %llu -> %llu; compaction DIFFERING %llu\n",
+                d(cs.cullItems, s0.cullItems), d(cs.cullChecked, s0.cullChecked), d(cs.cullClusters, s0.cullClusters), d(cs.cullExactVisible, s0.cullExactVisible), d(cs.cullCovered, s0.cullCovered),
+                d(cs.falseNegatives, s0.falseNegatives), d(cs.extras, s0.extras), d(cs.wholeRange, s0.wholeRange), d(cs.emptyItems, s0.emptyItems), d(cs.runs, s0.runs), d(cs.inexact, s0.inexact),
+                d(cs.idxBefore[0] + cs.idxBefore[1], s0.idxBefore[0] + s0.idxBefore[1]), d(cs.idxAfter[0] + cs.idxAfter[1], s0.idxAfter[0] + s0.idxAfter[1]), d(cs.differing, s0.differing));
+    if (cs.cullChecked - s0.cullChecked < 4 || cs.cullItems - s0.cullItems < 4 || cs.falseNegatives != 0 || cs.differing != 0 || cs.inexact != 0 || cs.badRuns != 0) {
+        std::printf("  FAIL cluster cull: checks (items checked %llu, culled-capable %llu, false negatives %llu, differing %llu, inexact %llu, bad runs %llu)\n", d(cs.cullChecked, s0.cullChecked),
+                    d(cs.cullItems, s0.cullItems), static_cast<unsigned long long>(cs.falseNegatives), static_cast<unsigned long long>(cs.differing), static_cast<unsigned long long>(cs.inexact),
+                    static_cast<unsigned long long>(cs.badRuns));
+        ++g_failures;
+    }
+    // A + B + C + A2 + D: the submitted indices (all views here are main solid) are well below five whole draws, and B drew nothing
+    const std::uint64_t whole = static_cast<std::uint64_t>(tris) * 3 * 5, after = cs.idxAfter[0] + cs.idxAfter[1] - s0.idxAfter[0] - s0.idxAfter[1];
+    if (cs.emptyItems - s0.emptyItems < 1 || cs.wholeRange - s0.wholeRange < 1 || after >= whole - whole / 4 || cs.extras - s0.extras > (cs.cullClusters - s0.cullClusters) / 2) {
+        std::printf("  FAIL cluster cull: no item without a record (%llu), no whole-range item (%llu), or the cull did not reduce the submitted indices (%llu of %llu)\n", d(cs.emptyItems, s0.emptyItems),
+                    d(cs.wholeRange, s0.wholeRange), static_cast<unsigned long long>(after), static_cast<unsigned long long>(whole));
+        ++g_failures;
+    }
+    tab.release(slot);
+    dev.setCullWorldRowsHook(nullptr);
+    tab.setActive(false);
+    compact.destroy();
+    tab.destroy();
+    store.destroy(&dev);
+    dev.setClusters(false);
+    dev.setClusterCull(false);
+    dev.setSceneViews(false);
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 // F5-1 clusters of large static meshes through the device's own path (frame-ownership.md 7.33, native.clusters): a 40 x 40 quad grid (3,200 triangles, 16-bit indices)
 // is drawn as a static mesh (a rigid material vertex shader: the semantics are set by hand, POSITION FLOAT3 at offset 0) (a) the normal way and (b) with the setting on: the
 // first draw asks the worker, a later one is drawn from the arena copy of the indices in cluster order. 0 bytes may differ from (a); the copy's read-back (Vulkan) and the
@@ -2747,7 +3076,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

@@ -80,6 +80,7 @@ public:
         rhi::MeshAlloc alloc;
         std::uint32_t isz = 0, triangles = 0, rowFirst = 0, rowCount = 0;
         std::uint64_t arenaBytes = 0;
+        bool cullOk = false;  // F5-2: the rows tile the copy's indices contiguously from its first index and there are at most clustercull::kMaxRows of them
     };
 
     ClusterStore();
@@ -111,6 +112,13 @@ public:
         const State s = it->second->state.load(std::memory_order_acquire);
         return used ? s != State::Ready : s != State::Pending;
     }
+    // F5-2: what a record needs to cull the range's draw on the GPU (a Ready entry whose rows tile its copy: `firstIndex` / `indexCount` = the whole copy's range)
+    struct CullInfo {
+        std::uint32_t rowFirst = 0, rowCount = 0, firstIndex = 0, indexCount = 0;
+    };
+    bool cullInfo(std::uint64_t id, CullInfo& out) const;
+    // the CPU twin of rows [first, first + count) (null when out of range / no table): the check frames' exact evaluation
+    const ClusterRow* rowsAt(std::uint32_t first, std::uint32_t count) const;
     // the table's GPU reference (F5-2); null before the first upload
     rhi::GpuRef tableRef() const { return table_ ? table_->ref() : rhi::GpuRef{}; }
     // once per present: finished builds (the 5 s line), the table's upload + read-back check

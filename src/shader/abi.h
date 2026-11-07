@@ -156,9 +156,10 @@ struct DrawRecord {
     std::uint32_t materialSlot;          // 96: Material table slot
     std::uint32_t illumEntry;            // 100: Illumination table entry
     std::uint32_t c5w;                   // 104: ABI v2 (sceneView): the bits of pixel c5.w (the mask reference of the draw), RVK_PSC(5).w; v1 records: 0
-    std::uint32_t reserved0;             // 108
+    std::uint32_t reserved0;             // 108: F5-2: the cluster entry id (low 32 bits) of a culled record (args[3] != 0), else 0
     std::uint32_t args[4];               // 112: F2c-4c (persistent owned records; 0 elsewhere): indexCount, firstIndex, vertexOffset (int bits), 0 = the indirect arguments the GPU compaction
-                                         // (shaders/gpuscene/owned_compact.comp.hlsl) copies; indexCount 0 = the record draws nothing
+                                         // (shaders/gpuscene/owned_compact.comp.hlsl) copies; indexCount 0 = the record draws nothing. args[3] (F5-2) = rowFirst | rowCount << 16: the
+                                         // cluster rows (gpuscene::ClusterRow, 32 bytes each) of the draw's range; 0 = not culled
 };
 static_assert(sizeof(DrawRecord) == kDrawRecordSize && alignof(DrawRecord) == 8);
 

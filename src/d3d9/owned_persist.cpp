@@ -10,7 +10,11 @@
 #include <cstring>
 
 #include "d3d9/device.h"
+#include "core/cluster_cull.h"
+#include "core/f5_measure.h"
+#include "gpuscene/object_table.h"
 #include "d3d9/scene_hash.h"
+#include "gpuscene/cluster_table.h"
 #include "gpuscene/owned_compact.h"
 #include "gpuscene/verify.h"
 
@@ -45,6 +49,7 @@ std::uint64_t Device::ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok)
     for (std::uint32_t i = 0; i < colorCount_ && i < kRenderTargets; ++i) h = hmix(h, static_cast<std::uint64_t>(colorFormats_[i]));
     h = hmix(h, static_cast<std::uint64_t>(depthFormat_) | static_cast<std::uint64_t>(stencilFormat_) << 32);
     h = hmix(h, boundDepthReversed() ? 1u : 0u);
+    h = hmix(h, clusterCull_ ? 0xc1u : 0u);  // (F5-2: the records carry their cluster rows)
     {
         float jx = 0.0f, jy = 0.0f, zs = 0.0f, zb = 0.0f;
         geometryJitter(jx, jy);
@@ -198,6 +203,17 @@ int Device::ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWind
     r.args[1] = c.packet.first;
     r.args[2] = static_cast<std::uint32_t>(c.packet.vertexOffset);
     r.args[3] = 0;
+    // F5-2: the cluster rows of a draw that reads the clustered copy, when the GPU cull can serve it: the world rows must come from the object table (the cull reads c33..c35 of
+    // window 2 at the compaction pass), the entry must be Ready with rows that tile the copy, and the packet must be exactly the copy's range
+    if (clusterCull_ && c.clusterUsing && c.clusterWait != 0) {
+        const OwnedWindows::Win& w2 = ow.w[0][2];
+        gpuscene::ClusterStore::CullInfo ci;
+        if (w2.kind == OwnedWindows::Kind::Object && w2.covered >= 5 && c.packet.indexOffset == 0 && gpuscene::clusterstore().cullInfo(c.clusterWait, ci) &&
+            ci.firstIndex == c.packet.first && ci.indexCount == c.packet.count && ci.rowCount != 0 && ci.rowCount <= clustercull::kMaxRows && ci.rowFirst < 65536) {
+            r.args[3] = ci.rowFirst | ci.rowCount << 16;
+            r.reserved0 = static_cast<std::uint32_t>(c.clusterWait);
+        }
+    }
     out.bucketKey = ownedBucketKey(c, ow.viewSlot);
     return 0;
 }
@@ -444,6 +460,62 @@ bool Device::ownedReserve(std::uint32_t maxDraws, OwnedArena& arena) {
     return true;
 }
 
+// F5-2, check frames: a culled-capable item with the CPU's exact per-cluster verdict (f5::makeObjView / sphereOutside, no margin: an independent implementation of the test
+// the shader makes) from the CPU twins of what the GPU reads: the view table's block, the object table's world rows, the cluster table's rows
+gpuscene::OwnedCompact::CullItem Device::cullCheckItem(const shader::abi::DrawRecord& rec, std::uint32_t viewSlot, std::uint32_t pos, std::uint32_t bucket) {
+    gpuscene::OwnedCompact::CullItem ci;
+    ci.pos = pos;
+    ci.bucket = bucket;
+    ci.indexCount = rec.args[0];
+    ci.firstIndex = rec.args[1];
+    ci.vertexOffset = rec.args[2];
+    ci.rowArgs = rec.args[3];
+    ci.entryId = rec.reserved0;
+    ci.win2 = rec.vsWin[2];
+    ci.viewSlot = viewSlot;
+    return ci;
+}
+
+void Device::cullCheckFinish(gpuscene::OwnedCompact::CullItem& ci) {
+    const std::uint32_t rowFirst = ci.rowArgs & 0xffffu, rowCount = ci.rowArgs >> 16;
+    const gpuscene::ClusterRow* rows = gpuscene::clusterstore().rowsAt(rowFirst, rowCount);
+    float world[12];
+    if (rows == nullptr || ci.viewSlot >= sceneViews_.slots) return;
+    if (!(cullWorldRowsHook_ && cullWorldRowsHook_(ci.win2, world)) && !gpuscene::objecttable().worldRowsAt(ci.win2, world)) return;
+    float regs[4][4];
+    std::memcpy(regs, sceneViews_.shadow[ci.viewSlot].vs0, sizeof(regs));
+    f5::ObjView ov;
+    if (!f5::makeObjView(regs, world, 3, 1.0f, 1.0f, ov)) return;
+    std::memcpy(ci.refRegs, regs, sizeof(regs));
+    std::memcpy(ci.refWorld, world, sizeof(world));
+    ci.sphere.resize(4u * rowCount);
+    ci.clusterFirst.resize(rowCount);
+    ci.clusterCount.resize(rowCount);
+    ci.visible.resize(rowCount);
+    ci.slack.resize(rowCount);
+    for (std::uint32_t c = 0; c < rowCount; ++c) {
+        if (rows[c].range != ci.entryId) {  // (the GPU draws the whole range for an entry whose rows are not its own: not an exact case)
+            ci.clusterFirst.clear();
+            ci.clusterCount.clear();
+            ci.visible.clear();
+            ci.slack.clear();
+            return;
+        }
+        ci.clusterFirst[c] = rows[c].firstIndex;
+        ci.clusterCount[c] = rows[c].indexCount;
+        ci.visible[c] = f5::sphereOutside(ov, rows[c].c, rows[c].r) ? 0 : 1;
+        float sl = 1e30f;
+        for (int pl = 0; pl < 6; ++pl) {
+            const float dd = ov.planes[pl][0] * rows[c].c[0] + ov.planes[pl][1] * rows[c].c[1] + ov.planes[pl][2] * rows[c].c[2] + ov.planes[pl][3];
+            if (ov.normalLen[pl] > 0.0f) sl = std::min(sl, dd / ov.normalLen[pl] + rows[c].r);
+        }
+        ci.slack[c] = sl;
+        std::memcpy(&ci.sphere[4u * c], rows[c].c, 12);
+        ci.sphere[4u * c + 3] = rows[c].r;
+    }
+    ci.exact = true;
+}
+
 bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount) {
     if (items.empty()) return true;
     const std::uint32_t n = static_cast<std::uint32_t>(items.size());
@@ -525,11 +597,23 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     std::uint32_t* args = nullptr;
     gpuscene::OwnedCompact::Range range;
     rhi::RingAlloc jobsBlock;
+    bool cullView = false;
+    static thread_local std::vector<std::uint32_t> capOf, capBucket, capCursor;  // (F5-2: the argument records reserved per item / bucket)
     if (gpu) {
         // (a refusal below = the CPU path for this flush: nothing was written yet)
-        gpu = compact.reserve(*this, n, buckets, range);
+        // F5-2: a record with cluster rows in a main z / solid flush is culled on the GPU: up to kRunCap argument records instead of one
+        cullView = clusterCull_ && viewSlot <= shader::abi::kViewSlotMainSolid && !gpuscene::clusterstore().tableRef().null() && !sceneViews_.base.null();
+        capOf.assign(n, 1u);
+        capBucket.assign(buckets, 0u);
+        capCursor.assign(buckets + 1, 0u);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (cullView && (shadow[items[i].slot].args[3] >> 16) != 0) capOf[i] = clustercull::kRunCap;
+            capBucket[ownedBucketOf_[i]] += capOf[i];
+        }
+        for (std::uint32_t b = 0; b < buckets; ++b) capCursor[b + 1] = capCursor[b] + capBucket[b];
+        gpu = compact.reserve(*this, capCursor[buckets], buckets, range);
         if (gpu) {
-            jobsBlock = game_->allocRing(static_cast<std::uint64_t>(buckets) * 16, 16);
+            jobsBlock = game_->allocRing(static_cast<std::uint64_t>(buckets) * 32, 16);
             if (jobsBlock.ptr == nullptr) {
                 gpu = false;
                 ++sceneStats_.fbRingFull;
@@ -576,7 +660,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         ++sceneStats_.candidates;
     }
     if (gpu) {
-        // the jobs (first entry, entries, first argument index, count index per bucket) + the check frames' expectation (what the CPU path would have written)
+        // the jobs (first entry, entries, first argument index, count index; capacity, flags per bucket) + the check frames' expectation (what the CPU path would have written)
         auto* jobs = static_cast<std::uint32_t*>(jobsBlock.ptr);
         gpuscene::OwnedCompact::Job job;
         job.list = arena.list.ref;
@@ -584,28 +668,51 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         job.items = n;
         job.buckets = buckets;
         job.range = range;
+        job.viewKind = viewSlot <= shader::abi::kViewSlotMainSolid ? viewSlot : 2u;
+        if (cullView) {
+            job.cullFlags = 1;
+            job.views = sceneViews_.base;
+            job.viewSlots = sceneViews_.slots;
+            job.clusters = gpuscene::clusterstore().tableRef();
+        }
         const bool check = compact.checkThisFrame(*this);
         std::vector<std::uint32_t> recs;
         if (check) {
             job.expect.resize(2 * static_cast<std::size_t>(buckets));
             recs.reserve(static_cast<std::size_t>(n) * 5);
         }
+        std::uint64_t cullCapable = 0;
         for (std::uint32_t b = 0; b < buckets; ++b) {
-            jobs[4 * b + 0] = cursor[b];
-            jobs[4 * b + 1] = cursor[b + 1] - cursor[b];
-            jobs[4 * b + 2] = range.firstArg + cursor[b];
-            jobs[4 * b + 3] = range.firstCount + b;
-            if (!check) continue;
+            jobs[8 * b + 0] = cursor[b];
+            jobs[8 * b + 1] = cursor[b + 1] - cursor[b];
+            jobs[8 * b + 2] = range.firstArg + capCursor[b];
+            jobs[8 * b + 3] = range.firstCount + b;
+            jobs[8 * b + 4] = capBucket[b];
+            jobs[8 * b + 5] = job.cullFlags;
+            jobs[8 * b + 6] = 0;
+            jobs[8 * b + 7] = 0;
+            if (!check) {
+                for (std::uint32_t k = cursor[b]; k < cursor[b + 1]; ++k) cullCapable += capOf[posItem[k]] > 1 ? 1 : 0;
+                continue;
+            }
             std::uint32_t want = 0;
             for (std::uint32_t k = cursor[b]; k < cursor[b + 1]; ++k) {
-                const OwnedItem& it = items[posItem[k]];
+                const std::uint32_t ii = posItem[k];
+                const OwnedItem& it = items[ii];
                 if (it.cd->packet.count == 0) continue;
+                job.fullIndices += it.cd->packet.count;
+                if (capOf[ii] > 1) {
+                    ++cullCapable;
+                    job.culls.push_back(cullCheckItem(shadow[it.slot], viewSlot, k, b));
+                    continue;
+                }
                 ++want;
                 recs.insert(recs.end(), {it.cd->packet.count, 1u, it.cd->packet.first, static_cast<std::uint32_t>(it.cd->packet.vertexOffset), k});
             }
-            job.expect[2 * b] = cursor[b];
+            job.expect[2 * b] = capCursor[b];
             job.expect[2 * b + 1] = want;
         }
+        compact.stats().cullItems += cullCapable;
         if (check) job.expect.insert(job.expect.end(), recs.begin(), recs.end());
         compact.queue(*this, std::move(job));
     }
@@ -623,7 +730,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         m.first = 0;
         m.vertexOffset = 0;
         if (gpu) {
-            compact.fillPacket(*this, range, cursor[b], b, count, m);
+            compact.fillPacket(*this, range, capCursor[b], b, capBucket[b], m);
         } else {
             m.indirectBuffer = arena.args.buffer;
             m.indirectOffset = arena.args.offset + static_cast<std::uint64_t>(cursor[b]) * rhi::kIndirectStride;

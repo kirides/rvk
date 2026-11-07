@@ -2585,6 +2585,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeClusterCull = &reg.add({
+        .key = "native.cluster_cull",
+        .label = "Native frame: cluster cull",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F5-2 (frame-ownership.md 7.34), Full mode, needs native.clusters + persistent owned draws: the owned z / solid draws of clustered meshes are culled per cluster on the GPU "
+                       "(the compaction pass tests each cluster's bounding sphere against the main view's frustum, widened by a margin for the camera jitter) and the visible clusters are drawn "
+                       "as at most 8 runs per draw (indirect arguments); the z pre-pass and the solid pass cull with the same inputs, so the solid pass's depth EQUAL holds. Check frames "
+                       "read the GPU's result back and compare it with the exact CPU test (false negatives must be 0). rvk.log `native: owned compaction (5 s)` + `cluster cull`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.clusters", "true", false, true}, {"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedCheck = &reg.add({
         .key = "native.owned_check",
         .label = "Native frame: owned static check interval",

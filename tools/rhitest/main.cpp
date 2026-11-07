@@ -39,6 +39,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/cluster_cull.h"
 #include "core/crash_dump.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
@@ -699,7 +700,7 @@ void testOwnedCompact(rhi::Device& dev, const Shaders& sh) {
     const std::uint64_t outBytes = kArgsBase + static_cast<std::uint64_t>(kFirstArg + total) * 20;
     auto records = dev.createBuffer({static_cast<std::uint64_t>(kSlots) * kRecordBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact records"});
     auto list = dev.createBuffer({static_cast<std::uint64_t>(total) * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact list"});
-    auto jobs = dev.createBuffer({kBuckets * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact jobs"});
+    auto jobs = dev.createBuffer({kBuckets * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact jobs"});
     auto out = dev.createBuffer({outBytes, kRw, rhi::Memory::Device, "rhi compact out"});
     auto fill = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi compact poison"});
     auto readback = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi compact readback"});
@@ -743,17 +744,22 @@ void testOwnedCompact(rhi::Device& dev, const Shaders& sh) {
     }
     std::memcpy(list->map(), entries.data(), entries.size() * sizeof(Entry));
     auto* jb = static_cast<std::uint32_t*>(jobs->map());
+    std::memset(jb, 0, kBuckets * 32);
     for (std::uint32_t b = 0; b < kBuckets; ++b) {
-        jb[4 * b + 0] = firstEntry[b];
-        jb[4 * b + 1] = sizes[b];
-        jb[4 * b + 2] = kFirstArg + firstEntry[b];
-        jb[4 * b + 3] = kFirstCount + b;
+        jb[8 * b + 0] = firstEntry[b];
+        jb[8 * b + 1] = sizes[b];
+        jb[8 * b + 2] = kFirstArg + firstEntry[b];
+        jb[8 * b + 3] = kFirstCount + b;
+        jb[8 * b + 4] = sizes[b];  // capacity
     }
     std::memset(fill->map(), 0xAB, outBytes);  // (poison: what the pass leaves alone stays visible)
     struct Push {
         std::uint32_t records[2], list[2], jobs[2], out[2];
-        std::uint32_t countsBase, argsBase, slotCount, pad;
+        std::uint32_t countsBase, argsBase, slotCount, viewSlots;
+        std::uint32_t clusters[2], views[2];
+        std::uint32_t clusterRows, pad[3];
     } push{};
+    static_assert(sizeof(Push) == 80);
     const auto rr = records->shaderRef(0), lr = list->shaderRef(0), jr = jobs->shaderRef(0), wr = out->shaderRefRw(0);
     push.records[0] = rr[0], push.records[1] = rr[1], push.list[0] = lr[0], push.list[1] = lr[1], push.jobs[0] = jr[0], push.jobs[1] = jr[1], push.out[0] = wr[0], push.out[1] = wr[1];
     push.countsBase = kCountsBase;
@@ -801,6 +807,282 @@ void testOwnedCompact(rhi::Device& dev, const Shaders& sh) {
     check(wrongCounts == 0, std::format("{} bucket count(s) differ", wrongCounts));
     check(wrongRecords == 0, std::format("{} of {} argument record(s) differ", wrongRecords, comparedRecords));
     check(got[0] == 0xABABABABu && got[kCountsBase / 4 - 1] == 0xABABABABu && got[kCountsBase / 4 + kFirstCount + kBuckets] == 0xABABABABu, "counts written outside the buckets' words");
+    report(dev, name, before);
+}
+
+// F5-2 (frame-ownership.md 7.34): the cull half of the same shader on a synthetic cluster table, view table and object table. Entries of 1 / 5 / 40 / 200 / 4096 clusters (a bucket mixes
+// them with plain records), one with 4097 clusters (too many: drawn whole), one whose rows belong to another entry (drawn whole), one whose slot has no object window (dropped as
+// invalid), views with a perspective camera, objects scaled + moved, a job without the cull flag. The runs read back must equal the CPU reference (core/cluster_cull) bit for
+// bit, the buckets' counts too, and the pass must not write beyond a bucket's capacity (a cap smaller than the runs: the excess is dropped, the neighbour bucket untouched).
+void testOwnedCull(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "owned draws cluster cull (F5-2)";
+    if (!sh.compact.ok) {
+        check(false, "compaction shader did not compile");
+        report(dev, name, before);
+        return;
+    }
+    constexpr std::uint32_t kRecordBytes = 128, kCountsBase = 64, kArgsBase = 256, kRunCap = 8;
+    struct Ent {
+        std::uint32_t clusters;  // rows
+        std::uint32_t kind;      // 0 normal, 1 rows of another entry, 2 no object window
+    };
+    const Ent ents[] = {{1, 0}, {5, 0}, {40, 0}, {200, 0}, {4096, 0}, {4097, 0}, {40, 1}, {40, 2}, {300, 0}, {17, 0}, {64, 0}, {63, 0}, {65, 0}};
+    constexpr std::uint32_t kEnts = sizeof(ents) / sizeof(ents[0]);
+    constexpr std::uint32_t kPlainSlots = 4;
+    constexpr std::uint32_t kSlots = kEnts + kPlainSlots + 2;
+    std::uint32_t seed = 987654321u;
+    const auto rnd = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f;
+    };
+    // the cluster table: rows of every entry in order, each cluster 3 triangles (9 indices), first index base + 9 c
+    struct Row {
+        float c[3], r;
+        std::uint32_t first, count, range, pad;
+    };
+    std::vector<Row> rows;
+    std::uint32_t rowFirst[kEnts], indexBase[kEnts];
+    for (std::uint32_t e = 0; e < kEnts; ++e) {
+        rowFirst[e] = static_cast<std::uint32_t>(rows.size());
+        indexBase[e] = 100000u * (e + 1);
+        for (std::uint32_t c = 0; c < ents[e].clusters; ++c) {
+            Row r{};
+            r.c[0] = (rnd() - 0.5f) * 800.0f;
+            r.c[1] = (rnd() - 0.5f) * 400.0f;
+            r.c[2] = (rnd() - 0.2f) * 1200.0f;
+            r.r = 2.0f + rnd() * 25.0f;
+            r.first = indexBase[e] + 9 * c;
+            r.count = 9;
+            r.range = ents[e].kind == 1 ? 7777u : 500u + e;  // (kind 1: another entry's id)
+            rows.push_back(r);
+        }
+    }
+    // the view table: slot 0 = perspective, slot 1 = the same camera moved (so the second view culls differently)
+    float views[2][160] = {};
+    for (int v = 0; v < 2; ++v) {
+        float* f = views[v];
+        const float fy = 1.0f / std::tan(0.5f), aspect = 16.0f / 9.0f, zn = 10.0f, zf = 5000.0f;
+        f[0] = fy / aspect;
+        f[4 + 1] = fy;
+        f[8 + 2] = zf / (zf - zn);
+        f[8 + 3] = -zn * zf / (zf - zn) + (v == 1 ? 40.0f : 0.0f);
+        f[12 + 2] = 1.0f;
+        f[3] = 0.25f;  // an x shear: the second view looks elsewhere
+    }
+    // the object table: record o at 512 + o * 96 (c31..c35 + info); the world rows of object o: scale s, translation t
+    const std::uint32_t kObjPad = 512;
+    std::vector<float> objects(kObjPad / 4 + kSlots * 24, 0.0f);
+    float world[kSlots][12];
+    for (std::uint32_t o = 0; o < kSlots; ++o) {
+        const float sc = 0.5f + rnd() * 2.0f;
+        std::memset(world[o], 0, sizeof(world[o]));
+        world[o][0] = world[o][5] = world[o][10] = sc;
+        world[o][3] = (rnd() - 0.5f) * 200.0f;
+        world[o][7] = (rnd() - 0.5f) * 100.0f;
+        world[o][11] = rnd() * 200.0f;
+        std::memcpy(&objects[kObjPad / 4 + o * 24 + 8], world[o], sizeof(world[o]));
+    }
+    // records
+    std::vector<std::uint32_t> rec(static_cast<std::size_t>(kSlots) * kRecordBytes / 4, 0u);
+    auto objBuf = dev.createBuffer({objects.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi cull objects"});
+    auto clusterBuf = dev.createBuffer({rows.size() * sizeof(Row), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi cull clusters"});
+    auto viewBuf = dev.createBuffer({sizeof(views), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi cull views"});
+    if (!objBuf || !clusterBuf || !viewBuf) {
+        check(false, "cull resource creation");
+        report(dev, name, before);
+        return;
+    }
+    std::memcpy(objBuf->map(), objects.data(), objects.size() * 4);
+    std::memcpy(clusterBuf->map(), rows.data(), rows.size() * sizeof(Row));
+    // (the view blocks are 640 bytes apart: c0..c3 at the block's start)
+    std::vector<float> viewBytes(2 * 160, 0.0f);
+    for (int v = 0; v < 2; ++v) std::memcpy(&viewBytes[v * 160], views[v], 16 * sizeof(float));
+    std::memcpy(viewBuf->map(), viewBytes.data(), viewBytes.size() * 4);
+    for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+        std::uint32_t* r = rec.data() + static_cast<std::size_t>(slot) * (kRecordBytes / 4);
+        const std::uint32_t e = slot < kEnts ? slot : 0xffffffffu;
+        const auto win = objBuf->shaderRef(kObjPad + slot * 96 - 31 * 16);
+        if (!(e < kEnts && ents[e].kind == 2)) {
+            r[4] = win[0];  // vsWin[2] low / high (record offset 16)
+            r[5] = win[1];
+        }
+        r[16] = 0x1000u + slot;
+        r[17] = 1;
+        if (e < kEnts) {
+            r[27] = 500u + e;  // reserved0 = the entry id
+            r[28] = ents[e].clusters * 9u;
+            r[29] = indexBase[e];
+            r[30] = static_cast<std::uint32_t>(-static_cast<std::int32_t>(slot));
+            r[31] = ents[e].clusters <= 65535 ? (rowFirst[e] | ents[e].clusters << 16) : 0u;
+        } else {
+            r[28] = 600u + slot;  // a plain record
+            r[29] = 77u * slot;
+            r[30] = 5u;
+        }
+    }
+    auto records = dev.createBuffer({rec.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi cull records"});
+    std::memcpy(records->map(), rec.data(), rec.size() * 4);
+    // the buckets: A = all culled entries interleaved with plain ones on view 0; B = some on view 1; C = tight capacity; D = the same as A without the cull flag
+    struct Item {
+        std::uint32_t slot, view;
+    };
+    std::vector<Item> items;
+    struct Bucket {
+        std::uint32_t first, count, cap, flags;
+    };
+    std::vector<Bucket> buckets;
+    const auto add = [&](std::uint32_t view, std::uint32_t flags, bool tight, const std::vector<std::uint32_t>& slots) {
+        Bucket b{static_cast<std::uint32_t>(items.size()), static_cast<std::uint32_t>(slots.size()), 0, flags};
+        for (const std::uint32_t s : slots) {
+            items.push_back({s, view});
+            b.cap += (flags & 1u) != 0 && s < kEnts ? kRunCap : 1u;
+        }
+        if (tight) b.cap = std::max(1u, b.cap / 3);
+        buckets.push_back(b);
+    };
+    std::vector<std::uint32_t> all;
+    for (std::uint32_t s = 0; s < kEnts + kPlainSlots; ++s) all.push_back(s);
+    add(0, 1, false, all);
+    std::vector<std::uint32_t> some = {3, 20 % kSlots, 2, 14, 1, 4, 8, 3};
+    add(1, 1, false, some);
+    add(0, 1, true, {2, 3, 8, 14, 15, 3, 2});   // capacity a third of the worst case: the excess is dropped, nothing leaks into bucket D
+    add(0, 0, false, all);                      // no cull flag: whole ranges
+    add(5000, 1, false, {2, 3});                // a view slot beyond the table: not culled
+    std::uint32_t capTotal = 0;
+    std::vector<std::uint32_t> capFirst;
+    for (const Bucket& b : buckets) {
+        capFirst.push_back(capTotal);
+        capTotal += b.cap;
+    }
+    constexpr std::uint32_t kFirstArg = 3, kFirstCount = 1, kGuard = 4;
+    const std::uint64_t outBytes = kArgsBase + static_cast<std::uint64_t>(kFirstArg + capTotal + kGuard) * 20;
+    auto list = dev.createBuffer({items.size() * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi cull list"});
+    auto jobs = dev.createBuffer({buckets.size() * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi cull jobs"});
+    constexpr VkBufferUsageFlags kRw = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    auto out = dev.createBuffer({outBytes, kRw, rhi::Memory::Device, "rhi cull out"});
+    auto fill = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi cull poison"});
+    auto readback = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi cull readback"});
+    auto pipeline = dev.createComputePipeline({sh.compact.shader(), "rhi owned cull"});
+    if (!list || !jobs || !out || !fill || !readback || !pipeline) {
+        check(false, "cull resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    std::memcpy(list->map(), items.data(), items.size() * sizeof(Item));
+    auto* jb = static_cast<std::uint32_t*>(jobs->map());
+    std::memset(jb, 0, buckets.size() * 32);
+    for (std::size_t b = 0; b < buckets.size(); ++b) {
+        jb[8 * b + 0] = buckets[b].first;
+        jb[8 * b + 1] = buckets[b].count;
+        jb[8 * b + 2] = kFirstArg + capFirst[b];
+        jb[8 * b + 3] = kFirstCount + static_cast<std::uint32_t>(b);
+        jb[8 * b + 4] = buckets[b].cap;
+        jb[8 * b + 5] = buckets[b].flags;
+    }
+    std::memset(fill->map(), 0xAB, outBytes);
+    struct Push {
+        std::uint32_t records[2], list[2], jobs[2], out[2];
+        std::uint32_t countsBase, argsBase, slotCount, viewSlots;
+        std::uint32_t clusters[2], views[2];
+        std::uint32_t clusterRows, pad[3];
+    } push{};
+    const auto rr = records->shaderRef(0), lr = list->shaderRef(0), jr = jobs->shaderRef(0), wr = out->shaderRefRw(0), cr = clusterBuf->shaderRef(0), vr = viewBuf->shaderRef(0);
+    push.records[0] = rr[0], push.records[1] = rr[1], push.list[0] = lr[0], push.list[1] = lr[1], push.jobs[0] = jr[0], push.jobs[1] = jr[1], push.out[0] = wr[0], push.out[1] = wr[1];
+    push.clusters[0] = cr[0], push.clusters[1] = cr[1], push.views[0] = vr[0], push.views[1] = vr[1];
+    push.countsBase = kCountsBase;
+    push.argsBase = kArgsBase;
+    push.slotCount = kSlots;
+    push.viewSlots = 2;
+    push.clusterRows = static_cast<std::uint32_t>(rows.size());
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.copyBuffer(*out, 0, *fill, 0, outBytes);
+        cl.bufferBarrier(*out, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(static_cast<std::uint32_t>(buckets.size()), 1, 1);
+        cl.bufferBarrier(*out, rhi::BufferAccess::IndirectRead);
+        cl.copyBuffer(*readback, 0, *out, 0, outBytes);
+        cl.bufferBarrier(*out, rhi::BufferAccess::IndirectRead);
+    });
+    const auto* got = static_cast<const std::uint32_t*>(readback->map());
+    std::uint32_t wrongCounts = 0, wrongRecords = 0, compared = 0, culledEntries = 0, wholeEntries = 0, emptyEntries = 0, clamped = 0;
+    for (std::size_t b = 0; b < buckets.size(); ++b) {
+        std::vector<std::uint32_t> want;  // 5 words per record
+        for (std::uint32_t k = 0; k < buckets[b].count; ++k) {
+            const std::uint32_t pos = buckets[b].first + k, slot = items[pos].slot;
+            const std::uint32_t e = slot < kEnts ? slot : 0xffffffffu;
+            if (e < kEnts && ents[e].kind == 2) {
+                // (no object window: the shader reads address 0 + 528; skipped here, the test never lists such a slot in a culled bucket)
+            }
+            const std::int32_t vtx = e < kEnts ? -static_cast<std::int32_t>(slot) : 5;
+            if (e >= kEnts) {
+                want.insert(want.end(), {600u + slot, 1u, 77u * slot, static_cast<std::uint32_t>(vtx), pos});
+                continue;
+            }
+            const std::uint32_t total = ents[e].clusters * 9u;
+            const bool cullable = (buckets[b].flags & 1u) != 0 && items[pos].view < 2 && ents[e].clusters <= 4096 && ents[e].kind == 0;
+            if (!cullable) {
+                want.insert(want.end(), {total, 1u, indexBase[e], static_cast<std::uint32_t>(vtx), pos});
+                ++wholeEntries;
+                continue;
+            }
+            clustercull::View v;
+            float regs[4][4];
+            std::memcpy(regs, views[items[pos].view], sizeof(regs));
+            clustercull::makeView(regs, world[slot], clustercull::kMargin, true, v);
+            std::vector<std::uint32_t> bits((ents[e].clusters + 31) / 32, 0u);
+            for (std::uint32_t c = 0; c < ents[e].clusters; ++c) {
+                if (!clustercull::sphereOutside(v, rows[rowFirst[e] + c].c, rows[rowFirst[e] + c].r)) bits[c >> 5] |= 1u << (c & 31u);
+            }
+            clustercull::Run runs[clustercull::kRunCap];
+            const std::uint32_t n = clustercull::extractRuns(bits.data(), ents[e].clusters, clustercull::kRunCap, runs);
+            ++culledEntries;
+            if (n == 0) ++emptyEntries;
+            for (std::uint32_t q = 0; q < n; ++q) {
+                const std::uint32_t first = indexBase[e] + 9 * runs[q].first;
+                want.insert(want.end(), {9u * (runs[q].end - runs[q].first), 1u, first, static_cast<std::uint32_t>(vtx), pos});
+            }
+        }
+        std::uint32_t haveCount = got[kCountsBase / 4 + kFirstCount + b];
+        std::uint32_t n = static_cast<std::uint32_t>(want.size() / 5);
+        if (n > buckets[b].cap) {  // (the excess is dropped: only the first `cap` records exist)
+            n = buckets[b].cap;
+            ++clamped;
+        }
+        if (haveCount != n) {
+            ++wrongCounts;
+            std::printf("    bucket %zu: count %u (want %u, cap %u)\n", b, haveCount, n, buckets[b].cap);
+            for (std::uint32_t k = 0; k < std::min(haveCount, 8u); ++k) {
+                const std::uint32_t* a = got + kArgsBase / 4 + static_cast<std::size_t>(kFirstArg + capFirst[b] + k) * 5;
+                std::printf("      gpu {%u, %u, %u, %d, %u}\n", a[0], a[1], a[2], static_cast<std::int32_t>(a[3]), a[4]);
+            }
+            for (std::uint32_t k = 0; k < std::min(n, 8u); ++k) std::printf("      cpu {%u, %u, %u, %d, %u}\n", want[k * 5], want[k * 5 + 1], want[k * 5 + 2], static_cast<std::int32_t>(want[k * 5 + 3]), want[k * 5 + 4]);
+            continue;
+        }
+        for (std::uint32_t k = 0; k < n; ++k) {
+            ++compared;
+            const std::uint32_t* a = got + kArgsBase / 4 + static_cast<std::size_t>(kFirstArg + capFirst[b] + k) * 5;
+            if (std::memcmp(a, &want[static_cast<std::size_t>(k) * 5], 20) != 0) {
+                if (wrongRecords++ < 6) std::printf("    bucket %zu record %u: {%u, %u, %u, %d, %u} want {%u, %u, %u, %d, %u}\n", b, k, a[0], a[1], a[2], static_cast<std::int32_t>(a[3]), a[4], want[k * 5], want[k * 5 + 1], want[k * 5 + 2], static_cast<std::int32_t>(want[k * 5 + 3]), want[k * 5 + 4]);
+            }
+        }
+        // the poison after the bucket's capacity stays (the next bucket's first record is written only if it has one: its range starts at capFirst[b + 1])
+        if (n < buckets[b].cap) {
+            const std::uint32_t* a = got + kArgsBase / 4 + static_cast<std::size_t>(kFirstArg + capFirst[b] + n) * 5;
+            check(a[0] == 0xABABABABu, std::format("bucket {}: the pass wrote beyond its count", b));
+        }
+    }
+    check(wrongCounts == 0, std::format("{} bucket count(s) differ", wrongCounts));
+    check(wrongRecords == 0, std::format("{} of {} cull record(s) differ", wrongRecords, compared));
+    check(culledEntries > 10 && emptyEntries < culledEntries && clamped >= 1, std::format("the test did not exercise the cull: {} culled entries ({} empty, {} whole), {} clamped", culledEntries, emptyEntries, wholeEntries, clamped));
+    check(got[kCountsBase / 4 + kFirstCount + buckets.size()] == 0xABABABABu, "a count written outside the buckets' words");
+    {
+        const std::uint32_t* g = got + kArgsBase / 4 + static_cast<std::size_t>(kFirstArg + capTotal) * 5;
+        bool poison = true;
+        for (std::uint32_t k = 0; k < kGuard * 5; ++k) poison = poison && g[k] == 0xABABABABu;
+        check(poison, "arguments written past the last bucket's capacity");
+    }
     report(dev, name, before);
 }
 
@@ -1449,6 +1731,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testVertex(*dev, sh);
     testIndirectPull(*dev, sh);
     testOwnedCompact(*dev, sh);
+    testOwnedCull(*dev, sh);
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);

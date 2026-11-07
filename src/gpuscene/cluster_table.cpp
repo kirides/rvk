@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/cluster_cull.h"
 #include "core/paths.h"
 #include "d3d9/device.h"
 
@@ -271,6 +272,17 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
         r.pad = 0;
         table_->mark(rows + i);
     }
+    {
+        // F5-2: the rows must tile the copy's index range (contiguous, in order) for the GPU cull's runs to be index ranges
+        bool tile = n != 0 && n <= clustercull::kMaxRows;
+        std::uint32_t next = firstIndex;
+        for (std::uint32_t i = 0; i < n && tile; ++i) {
+            const ClusterRow& r = table_->shadow()[rows + i];
+            tile = r.firstIndex == next && r.indexCount != 0;
+            next += r.indexCount;
+        }
+        e.cullOk = tile && next == firstIndex + tris * 3;
+    }
     e.alloc = na;
     e.isz = isz;
     e.triangles = tris;
@@ -290,6 +302,23 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
     e.accounted = true;
     epoch_.fetch_add(1, std::memory_order_release);
     return true;
+}
+
+bool ClusterStore::cullInfo(std::uint64_t id, CullInfo& out) const {
+    const auto it = byId_.find(id);
+    if (it == byId_.end() || !table_ || !table_->ready()) return false;
+    const Entry& e = *it->second;
+    if (e.state.load(std::memory_order_acquire) != State::Ready || !e.cullOk || e.rowFirst + e.rowCount > kRowCapacity) return false;
+    out.rowFirst = e.rowFirst;
+    out.rowCount = e.rowCount;
+    out.firstIndex = e.isz != 0 ? static_cast<std::uint32_t>(e.alloc.offset / e.isz) : 0;
+    out.indexCount = e.triangles * 3;
+    return true;
+}
+
+const ClusterRow* ClusterStore::rowsAt(std::uint32_t first, std::uint32_t count) const {
+    if (!table_ || static_cast<std::uint64_t>(first) + count > table_->shadow().size()) return nullptr;
+    return table_->shadow().data() + first;
 }
 
 void ClusterStore::releaseEntry(d3d9::Device* dev, Entry& e) {

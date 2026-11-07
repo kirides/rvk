@@ -1,14 +1,20 @@
 #include "gpuscene/owned_compact.h"
 
 #include <algorithm>
+#include <array>
+#include <unordered_map>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <future>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
 #include "d3d9/device.h"
+#include "core/cluster_cull.h"
+#include "gpuscene/cluster_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "shader/embedded.h"
 
@@ -162,6 +168,9 @@ void OwnedCompact::flush(d3d9::Device& dev) {
     SlotState& s = slots_[game.frameSlot() % rhi::kFramesInFlight];
     collect(dev);
     if (s.frameSeen == game.frameValue() && !s.jobs.empty() && s.buffer && pipeline_ && pipeline_->pipe) {
+        for (Job& j : s.jobs) {
+            for (CullItem& ci : j.culls) dev.cullCheckFinish(ci);  // (check frames: the exact verdicts from the end-of-frame twins)
+        }
         rhi::CommandList& list = dev.uploadList();
         const bool timed = game.timestampsEnabled();
         if (timed) game.timestampMark(list, game.frameSlot(), rhi::TimestampStream::Upload, "uploads before the owned draws compaction");
@@ -172,9 +181,11 @@ void OwnedCompact::flush(d3d9::Device& dev) {
         list.bindPipeline(*pipeline_->pipe);
         struct Push {
             std::uint32_t records[2], list[2], jobs[2], out[2];
-            std::uint32_t countsBase, argsBase, slotCount, pad;
+            std::uint32_t countsBase, argsBase, slotCount, viewSlots;
+            std::uint32_t clusters[2], views[2];
+            std::uint32_t clusterRows, pad[3];
         } push{};
-        static_assert(sizeof(Push) == 48);
+        static_assert(sizeof(Push) == 80);
         const auto rr = drawrecords().recordsRef().pair();
         const auto wr = s.buffer->shaderRefRw(0);
         for (const Job& j : s.jobs) {
@@ -191,6 +202,17 @@ void OwnedCompact::flush(d3d9::Device& dev) {
             push.countsBase = 0;
             push.argsBase = kArgsBase;
             push.slotCount = DrawRecordTable::kCapacity;
+            // F5-2: the tables of a job with the cull (null otherwise: the shader drops the cull flag)
+            const bool cull = (j.cullFlags & 1u) != 0 && !j.views.null() && !j.clusters.null();
+            const auto cr = cull ? j.clusters.pair() : std::array<std::uint32_t, 2>{};
+            const auto vr = cull ? j.views.pair() : std::array<std::uint32_t, 2>{};
+            push.clusters[0] = cr[0];
+            push.clusters[1] = cr[1];
+            push.views[0] = vr[0];
+            push.views[1] = vr[1];
+            push.viewSlots = cull ? j.viewSlots : 0;
+            push.clusterRows = cull ? ClusterStore::kRowCapacity : 0;
+            if (cull) ++stats_.cullJobs;
             list.setPushConstants(&push, sizeof(push));
             list.dispatch(j.buckets, 1, 1);
             ++stats_.dispatches;
@@ -233,37 +255,126 @@ void OwnedCompact::collect(d3d9::Device& dev) {
         const auto* got = static_cast<const std::uint32_t*>(s.readback->map());
         ++stats_.checks;
         for (const Job& j : s.checks) {
-            const std::uint32_t* meta = j.expect.data();  // per bucket: first entry, expected count
+            const std::uint32_t* meta = j.expect.data();  // per bucket: the first argument record (relative to the flush's), the expected plain records
             const std::uint32_t* recs = meta + 2 * static_cast<std::size_t>(j.buckets);
+            std::unordered_map<std::uint32_t, const CullItem*> culled;
+            for (const CullItem& ci : j.culls) culled.emplace(ci.pos, &ci);
             std::uint32_t done = 0;
+            std::uint64_t after = 0;
             for (std::uint32_t b = 0; b < j.buckets; ++b) {
-                const std::uint32_t firstEntry = meta[2 * b], want = meta[2 * b + 1];
+                const std::uint32_t argStart = meta[2 * b], want = meta[2 * b + 1];
                 const std::uint32_t have = got[j.range.firstCount + b];
                 ++stats_.checkedBuckets;
-                if (have != want) {
-                    ++stats_.countDiffering;
-                    ++stats_.differing;
-                    if (differingLogged_++ < 8) spdlog::error("native: owned compaction: DIFFERING count of bucket {}: gpu {} cpu {}", j.range.firstCount + b, have, want);
-                    done += want;
-                    continue;
-                }
-                for (std::uint32_t k = 0; k < want; ++k) {
+                const std::uint32_t* base = got + kArgsBase / 4 + static_cast<std::size_t>(j.range.firstArg + argStart) * 5;
+                std::uint32_t plain = 0;
+                std::vector<const CullItem*> seen;
+                for (std::uint32_t r = 0; r < have;) {
+                    const std::uint32_t* a = base + static_cast<std::size_t>(r) * 5;
+                    const auto it = culled.find(a[4]);
+                    if (it != culled.end() && it->second->bucket == b) {
+                        const CullItem& ci = *it->second;
+                        seen.push_back(&ci);
+                        std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
+                        for (; r < have; ++r) {
+                            const std::uint32_t* q = base + static_cast<std::size_t>(r) * 5;
+                            if (q[4] != ci.pos) break;
+                            ++stats_.runs;
+                            after += q[0];
+                            const bool good = q[1] == 1 && static_cast<std::int32_t>(q[3]) == static_cast<std::int32_t>(ci.vertexOffset) && q[0] != 0 && q[2] >= ci.firstIndex &&
+                                              static_cast<std::uint64_t>(q[2]) + q[0] <= static_cast<std::uint64_t>(ci.firstIndex) + ci.indexCount;
+                            if (!good) {
+                                ++stats_.badRuns;
+                                ++stats_.differing;
+                                if (differingLogged_++ < 8) {
+                                    spdlog::error("native: owned compaction: DIFFERING cull run of entry {}: {{{}, {}, {}, {}, {}}} range [{}, +{}) vertex offset {}", ci.pos, q[0], q[1], q[2], q[3], q[4], ci.firstIndex,
+                                                  ci.indexCount, ci.vertexOffset);
+                                }
+                            }
+                            runs.emplace_back(q[2], q[0]);
+                        }
+                        evaluate(j, ci, runs);
+                        continue;
+                    }
                     ++stats_.checkedRecords;
-                    const std::uint32_t* a = got + kArgsBase / 4 + static_cast<std::size_t>(j.range.firstArg + firstEntry + k) * 5;
-                    const std::uint32_t* e = recs + static_cast<std::size_t>(done + k) * 5;
-                    if (std::memcmp(a, e, 20) != 0) {
+                    const std::uint32_t* e = recs + static_cast<std::size_t>(done + plain) * 5;
+                    if (plain >= want || std::memcmp(a, e, 20) != 0) {
                         ++stats_.differing;
                         if (differingLogged_++ < 8) {
-                            spdlog::error("native: owned compaction: DIFFERING record {} of bucket {}: gpu {{{}, {}, {}, {}, {}}} cpu {{{}, {}, {}, {}, {}}}", k, b, a[0], a[1], a[2], a[3], a[4], e[0], e[1],
-                                          e[2], e[3], e[4]);
+                            if (plain < want) {
+                                spdlog::error("native: owned compaction: DIFFERING record {} of bucket {}: gpu {{{}, {}, {}, {}, {}}} cpu {{{}, {}, {}, {}, {}}}", r, b, a[0], a[1], a[2], a[3], a[4], e[0], e[1], e[2],
+                                              e[3], e[4]);
+                            } else {
+                                spdlog::error("native: owned compaction: DIFFERING extra record {} of bucket {}: gpu {{{}, {}, {}, {}, {}}}, {} expected", r, b, a[0], a[1], a[2], a[3], a[4], want);
+                            }
                         }
+                    }
+                    after += a[0];
+                    ++plain;
+                    ++r;
+                }
+                if (plain != want) {
+                    ++stats_.countDiffering;
+                    ++stats_.differing;
+                    if (differingLogged_++ < 8) spdlog::error("native: owned compaction: DIFFERING count of bucket {}: gpu {} plain records, cpu {} (total gpu {})", j.range.firstCount + b, plain, want, have);
+                }
+                // culled items the GPU wrote no record for: everything of them must be outside
+                for (const CullItem& ci : j.culls) {
+                    if (ci.bucket == b && std::find(seen.begin(), seen.end(), &ci) == seen.end()) {
+                        ++stats_.emptyItems;
+                        evaluate(j, ci, {});
                     }
                 }
                 done += want;
             }
+            const std::uint32_t kind = std::min(j.viewKind, 2u);
+            stats_.idxBefore[kind] += j.fullIndices;
+            stats_.idxAfter[kind] += after;
+            ++stats_.idxFlushes[kind];
         }
         s.checks.clear();
         s.checkFrame = 0;
+    }
+}
+
+// one culled item: the GPU's runs against the CPU's exact verdict
+void OwnedCompact::evaluate(const Job& j, const CullItem& ci, const std::vector<std::pair<std::uint32_t, std::uint32_t>>& runs) {
+    ++stats_.cullChecked;
+    if (!ci.exact) {
+        ++stats_.inexact;
+        return;
+    }
+    if (runs.size() == 1 && runs[0].first == ci.firstIndex && runs[0].second == ci.indexCount) ++stats_.wholeRange;
+    std::uint32_t falseNeg = 0;
+    for (std::size_t c = 0; c < ci.visible.size(); ++c) {
+        bool covered = false;
+        for (const auto& r : runs) {
+            covered = covered || (ci.clusterFirst[c] >= r.first && static_cast<std::uint64_t>(ci.clusterFirst[c]) + ci.clusterCount[c] <= static_cast<std::uint64_t>(r.first) + r.second);
+        }
+        ++stats_.cullClusters;
+        stats_.cullExactVisible += ci.visible[c];
+        stats_.cullCovered += covered ? 1 : 0;
+        if (ci.visible[c] != 0 && !covered) {
+            ++stats_.falseNegatives;
+            ++falseNeg;
+            if (differingLogged_ < 8) {
+                clustercull::View cv;
+                clustercull::makeView(reinterpret_cast<const float(*)[4]>(ci.refRegs), ci.refWorld, clustercull::kMargin, true, cv);
+                const bool refOut = clustercull::sphereOutside(cv, &ci.sphere[4 * c], ci.sphere[4 * c + 3]);
+                float d[6];
+                for (int p = 0; p < 6; ++p) d[p] = (cv.plane[p][0] * ci.sphere[4 * c] + cv.plane[p][1] * ci.sphere[4 * c + 1] + cv.plane[p][2] * ci.sphere[4 * c + 2] + cv.plane[p][3]) / std::max(cv.len[p], 1e-9f) + ci.sphere[4 * c + 3];
+                spdlog::error("native: owned compaction: false negative cluster {} of entry {} view {}: sphere ({:.1f} {:.1f} {:.1f}) r {:.1f}, exact slack {:.3f}, reference (the shader's formula) says {}, its slacks {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}; "
+                              "world rows [{:.4g} {:.4g} {:.4g} {:.4g} | {:.4g} {:.4g} {:.4g} {:.4g} | {:.4g} {:.4g} {:.4g} {:.4g}]; c3 row {:.5g} {:.5g} {:.5g} {:.5g}",
+                              c, ci.pos, ci.viewSlot, ci.sphere[4 * c], ci.sphere[4 * c + 1], ci.sphere[4 * c + 2], ci.sphere[4 * c + 3], ci.slack[c], refOut ? "OUTSIDE" : "inside", d[0], d[1], d[2], d[3], d[4],
+                              ci.refWorld[0], ci.refWorld[1], ci.refWorld[2], ci.refWorld[3], ci.refWorld[4], ci.refWorld[5], ci.refWorld[6], ci.refWorld[7], ci.refWorld[8], ci.refWorld[9], ci.refWorld[10], ci.refWorld[11],
+                              ci.refRegs[12], ci.refRegs[13], ci.refRegs[14], ci.refRegs[15]);
+            }
+        } else if (ci.visible[c] == 0 && covered) {
+            ++stats_.extras;
+        }
+    }
+    if (falseNeg != 0 && differingLogged_++ < 8) {
+        spdlog::error("native: owned compaction: FALSE NEGATIVE cull of entry {} (view kind {}): {} of {} clusters are inside the frustum but were not drawn ({} runs)", ci.pos, j.viewKind, falseNeg,
+                      ci.visible.size(), runs.size());
     }
 }
 
@@ -279,6 +390,23 @@ void OwnedCompact::report() {
                  s.frames - l.frames, s.flushes - l.flushes, s.items - l.items, s.buckets - l.buckets, s.dispatches - l.dispatches, s.cpuFull - l.cpuFull, s.cpuNotReady - l.cpuNotReady,
                  s.argsMismatch - l.argsMismatch, s.checks - l.checks, s.checkedBuckets - l.checkedBuckets, s.checkedRecords - l.checkedRecords, s.differing - l.differing,
                  s.countDiffering - l.countDiffering, s.skipped - l.skipped, bytes() / 1024);
+    if (s.cullItems != 0 || s.cullChecked != 0) {
+        const auto pct = [](std::uint64_t a, std::uint64_t b) { return b != 0 ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0; };
+        static const char* kKind[3] = {"main z", "main solid", "other"};
+        std::string tri;
+        for (int k = 0; k < 3; ++k) {
+            const std::uint64_t f = s.idxFlushes[k] - l.idxFlushes[k];
+            if (f == 0) continue;
+            const std::uint64_t b = s.idxBefore[k] - l.idxBefore[k], a = s.idxAfter[k] - l.idxAfter[k];
+            tri += std::format(" [{}: {} flushes, {:.0f} -> {:.0f} triangles per flush ({:.1f} %)]", kKind[k], f, static_cast<double>(b) / 3.0 / static_cast<double>(f), static_cast<double>(a) / 3.0 / static_cast<double>(f),
+                               pct(a, b));
+        }
+        spdlog::info("native: cluster cull (5 s): {} culled-capable items in {} flushes; checks: {} items, {} clusters ({} inside by the exact test, {} drawn), FALSE NEGATIVES {}, extras {} ({:.1f} % of the clusters), "
+                     "whole-range fallbacks {}, items with no record {}, runs {} ({} bad), exact evaluation impossible {};{}",
+                     s.cullItems - l.cullItems, s.cullJobs - l.cullJobs, s.cullChecked - l.cullChecked, s.cullClusters - l.cullClusters, s.cullExactVisible - l.cullExactVisible, s.cullCovered - l.cullCovered,
+                     s.falseNegatives - l.falseNegatives, s.extras - l.extras, pct(s.extras - l.extras, s.cullClusters - l.cullClusters), s.wholeRange - l.wholeRange, s.emptyItems - l.emptyItems,
+                     s.runs - l.runs, s.badRuns - l.badRuns, s.inexact - l.inexact, tri);
+    }
     last_ = stats_;
 }
 

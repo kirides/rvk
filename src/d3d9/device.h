@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "d3d9/wp0.h"
+#include "gpuscene/owned_compact.h"
 #include "core/id_hash.h"
 #include "d3d9/defs.h"
 #include "d3d9/draws.h"
@@ -872,6 +873,13 @@ public:
     // draw (a pending batch is recorded first)
     void setClusters(bool on);
     bool clustersOn() const { return clusters_; }
+    // F5-2 (native.cluster_cull, frame-ownership.md 7.34): the persistent owned records of clustered draws carry their cluster rows; the compaction pass culls them per view
+    void setClusterCull(bool on) { clusterCull_ = on; }
+    bool clusterCullOn() const { return clusterCull_; }
+    // tests: the CPU twin of an object window's world rows (c33..c35) for the cull's check frames, in place of the object table's
+    // check frames, at the present (OwnedCompact::flush): the exact per-cluster verdict from the CPU twins as they stand NOW = what the GPU reads
+    void cullCheckFinish(gpuscene::OwnedCompact::CullItem& ci);
+    void setCullWorldRowsHook(std::function<bool(std::uint64_t, float*)> hook) { cullWorldRowsHook_ = std::move(hook); }
     void setBatching(bool on);
     // the opaque passes' draws recorded on worker threads (debug.record_threads); applies from the next rendering scope
     void setRecordThreads(bool on) { recordThreadsWanted_ = on; }
@@ -1184,6 +1192,7 @@ public:
     bool ownedReserve(std::uint32_t maxDraws, OwnedArena& arena);
     // true = every item drawn (queued as indirect packets); false = nothing queued (no rendering scope / a guard), the caller composes the items' ops
     // `shadow` / `slotCount`: the records table's CPU twin: an item whose slot is out of range or whose record was never written (no block address) is refused (GPU safety)
+    gpuscene::OwnedCompact::CullItem cullCheckItem(const shader::abi::DrawRecord& rec, std::uint32_t viewSlot, std::uint32_t pos, std::uint32_t bucket);
     bool ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount);
     struct OwnedPersistStats {
         std::uint64_t derived = 0, refused = 0, observed = 0, buckets = 0, packets = 0, items = 0, bucketKeyClash = 0;
@@ -1603,6 +1612,8 @@ private:
     // order is drawn from the arena copy of its indices in cluster order (same triangles, same vertex order of each): packet_.indexBuffer / first are pointed at it
     void clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives);
     bool clusters_ = false;
+    bool clusterCull_ = false;
+    std::function<bool(std::uint64_t, float*)> cullWorldRowsHook_;
     std::uint64_t clusterWait_ = 0;
     bool clusterUsing_ = false;
     // GI variant eligibility of the current draw (prepareDraw): the engine set its ambient constants (a first pass)

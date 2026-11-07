@@ -491,6 +491,7 @@ struct RendererSettings {
     Setting* nativeOwnedObjects = nullptr;     // native.owned_objects: the static ops' non-instanced mesh draws read VS windows 1 / 2 from the view block / the object table (frame-ownership.md 7.13)
     Setting* nativeOwnedStatic = nullptr;      // native.owned_static: the static z / solid ops of valid records drawn from the records, left out of the engine's lists (frame-ownership.md 7.16)
     Setting* nativeOwnedPersistent = nullptr;  // native.owned_persistent: the owned draws' DrawRecords / DrawBlocks persistent on the GPU, one indirect draw per bucket (frame-ownership.md 7.21)
+    Setting* nativeClusterCull = nullptr;      // native.cluster_cull: the GPU frustum cull of the owned draws of clustered meshes (frame-ownership.md 7.34, F5-2)
     Setting* nativeClusters = nullptr;         // native.clusters: static meshes of >= 1,024 triangles drawn from index copies in cluster order, with a GPU cluster table (frame-ownership.md 7.33, F5-1)
     Setting* nativeOwnedCheck = nullptr;       // native.owned_check: every N-th frame (and the one before it) runs the old path and compares
     Setting* nativeOwnedRecords = nullptr;     // native.owned_records: op records built from the static composition and compared with record-derived draws (frame-ownership.md 7.14)

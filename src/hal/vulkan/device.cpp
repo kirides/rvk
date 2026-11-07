@@ -191,6 +191,7 @@ void HalDevice::applyStaticOps() {
                                        rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : static_cast<int>(kAllSceneOpGroups));
     engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
     dev_.setClusters(on(rs.nativeClusters));  // F5-1: static meshes clustered (any mode: the draws are the D3D9 model's)
+    dev_.setClusterCull(on(rs.nativeClusterCull) && on(rs.nativeClusters));  // F5-2: the GPU cull of the owned draws of clustered meshes
     const bool takeOver = plan.staticTake;
     const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
@@ -1705,9 +1706,9 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::windowtables().flush(dev_);
         gpuscene::viewtable().flush(dev_);
         gpuscene::drawrecords().flush(dev_);
-        gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
-        gpuscene::clusterstore().flush(dev_);  // F5-1
+        gpuscene::clusterstore().flush(dev_);  // F5-1 (before the compaction: F5-2's cull reads the cluster table and the object table's rows)
         gpuscene::objecttable().flush(dev_);
+        gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
         gpuscene::bbtable().flush(dev_);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)

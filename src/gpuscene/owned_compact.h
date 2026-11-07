@@ -42,12 +42,34 @@ public:
         std::uint32_t firstArg = 0;    // argument index of the flush's first record
         std::uint32_t firstCount = 0;  // count index of the flush's first bucket
     };
+    // `items` = argument records to reserve (every item one, a culled-capable one kRunCap)
     bool reserve(d3d9::Device& dev, std::uint32_t items, std::uint32_t buckets, Range& r);
+    // F5-2 (check frames): an item the GPU may cull, with the CPU's exact verdict per cluster (no margin) to compare the runs the GPU wrote against
+    struct CullItem {
+        std::uint32_t pos = 0, bucket = 0;           // the entry's position in the flush's list (= the records' firstInstance), its bucket
+        std::uint32_t firstIndex = 0, indexCount = 0, vertexOffset = 0;  // the record's own args (the whole range)
+        std::uint32_t viewSlot = 0, rowArgs = 0, entryId = 0;  // what the evaluation needs (it runs at the present, from the end-of-frame state the GPU reads)
+        std::uint64_t win2 = 0;
+        bool exact = false;                          // the exact evaluation was possible (a regular world matrix)
+        std::vector<std::uint32_t> clusterFirst, clusterCount;  // per cluster (copied: the rows may be freed by the time the read-back is collected)
+        std::vector<std::uint8_t> visible;           // per cluster: the exact test says not outside
+        float refRegs[16] = {}, refWorld[12] = {};   // diagnostics: the inputs of the exact evaluation
+        std::vector<float> sphere;                   // diagnostics: per cluster centre xyz + radius
+        std::vector<float> slack;                    // per cluster: the least over the planes of (distance / |n| + radius): how far inside (world units; < 0 = outside)
+    };
     struct Job {
-        rhi::GpuRef list, jobs;  // the flush's ref list block, its jobs block (16 bytes per bucket)
+        rhi::GpuRef list, jobs;  // the flush's ref list block, its jobs block (32 bytes per bucket)
         std::uint32_t items = 0, buckets = 0;
         Range range;
-        std::vector<std::uint32_t> expect;  // check frames: per bucket (first entry, count), then 5 words per expected argument record in order (empty = not checked)
+        std::uint32_t viewKind = 2;         // statistics: 0 main z, 1 main solid, 2 other
+        std::uint32_t cullFlags = 0;        // bit 0: cull the clustered records (the tables below are set), bit 1: side planes only
+        rhi::GpuRef views, clusters;        // the view table, the cluster table
+        std::uint32_t viewSlots = 0;
+        std::uint64_t fullIndices = 0;      // check frames: the indices of every item's whole range
+        // check frames: per bucket (the bucket's first argument record relative to range.firstArg, the plain records expected), then 5 words per expected argument record of
+        // the items that are not culled, in order (empty = not checked)
+        std::vector<std::uint32_t> expect;
+        std::vector<CullItem> culls;
     };
     void queue(d3d9::Device& dev, Job&& job);
     // the fields of a DrawIndexedIndirectCount packet over a bucket (`firstItem` = the bucket's first entry in the flush, `bucket` its index in the flush)
@@ -59,6 +81,11 @@ public:
     struct Stats {
         std::uint64_t flushes = 0, items = 0, buckets = 0, dispatches = 0, frames = 0, cpuFull = 0, cpuNotReady = 0, argsMismatch = 0;
         std::uint64_t checks = 0, checkedBuckets = 0, checkedRecords = 0, differing = 0, countDiffering = 0, skipped = 0;
+        // F5-2: culled-capable items / jobs with the cull; check frames: items compared, clusters (all / the exact test's visible / covered by the GPU's runs), false negatives, extras,
+        // whole-range fallbacks, items with no records, runs, bad run records, exact evaluations impossible; indices of the checked flushes per view kind before / after
+        std::uint64_t cullItems = 0, cullJobs = 0, cullChecked = 0, cullClusters = 0, cullExactVisible = 0, cullCovered = 0, falseNegatives = 0, extras = 0, wholeRange = 0, emptyItems = 0,
+                      runs = 0, badRuns = 0, inexact = 0;
+        std::uint64_t idxBefore[3] = {}, idxAfter[3] = {}, idxFlushes[3] = {};
     };
     Stats& stats() { return stats_; }
     bool failed() const { return failed_; }
@@ -85,6 +112,7 @@ private:
     SlotState& slotFor(d3d9::Device& dev);
     bool ensureBuffers(d3d9::Device& dev, SlotState& s);
     void collect(d3d9::Device& dev);
+    void evaluate(const Job& j, const CullItem& ci, const std::vector<std::pair<std::uint32_t, std::uint32_t>>& runs);
     void report();
 
     struct Pipeline;

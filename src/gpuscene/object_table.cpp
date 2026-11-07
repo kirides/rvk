@@ -116,6 +116,16 @@ bool ObjectTable::windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) co
     return true;
 }
 
+bool ObjectTable::worldRowsAt(std::uint64_t baseBits, float world[12]) const {
+    if (!active_ || !table_.ready() || table_.ref().null()) return false;
+    const std::int64_t delta = static_cast<std::int64_t>(baseBits) - static_cast<std::int64_t>(table_.ref().bits) + static_cast<std::int64_t>(kObjectFirstReg) * 16;
+    if (delta < 0 || delta % static_cast<std::int64_t>(sizeof(ObjectRecord)) != 0) return false;
+    const std::uint64_t slot = static_cast<std::uint64_t>(delta) / sizeof(ObjectRecord);
+    if (slot >= kCapacity || slot >= table_.shadow().size()) return false;
+    std::memcpy(world, table_.shadow()[slot].regs[2], 12 * sizeof(float));
+    return true;
+}
+
 void ObjectTable::flush(d3d9::Device& dev) {
     if (!active_) {
         ++frame_;
