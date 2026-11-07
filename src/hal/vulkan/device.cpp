@@ -1669,17 +1669,6 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     updateMenuPacing();
     // frame generation: the interpolated frame of this present is computed now, so that captures can read it too
     dev_.inject(d3d9::inject::Point::BeforePresent);
-    auto& captures = api::captures();
-    // [debug] screenshot_frames: a request of the tool API's queue, due at this present
-    if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {
-        captures.request(options_.screenshotDir / std::format("frame_{}.png", frame), api::ImageFormat::Png, 0, nullptr);
-    }
-    // rvk_screenshot: the finished back buffer (scene + post + GUI) before it is shown, as D3D9's Present hook / DoSnapshot see it
-    captures.onPresent(frame, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
-        return dev_.readBackBuffer(bgra, w, h);
-    }, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
-        return framegen_ && framegen_->readGenerated(bgra, w, h);  // the manual frame generation's frame_<n>_gen.png
-    });
     HAL_LOG("hal> SwapScreen");
     // borderless / exclusive fullscreen: a pending window placement / mode correction, the window kept on its monitor,
     // exclusive fullscreen's display mode and Vulkan exclusive mode (docs/research/window-mode.md)
@@ -1711,6 +1700,20 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
         gpuscene::bbtable().flush(dev_);
     }
+    // The captures read the back buffer with a mid-frame flush (submit + wait): they run AFTER the tables' flushes above, which record into this
+    // frame's upload list (it runs before the frame's draws in the same submission). A flush after the capture's submission would land behind the
+    // draws that read those tables (a burst of pictures while the owned draws change every frame: GPU page fault; frame-ownership.md 7.35).
+    auto& captures = api::captures();
+    // [debug] screenshot_frames: a request of the tool API's queue, due at this present
+    if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {
+        captures.request(options_.screenshotDir / std::format("frame_{}.png", frame), api::ImageFormat::Png, 0, nullptr);
+    }
+    // rvk_screenshot: the finished back buffer (scene + post + GUI) before it is shown, as D3D9's Present hook / DoSnapshot see it
+    captures.onPresent(frame, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
+        return dev_.readBackBuffer(bgra, w, h);
+    }, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
+        return framegen_ && framegen_->readGenerated(bgra, w, h);  // the manual frame generation's frame_<n>_gen.png
+    });
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();
