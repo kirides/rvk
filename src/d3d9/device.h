@@ -523,6 +523,7 @@ public:
 // engine's geometry and per-draw constants (world rows in the vertex shader constants) without changing anything. Indexed
 // draws from buffers of the views / kinds it observes are shown to it in prepareDraw, before the draw is recorded (the
 // constants and the bound state are the draw's). Render thread.
+struct OwnedFrame;
 class DrawObserver {
 public:
     virtual ~DrawObserver() = default;
@@ -543,6 +544,13 @@ public:
     virtual void bufferChanged(std::uint64_t /*bufferId*/) {}
     // the texture is about to be destroyed (render thread, Device::processReleases): pointers to it must be forgotten
     virtual void textureReleased(const Texture* /*texture*/) {}
+    // F2c-4b (docs/research/frame-ownership.md 7.23; native.owned_persistent): an observer that returns true from bulkOwned() is not shown the persistent owned static
+    // draws (plain StaticMesh, not instanced / blended) one by one before they are queued, but once per owned pass (and before an op of the pass is composed late) through
+    // observeOwned: the draws of the pass with their immutable record views, `entered` / `left` deltas against the pass kind's previous pass. The observer may keep
+    // per-record state (OwnedRecordView::id) and skip what it already holds; it must not request captures for these draws (they are queued already). The default
+    // implementation is the per-draw loop (observes / coversDraw / registers loaded / observe), so an observer that only opts in behaves as before.
+    virtual bool bulkOwned() const { return false; }
+    virtual void observeOwned(Device& device, const OwnedFrame& frame);
 };
 
 // The ray tracing scene of the frame, for the FrameBlock (shader/abi.h FrameBlock::rtScene / rtInfo): valid only in the
@@ -1106,7 +1114,52 @@ public:
     int ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWindows& ow, rhi::GpuRef blockAddress, rhi::GpuRef zeroBlock, OwnedPersist& out);
     // deriveScene + the view checks + ownedBuild; `checkView` false = the view table's slot is not this frame's (the check frames compare the content only)
     int ownedDerive(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& ow, rhi::GpuRef blockAddress, rhi::GpuRef zeroBlock, bool checkView, OwnedPersist& out);
-    bool ownedObserve(const CachedDraw& c, const OwnedWindows& ow);
+    // F2c-4b: what the persistent path tells the observers about the draw it has just made / found valid (`id` = its persistent slot, `changed` = its slot was rewritten this frame)
+    struct OwnedObsInfo {
+        std::uint32_t id = 0;
+        std::uint64_t sig = 0, epoch = 0;
+        bool changed = false;
+    };
+    bool ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const OwnedObsInfo& info);
+    // one owned draw as the bulk observers see it (immutable for the call): the retained draw, its windows (the record's own persistent ones), the tag it is drawn under
+    struct OwnedRecordView {
+        const CachedDraw* cd = nullptr;
+        const OwnedWindows* ow = nullptr;
+        draws::Tag tag;
+        std::uint32_t id = 0;
+        std::uint32_t wanted = 0;  // bit i: the observer at observers_[i] wants it (bulkOwned and observes)
+        std::uint64_t sig = 0, epoch = 0;
+        bool entered = false;      // not in the previous pass of this kind
+        bool changed = false;
+    };
+    // a pass of persistent owned draws begins (z pre-pass / solid): the bulk list and the entered / left bookkeeping of the pass kind; ownedBulkFlush delivers the draws added so far
+    // (`last` = the end of the pass: the `left` list goes with it). Called before an op is composed late (its record may be dropped) and at the pass's end
+    void ownedBulkBegin(bool solid);
+    void ownedBulkFlush(bool last);
+    bool ownedBulkOn() const { return ownedBulkOn_; }
+    struct OwnedBulkStats {
+        std::uint64_t flushes = 0, records = 0, entered = 0, left = 0, lateCapture = 0, perDrawCovered = 0;
+    } ownedBulkStats;
+    // the device state of one owned draw while an observer looks at it: the tag, the draw's windows, the draw's query (OwnedFrame consumers call observe from inside it)
+    class OwnedDrawScope {
+    public:
+        OwnedDrawScope(Device& d, const OwnedRecordView& r);
+        ~OwnedDrawScope();
+        OwnedDrawScope(const OwnedDrawScope&) = delete;
+        OwnedDrawScope& operator=(const OwnedDrawScope&) = delete;
+        const ReplaceQuery& query() const { return q_; }
+        // the windows' register images into the register file (for observers that read material constants); the pass restores the file
+        void loadRegisters();
+        // an observer asked for a capture of this draw (too late for a draw that is queued: counted)
+        bool captureRequested() const { return !d_.captureRequest_.null(); }
+    private:
+        Device& d_;
+        const OwnedWindows* savedOwned_;
+        draws::Tag savedTag_;
+        const OwnedWindows* ow_;
+        bool loaded_ = false;
+        ReplaceQuery q_;
+    };
     std::uint64_t ownedBucketKey(const CachedDraw& c, std::uint32_t viewSlot) const;
     struct OwnedItem {
         const CachedDraw* cd = nullptr;
@@ -1593,6 +1646,15 @@ private:
     bool ownedWindowsServed(std::uint32_t* stageOut = nullptr, std::uint32_t* windowOut = nullptr, std::uint32_t* needOut = nullptr) const;
     void loadOwnedRegisters(const OwnedWindows& ow);
     std::uint32_t psWindowMinEnd_ = 0;
+    // F2c-4b: the bulk observation lists (owned_persist.cpp)
+    bool ownedBulkOn_ = true;  // RVK_F2C4B_PERDRAW=1 = off (A/B: the per-draw path)
+    std::vector<OwnedRecordView> ownedBulk_;
+    std::vector<std::uint32_t> ownedBulkIds_[2];        // this pass's ids per kind (z, solid): the next pass's `left` is made from them
+    std::vector<std::uint32_t> ownedBulkPrevIds_[2];
+    std::vector<std::uint32_t> ownedBulkSeen_[2];       // per id: the serial of the last pass that held it
+    std::uint32_t ownedBulkSerial_[2] = {0, 0}, ownedBulkPrevSerial_[2] = {0, 0};
+    std::vector<std::uint32_t> ownedBulkLeft_;
+    std::uint32_t ownedBulkKind_ = 0;
     void blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], rhi::Texture& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);
     static std::uint32_t slotOf(std::uint32_t d3dSampler);
@@ -2075,6 +2137,17 @@ public:
 
 private:
     Device& device_;
+};
+
+// what DrawObserver::observeOwned gets (F2c-4b): the owned draws of (part of) one pass in the engine's order
+struct OwnedFrame {
+    scene::Phase phase;
+    const Device::OwnedRecordView* records = nullptr;
+    std::size_t count = 0;
+    const std::uint32_t* left = nullptr;  // ids that were in the pass kind's previous pass and are not in this one (only with `last`)
+    std::size_t leftCount = 0;
+    bool last = false;                    // the end of the pass (the `left` list is complete)
+    std::uint32_t observerBit = 0;        // this observer's bit in OwnedRecordView::wanted
 };
 
 }  // namespace rvk::d3d9

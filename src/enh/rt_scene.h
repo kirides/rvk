@@ -120,6 +120,10 @@ public:
     bool coversDraw(const d3d9::CoverQuery& draw) override;
     Registers registersRead() const override { return Registers::Material; }  // (world rows: ReplaceQuery::objectRows; the uv map's material constants)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
+    // F2c-4b (frame-ownership.md 7.23): with table entries on, the persistent owned static draws come once per pass; a record that was covered last time and whose retained
+    // draw, signature and env epoch are unchanged, whose entry is alive and whose slot has not moved is skipped without a lookup (the F8-2 hand-over)
+    bool bulkOwned() const override { return tableOn_ && active_; }
+    void observeOwned(d3d9::Device& device, const d3d9::OwnedFrame& frame) override;
     void bufferChanged(std::uint64_t bufferId) override;
     void textureReleased(const d3d9::Texture* texture) override;
 
@@ -424,6 +428,7 @@ private:
         const void* entity = nullptr;
         std::uint32_t opDesc = 0, first = 0, primitives = 0;
         std::uint32_t slot = 0, slotGen = 0, slotVersion = 0;  // the scene-table slot of the entity at learn time
+        std::uint64_t slotStamp = 0;                           // scenetable::stamp(slot) then: differs when the slot was freed / reallocated / moved
         rt::BlasKey key;                                       // the draw's BLAS key (buffer ids + generations, range)
         std::uint64_t blas = 0, instKey = 0;                   // the BLAS id and the registry instance key (BLAS + quantised rows)
         rt::Rows rows{};
@@ -432,7 +437,26 @@ private:
         std::uint8_t classMask = 0;                            // draw classes fully observed since the learn: 1 main solid, 2 main z pre-pass, 4 cascades
         std::uint8_t salt = 0;
         std::uint64_t comparedFrame = 0;
+        std::uint32_t idx = 0;                                 // F2c-4b: the liveness slot (entryGen_[idx] changes when the entry dies)
     };
+    // F2c-4b: per owned record (persistent slot id) what the last covered sighting found: a skip needs the same retained draw / signature / epoch / entity and a live entry
+    struct OwnedCover {
+        const void* cd = nullptr;
+        const void* entity = nullptr;
+        std::uint64_t sig = 0, epoch = 0;
+        const TableEntry* entry = nullptr;      // (identity only: the checks below read the copies, not the entry's heap node)
+        std::uint64_t slotStamp = 0;            // the entry's scenetable stamp, its slot and relearn salt
+        std::uint32_t gen = 0, idx = 0, slot = 0;
+        std::uint32_t opDesc = 0;
+        std::uint8_t cls = 0, salt = 0;
+    };
+    std::vector<OwnedCover> ownedCover_;
+    std::vector<std::uint32_t> entryGen_, entryFree_;
+    const TableEntry* coveredEntry_ = nullptr;  // coversDraw's answer: the entry that covered the draw
+    void tableDropInstance(std::uint64_t instKey);
+    struct BulkStats {
+        std::uint64_t calls = 0, records = 0, entered = 0, left = 0, skipped = 0, slow = 0, covered = 0, observed = 0;
+    } bs_;
     static std::uint8_t tableClass(d3d9::scene::Phase p);
     static std::uint64_t tableKey(const void* entity, std::uint32_t opDesc, std::uint32_t first, std::uint32_t primitives);
     void tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Registry::Instance& in, const rt::Rows& rows, bool fresh,
@@ -455,6 +479,7 @@ private:
         std::uint64_t asked[3]{}, covered[3]{}, observed[3]{};  // by class (main solid, main z, cascades)
         std::uint64_t fallNone = 0, fallClass = 0, fallMoved = 0, fallIdent = 0, fallMaterial = 0, fallRelearn = 0, fallCompare = 0;
         std::uint64_t learned = 0, relearned = 0, refusedNoSlot = 0, refusedRows = 0, refusedShared = 0, lodErased = 0, slotDropped = 0, instGone = 0;
+        std::uint64_t refusedAmbiguous = 0, ambiguousDropped = 0, ambiguousSkipped = 0;  // F2c-4b: instances two unlike draws gave different materials
         std::uint64_t checkFrames = 0, matched = 0, missing = 0, extra = 0, differing = 0, diffKey = 0, diffRows = 0, diffFlags = 0, diffData = 0, diffMaterial = 0, materialIds = 0;
         double coverMs = 0.0;
     } ts_;

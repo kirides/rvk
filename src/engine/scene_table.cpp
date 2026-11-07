@@ -21,6 +21,8 @@ constexpr std::uint32_t kNone = UINT32_MAX;
 constexpr std::size_t kEntityWorld = 0x60, kEntityFlags = 0x28;
 
 std::vector<Slot> g_slots;
+std::vector<std::uint64_t> g_stamps;  // per slot: 0 = free, else 1<<63 | generation << 32 | version (a compact copy: change checks read 8 bytes, not the 200-byte slot)
+inline std::uint64_t mkStamp(const Slot& s) { return (1ull << 63) | (static_cast<std::uint64_t>(s.generation & 0x7fffffffu) << 32) | s.version; }
 std::vector<std::uint32_t> g_free;
 bool g_trackFreed = false;
 std::vector<std::uint32_t> g_freedDirty;  // slots freed since the last drainFreed (the GPU records are marked dead)
@@ -41,6 +43,7 @@ void freeSlot(std::uint32_t i) {
     g_index.erase(s.entity);
     s.entity = nullptr;
     s.dirty = false;
+    g_stamps[i] = 0;
     g_free.push_back(i);
     if (g_trackFreed) g_freedDirty.push_back(i);
     --g_live;
@@ -54,6 +57,7 @@ void allocate(const void* entity) {
     } else {
         i = static_cast<std::uint32_t>(g_slots.size());
         g_slots.emplace_back();
+        g_stamps.push_back(0);
     }
     Slot& s = g_slots[i];
     const std::uint32_t gen = s.generation + 1;
@@ -64,6 +68,7 @@ void allocate(const void* entity) {
     std::memcpy(s.prev, s.world, sizeof(s.prev));
     readAt(entity, kEntityFlags, s.flags);
     s.dirty = true;
+    g_stamps[i] = mkStamp(s);
     g_index[entity] = i;
     ++g_live;
 }
@@ -118,6 +123,7 @@ void onMatrix(void* self, const float* now) {
     std::memcpy(s.prev, s.world, sizeof(s.prev));
     std::memcpy(s.world, m, sizeof(m));
     ++s.version;
+    g_stamps[it->second] = mkStamp(s);
     s.movedFrame = g_frame;
     s.dirty = true;
 }
@@ -148,6 +154,7 @@ bool install() {
 
 std::uint32_t liveSlots() { return g_live; }
 std::uint32_t capacity() { return static_cast<std::uint32_t>(g_slots.size()); }
+std::uint64_t stamp(std::uint32_t i) { return i < g_stamps.size() ? g_stamps[i] : 0; }
 const Slot* slot(std::uint32_t i) { return i < g_slots.size() && g_slots[i].entity != nullptr ? &g_slots[i] : nullptr; }
 std::uint32_t find(const void* entity) {
     const auto it = g_index.find(entity);

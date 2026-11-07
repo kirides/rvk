@@ -228,13 +228,47 @@ int Device::ownedDerive(const CachedDraw& c, const DeriveIn& in, const OwnedWind
     return rc != 0 ? refuse(rc) : 0;
 }
 
-bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow) {
+// F2c-4b: an owned draw is "bulk eligible" when the bulk observers' contract fits it: a plain static mesh draw (the RT scene's table entries cover these; every other kind keeps the
+// per-draw path, where an observer may still ask for a capture before the draw is queued)
+static bool ownedBulkEligible(const Device::CachedDraw& c) {
+    return c.kind == draws::Kind::StaticMesh && !c.query.instanced && !c.query.blending && c.query.primitiveType == 4;
+}
+
+bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const OwnedObsInfo& info) {
     ++ownedPersistStats.observed;
     bool opaqueObserver = false;
     if (c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
         for (DrawReplacer* r : replacers_) opaqueObserver |= r->wantsOpaque();
     }
     if (observers_.empty() && !opaqueObserver) return true;
+    // the observers' turn: bulk observers (observeOwned, once per pass) get a record view, the others see the draw now
+    const bool eligible = ownedBulkOn_ && ownedBulkEligible(c);
+    std::uint32_t wanted = 0;
+    bool perDraw = opaqueObserver;
+    for (std::size_t i = 0; i < observers_.size(); ++i) {
+        DrawObserver* o = observers_[i];
+        if (!o->observes(c.kind, c.phase)) continue;
+        if (eligible && i < 32 && o->bulkOwned()) wanted |= 1u << i;
+        else perDraw = true;
+    }
+    if (wanted != 0) {
+        OwnedRecordView& v = ownedBulk_.emplace_back();
+        v.cd = &c;
+        v.ow = &ow;
+        v.tag = tag_;
+        v.id = info.id;
+        v.wanted = wanted;
+        v.sig = info.sig;
+        v.epoch = info.epoch;
+        v.changed = info.changed;
+        const std::uint32_t k = ownedBulkKind_;
+        std::vector<std::uint32_t>& seen = ownedBulkSeen_[k];
+        if (seen.size() <= info.id) seen.resize(static_cast<std::size_t>(info.id) + 256, 0);
+        v.entered = ownedBulkPrevSerial_[k] == 0 || seen[info.id] != ownedBulkPrevSerial_[k];
+        seen[info.id] = ownedBulkSerial_[k];
+        ownedBulkIds_[k].push_back(info.id);
+    }
+    if (!perDraw) return true;
     struct Scope {
         Device& d;
         const OwnedWindows* savedOwned;
@@ -256,8 +290,15 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow) {
     captureRequestRw_ = {};
     captureInstances_ = false;
     bool loaded = false;
-    for (DrawObserver* o : observers_) {
+    const CoverQuery cq = coverOf(q);
+    for (std::size_t i = 0; i < observers_.size(); ++i) {
+        DrawObserver* o = observers_[i];
         if (!o->observes(c.kind, c.phase)) continue;
+        if (eligible && i < 32 && o->bulkOwned()) continue;
+        if (o->coversDraw(cq)) {  // F8-0 pre-filter (the persistent loop had none)
+            ++ownedBulkStats.perDrawCovered;
+            continue;
+        }
         if (!loaded) {
             loadOwnedRegisters(ow);
             loaded = true;
@@ -275,6 +316,105 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow) {
         }
     }
     return captureRequest_.null();
+}
+
+// ---- F2c-4b bulk observers (frame-ownership.md 7.23) -------------------------------------------------------------------------------------------------
+
+void Device::ownedBulkBegin(bool solid) {
+    static const bool perDraw = [] {
+        char v[8];
+        return GetEnvironmentVariableA("RVK_F2C4B_PERDRAW", v, sizeof(v)) != 0;
+    }();
+    ownedBulkOn_ = !perDraw;
+    const std::uint32_t k = solid ? 1u : 0u;
+    ownedBulkKind_ = k;
+    ownedBulk_.clear();
+    // the previous pass of this kind is what `entered` / `left` are measured against
+    ownedBulkPrevIds_[k].swap(ownedBulkIds_[k]);
+    ownedBulkIds_[k].clear();
+    ownedBulkPrevSerial_[k] = ownedBulkSerial_[k];
+    ownedBulkSerial_[k] = ownedBulkSerial_[k] + 1;
+    if (ownedBulkSerial_[k] == 0) {  // (wrapped: forget everything)
+        std::fill(ownedBulkSeen_[k].begin(), ownedBulkSeen_[k].end(), 0u);
+        ownedBulkSerial_[k] = 1;
+        ownedBulkPrevSerial_[k] = 0;
+    }
+}
+
+void Device::ownedBulkFlush(bool last) {
+    const std::uint32_t k = ownedBulkKind_;
+    ownedBulkLeft_.clear();
+    if (last) {
+        const std::vector<std::uint32_t>& seen = ownedBulkSeen_[k];
+        for (const std::uint32_t id : ownedBulkPrevIds_[k]) {
+            if (id < seen.size() && seen[id] != ownedBulkSerial_[k]) ownedBulkLeft_.push_back(id);
+        }
+    }
+    if (ownedBulk_.empty() && ownedBulkLeft_.empty()) return;
+    ++ownedBulkStats.flushes;
+    ownedBulkStats.records += ownedBulk_.size();
+    ownedBulkStats.left += ownedBulkLeft_.size();
+    for (const OwnedRecordView& v : ownedBulk_) ownedBulkStats.entered += v.entered ? 1 : 0;
+    OwnedFrame f;
+    f.phase = ownedBulk_.empty() ? phases_.current() : ownedBulk_.front().cd->phase;
+    f.records = ownedBulk_.data();
+    f.count = ownedBulk_.size();
+    f.left = ownedBulkLeft_.data();
+    f.leftCount = ownedBulkLeft_.size();
+    f.last = last;
+    // (an observer may not change the registered observers; the list is walked by index)
+    for (std::size_t i = 0; i < observers_.size() && i < 32; ++i) {
+        DrawObserver* o = observers_[i];
+        if (!o->bulkOwned()) continue;
+        f.observerBit = 1u << i;
+        o->observeOwned(*this, f);
+    }
+    ownedBulk_.clear();
+}
+
+Device::OwnedDrawScope::OwnedDrawScope(Device& d, const OwnedRecordView& r) : d_(d), savedOwned_(d.owned_), savedTag_(d.tag_), ow_(r.ow) {
+    const CachedDraw& c = *r.cd;
+    d.owned_ = r.ow;
+    d.ownedReplay_ = true;
+    d.tag_ = r.tag;
+    // (the draw's shaders: what the per-draw path had bound while the observers looked at it)
+    if (d.vertexShader() != c.vs) d.setVertexShaderRef(ShaderRef(const_cast<Shader*>(c.vs)));
+    if (d.pixelShader() != c.ps) d.setPixelShaderRef(ShaderRef(const_cast<Shader*>(c.ps)));
+    q_ = c.query;
+    q_.tag = &d.tag_;
+    q_.textures = c.tex;
+    q_.mainView = d.firings_.mainViews();
+    q_.objectRows = d.ownedObjectRows();
+    d.captureRequest_ = {};
+    d.captureRequestRw_ = {};
+    d.captureInstances_ = false;
+}
+
+Device::OwnedDrawScope::~OwnedDrawScope() {
+    if (!d_.captureRequest_.null()) ++d_.ownedBulkStats.lateCapture;
+    d_.owned_ = savedOwned_;
+    d_.ownedReplay_ = false;
+    d_.tag_ = savedTag_;
+}
+
+void Device::OwnedDrawScope::loadRegisters() {
+    if (loaded_) return;
+    loaded_ = true;
+    d_.loadOwnedRegisters(*ow_);
+}
+
+// the default of DrawObserver::observeOwned: the per-draw loop over the pass's records (what ownedObserve does for an observer that is not bulk)
+void DrawObserver::observeOwned(Device& device, const OwnedFrame& frame) {
+    for (std::size_t i = 0; i < frame.count; ++i) {
+        const Device::OwnedRecordView& r = frame.records[i];
+        if ((r.wanted & frame.observerBit) == 0) continue;
+        Device::OwnedDrawScope scope(device, r);
+        const ReplaceQuery& q = scope.query();
+        if (!observes(r.cd->kind, r.cd->phase)) continue;
+        if (coversDraw(coverOf(q))) continue;
+        scope.loadRegisters();
+        observe(device, q);
+    }
 }
 
 bool Device::ownedBeginScope() {

@@ -588,6 +588,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         rt::Registry::Instance* in = sr.first;
         if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
+        if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
         if (in != nullptr && tableOn_ && !speedTree) tableObserved(q, *b, *in, rows, sr.second, havePre ? &pre : nullptr);
         if (in != nullptr && speedTree && animated_ && q.phase.view == View::Main && q.phase.pass == Pass::Solid) {
             TreeBatch batch;
@@ -623,6 +624,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         rt::Registry::Instance* in = sr.first;
         if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
+        if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
         // the capture's instance k is the batch's k-th instance (the instance stream is 0, 1, 2, ...)
         if (in != nullptr && treeBatchOk && v == static_cast<float>(i)) observeTree(dev, q, *b, *in, rows, treeBatch, i, n);
     }
@@ -684,6 +686,8 @@ void RtScene::setTableEntries(bool on, bool compare) {
 void RtScene::tableClear() {
     for (auto& [k, e] : table_) {
         if (rt::Registry::Instance* in = registry_.find(e.instKey)) in->pinned = false;
+        ++entryGen_[e.idx];
+        entryFree_.push_back(e.idx);
     }
     table_.clear();
     tableByInst_.clear();
@@ -718,7 +722,25 @@ void RtScene::tableErase(std::unordered_map<std::uint64_t, TableEntry, IdHash>::
             break;
         }
     }
+    ++entryGen_[e.idx];  // (the covers that point at it are dead)
+    entryFree_.push_back(e.idx);
     table_.erase(it);
+}
+
+// F2c-4b: an instance several unlike draws gave different materials: its entries go and it is not held again (its draws are observed, as without the table); it ages as an observed one
+void RtScene::tableDropInstance(std::uint64_t instKey) {
+    std::vector<std::uint64_t> keys;
+    const auto range = tableByInst_.equal_range(instKey);
+    for (auto o = range.first; o != range.second; ++o) keys.push_back(o->second);
+    if (keys.empty()) return;
+    for (const std::uint64_t k : keys) {
+        if (const auto it = table_.find(k); it != table_.end()) {
+            tableErase(it, false);
+            ++ts_.ambiguousDropped;
+        }
+    }
+    tableByInst_.erase(instKey);
+    if (rt::Registry::Instance* in = registry_.find(instKey)) in->pinned = false;
 }
 
 // the registry dropped a pinned instance (aged by distance, its BLAS died, replaced, capped): its entry goes with it
@@ -761,8 +783,7 @@ bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
             ++ts_.fallClass;
             break;
         }
-        const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
-        if (s == nullptr || s->entity != e.entity || s->generation != e.slotGen || s->version != e.slotVersion) {
+        if (engine::scenetable::stamp(e.slot) != e.slotStamp) {  // (freed / reallocated / moved: the compact stamp of the slot)
             ++ts_.fallMoved;
             break;
         }
@@ -790,9 +811,67 @@ bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
         }
         ++ts_.covered[ci];
         covered = true;
+        coveredEntry_ = &e;
     } while (false);
     if (timed) ts_.coverMs += msSince(t0);
     return covered;
+}
+
+// F2c-4b / F8-2 (frame-ownership.md 7.23): the persistent owned static draws of a pass. A record whose last sighting was covered by an entry skips everything while nothing it
+// depends on moved: the retained draw (its own pointer), its derivation signature (texture slots / ready state, buffer bindings: the BLAS key's generations and the material's
+// inputs), the pass's env epoch, the entry (alive: tableErase / tableClear bump entryGen_), the entity's scene-table slot (generation / version: the rows) and the relearn
+// period; check frames always take the long way. Everything else is the per-draw procedure of ownedObserve: the pre-filter, then the full observation.
+void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
+    if (!active_) return;
+    ++bs_.calls;
+    bs_.left += f.leftCount;
+    const std::uint64_t frame = dev.frameValue();
+    const bool compare = tableCompareFrame(frame);
+    for (std::size_t i = 0; i < f.count; ++i) {
+        const d3d9::Device::OwnedRecordView& r = f.records[i];
+        if ((r.wanted & f.observerBit) == 0) continue;
+        ++bs_.records;
+        bs_.entered += r.entered ? 1 : 0;
+        const d3d9::Device::CachedDraw& cd = *r.cd;
+        if (r.id >= ownedCover_.size()) ownedCover_.resize(static_cast<std::size_t>(r.id) + 256);
+        OwnedCover& oc = ownedCover_[r.id];
+        if (!r.entered && !r.changed && !compare && oc.entry != nullptr && oc.cd == &cd && oc.sig == r.sig && oc.epoch == r.epoch && oc.entity == r.tag.entity &&
+            oc.opDesc == r.tag.opDesc && oc.idx < entryGen_.size() && entryGen_[oc.idx] == oc.gen) {
+            if (engine::scenetable::stamp(oc.slot) == oc.slotStamp && (frame + oc.salt) % kTableRelearn != 0) {
+                const int ci = oc.cls == 1 ? 0 : oc.cls == 2 ? 1 : 2;
+                ++ts_.asked[ci];
+                ++ts_.covered[ci];
+                ++bs_.skipped;
+                continue;
+            }
+        }
+        ++bs_.slow;
+        oc.entry = nullptr;
+        d3d9::CoverQuery cq = d3d9::coverOf(cd.query);
+        cq.tag = &r.tag;
+        cq.textures = cd.tex;
+        coveredEntry_ = nullptr;
+        if (coversDraw(cq) && coveredEntry_ != nullptr) {
+            oc.cd = &cd;
+            oc.entity = r.tag.entity;
+            oc.opDesc = r.tag.opDesc;
+            oc.sig = r.sig;
+            oc.epoch = r.epoch;
+            oc.entry = coveredEntry_;
+            oc.idx = coveredEntry_->idx;
+            oc.slot = coveredEntry_->slot;
+            oc.slotStamp = coveredEntry_->slotStamp;
+            oc.salt = coveredEntry_->salt;
+            oc.gen = entryGen_[oc.idx];
+            oc.cls = tableClass(cd.phase);
+            ++bs_.covered;
+            continue;
+        }
+        d3d9::Device::OwnedDrawScope scope(dev, r);
+        scope.loadRegisters();
+        observe(dev, scope.query());
+        ++bs_.observed;
+    }
 }
 
 // a plain draw of the table's class has just been observed in full (`in` = its registry instance after the sighting): compare it with its entry
@@ -810,6 +889,11 @@ void RtScene::tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Regi
     const std::uint64_t frame = dev_.frameValue();
     const std::uint64_t ek = tableKey(q.tag->entity, q.tag->opDesc, q.first, q.primitives);
     auto it = table_.find(ek);
+    if (in.ambiguous) {  // F2c-4b: unlike draws disagree on this instance's material: it stays on the observed path
+        ++ts_.refusedAmbiguous;
+        if (it != table_.end()) tableErase(it, true);
+        return;
+    }
     const std::uint32_t slotIndex = engine::scenetable::find(q.tag->entity);
     const engine::scenetable::Slot* slot = engine::scenetable::slot(slotIndex);
     if (slot == nullptr) {
@@ -905,6 +989,13 @@ void RtScene::tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Regi
         }
     }
     TableEntry e;
+    if (!entryFree_.empty()) {
+        e.idx = entryFree_.back();
+        entryFree_.pop_back();
+    } else {
+        e.idx = static_cast<std::uint32_t>(entryGen_.size());
+        entryGen_.push_back(1);
+    }
     e.entity = q.tag->entity;
     e.opDesc = q.tag->opDesc;
     e.first = q.first;
@@ -912,6 +1003,7 @@ void RtScene::tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Regi
     e.slot = slotIndex;
     e.slotGen = slot->generation;
     e.slotVersion = slot->version;
+    e.slotStamp = engine::scenetable::stamp(slotIndex);
     e.key = b.key;
     e.blas = b.id;
     e.instKey = in.key;
@@ -939,6 +1031,10 @@ void RtScene::tableMaintain(std::uint64_t frame) {
         for (const auto& [key, preMaterial] : tableMatPre_) {
             const rt::Registry::Instance* in = registry_.find(key);
             if (in == nullptr || in->material == preMaterial) continue;
+            if (in->ambiguous) {  // F2c-4b: unlike draws disagree (the instance is no longer held by an entry): the difference is the explained one
+                ++ts_.ambiguousSkipped;
+                continue;
+            }
             const RtMaterial* a = preMaterial != 0 ? materials_.get(preMaterial) : nullptr;
             const RtMaterial* c = in->material != 0 ? materials_.get(in->material) : nullptr;
             const bool same = a != nullptr && c != nullptr && a->albedo == c->albedo && a->opacity == c->opacity && a->sampler == c->sampler &&
@@ -967,8 +1063,7 @@ void RtScene::tableMaintain(std::uint64_t frame) {
     }
     for (auto it = table_.begin(); it != table_.end();) {
         const TableEntry& e = it->second;
-        const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
-        if (s == nullptr || s->entity != e.entity || s->generation != e.slotGen || s->version != e.slotVersion) {
+        if (engine::scenetable::stamp(e.slot) != e.slotStamp) {
             const auto victim = it++;
             tableErase(victim, true);
             ++ts_.slotDropped;
@@ -1008,6 +1103,13 @@ void RtScene::logTable(double frames) {
         tableClear();
         spdlog::error("rt: scene table: turned off: {} entries DIFFERING from the full observation on the check frames (rt.table_entries stays set; restart to retry)", t.differing);
     }
+    if (bs_.calls != 0 || t.refusedAmbiguous != 0 || t.ambiguousDropped != 0) {
+        spdlog::info("rt: scene table bulk (5 s): {} observeOwned calls, per frame {:.0f} records ({:.1f} entered, {:.1f} left): skipped without a lookup {:.0f}, long way {:.0f} (covered by the pre-filter {:.0f}, observed in full {:.0f}); "
+                     "ambiguous instances (unlike draws, different materials): learns refused {}, entries dropped {}, material differences skipped on check frames {}",
+                     bs_.calls, static_cast<double>(bs_.records) / frames, static_cast<double>(bs_.entered) / frames, static_cast<double>(bs_.left) / frames, static_cast<double>(bs_.skipped) / frames,
+                     static_cast<double>(bs_.slow) / frames, static_cast<double>(bs_.covered) / frames, static_cast<double>(bs_.observed) / frames, t.refusedAmbiguous, t.ambiguousDropped, t.ambiguousSkipped);
+    }
+    bs_ = {};
     ts_ = {};
 }
 
@@ -1139,6 +1241,8 @@ void RtScene::learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const r
 void RtScene::applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::uint8_t rank, bool overlay, std::uint64_t frame) {
     if (rank < in.materialRank) return;                          // a better view gave it
     if (overlay && in.material != 0) return;                     // an overlay only while nothing else is known
+    // F2c-4b: a second opaque draw of the frame that resolves another material: the winner is the last observed draw, which depends on which draws are observed
+    if (rank == 4 && in.sightFrame == frame && in.sightRank == 4 && in.material != 0 && id != 0 && in.material != id) in.ambiguous = true;
     // blended layers: the first draw of the frame at this rank counts (the base); opaque passes over the same surface: the
     // last one (it covers the earlier ones in the depth buffer)
     if (rank != 4 && in.sightFrame == frame && in.sightRank == rank) return;

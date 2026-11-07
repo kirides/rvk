@@ -1377,6 +1377,29 @@ mov oC0, r0
     dev.release(std::move(ib));
 }
 
+// F2c-4b: a bulk observer for the owned-draw lists (DrawObserver::bulkOwned / observeOwned; frame-ownership.md 7.23). It only counts; its default observeOwned is the per-draw loop
+struct BulkTestObserver final : DrawObserver {
+    bool bulk = true;
+    int calls = 0, lastCalls = 0, records = 0, entered = 0, left = 0, observed = 0, nullTag = 0, loadedRegs = 0;
+    bool observes(draws::Kind kind, scene::Phase phase) const override { return kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid; }
+    void observe(Device&, const ReplaceQuery& q) override {
+        ++observed;
+        if (q.tag == nullptr || q.textures == nullptr) ++nullTag;
+    }
+    Registers registersRead() const override { return Registers::Material; }
+    bool bulkOwned() const override { return bulk; }
+    void observeOwned(Device& d, const OwnedFrame& f) override {
+        ++calls;
+        if (f.last) ++lastCalls;
+        records += static_cast<int>(f.count);
+        left += static_cast<int>(f.leftCount);
+        for (std::size_t i = 0; i < f.count; ++i) {
+            if ((f.records[i].wanted & f.observerBit) != 0) entered += f.records[i].entered ? 1 : 0;
+        }
+        DrawObserver::observeOwned(d, f);
+    }
+};
+
 // F2c-4a persistent owned draws through the device's own path (frame-ownership.md 7.21): the eight quads of the v2 case, each owned draw a SLOT of the real
 // gpuscene::drawrecords() tables (derived once by Device::ownedDerive, written by DrawRecordTable::write, uploaded by its flush) and drawn by Device::ownedFlush as
 // indirect draws over a CPU-written ref list. Checked against the normal draws (0 bytes differ): (1) one bucket = one indirect call over eight slots; (2) the same
@@ -1715,6 +1738,60 @@ mov oC0, r0
             ++g_failures;
         }
         bad(ref1, frame("ownedp_after_guards", 3, 3, kQuads, nullptr, nullptr, calls), "persistent draws after the refusals");
+    }
+    // 7. F2c-4b bulk observers: the records of a pass arrive in observeOwned (not before), with entered / left against the previous pass of the kind; a mid-pass flush does not
+    // disturb the deltas; a per-draw (not bulk) observer sees every draw at once; the register images are loaded only on request; an ineligible kind stays per-draw
+    {
+        BulkTestObserver obs;
+        dev.addDrawObserver(&obs);
+        begin();
+        OwnedWindows ows[kQuads];
+        for (auto& w : ows) w = windowsOf(3);
+        const auto pass = [&](std::uint32_t from, std::uint32_t to, bool midFlush) {
+            dev.ownedBulkBegin(true);
+            for (std::uint32_t k = from; k < to; ++k) {
+                Device::OwnedObsInfo info;
+                info.id = slots[k];
+                info.sig = 11;
+                info.epoch = 22;
+                info.changed = k == from;
+                if (!dev.ownedObserve(cd[k], ows[k], info)) {
+                    std::printf("  FAIL owned bulk: an observer wanted a capture\n");
+                    ++g_failures;
+                }
+                if (midFlush && k + 1 == (from + to) / 2) dev.ownedBulkFlush(false);
+            }
+            dev.ownedBulkFlush(true);
+        };
+        const auto expect = [&](const char* what, int calls, int records, int entered, int left, int observed) {
+            if (obs.calls != calls || obs.records != records || obs.entered != entered || obs.left != left || obs.observed != observed || obs.nullTag != 0) {
+                std::printf("  FAIL owned bulk (%s): calls %d records %d entered %d left %d observed %d (expected %d / %d / %d / %d / %d), draws without tag / textures %d\n", what, obs.calls, obs.records,
+                            obs.entered, obs.left, obs.observed, calls, records, entered, left, observed, obs.nullTag);
+                ++g_failures;
+            }
+        };
+        pass(0, kQuads, false);
+        expect("first pass: everything entered", 1, 8, 8, 0, 8);
+        pass(0, 6, false);
+        expect("quads 6, 7 left", 2, 14, 8, 2, 14);
+        pass(0, kQuads, true);
+        expect("quads 6, 7 entered again; a mid-pass flush", 4, 22, 10, 2, 22);
+        if (obs.lastCalls != 3) {
+            std::printf("  FAIL owned bulk: the `last` call came %d times (expected once per pass = 3)\n", obs.lastCalls);
+            ++g_failures;
+        }
+        // not bulk: the draws are shown at once, nothing is delivered later
+        const int callsBefore = obs.calls, observedBefore = obs.observed;
+        obs.bulk = false;
+        pass(0, kQuads, false);
+        if (obs.calls != callsBefore || obs.observed != observedBefore + 8) {
+            std::printf("  FAIL owned bulk: a per-draw observer saw %d draws of 8 (bulk calls %d -> %d)\n", obs.observed - observedBefore, callsBefore, obs.calls);
+            ++g_failures;
+        }
+        dev.removeDrawObserver(&obs);
+        dev.phases().pop();
+        std::printf("  owned bulk observers: %llu flushes, %llu records, %llu entered, %llu left\n", static_cast<unsigned long long>(dev.ownedBulkStats.flushes), static_cast<unsigned long long>(dev.ownedBulkStats.records),
+                    static_cast<unsigned long long>(dev.ownedBulkStats.entered), static_cast<unsigned long long>(dev.ownedBulkStats.left));
     }
     std::printf("  owned persistent: %llu derivations, %llu refused, %llu buckets / %llu indirect packets / %llu items; %llu slot writes, %llu unchanged, %llu allocated, %llu released, %llu reused\n",
                 static_cast<unsigned long long>(dev.ownedPersistStats.derived), static_cast<unsigned long long>(dev.ownedPersistStats.refused), static_cast<unsigned long long>(dev.ownedPersistStats.buckets),
