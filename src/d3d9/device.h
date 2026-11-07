@@ -1601,7 +1601,7 @@ private:
     void f5Note(std::uint32_t primitiveType, const DrawGeom& geom, draws::Kind kind, scene::Phase phase);
     // ---- F5-1 clusters (native.clusters, frame-ownership.md 7.33; d3d9/cluster_draw.cpp). A static rigid opaque draw of >= 1,024 triangles whose range has a built cluster
     // order is drawn from the arena copy of its indices in cluster order (same triangles, same vertex order of each): packet_.indexBuffer / first are pointed at it
-    void clusterApply(std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives);
+    void clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives);
     bool clusters_ = false;
     std::uint64_t clusterWait_ = 0;
     bool clusterUsing_ = false;

@@ -18,14 +18,14 @@ void Device::setClusters(bool on) {
     gpuscene::clusterstore().setActive(*this, on);
 }
 
-void Device::clusterApply(std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives) {
+void Device::clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives) {
     clusterWait_ = 0;
     clusterUsing_ = false;
     if (primitives < gpuscene::ClusterStore::kLargeTriangles || lastKind_ != draws::Kind::StaticMesh || instanceCount_ > 1 || indices_ == nullptr || numVertices == 0) return;
     Buffer* vb = streams_[0].buffer;
     Buffer* ib = indices_;
     if (vb == nullptr || vb->ringCopied() || ib->ringCopied() || streams_[0].stride < 12 || decl_ == nullptr || customVertices_ != 0 || up_.active) return;
-    if (lastQuery_.blending || lastQuery_.instanced || lastQuery_.primitiveType != 4) return;
+    if (type != PT_TRIANGLELIST || rs_[RS_ALPHABLENDENABLE] != 0) return;
     const scene::Phase ph = phases_.current();
     const bool pass = (ph.view == scene::View::Main && (ph.pass == scene::Pass::DepthPrepass || ph.pass == scene::Pass::Solid)) ||
                       (ph.view == scene::View::Shadow && ph.pass == scene::Pass::ShadowDepth);

@@ -1419,6 +1419,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (probe_ != nullptr) probeBlock_ = block;
     rhi::RingAlloc db = game_->allocRing(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
+    lastKind_ = kind;  // (F5-1's clusterApply reads it in every mode; the rest of the retained-draw state is captured below only when a capture is asked for)
     if (capture_ != nullptr) {
         // a plain draw: no enhancement took part in it (the retained packet replays exactly this)
         // (a draw with an enhancement variant is retained with its decision: lastVariant_; one offered a variant that is not built / has no pipeline yet is not)
@@ -2009,7 +2010,7 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     packet_.vertexOffset = baseVertex + vertexShift_;
     clusterWait_ = 0;
     clusterUsing_ = false;
-    if (clusters_) clusterApply(baseVertex, minIndex, numVertices, startIndex, primitiveCount);  // F5-1: the clustered copy of a large static range (cluster_draw.cpp)
+    if (clusters_) clusterApply(type, baseVertex, minIndex, numVertices, startIndex, primitiveCount);  // F5-1: the clustered copy of a large static range (cluster_draw.cpp)
     submitPacket(packet_);
 }
 
