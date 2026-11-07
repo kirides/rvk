@@ -60,6 +60,11 @@ struct Stamp {
 inline constexpr const char* kStampNames[] = {"LOD resource", "entity", "geometry / material", "illumination", "lightmaps", "overlay flags", "illum pointer", "fade",
                                               "switch value", "object slot", "variant epoch", "registry generation", "view", "material structure"};
 inline constexpr std::size_t kStampFields = std::size(kStampNames);
+// a logged word read that looked at a resource still loading: a 4-byte state (eCResource2 +0x38: 1 / 2 = requested / loading, 3 = resident) below 3 at an engine object's
+// +0x38, or an 8-byte image data pointer (+0x70) still null at an object whose state is below 3
+inline bool loadingRead(std::uint32_t size, std::uint64_t value, bool engineObjectAt38, bool engineObjectAt70, std::int32_t stateAt70Object) {
+    return (size == 4 && value < 3 && engineObjectAt38) || (size == 8 && value == 0 && engineObjectAt70 && stateAt70Object < 3);
+}
 // the index (kStampNames) of the first field that differs; -1 = equal
 inline int firstDifference(const Stamp& a, const Stamp& b) {
     if (a.res != b.res) return 0;
@@ -182,6 +187,12 @@ struct OpRecord {
         bool on = false;
     };
     std::vector<Stream3> stream3Prims;
+    // frame-ownership.md 7.21 addendum (2026-11-07): what the stamps could not see. `watch` = the composition's logged word reads that looked at a resource still loading
+    // (`loadingRead`: a state dword below 3, or image data still null, of an engine object): the record is stale once one of them changes (the load completed: the composition now
+    // binds the real image / material). Only these are re-read per op (a resident record has none). `illumSlot` = the illumination's table slot the draws were composed with (the
+    // lighting entries key on it): stale once the table freed / reused the slot (idle sweep).
+    std::vector<ret::ReadRec> watch;
+    std::uint32_t illumSlot = 0xffffffffu;
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;
@@ -193,7 +204,7 @@ struct Stats {
     std::uint64_t excluded[kExclCount] = {};          // ops of the main view's static z / solid lists that are not in cut 1, by first reason
     std::uint64_t opsAll = 0;                         // ops of the Static group's main view lists (the denominator of the share)
     std::uint64_t validAtEntry = 0, built = 0, rebuilt = 0;
-    std::uint64_t rebuiltWhy[kStampFields + 4] = {};  // by first differing stamp field; + draw count, read log, not retained, other
+    std::uint64_t rebuiltWhy[kStampFields + 6] = {};  // by first differing stamp field; + draw count, read log, not retained, other, illumination slot gone, resource load completed
     std::uint64_t derived = 0, compared = 0;          // draws derived / of those compared with a scene draw
     std::uint64_t refused[kDeriveWhyCount] = {};
     std::uint64_t differing = 0;                      // draws with a difference

@@ -199,6 +199,10 @@ bool StaticOps::ownedSelect(const Op& op) {
         ++W.leftStamp[static_cast<std::size_t>(d)];
         return false;
     }
+    if (const int live = recLiveWhy(rec); live >= 0) {
+        ++W.leftStamp[live == static_cast<int>(orec::kStampFields) + 4 ? 3 : 2];  // (illumination slot gone / a pending load completed: the engine draws it, the composition rebuilds the record)
+        return false;
+    }
     OwnedView& V = ownedView_;
     if (!V.adminKnown) {
         V.admin = ptr(rec.anchors[7], 0x220);  // (the shader's material admin: the view's; its pass-dependent bytes are stamped at the pass: ownedPass)

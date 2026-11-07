@@ -52,6 +52,27 @@ inline std::uint64_t ns(Clock::time_point a, Clock::time_point b) { return stati
 
 constexpr std::uint32_t kStaticOpNone = 0xffffffu;
 
+// the vtable slot of a candidate object `back` bytes before a logged address, without faulting (the page before may be unmapped: the guarded read would log a first-chance fault)
+const void* objectVtable(const std::uint8_t* addr, std::size_t back) {
+    const std::uint8_t* base = addr - back;
+    if ((reinterpret_cast<std::uintptr_t>(addr) & 0xfffu) < back) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(base, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return nullptr;
+    }
+    return ptr(base, 0);
+}
+
+// a pointer into Engine.dll's image (a vtable: the object is an engine object)
+bool inEngineImage(const void* p) {
+    static const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(L"Engine.dll"));
+    static const std::uintptr_t size = [] {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        return base != 0 ? static_cast<std::uintptr_t>(reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew)->OptionalHeader.SizeOfImage) : std::uintptr_t{0};
+    }();
+    const auto v = reinterpret_cast<std::uintptr_t>(p);
+    return base != 0 && v >= base && v < base + size;
+}
+
 }  // namespace
 
 void StaticOps::setOwnedRecords(bool on) {
@@ -232,8 +253,13 @@ void StaticOps::recEnter(const Op& op) {
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
         const int d = orec::firstDifference(a, st);
-        if (d < 0) R.cur = &rec;
-        else R.rebuildWhy = d;
+        if (d < 0) {
+            const int live = recLiveWhy(rec);
+            if (live < 0) R.cur = &rec;
+            else R.rebuildWhy = live;
+        } else {
+            R.rebuildWhy = d;
+        }
     }
     w.stampNs += ns(t0, Clock::now());
     if (R.cur != nullptr) {
@@ -246,6 +272,14 @@ void StaticOps::recEnter(const Op& op) {
         R.readLog = {};
         ret::gLog = &R.readLog;  // (the composition's reads: the signal audit of the next frames)
     }
+}
+
+// what the stamps do not see (frame-ownership.md 7.21 addendum): the illumination's table slot (kept alive while the op is looked at: the idle sweep must not free
+// the slot of an op that is drawn without being composed) and the loads that were pending when the record was built. Resident records: one slot compare.
+int StaticOps::recLiveWhy(const orec::OpRecord& rec) {
+    if (rec.illumSlot != gpuscene::kNoSlot && !gpuscene::illumtable().slotLive(rec.anchors[3], rec.illumSlot)) return static_cast<int>(orec::kStampFields) + 4;
+    if (!rec.watch.empty() && !ret::validate(rec.watch.data(), rec.watch.size())) return static_cast<int>(orec::kStampFields) + 5;
+    return -1;
 }
 
 // the signal audit: the record's read log against the engine's memory; the stamps called the record valid
@@ -683,6 +717,12 @@ void StaticOps::recEnd(const Op& op) {
         rec->stream3 = op.list == List::ZPass;
         // F2c-3: what the engine's slot code touches (collected by leanTouch / leanImage / leanStream3 while the record was built)
         rec->touches = leanTouches_;
+        for (const orec::DrawRec& r : rec->draws) {
+            if (r.illumSlot != gpuscene::kNoSlot) {
+                rec->illumSlot = r.illumSlot;
+                break;
+            }
+        }
         for (const LeanStream3& x : leanStream3_) rec->stream3Prims.push_back({x.primitive, x.on});
     }
     rec->builtFrame = dev_.stats().frames;
@@ -690,6 +730,15 @@ void StaticOps::recEnd(const Op& op) {
     if (ret::gLog == nullptr && !R.readLog.v.empty()) {
         ret::finalize(R.readLog.v);
         if (!R.readLog.failed) rec->reads = std::move(R.readLog.v);
+    }
+    {
+        // the reads that looked at a resource still loading (7.21 addendum): re-read per op until the load completes
+        for (const ret::ReadRec& q : rec->reads) {
+            if (q.kind != 0 || rec->watch.size() >= 16) continue;
+            const bool at38 = q.size == 4 && inEngineImage(objectVtable(q.addr, 0x38));
+            const bool at70 = q.size == 8 && inEngineImage(objectVtable(q.addr, 0x70));
+            if (orec::loadingRead(q.size, q.value, at38, at70, at70 ? get<std::int32_t>(q.addr - 0x38, 0) : 3)) rec->watch.push_back(q);
+        }
     }
     R.readLog = {};
     const bool existed = R.map.find(R.key) != R.map.end();
@@ -711,6 +760,8 @@ void StaticOps::recReport() {
     orec::Stats& w = R.window;
     R.total.add(w);
     if (ownedStatic_ && w.differing != 0) ownedAutoOff(w.differing);  // F2c-3: a check frame's derived draw differs from the composed one
+    // an audit disagreement = a dependency the stamps do not cover (the audit caught it and the record was rebuilt: non-fatal, but a MISS-like finding the soak counts)
+    if (w.auditDisagree != 0) spdlog::warn("native: owned records: MISS (audit): {} read log disagreements in 5 s while the stamps held", w.auditDisagree);
     const std::uint64_t frames = std::max<std::uint64_t>(1, dev_.stats().frames - R.lastFrame);
     R.lastFrame = dev_.stats().frames;
     const auto list = [](const std::uint64_t* v, const char* const* names, std::size_t n, std::size_t from = 0) {
@@ -721,9 +772,10 @@ void StaticOps::recReport() {
         return out.empty() ? std::string("none") : out;
     };
     std::string rebuilt;
-    for (std::size_t i = 0; i < orec::kStampFields + 3; ++i) {
+    for (std::size_t i = 0; i < orec::kStampFields + 6; ++i) {
         if (w.rebuiltWhy[i] == 0) continue;
-        const char* n = i < orec::kStampFields ? orec::kStampNames[i] : i == orec::kStampFields ? "draw count" : i == orec::kStampFields + 1 ? "read log" : "derive refused";
+        constexpr const char* kExtra[] = {"draw count", "read log", "derive refused", "other", "illumination slot gone", "resource load completed"};
+        const char* n = i < orec::kStampFields ? orec::kStampNames[i] : kExtra[i - orec::kStampFields];
         rebuilt += std::format("{}{} {}", rebuilt.empty() ? "" : ", ", n, w.rebuiltWhy[i]);
     }
     const double frame = static_cast<double>(frames);
