@@ -118,10 +118,13 @@ bool ObjectTable::windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) co
 
 bool ObjectTable::worldRowsAt(std::uint64_t baseBits, float world[12]) const {
     if (!active_ || !table_.ready() || table_.ref().null()) return false;
-    const std::int64_t delta = static_cast<std::int64_t>(baseBits) - static_cast<std::int64_t>(table_.ref().bits) + static_cast<std::int64_t>(kObjectFirstReg) * 16;
+    // (a reference moves in the offset field: the high word on D3D12 (refShift 32), the whole value on Vulkan)
+    const std::int64_t delta = (static_cast<std::int64_t>(baseBits - table_.ref().bits) >> rhi::detail::g_refShift) + static_cast<std::int64_t>(kObjectFirstReg) * 16;
     if (delta < 0 || delta % static_cast<std::int64_t>(sizeof(ObjectRecord)) != 0) return false;
     const std::uint64_t slot = static_cast<std::uint64_t>(delta) / sizeof(ObjectRecord);
     if (slot >= kCapacity || slot >= table_.shadow().size()) return false;
+    d3d9::OwnedWindows::Win w;
+    if (!windowFor(static_cast<std::uint32_t>(slot), w) || w.base.bits != baseBits) return false;  // (not a record's base)
     std::memcpy(world, table_.shadow()[slot].regs[2], 12 * sizeof(float));
     return true;
 }
