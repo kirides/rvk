@@ -66,7 +66,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -1086,6 +1086,141 @@ void testOwnedCull(rhi::Device& dev, const Shaders& sh) {
     report(dev, name, before);
 }
 
+// shaders/rt/rt_skin.comp.hlsl (the ray tracing scene's character skinning, rt-shadows.md 10) on both backends against a CPU reference of the engine's skinned vertex
+// shader: two jobs of different vertex layouts in one dispatch (the job / chunk lookup through byte-address loads at 16-byte offsets), random bones and weights,
+// bone indices past the palette (ignored), the bones and the vertices behind addresses that are not at the start of their buffer
+void testSkin(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "character skinning compute (rt_skin)";
+    if (!sh.skin.ok) {
+        check(false, "rt_skin shader did not compile");
+        report(dev, name, before);
+        return;
+    }
+    std::uint32_t seed = 12345;
+    const auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f;
+    };
+    struct Layout {
+        std::uint32_t slots, stride, pos, bw, bi, tc;
+    };
+    const Layout layouts[2] = {{200, 72, 0, 12, 28, 64}, {97, 80, 4, 16, 32, 44}};
+    constexpr std::uint32_t kBoneVec4 = 200, kBoneShift = 256, kVertShift = 64;  // the byte offsets the jobs' addresses start at
+    std::vector<float> bones[2];
+    std::vector<std::uint8_t> verts[2];
+    for (int j = 0; j < 2; ++j) {
+        bones[j].resize(kBoneVec4 * 4);
+        for (float& f : bones[j]) f = rnd() * 2.0f - 1.0f;
+        verts[j].assign(static_cast<std::size_t>(layouts[j].slots) * layouts[j].stride, 0);
+        for (std::uint32_t i = 0; i < layouts[j].slots; ++i) {
+            std::uint8_t* v = verts[j].data() + static_cast<std::size_t>(i) * layouts[j].stride;
+            float pos[3] = {rnd() * 100.0f, rnd() * 100.0f, rnd() * 100.0f};
+            float w[4] = {rnd(), rnd(), rnd(), rnd()};
+            std::uint8_t idx[4];
+            for (auto& b : idx) b = static_cast<std::uint8_t>(rnd() < 0.15f ? 66 + static_cast<int>(rnd() * 100.0f) : static_cast<int>(rnd() * 66.0f));
+            float tc[2] = {rnd(), rnd()};
+            std::memcpy(v + layouts[j].pos, pos, 12);
+            std::memcpy(v + layouts[j].bw, w, 16);
+            std::memcpy(v + layouts[j].bi, idx, 4);
+            std::memcpy(v + layouts[j].tc, tc, 8);
+        }
+    }
+    std::unique_ptr<rhi::Buffer> vb[2], bb[2], out[2], readback[2];
+    auto table = dev.createBuffer({16 + 64 * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi skin table"});
+    auto pipeline = dev.createComputePipeline({sh.skin.shader(), "rhi rt skin"});
+    bool ok = table && pipeline;
+    constexpr VkBufferUsageFlags kRw = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    for (int j = 0; j < 2 && ok; ++j) {
+        const std::uint64_t outBytes = 16 + static_cast<std::uint64_t>(layouts[j].slots) * 32;
+        vb[j] = dev.createBuffer({kVertShift + verts[j].size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi skin vertices"});
+        bb[j] = dev.createBuffer({kBoneShift + kBoneVec4 * 16ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi skin bones"});
+        out[j] = dev.createBuffer({outBytes, kRw, rhi::Memory::Device, "rhi skin out"});
+        readback[j] = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi skin readback"});
+        ok = vb[j] && bb[j] && out[j] && readback[j];
+        if (!ok) break;
+        std::memcpy(static_cast<std::uint8_t*>(vb[j]->map()) + kVertShift, verts[j].data(), verts[j].size());
+        std::memcpy(static_cast<std::uint8_t*>(bb[j]->map()) + kBoneShift, bones[j].data(), bones[j].size() * 4);
+    }
+    if (!ok) {
+        check(false, "skin resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    auto* t = static_cast<std::uint32_t*>(table->map());
+    std::memset(t, 0, 16 + 64 * 2);
+    t[0] = 2;
+    std::uint32_t chunk = 0;
+    for (int j = 0; j < 2; ++j) {
+        std::uint32_t* w = t + 4 + 16 * j;
+        const Layout& l = layouts[j];
+        const auto vr = vb[j]->shaderRef(kVertShift), br = bb[j]->shaderRef(kBoneShift), orf = out[j]->shaderRefRw(0);
+        w[0] = vr[0], w[1] = vr[1], w[2] = br[0], w[3] = br[1], w[4] = orf[0], w[5] = orf[1];
+        w[6] = l.slots;
+        w[7] = l.stride;
+        w[8] = chunk;
+        w[12] = l.pos | (l.bw << 8) | (l.bi << 16) | (l.tc << 24);
+        chunk += (l.slots + 63) / 64;
+    }
+    t[1] = chunk;
+    struct Push {
+        std::uint32_t frame[2];
+        std::uint32_t passId, passFlags;
+        std::uint32_t table[2];
+        std::uint32_t pad[2];
+    } push{};
+    const auto tr = table->shaderRef(0);
+    push.table[0] = tr[0];
+    push.table[1] = tr[1];
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(chunk, 1, 1);
+        for (int j = 0; j < 2; ++j) {
+            cl.bufferBarrier(*out[j], rhi::BufferAccess::IndirectRead);
+            cl.copyBuffer(*readback[j], 0, *out[j], 0, 16 + static_cast<std::uint64_t>(layouts[j].slots) * 32);
+        }
+    });
+    int bad = 0;
+    float maxErr = 0.0f;
+    for (int j = 0; j < 2; ++j) {
+        const Layout& l = layouts[j];
+        const auto* o = static_cast<const float*>(readback[j]->map()) + 4;  // after the 16-byte header
+        for (std::uint32_t i = 0; i < l.slots; ++i) {
+            const std::uint8_t* v = verts[j].data() + static_cast<std::size_t>(i) * l.stride;
+            float p[4] = {0, 0, 0, 1}, w[4], tc[2];
+            std::uint8_t idx[4];
+            std::memcpy(p, v + l.pos, 12);
+            std::memcpy(w, v + l.bw, 16);
+            std::memcpy(idx, v + l.bi, 4);
+            std::memcpy(tc, v + l.tc, 8);
+            float rows[3][4] = {};
+            for (int k = 0; k < 4; ++k) {
+                if (idx[k] >= 66 || w[k] == 0.0f) continue;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 4; ++c) rows[r][c] += bones[j][(1 + 3 * idx[k] + r) * 4 + c] * w[k];
+                }
+            }
+            float expect[8];
+            for (int r = 0; r < 3; ++r) expect[r] = p[0] * rows[r][0] + p[1] * rows[r][1] + p[2] * rows[r][2] + p[3] * rows[r][3];
+            expect[3] = 1.0f;
+            expect[4] = tc[0];
+            expect[5] = tc[1];
+            expect[6] = 0.0f;
+            expect[7] = 1.0f;
+            for (int c = 0; c < 8; ++c) {
+                const float e = std::abs(o[i * 8 + c] - expect[c]);
+                maxErr = std::max(maxErr, e);
+                if (e > 1e-3f * std::max(1.0f, std::abs(expect[c])) && bad++ < 5) {
+                    std::printf("    job %d slot %u component %d = %f, expected %f\n", j, i, c, o[i * 8 + c], expect[c]);
+                }
+            }
+        }
+    }
+    check(bad == 0, std::format("{} skinned component(s) differ from the CPU reference (max error {})", bad, maxErr));
+    report(dev, name, before);
+}
+
 // the pixel of src/vk/raytracing.cpp selfTest's scene (rt_query.comp's encoding); `ambiguous`: on a triangle edge (either result is valid)
 std::uint32_t expectedRay(std::uint32_t px, std::uint32_t py, std::uint32_t size, bool& ambiguous, float dz = 0.0f) {
     constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
@@ -1732,6 +1867,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testIndirectPull(*dev, sh);
     testOwnedCompact(*dev, sh);
     testOwnedCull(*dev, sh);
+    testSkin(*dev, sh);
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
@@ -1827,6 +1963,7 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_ind.comp.hlsl", "CSMain", "cs_6_6", sh.indCs);
     compileBoth("test/rhi_ind.vert.hlsl", "VSMain", "vs_6_6", sh.indVs);
     compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
+    compileBoth("rt/rt_skin.comp.hlsl", "CSMain", "cs_6_6", sh.skin);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
     compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);

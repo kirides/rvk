@@ -137,7 +137,8 @@ return {
     },
     {
         id = "torch_hero",
-        player = { x = -4361, y = 486, z = -19659, yaw = 0 },
+        -- (not snapped: the navigation mesh query returned a point up to 70 units apart from run to run, the hero's shadow with it)
+        player = { x = -4181, y = 486, z = -19748, yaw = 0, snap = false },
         camera = { target = { 0, 100, 0 }, yaw = 270, pitch = -22, distance = 600 },
         hide_player = false, hide_npcs = 2500,
         time = { 23, 30 }, weather = "Sunny_Full", explicit = true,

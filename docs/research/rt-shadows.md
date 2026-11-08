@@ -295,6 +295,19 @@ weights (faces speaking, 7 % of the draws) keep the capture; the motion vectors 
 own draws still skin in their vertex shaders (sharing the result with them needs a replacement vertex shader for every skinned
 material: not built, no frame-time gain expected since the draw calls stay).
 
+**Backend parity (2026-11-08, "the hero's lamp shadow differs between Vulkan and D3D12 at `torch_hero`": no backend defect).**
+`rvk_rhitest` now has "character skinning compute (rt_skin)" (two jobs of different vertex layouts, one dispatch, bones / vertices
+behind non-zero buffer offsets, bone indices past the palette, against a CPU reference of the vertex shader): PASS on Vulkan and D3D12
+(`rvk_vktest --skin` as before); the push block (16-byte header + `uint2` + `uint2`) does not straddle (the lint
+`pass_push_blocks_do_not_straddle_16_bytes` scans every `RVK_PASS_PUSH_HEADER` block, RT and skin ones included). In the game
+`rt.debug=depth` is green on the hero on both backends (same RT scene, parts all present in `rt.debug=instances`). The pictures differed
+because **the hero stood in different places**: `rvkcompare` snapped him with `risen.world.nav_point` and the query returned points up to
+70 units apart run to run (anchors -4165 / -19700, -4181 / -19748, -4171 / -19721, -4195 / -19771), on one backend too; with the hero
+nearer the wall the shade at his feet is short, further out it is the long cast shade with the self-shadow holes (both backends show
+both, 2 runs each). The spot `torch_hero` has a fixed, unsnapped anchor now (`snap = false`; hero at -4181 / -19748): 2 runs per
+backend with `lighting.debug=shadows` are the same picture on both (short shade at his feet, the long cast shade to the left of him,
+silhouette lit with a few self-shadow specks). The long shade to the left is the physically expected one (the torch is on his right).
+
 ## 11. VK_ERROR_DEVICE_LOST after a teleport: the TLAS built over stale instances (2026-10-29)
 
 **Symptom** [C]: with `shadows.rt` near / extended the game lost the device (`VK_ERROR_DEVICE_LOST`, 5,000+ error lines) ~50 s into
