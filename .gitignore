@@ -20,3 +20,7 @@ __pycache__/
 /captures/
 /game-shaders/
 /game-shaders-scene*/
+
+# scratch run markers of test scripts (they belong under B:\DevDrive\rvk-work\scratch)
+/DONE_*
+/DONEQ_*
