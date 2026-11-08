@@ -1598,13 +1598,60 @@ bool uberBaseOptions(const Shader& s, shader::TranslateOptions& o) {
 
 }  // namespace
 
+rhi::ShaderModule Device::uberAskedNow(const Shader& ps) const {
+    if (!ubershader_.load(std::memory_order_relaxed) || ps.source.load(std::memory_order_acquire) == nullptr) return rhi::ShaderModule::None;
+    constexpr std::size_t i = static_cast<std::size_t>(VariantSlot::Base);
+    return ps.variantState[i].load(std::memory_order_acquire) == 2 ? ps.variants[i].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+}
+
+Device::UberWhy Device::uberWhyOf(const Shader& ps, VariantSlot slot) const {
+    if (!ubershader_.load(std::memory_order_relaxed)) return UberWhy::None;
+    const MaterialSource* src = ps.source.load(std::memory_order_acquire);
+    if (src == nullptr) return UberWhy::NoRequest;
+    if ((ps.uberSlots.load(std::memory_order_acquire) >> static_cast<std::size_t>(slot) & 1u) != 0) return UberWhy::Uber;
+    if (src->file == "ge_default_leafs.fx") return UberWhy::Leaf;
+    if (!shader::uberSupports(src->file, src->entry)) return UberWhy::None;
+    if (!uberCovers(*src)) return UberWhy::Skipped;
+    return UberWhy::Failed;
+}
+
 void Device::setUbershaderSkip(std::uint32_t mask) { g_uberSkip.store(mask, std::memory_order_relaxed); }
 
 void Device::setUbershader(bool on) {
+    const bool changed = ubershader_.load(std::memory_order_relaxed) != on;
     ++variantEpoch_;
     ubershader_.store(on, std::memory_order_relaxed);
     if (on) setVariantProvider(VariantSlot::Base, {std::format("base_t{}", kTranslatorVersion), &uberBaseOptions});
-    spdlog::info("d3d9: GLSL material shaders {}", on ? "on" : "off");
+    // (S-1a: a toggle at run time builds every variant again in the other form: the modules built so far are of the old one)
+    if (changed) resetUberVariants();
+    spdlog::info("d3d9: HLSL material shaders {}", on ? "on" : "off");
+}
+
+// S-1a: forget the variants of the material pixel shaders (render thread, between frames: the workers are drained first). The old modules stay alive (pipelines hold them);
+// the next request builds the slot's module in the current form (the SPIR-V / DXIL disk caches key the two forms apart)
+void Device::resetUberVariants() {
+    {
+        std::unique_lock lock(variantMutex_);
+        for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
+        variantJobs_.clear();
+        variantIdleCv_.wait(lock, [this] { return variantBusy_ == 0; });
+    }
+    std::vector<std::shared_ptr<Shader>> all;
+    {
+        const std::lock_guard lock(shaderMutex_);
+        all.reserve(shaders_.size());
+        for (const auto& [h, sh] : shaders_) {
+            if (sh->stage == shader::Stage::Pixel && sh->source.load(std::memory_order_acquire) != nullptr) all.push_back(sh);
+        }
+    }
+    for (const auto& sh : all) {
+        for (std::size_t i = 0; i < kVariantSlots; ++i) {
+            sh->variants[i].store(rhi::ShaderModule::None, std::memory_order_release);
+            sh->variantState[i].store(0, std::memory_order_release);
+        }
+        sh->uberSlots.store(0, std::memory_order_release);
+    }
+    spdlog::info("d3d9: HLSL material shaders: {} pixel shaders' variants reset", all.size());
 }
 
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
@@ -1653,10 +1700,19 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         {.spirv = spirv}, game_->namesEnabled() ? moduleLabel(game_->namesEnabled(), s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)).c_str() : nullptr);
 }
 
-rhi::ShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag) {
+rhi::ShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber) {
+    if (viaUber != nullptr) *viaUber = false;
     if (options.uber && ubershader_.load(std::memory_order_relaxed) && s.stage == shader::Stage::Pixel) {
         const MaterialSource* src = s.source.load(std::memory_order_acquire);
-        if (src != nullptr && uberCovers(*src)) return uberModule(s, *src, options, tag);
+        if (src != nullptr && uberCovers(*src)) {
+            const rhi::ShaderModule m = uberModule(s, *src, options, tag);
+            if (m != rhi::ShaderModule::None) {
+                if (viaUber != nullptr) *viaUber = true;
+                return m;
+            }
+            // S-1a: a request the ubershader cannot build stays on the translated shader of the same form (counted)
+            ++uberFallbacks_;
+        }
     }
     const auto dec = shader::decode(s.bytecode);
     if (!dec.ok()) {
@@ -1777,6 +1833,7 @@ void Device::variantWorker() {
             if (variantStop_) return;
             job = std::move(variantJobs_.front());
             variantJobs_.pop_front();
+            ++variantBusy_;
             provider = variantProviders_[static_cast<std::size_t>(job.slot)];
             if (job.slot >= VariantSlot::SceneVs) {
                 // a scene form (7.11): the base slot's provider + sceneRecord (SceneVs / ScenePs: no base options)
@@ -1789,9 +1846,12 @@ void Device::variantWorker() {
                 const bool lodVs = v1 == VariantSlot::SceneVsLod;
                 const bool pixel = v1 != VariantSlot::SceneVs && !lodVs;
                 provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "");
-                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view](const Shader& sh, shader::TranslateOptions& o) {
+                const bool uberOn = ubershader_.load(std::memory_order_relaxed);
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn](const Shader& sh, shader::TranslateOptions& o) {
                     if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
+                    // S-1a: the plain scene pixel shader of a request the ubershader covers is built from it (the enhancement variants say so through their own hooks)
+                    if (pixel && !hasBase && uberOn) uberBaseOptions(sh, o);
                     if (lodVs) {
                         o.inputOverrides.push_back({shader::Usage::BlendWeight, 1,
                                                     std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
@@ -1803,21 +1863,33 @@ void Device::variantWorker() {
             }
         }
         const std::size_t i = static_cast<std::size_t>(job.slot);
+        const auto done = [&] {
+            {
+                const std::lock_guard lock(variantMutex_);
+                --variantBusy_;
+            }
+            variantIdleCv_.notify_all();
+        };
         shader::TranslateOptions o;
         if (!provider.options || !provider.options(*job.shader, o)) {
             job.shader->variantState[i].store(3, std::memory_order_release);
+            done();
             continue;
         }
-        const rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion));
+        bool viaUber = false;
+        const rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion), &viaUber);
         if (m == rhi::ShaderModule::None) {
             ++variantsFailed_;
             spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);
             job.shader->variantState[i].store(3, std::memory_order_release);
+            done();
             continue;
         }
         ++variantsBuilt_;
+        if (viaUber) job.shader->uberSlots.fetch_or(1u << i, std::memory_order_release);
         job.shader->variants[i].store(m, std::memory_order_release);
         job.shader->variantState[i].store(2, std::memory_order_release);
+        done();
     }
 }
 

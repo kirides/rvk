@@ -283,10 +283,10 @@ void testSceneAsm(Harness& h, bool v2 = false, bool mutate = false) {
 }
 
 // the ubershader (a captured request) with the translated vertex shader of the uber test: the pixel shader reads window 2 / 3 and the DrawBlock by record
-void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros, const std::string& hooks, bool heavy, bool v2 = false) {
+void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros, const std::string& hooks, bool heavy, bool v2 = false, const char* entry = "PS_Default") {
     rhi::Device& dev = h.dev;
     SceneCase c;
-    c.label = std::string("scene variant (ubershader, ") + name + (v2 ? ", ABI v2" : "") + ")";
+    c.label = std::string("scene variant (ubershader, ") + (std::string(entry) == "PS_Default" ? "" : "zpass, ") + name + (v2 ? ", ABI v2" : "") + ")";
     if (!selected(c.label.c_str())) return;
     if (!devtools::D3DX::get().available()) {
         std::printf("[%s] %s: SKIP (d3dx9_39.dll not installed)\n", rhi::backendName(dev.caps().backend), c.label.c_str());
@@ -297,8 +297,8 @@ void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros
     sceneOpt.sceneView = v2;
     quadLayout(c);
     if (!translated(kUberVsAsm, true, plainOpt, c.vs, "scene_uber_vs") || !translated(kUberVsAsm, true, sceneOpt, c.svs, "scene_uber_vs_s") ||
-        !compileBoth("scene_uber.hlsl", shader::uberPixelHlsl("PS_Default", withExtra(macros), hooks), "PSMain", "ps_6_6", c.ps) ||
-        !compileBoth("scene_uber_s.hlsl", shader::uberPixelHlsl("PS_Default", withExtra(macros), hooks, true, v2), "PSMain", "ps_6_6", c.sps)) {
+        !compileBoth("scene_uber.hlsl", shader::uberPixelHlsl(entry, withExtra(macros), hooks), "PSMain", "ps_6_6", c.ps) ||
+        !compileBoth("scene_uber_s.hlsl", shader::uberPixelHlsl(entry, withExtra(macros), hooks, true, v2), "PSMain", "ps_6_6", c.sps)) {
         check(false, c.label + ": shaders");
         return;
     }
@@ -530,12 +530,21 @@ void testSceneCorpus(Harness& h, bool v2 = false) {
     }
 }
 
+shader::MacroList maskedZRequest() {
+    shader::MacroList m = simpleRequest();
+    m.emplace_back("XFX_MASKED", "true");
+    return m;
+}
+
 void testScene(Harness& h) {
     testSceneAsm(h);
     testSceneUber(h, "diffuse * vertex colour", simpleRequest(), {}, false);
     testSceneUber(h, "normal map, specular, lightmap, lights", heavyRequest(), {}, true);
     // the hooks of the G-buffer + GI variants without the extra render targets: window 3 read through rvkPsWin
     testSceneUber(h, "gi hooks", heavyRequest(), "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n#define RVK_MV_KIND_SKINNED 3\n", true);
+    // S-1a: the z pass entry (z pre-pass, cascades: the largest class of owned draws), masked, and the G-buffer + GI hooks of the owned path
+    testSceneUber(h, "masked", maskedZRequest(), {}, false, false, "PS_DefaultZPass");
+    testSceneUber(h, "gbuffer + gi hooks", heavyRequest(), kHookDefines, true);
     testSceneCorpus(h);
     // scene ABI v2 (frame-ownership.md 7.19): the same draws with the view registers from a view table slot; the wrong-slot mutation must differ
     testSceneAsm(h, true);
@@ -543,5 +552,7 @@ void testScene(Harness& h) {
     testSceneUber(h, "diffuse * vertex colour", simpleRequest(), {}, false, true);
     testSceneUber(h, "normal map, specular, lightmap, lights", heavyRequest(), {}, true, true);
     testSceneUber(h, "gi hooks", heavyRequest(), "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n#define RVK_MV_KIND_SKINNED 3\n", true, true);
+    testSceneUber(h, "masked", maskedZRequest(), {}, false, true, "PS_DefaultZPass");
+    testSceneUber(h, "gbuffer + gi hooks", heavyRequest(), kHookDefines, true, true);
     testSceneCorpus(h, true);
 }

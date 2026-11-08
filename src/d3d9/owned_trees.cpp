@@ -173,6 +173,7 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
         }
         total += it.instances;
     }
+    for (const TreeItem& it : items) ++sceneStats_.uberOwned[static_cast<std::size_t>(it.cd->kind)][it.cd->v.uberPs];  // (S-1a)
     if (total != positions || posRec.size() != positions || recs.empty()) {
         ++treeFlushStats.refused;
         return false;

@@ -1,6 +1,8 @@
 // rvk_shadereq: do two pixel shaders compute the same colour? (docs/research/shader-permutations.md 6)
 //
-//   rvk_shadereq --vs <varyings.vert.spv> --fs <a.spv> <b.spv> [--trials N] [--seed S] [--tol T] [--no-validation]
+//   rvk_shadereq --vs <varyings.vert.spv> --fs <a.spv> <b.spv> [--trials N] [--seed S] [--tol T] [--no-validation] [--scene | --scene2]
+//                (--scene / --scene2: the three shaders are scene forms (RVK_SCENE_RECORD, + RVK_SCENE_VIEW for --scene2: frame-ownership.md 7.10 / 7.19): the draw's windows,
+//                DrawBlock and (v2) the view block come from a DrawRecord / ViewBlock2 built from the same random constants)
 //   rvk_shadereq --vs-test --vsa <a.spv> <b.spv> --attrs-a <loc:slot,..> --attrs-b <loc:slot,..> --probe <probe.spv> --probe-count N
 //                [--trials N] [--seed S] [--tol T] [--billboard-valid]: the vertex shader variant of the check (below); --billboard-valid
 //                gives the SpeedTree billboards valid inputs (c_f2PI = 2 pi, 8 images)
@@ -308,7 +310,7 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
 
 int main(int argc, char** argv) {
     std::string vsPath, fsA, fsB, vsA, vsB, attrsA, attrsB, probePath;
-    bool vsTestMode = false, billboardValid = false;
+    bool vsTestMode = false, billboardValid = false, sceneForm = false, sceneView = false;
     std::uint32_t probeCount = 0;
     int trials = 8;
     std::uint32_t seed = 1;
@@ -329,6 +331,10 @@ int main(int argc, char** argv) {
             tol = static_cast<float>(std::atof(argv[++i]));
         } else if (a == "--no-validation") {
             validation = false;
+        } else if (a == "--scene") {
+            sceneForm = true;
+        } else if (a == "--scene2") {
+            sceneForm = sceneView = true;
         } else if (a == "--vs-test") {
             vsTestMode = true;
         } else if (a == "--billboard-valid") {
@@ -469,6 +475,32 @@ int main(int argc, char** argv) {
         shader::abi::PushConstants push{vsC.ref.bits, psC.ref.bits, db.ref.bits, 0, 0, 0, 0};
 
         push.legacyWindows();
+        shader::abi::ScenePush scenePush{};
+        if (sceneForm) {
+            // one record (index 0) with the same data as the push block: every window = the stage's full block, the DrawBlock; v2: the view's windows 0 / 1 of the vertex stage and
+            // window 0 of the pixel stage, posFix and c5.xyz from a ViewBlock2 (copies of the same registers), c5.w in the record
+            rhi::RingAlloc rec = frames.allocate(shader::abi::kDrawRecordSize, 16);
+            shader::abi::DrawRecord r{};
+            for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+                r.vsWin[w] = vsC.ref.bits;
+                r.psWin[w] = psC.ref.bits;
+            }
+            r.draw = db.ref.bits;
+            r.flags = push.flags;
+            scenePush.records = rec.ref.bits;
+            if (sceneView) {
+                rhi::RingAlloc view = frames.allocate(shader::abi::kViewBlock2Size, 16);
+                shader::abi::ViewBlock2 vb{};
+                std::memcpy(vb.vs0, vc, sizeof(vb.vs0));
+                std::memcpy(vb.ps0, pc, sizeof(vb.ps0));
+                std::memcpy(vb.vs1, vc + 12 * 4, sizeof(vb.vs1));
+                std::memcpy(vb.c5, pc + 5 * 4, sizeof(vb.c5));
+                std::memcpy(&r.c5w, pc + 5 * 4 + 3, sizeof(r.c5w));
+                std::memcpy(view.ptr, &vb, sizeof(vb));
+                scenePush.views = view.ref.bits;
+            }
+            std::memcpy(rec.ptr, &r, sizeof(r));
+        }
         for (int i = 0; i < 2; ++i) {
             rt[i].transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -486,8 +518,11 @@ int main(int argc, char** argv) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline[i]);
             const VkDescriptorSet set = bindless.set();
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindless.pipelineLayout(), 0, 1, &set, 0, nullptr);
-            vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
-                               &push);
+            if (sceneForm) {
+                vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(scenePush), &scenePush);
+            } else {
+                vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+            }
             setDynamicState(cmd, ctx, kSize, kSize);
             if (ctx.features().vertexInputDynamicState) {
                 vkCmdSetVertexInputEXT(cmd, 0, nullptr, 0, nullptr);

@@ -19,3 +19,4 @@ __pycache__/
 /corpus/
 /captures/
 /game-shaders/
+/game-shaders-scene*/

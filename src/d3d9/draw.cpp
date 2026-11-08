@@ -630,9 +630,9 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
     // windows, each uploaded when a register of it changed since its last upload (or when it was uploaded shorter than this
     // shader reads). Everything else (hand-written shaders, effects that read i# / b#, the GLSL material shader, replaced
     // draws with their own DrawBlock) keeps the one full block per stage
-    const bool uber = ubershader_.load(std::memory_order_relaxed);
-    drawSplit_[0] = splitConstants_ && vs_->reflection.splitConsts && !uber;
-    drawSplit_[1] = splitConstants_ && ps_->reflection.splitConsts && !forceLegacyPs && !uber;
+    // (S-1a: the HLSL material shader reads the same register windows as the translated one, RVK_PSC: it splits like any translated shader)
+    drawSplit_[0] = splitConstants_ && vs_->reflection.splitConsts;
+    drawSplit_[1] = splitConstants_ && ps_->reflection.splitConsts && !forceLegacyPs;
     psWindowMinEnd_ = psMinEnd;
     if (drawSplit_[0]) {
         splitStage(true, *vs_, drawWin_[0]);
@@ -1140,10 +1140,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
 
     // the GLSL material shader (Device::setUbershader): the plain module of a material pixel shader whose request is known
-    rhi::ShaderModule uberBase = rhi::ShaderModule::None;
-    if (!replaced && tint == 0 && ubershader_.load(std::memory_order_relaxed) && ps_->source.load(std::memory_order_acquire) != nullptr) {
-        uberBase = variant(ps_, VariantSlot::Base);
-    }
+    rhi::ShaderModule uberBase = rhi::ShaderModule::None;  // (requested below, once it is known that no enhancement variant is wanted for the draw)
 
     // detail distances (lod.trees): the billboards' baked fade-in distances scaled with the trees' LOD
     rhi::ShaderModule vsModule = vs_->module;
@@ -1181,6 +1178,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         if (cv.wanted) fsVariant = variant(ps_, VariantSlot::Gi);
     }
     cv.fsAsked = fsVariant;
+    // (S-1a: the plain module is only built for draws no GI / pack / G-buffer variant is wanted for: those take the variant's own ubershader module)
+    if (!replaced && tint == 0 && !cv.wanted && !cv.gbufWanted && ubershader_.load(std::memory_order_relaxed) && ps_->source.load(std::memory_order_acquire) != nullptr) {
+        uberBase = variant(ps_, VariantSlot::Base);
+    }
 
     // a copy of the blank description: `PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
     // not zero; ~1.5 % of the engine thread in the V4 profile)
@@ -1299,6 +1300,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             game_->prewarmOncePipeline(ud);
         }
     }
+    cv.uberAsked = uberBase;
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     GamePipeline pipeline = GamePipeline::None;
     if (lastPipelineValid_ && sameDesc(pd, lastPipelineDesc_)) {
@@ -1426,10 +1428,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         // (a draw with an enhancement variant is retained with its decision: lastVariant_; one offered a variant that is not built / has no pipeline yet is not)
         const bool variantPending = (fsVariant != rhi::ShaderModule::None && !giDraw && !gbufWrite_) || (!retainVariants_ && (giDraw || cv.vsUsed != vs_->module));
         captureOk_ = !replaced && tint == 0 && !captureDraw && !variantPending && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
-                     rep.action == DrawReplacement::Action::Engine && uberBase == rhi::ShaderModule::None && fs == ps_->module && captureRequest_.null();
+                     rep.action == DrawReplacement::Action::Engine && (uberBase == rhi::ShaderModule::None || pd.fs != fs) && fs == ps_->module && captureRequest_.null();  // (S-1a: with the ubershader on, a draw that took a module of ours (it, or a variant) is retained; one still on the translated module while the ubershader's pipeline builds is not)
         if (!captureOk_) {
             ++replayStats.ncWhy[replaced ? 0 : tint != 0 ? 1 : captureDraw ? 2 : variantPending ? 3 : customVertices_ != 0 ? 5 : !geom.indexed || geom.userPointer ? 6
-                                : rep.action != DrawReplacement::Action::Engine ? 7 : uberBase != rhi::ShaderModule::None ? 8 : fs != ps_->module ? 9 : 10];
+                                : rep.action != DrawReplacement::Action::Engine ? 7 : (uberBase != rhi::ShaderModule::None && pd.fs == fs) ? 8 : fs != ps_->module ? 9 : 10];
         }
         cv.giDraw = giDraw;
         cv.drawn = giDraw || gbufWrite_;
@@ -1631,7 +1633,7 @@ const float* Device::ownedObjectRows() {
 }
 
 bool Device::replayAllowed(const CachedDraw& c) const {
-    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || (gbuf_.active && !gbufArmed_)) return false;  // (arming counts the solid draws in prepareDraw)
+    if (tint_ != draws::TintMode::Off || (gbuf_.active && !gbufArmed_)) return false;  // (arming counts the solid draws in prepareDraw)
     if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
     // (the GI / material pack variant and the billboards' fade variant are part of the packet: its decision is re-derived by replayBuild)
     // observers (RT scene, GI, object motion) and opaque-observing replacers (water) are shown the cached query at replay (replayDraw)
@@ -1654,6 +1656,8 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     // variants' build state; a change in any of them makes the draw take another pipeline / pixel window / pack word
     if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_)) return fail(10);
     if (c.v.gbufGate != gbuf_.active) return fail(10);
+    // S-1a: the plain ubershader module the draw was offered (its build / pipeline state moved since: the packet is made again)
+    if (!c.v.wanted && !c.v.gbufWanted && uberAskedNow(*ps_) != c.v.uberAsked) return fail(10);  // (a draw that took a variant never asked for the plain module)
     // F2b-1: scene draws switched on / off, or the scene form of the draw was not ready when the packet was made: remade
     if (c.v.sceneActive != sceneActive() || (c.v.sceneActive && c.v.scenePending)) return fail(10);
     bool gbufTaken = false;

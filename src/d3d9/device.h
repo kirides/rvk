@@ -318,6 +318,7 @@ public:
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
     std::array<std::atomic<rhi::ShaderModule>, kVariantSlots> variants{};  // (VariantSlot::Count)
     std::array<std::atomic<std::uint8_t>, kVariantSlots> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::atomic<std::uint32_t> uberSlots{0};  // S-1a: bit i = variants[i] was built from the HLSL ubershader (not the translated bytecode)
 };
 
 // A non-owning reference to the device's current shader (setVertexShader / setPixelShader / a replacement's): switching
@@ -910,6 +911,9 @@ public:
         std::uint64_t breaks[5] = {};     // runs cut inside one pipeline: vertex input, dynamic state, index binding, frame block, run size
         std::uint64_t fbNotBatchable = 0, fbVariantKind = 0, fbVariantFailed = 0, fbVariantPending = 0, fbPipelinePending = 0, fbNoRoom = 0, fbRingFull = 0, fbNullAddress = 0;
         std::uint64_t checks = 0, checkedRecords = 0, checkedBytes = 0, checkDiffering = 0, checkSkipped = 0;
+        // S-1a: pixel shader form per draw kind x UberWhy: counted per scene draw decision (decided) and per owned item per flush (owned)
+        std::uint64_t uberDecided[static_cast<std::size_t>(draws::Kind::Count)][6] = {};
+        std::uint64_t uberOwned[static_cast<std::size_t>(draws::Kind::Count)][6] = {};
     };
     void setSceneDraws(bool on, std::uint32_t checkEvery);
     // F2c-4-0 (frame-ownership.md 7.19): scene ABI v2 (the view table). `on` = the retained draws also get the v2 form's pipeline (CachedDraw::scenePipeline2); the table itself
@@ -1048,6 +1052,8 @@ public:
             bool sceneActive = false;   // F2b-1: scene draws were on for this draw (a change remakes the packet)
             bool scenePending = false;  // ... and its scene variants / pipeline were not ready: retried until they are
             rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
+            rhi::ShaderModule uberAsked = rhi::ShaderModule::None;  // S-1a: the plain HLSL ubershader module the draw was offered (debug.ubershader; None = not built / not covered)
+            std::uint8_t uberPs = 0;  // S-1a: which pixel shader the scene form took: see UberWhy
         } v;
         std::uint32_t streamMask = 0;
         bool clusterUsing = false;      // ... or it drew with the entry's clustered copy (the draw is remade when the entry is gone)
@@ -1502,6 +1508,19 @@ public:
     // built from it in the background; a shader it cannot build stays translated. Applies to modules requested afterwards
     void setUbershader(bool on);
     void setUbershaderSkip(std::uint32_t mask);  // classes of material shader that stay translated (shader::uberClassMask)
+    // S-1a (frame-ownership.md 14.6): the pixel shader form a scene draw took, per draw kind (counted where the scene form is decided and again per owned item)
+    enum class UberWhy : std::uint8_t {
+        None = 0,        // the setting is off / not a material pixel shader (sky, particles ...): the translated shader, not a fallback
+        Uber = 1,        // the HLSL ubershader
+        Leaf = 2,        // ge_default_leafs.fx (S-1b): stays translated
+        Skipped = 3,     // class kept translated by debug.ubershader_skip
+        NoRequest = 4,   // the engine's request of this shader is unknown (no Shader::source)
+        Failed = 5,      // the ubershader did not build (or the translated scene form was taken first): translated
+        Count
+    };
+    UberWhy uberWhyOf(const Shader& ps, VariantSlot slot) const;  // the form a scene pixel shader of this slot took (device.cpp)
+    // the plain ubershader module a draw of `ps` is offered now (None: off, no request, not built / not covered): read only; CachedDraw::Variant::uberAsked is its value at capture
+    rhi::ShaderModule uberAskedNow(const Shader& ps) const;
     bool ubershader() const { return ubershader_.load(std::memory_order_relaxed); }
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
     rhi::ShaderModule variant(const ShaderRef& s, VariantSlot slot);
@@ -1690,7 +1709,8 @@ private:
     rhi::ShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (None when it fails to build)
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
     rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash);
-    rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag);
+    rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
+    void resetUberVariants();  // S-1a: debug.ubershader toggled at run time: every material pixel shader's variants are built again in the new form
     rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
     std::atomic<bool> ubershader_{false};
     std::atomic<std::uint64_t> ubershadersBuilt_{0}, ubershadersFailed_{0};
@@ -2141,7 +2161,9 @@ private:
         VariantSlot slot;
     };
     std::mutex variantMutex_;
-    std::condition_variable variantCv_;
+    std::condition_variable variantCv_, variantIdleCv_;
+    int variantBusy_ = 0;  // jobs a worker is building now (variantMutex_); resetUberVariants waits for 0
+    std::atomic<std::uint64_t> uberFallbacks_{0};  // S-1a: ubershader builds that failed and were taken by the translated shader
     std::deque<VariantJob> variantJobs_;
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
     std::mutex shaderJobMutex_;

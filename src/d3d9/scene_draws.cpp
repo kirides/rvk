@@ -11,6 +11,8 @@
 #include <atomic>
 #include <bit>
 #include <cstring>
+#include <format>
+#include <string>
 
 #include "core/f2c4_measure.h"
 #include "d3d9/device.h"
@@ -120,7 +122,8 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     // which pixel shader form the draw takes (computed like prepareDraw's choice): the G-buffer variant, the GI variant or the plain module; the
     // capture / motion variants, the tint view and the ubershader have no scene form
     VariantSlot base = VariantSlot::Base;
-    if (captureDraw || uberTaken || (!gbufWrite_ && !giDraw && pd.fs != ps_->module)) {
+    // (S-1a: a draw the plain ubershader took (uberTaken) gets the plain scene form, built from the ubershader too: Device::variantWorker)
+    if (captureDraw || (!gbufWrite_ && !giDraw && pd.fs != ps_->module && !uberTaken)) {
         ++sceneStats_.fbVariantKind;
         if (captureDraw && probe_ != nullptr) probe_->capture = true;
         return;
@@ -200,6 +203,11 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
             return;
         }
         scenePipe2_ = sp2;
+    }
+    if (scenePipe2_ != GamePipeline::None || scenePipe_ != GamePipeline::None) {
+        const UberWhy why = uberWhyOf(*ps_, scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs);
+        if (capture_ != nullptr) lastVariant_.uberPs = static_cast<std::uint8_t>(why);
+        ++sceneStats_.uberDecided[static_cast<std::size_t>(kind)][static_cast<std::size_t>(why)];
     }
 }
 
@@ -339,6 +347,7 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
         }
     }
     if (c.v.gate && !gbufTaken && ((c.v.staticOk && in.ambientLit) != c.v.wanted)) return variantRefusal(4, c);
+    if (!c.v.wanted && !c.v.gbufWanted && uberAskedNow(*c.ps) != c.v.uberAsked) return variantRefusal(7, c);  // S-1a: the ubershader module the draw was offered (or the setting) moved
     if (c.v.gate && c.v.wanted && !gbufTaken) {
         // the variant the draw was offered (None while it was still being built): a module that exists now makes the draw take another pixel shader and pipeline (variant(): read only)
         const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
@@ -840,6 +849,24 @@ void Device::sceneReport() {
         s.breaks[0] - l.breaks[0], s.breaks[1] - l.breaks[1], s.breaks[2] - l.breaks[2], s.breaks[3] - l.breaks[3], s.breaks[4] - l.breaks[4], s.groups - l.groups, s.fbNotBatchable - l.fbNotBatchable,
         s.fbVariantKind - l.fbVariantKind, s.fbVariantFailed - l.fbVariantFailed, s.fbVariantPending - l.fbVariantPending, s.fbPipelinePending - l.fbPipelinePending, s.fbNoRoom - l.fbNoRoom,
         s.fbRingFull - l.fbRingFull, s.fbNullAddress - l.fbNullAddress, s.checks, s.checkedBytes / 1024, s.checkDiffering, s.checkSkipped);
+    if (ubershader_.load(std::memory_order_relaxed)) {
+        // S-1a (frame-ownership.md 14.6): the pixel shader form of the scene draws per draw kind: decisions (new scene forms) and owned items (per flush) of this window.
+        // columns: ubershader / other translated (not a material shader) / leaf (S-1b) / class skipped / request unknown / build failed
+        std::string line;
+        for (std::size_t k = 0; k < static_cast<std::size_t>(draws::Kind::Count); ++k) {
+            std::uint64_t d[6], o[6], dt = 0, ot = 0;
+            for (std::size_t w = 0; w < 6; ++w) {
+                d[w] = s.uberDecided[k][w] - l.uberDecided[k][w];
+                o[w] = s.uberOwned[k][w] - l.uberOwned[k][w];
+                dt += d[w];
+                ot += o[w];
+            }
+            if (dt == 0 && ot == 0) continue;
+            line += std::format(" [{}: owned {} = uber {} other {} leaf {} skipped {} unknown {} failed {}; decided {} = uber {} other {} leaf {} skipped {} unknown {} failed {}]", draws::name(static_cast<draws::Kind>(k)), ot,
+                                o[1], o[0], o[2], o[3], o[4], o[5], dt, d[1], d[0], d[2], d[3], d[4], d[5]);
+        }
+        spdlog::info("native: owned shaders (5 s): HLSL ubershader on, translated builds after an ubershader failure {} (run total):{}", uberFallbacks_.load(), line.empty() ? std::string(" no scene draws") : line);
+    }
     sceneLast_ = s;
 }
 

@@ -3,7 +3,11 @@
 precompiled pixel shader? (docs/research/shader-permutations.md 8)
 
     python tools/ubershader_check.py out/matsrc/*.jsonl [--corpus game-shaders] [--jobs 6] [--trials 16] [--only HASH]
-                                     [--limit N] [-o out/ubershader]
+                                     [--limit N] [-o out/ubershader] [--scene | --scene2]
+
+--scene / --scene2 (S-1a, frame-ownership.md 14.6): the scene forms. The translated shader is the scene form of the corpus export (`rvk_shadertool export corpus
+game-shaders-scene --scene` / `game-shaders-scene2 --scene2`, the default --corpus of the mode), the ubershader is built with RVK_SCENE_RECORD (+ RVK_SCENE_VIEW), both run behind
+the scene pass-through vertex shader (test/eq_varyings.vert with the same defines) with one DrawRecord (+ ViewBlock2) made from the random constants (rvk_shadereq --scene).
 
 Input: the JSON lines of `-Setting debug.material_sources=true` runs (bin/rvk/cache/materials/sources.jsonl: one line per
 shader with its effect, entry function and the final macro list). For every pixel shader of ge_default_phong.fx (PS_Default /
@@ -30,8 +34,12 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, env=ENV, **kw)
 
 
-def defines(macros, entry, file='ge_default_phong.fx'):
+def defines(macros, entry, file='ge_default_phong.fx', scene=0):
     out = []
+    if scene >= 1:
+        out += ['-D', 'RVK_SCENE_RECORD=1']
+    if scene >= 2:
+        out += ['-D', 'RVK_SCENE_VIEW=1']
     if file == 'ge_default_leafs.fx':
         out += ['-D', 'RVK_LEAFS=1']
     for name, value in macros:
@@ -43,7 +51,7 @@ def defines(macros, entry, file='ge_default_phong.fx'):
     return out
 
 
-def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False):
+def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False, scene=0):
     h = entry['corpus']
     res = {'hash': entry['hash'], 'corpus': h, 'entry': entry['entry'], 'file': entry['file']}
     if entry['file'] not in ('ge_default_phong.fx', 'ge_default_leafs.fx') or entry['entry'] not in ('PS_Default', 'PS_DefaultZPass'):
@@ -60,12 +68,12 @@ def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False):
         res['status'] = 'TRANSLATED-ERR'
         res['log'] = (r.stdout + r.stderr).strip()[:400]
         return res
-    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry'], entry['file']))
+    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry'], entry['file'], scene))
     if r.returncode:
         res['status'] = 'PORT-ERR'
         res['log'] = (r.stdout + r.stderr).strip()[:600]
         return res
-    r = run([os.path.join(BIN, 'rvk_shadereq.exe'), '--vs', vs_spv, '--fs', a_spv, b_spv, '--trials', str(trials)])
+    r = run([os.path.join(BIN, 'rvk_shadereq.exe'), '--vs', vs_spv, '--fs', a_spv, b_spv, '--trials', str(trials)] + (['--scene2'] if scene >= 2 else ['--scene'] if scene == 1 else []))
     tail = r.stdout.strip().splitlines()
     last = tail[-1] if tail else r.stderr.strip()[:300]
     res['status'] = 'EQUAL' if r.returncode == 0 and last.startswith('EQUAL') else 'DIFF'
@@ -82,7 +90,9 @@ def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('db', nargs='+', help='sources.jsonl files (globs ok); the union by shader hash is checked')
-    ap.add_argument('--corpus', default=os.path.join(ROOT, 'game-shaders'))
+    ap.add_argument('--corpus', default='')
+    ap.add_argument('--scene', action='store_true', help='scene ABI v1 forms (RVK_SCENE_RECORD)')
+    ap.add_argument('--scene2', action='store_true', help='scene ABI v2 forms (RVK_SCENE_RECORD + RVK_SCENE_VIEW)')
     ap.add_argument('--jobs', type=int, default=6)
     ap.add_argument('--trials', type=int, default=16)
     ap.add_argument('--only', default='')
@@ -92,6 +102,9 @@ def main():
     ap.add_argument('-o', '--out', default=os.path.join(ROOT, 'out', 'ubershader'))
     a = ap.parse_args()
 
+    scene = 2 if a.scene2 else 1 if a.scene else 0
+    if not a.corpus:
+        a.corpus = os.path.join(ROOT, ['game-shaders', 'game-shaders-scene', 'game-shaders-scene2'][scene])
     entries = {}
     for pat in a.db:
         for f in glob.glob(pat):
@@ -106,14 +119,14 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix='ubershader_')
     vs_spv = os.path.join(tmp, 'eq_varyings.spv')
-    r = run([TOOL, 'hlsl', 'test/eq_varyings.vert', '-o', vs_spv])
+    r = run([TOOL, 'hlsl', 'test/eq_varyings.vert', '-o', vs_spv] + (['-D', 'RVK_SCENE_RECORD=1'] if scene else []) + (['-D', 'RVK_SCENE_VIEW=1'] if scene >= 2 else []))
     if r.returncode:
         print(r.stderr)
         return 2
     t0 = time.time()
     results = []
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = [ex.submit(check, e, tmp, a.corpus, vs_spv, a.trials, a.keep) for e in todo]
+        futs = [ex.submit(check, e, tmp, a.corpus, vs_spv, a.trials, a.keep, scene) for e in todo]
         for i, f in enumerate(cf.as_completed(futs)):
             results.append(f.result())
             if (i + 1) % 25 == 0:

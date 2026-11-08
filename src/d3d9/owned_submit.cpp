@@ -36,7 +36,7 @@ Device::OwnedWhy Device::submitOwned(const CachedDraw& c, const DeriveIn& in, co
     if (!c.valid || c.vs == nullptr || c.ps == nullptr || c.scenePipeline == GamePipeline::None || !sceneDrawsOn_ || !sceneAvail_) return OwnedWhy::NoScene;
     if (!ownedBindingsLive(in)) return OwnedWhy::Derive;
     // the shaders read their floats through the windows (a full-block shader would read the register file)
-    if (!splitConstants_ || !c.vs->reflection.splitConsts || !c.ps->reflection.splitConsts || ubershader_.load(std::memory_order_relaxed)) return OwnedWhy::Split;
+    if (!splitConstants_ || !c.vs->reflection.splitConsts || !c.ps->reflection.splitConsts) return OwnedWhy::Split;
     // observers (RT scene, GI, object motion) are shown the draw at prepare / replay time with the device's tag and registers: draws they observe stay composed
     for (DrawObserver* o : observers_) {
         if (o->observes(c.kind, c.phase)) return OwnedWhy::Consumers;

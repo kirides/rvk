@@ -32,7 +32,7 @@ inline std::uint64_t hmixF(std::uint64_t h, float f) { return hmix(h, std::bit_c
 
 // everything deriveScene / replayOwned read from the device that is not the draw's: a hash of it, as an epoch (moves when the hash differs from this pass kind's last)
 std::uint64_t Device::ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok) const {
-    ok = sceneActive() && sceneViewsReady() && viewSlot < sceneViews_.slots && splitConstants_ && !ubershader_.load(std::memory_order_relaxed) && tint_ == draws::TintMode::Off &&
+    ok = sceneActive() && sceneViewsReady() && viewSlot < sceneViews_.slots && splitConstants_ && tint_ == draws::TintMode::Off &&
          !(gbuf_.active && !gbufArmed_) && stats_.totalDraws >= options_.logDraws && !wp0_.on && customVertices_ == 0 && !up_.active;
     std::uint64_t h = 0xcbf29ce484222325ull;
     const scene::Phase ph = phases_.current();
@@ -540,6 +540,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
             return false;
         }
     }
+    for (const OwnedItem& it : items) ++sceneStats_.uberOwned[static_cast<std::size_t>(it.cd->kind)][it.cd->v.uberPs];  // (S-1a: the pixel shader form of each owned item)
     // F2c-4c: the GPU compaction copies each record's own args: they must be the draw's (the signature covers them; this is the per-item tripwire)
     gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
     bool gpu = compact.usable(*this);

@@ -225,7 +225,7 @@ std::string ctabComment(const std::vector<std::uint32_t>& tokens) {
     return out;
 }
 
-int cmdExport(const fs::path& dir, const fs::path& out) {
+int cmdExport(const fs::path& dir, const fs::path& out, bool scene = false, bool sceneView = false) {
     fs::create_directories(out / "include");
     for (const char* inc : {"rvk_draw.hlsli", "rvk_abi.hlsli", "rvk_common.hlsli", "rvk_oct.hlsli"}) {
         std::ofstream(out / "include" / inc, std::ios::binary) << embedded::hlslSource(std::string("include/") + inc);
@@ -241,7 +241,10 @@ int cmdExport(const fs::path& dir, const fs::path& out) {
     for (const auto& f : files) {
         const auto tokens = readTokens(f);
         const DecodeResult dec = decode(tokens);
-        const HlslResult g = dec.ok() ? toHlsl(dec.program) : HlslResult{};
+        TranslateOptions options;
+        options.sceneRecord = scene || sceneView;  // S-1a: `export ... --scene` / `--scene2` = the scene forms the ubershader's scene form is compared with
+        options.sceneView = sceneView;
+        const HlslResult g = dec.ok() ? toHlsl(dec.program, options) : HlslResult{};
         if (!dec.ok() || !g.ok()) {
             ++failed;
             std::printf("FAIL %s: %s\n", f.filename().string().c_str(), dec.ok() ? g.error.c_str() : dec.error.c_str());
@@ -470,7 +473,12 @@ int main(int argc, char** argv) {
             std::printf("usage: rvk_shadertool export <corpus dir> <out dir>\n");
             return 2;
         }
-        return cmdExport(argv[2], argv[3]);
+        bool scene = false, view = false;
+        for (int i = 4; i < argc; ++i) {
+            scene |= std::string(argv[i]) == "--scene";
+            view |= std::string(argv[i]) == "--scene2";
+        }
+        return cmdExport(argv[2], argv[3], scene, view);
     }
     if (cmd == "dxil-check") return cmdDxilCheck(argc, argv);
     if (cmd == "hlsl") return cmdHlsl(argc, argv);
