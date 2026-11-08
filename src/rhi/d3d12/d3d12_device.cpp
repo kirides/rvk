@@ -887,7 +887,7 @@ public:
             D3D12_INPUT_ELEMENT_DESC e{};
             e.SemanticName = "ATTR";
             e.SemanticIndex = a.location;
-            e.Format = toDxgi(a.format);
+            e.Format = toDxgiVertex(a.format);
             e.InputSlot = a.binding;
             e.AlignedByteOffset = a.offset;
             e.InputSlotClass = perInstance ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
