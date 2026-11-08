@@ -39,90 +39,167 @@
 #define RVK_NEED_WEIGHTS2 (XFX_ST_LEAFMESH || XFX_ST_LEAFCARDS || XFX_VEGETATION || XFX_ST_BILLBOARDS)
 #define RVK_NEED_NORMDELTA12 (XFX_ST_LEAFMESH || XFX_MORPHED)
 
-// location numbers: the order below, an attribute that is not read takes no location (RVK_N7.. count the declared ones)
-#define RVK_N7 7
+// ---- attribute locations -------------------------------------------------------------------------------------------------------
+// Every attribute the shader reads has RVK_LOC_<name> (its location) + RVK_SEM_<name> (its semantic: ATTR<location>, the name the D3D12 input layout uses).
+// Run time (RVK_VS_DECL, shader::uberVertexHlsl): the draw's own vertex shader bytecode declares the inputs, the generator defines one pair per declared
+// input (location = the dcl register, as the translator's ATTR<n>), so the pipeline's vertex input state (built for the engine's shader) fits this one.
+// Offline (no RVK_VS_DECL: the equivalence checks, dxil-check, the corpus tools): the order below, from the macros.
+#ifndef RVK_VS_DECL
+#define RVK_LOC_aPos 0
+#define RVK_SEM_aPos ATTR0
+#define RVK_LOC_aNorm 1
+#define RVK_SEM_aNorm ATTR1
+#define RVK_LOC_aTangent 2
+#define RVK_SEM_aTangent ATTR2
+#define RVK_LOC_aCol0 3
+#define RVK_SEM_aCol0 ATTR3
+#define RVK_LOC_aCol1 4
+#define RVK_SEM_aCol1 ATTR4
+#define RVK_LOC_aTex0 5
+#define RVK_SEM_aTex0 ATTR5
+#define RVK_LOC_aLightmap 6
+#define RVK_SEM_aLightmap ATTR6
 #if XFX_VS_INPUT_TEXSETS > 1
-#define RVK_N8 (RVK_N7 + 3)
+#define RVK_LOC_aTex1 7
+#define RVK_SEM_aTex1 ATTR7
+#define RVK_LOC_aTex2 8
+#define RVK_SEM_aTex2 ATTR8
+#define RVK_LOC_aTex3 9
+#define RVK_SEM_aTex3 ATTR9
+#define RVK_N7 10
+#else
+#define RVK_N7 7
+#endif
+#if RVK_NEED_INSTANCE
+#define RVK_LOC_aInstance RVK_N7
+#define RVK_SEM_aInstance ATTR10
+#define RVK_N8 (RVK_N7 + 1)
 #else
 #define RVK_N8 RVK_N7
 #endif
-#if RVK_NEED_INSTANCE
+#if RVK_NEED_BILLBOARD
+#define RVK_LOC_aBillboard RVK_N8
+#define RVK_SEM_aBillboard ATTR11
 #define RVK_N9 (RVK_N8 + 1)
 #else
 #define RVK_N9 RVK_N8
 #endif
-#if RVK_NEED_BILLBOARD
+#if RVK_NEED_INDICES0
+#define RVK_LOC_aIndices0 RVK_N9
+#define RVK_SEM_aIndices0 ATTR12
 #define RVK_N10 (RVK_N9 + 1)
 #else
 #define RVK_N10 RVK_N9
 #endif
-#if RVK_NEED_INDICES0
+#if RVK_NEED_WEIGHTS0
+#define RVK_LOC_aWeights0 RVK_N10
+#define RVK_SEM_aWeights0 ATTR13
 #define RVK_N11 (RVK_N10 + 1)
 #else
 #define RVK_N11 RVK_N10
 #endif
-#if RVK_NEED_WEIGHTS0
+#if RVK_NEED_WEIGHTS1
+#define RVK_LOC_aWeights1 RVK_N11
+#define RVK_SEM_aWeights1 ATTR14
 #define RVK_N12 (RVK_N11 + 1)
 #else
 #define RVK_N12 RVK_N11
 #endif
-#if RVK_NEED_WEIGHTS1
+#if RVK_NEED_WEIGHTS2
+#define RVK_LOC_aWeights2 RVK_N12
+#define RVK_SEM_aWeights2 ATTR15
 #define RVK_N13 (RVK_N12 + 1)
 #else
 #define RVK_N13 RVK_N12
 #endif
-#if RVK_NEED_WEIGHTS2
-#define RVK_N14 (RVK_N13 + 1)
+#if RVK_NEED_NORMDELTA12
+#define RVK_LOC_aNormDelta1 RVK_N13
+#define RVK_SEM_aNormDelta1 ATTR16
+#define RVK_LOC_aNormDelta2 (RVK_N13 + 1)
+#define RVK_SEM_aNormDelta2 ATTR17
+#define RVK_N14 (RVK_N13 + 2)
 #else
 #define RVK_N14 RVK_N13
 #endif
-#if RVK_NEED_NORMDELTA12
-#define RVK_N15 (RVK_N14 + 2)
-#else
-#define RVK_N15 RVK_N14
+#if XFX_MORPHED
+#define RVK_LOC_aPosDelta1 RVK_N14
+#define RVK_SEM_aPosDelta1 ATTR18
+#define RVK_LOC_aPosDelta2 (RVK_N14 + 1)
+#define RVK_SEM_aPosDelta2 ATTR19
+#define RVK_LOC_aPosDelta3 (RVK_N14 + 2)
+#define RVK_SEM_aPosDelta3 ATTR20
+#define RVK_LOC_aNormDelta3 (RVK_N14 + 3)
+#define RVK_SEM_aNormDelta3 ATTR21
 #endif
+#endif  // !RVK_VS_DECL
 
 // ---- vertex inputs (sVSInput_Default); unread ones stay zero -------------------------------------------------------------------
 struct RvkVsIn {
-    [[vk::location(0)]] float4 aPos : ATTR0;       // POSITION0 (w: billboard corner index for SpeedTree billboards)
-    [[vk::location(1)]] float3 aNorm : ATTR1;      // NORMAL0
-    [[vk::location(2)]] float3 aTangent : ATTR2;   // TANGENT0
-    [[vk::location(3)]] float4 aCol0 : ATTR3;      // COLOR0 (r: binormal sign)
-    [[vk::location(4)]] float4 aCol1 : ATTR4;      // COLOR1 (a: vertex ambient occlusion)
-    [[vk::location(5)]] float2 aTex0 : ATTR5;      // TEXCOORD0
-    [[vk::location(6)]] float2 aLightmap : ATTR6;  // TEXCOORD6
-#if XFX_VS_INPUT_TEXSETS > 1
-    [[vk::location(RVK_N7)]] float2 aTex1 : ATTR7;      // TEXCOORD1
-    [[vk::location(RVK_N7 + 1)]] float2 aTex2 : ATTR8;  // TEXCOORD2
-    [[vk::location(RVK_N7 + 2)]] float2 aTex3 : ATTR9;  // TEXCOORD3
+#ifdef RVK_LOC_aPos
+    [[vk::location(RVK_LOC_aPos)]] float4 aPos : RVK_SEM_aPos;  // POSITION0 (w: billboard corner index for SpeedTree billboards)
 #endif
-#if RVK_NEED_INSTANCE
-    [[vk::location(RVK_N8)]] float aInstance : ATTR10;  // TEXCOORD4: instance index
+#ifdef RVK_LOC_aNorm
+    [[vk::location(RVK_LOC_aNorm)]] float3 aNorm : RVK_SEM_aNorm;  // NORMAL0
 #endif
-#if RVK_NEED_BILLBOARD
-    [[vk::location(RVK_N9)]] float2 aBillboard : ATTR11;  // TEXCOORD5: billboard u / v axis scale
+#ifdef RVK_LOC_aTangent
+    [[vk::location(RVK_LOC_aTangent)]] float3 aTangent : RVK_SEM_aTangent;  // TANGENT0
 #endif
-#if RVK_NEED_INDICES0
-    [[vk::location(RVK_N10)]] float4 aIndices0 : ATTR12;  // BLENDINDICES0
+#ifdef RVK_LOC_aCol0
+    [[vk::location(RVK_LOC_aCol0)]] float4 aCol0 : RVK_SEM_aCol0;  // COLOR0 (r: binormal sign)
 #endif
-#if RVK_NEED_WEIGHTS0
-    [[vk::location(RVK_N11)]] float4 aWeights0 : ATTR13;  // BLENDWEIGHT0
+#ifdef RVK_LOC_aCol1
+    [[vk::location(RVK_LOC_aCol1)]] float4 aCol1 : RVK_SEM_aCol1;  // COLOR1 (a: vertex ambient occlusion)
 #endif
-#if RVK_NEED_WEIGHTS1
-    [[vk::location(RVK_N12)]] float4 aWeights1 : ATTR14;  // BLENDWEIGHT1
+#ifdef RVK_LOC_aTex0
+    [[vk::location(RVK_LOC_aTex0)]] float2 aTex0 : RVK_SEM_aTex0;  // TEXCOORD0
 #endif
-#if RVK_NEED_WEIGHTS2
-    [[vk::location(RVK_N13)]] float4 aWeights2 : ATTR15;  // BLENDWEIGHT2
+#ifdef RVK_LOC_aLightmap
+    [[vk::location(RVK_LOC_aLightmap)]] float2 aLightmap : RVK_SEM_aLightmap;  // TEXCOORD6
 #endif
-#if RVK_NEED_NORMDELTA12
-    [[vk::location(RVK_N14)]] float3 aNormDelta1 : ATTR16;      // NORMAL1
-    [[vk::location(RVK_N14 + 1)]] float3 aNormDelta2 : ATTR17;  // NORMAL2
+#ifdef RVK_LOC_aTex1
+    [[vk::location(RVK_LOC_aTex1)]] float2 aTex1 : RVK_SEM_aTex1;  // TEXCOORD1
 #endif
-#if XFX_MORPHED
-    [[vk::location(RVK_N15)]] float4 aPosDelta1 : ATTR18;      // POSITION1
-    [[vk::location(RVK_N15 + 1)]] float4 aPosDelta2 : ATTR19;  // POSITION2
-    [[vk::location(RVK_N15 + 2)]] float4 aPosDelta3 : ATTR20;  // POSITION3
-    [[vk::location(RVK_N15 + 3)]] float3 aNormDelta3 : ATTR21;  // NORMAL3
+#ifdef RVK_LOC_aTex2
+    [[vk::location(RVK_LOC_aTex2)]] float2 aTex2 : RVK_SEM_aTex2;  // TEXCOORD2
+#endif
+#ifdef RVK_LOC_aTex3
+    [[vk::location(RVK_LOC_aTex3)]] float2 aTex3 : RVK_SEM_aTex3;  // TEXCOORD3
+#endif
+#ifdef RVK_LOC_aInstance
+    [[vk::location(RVK_LOC_aInstance)]] float aInstance : RVK_SEM_aInstance;  // TEXCOORD4: instance index
+#endif
+#ifdef RVK_LOC_aBillboard
+    [[vk::location(RVK_LOC_aBillboard)]] float2 aBillboard : RVK_SEM_aBillboard;  // TEXCOORD5: billboard u / v axis scale
+#endif
+#ifdef RVK_LOC_aIndices0
+    [[vk::location(RVK_LOC_aIndices0)]] float4 aIndices0 : RVK_SEM_aIndices0;  // BLENDINDICES0
+#endif
+#ifdef RVK_LOC_aWeights0
+    [[vk::location(RVK_LOC_aWeights0)]] float4 aWeights0 : RVK_SEM_aWeights0;  // BLENDWEIGHT0
+#endif
+#ifdef RVK_LOC_aWeights1
+    [[vk::location(RVK_LOC_aWeights1)]] float4 aWeights1 : RVK_SEM_aWeights1;  // BLENDWEIGHT1
+#endif
+#ifdef RVK_LOC_aWeights2
+    [[vk::location(RVK_LOC_aWeights2)]] float4 aWeights2 : RVK_SEM_aWeights2;  // BLENDWEIGHT2
+#endif
+#ifdef RVK_LOC_aNormDelta1
+    [[vk::location(RVK_LOC_aNormDelta1)]] float3 aNormDelta1 : RVK_SEM_aNormDelta1;  // NORMAL1
+#endif
+#ifdef RVK_LOC_aNormDelta2
+    [[vk::location(RVK_LOC_aNormDelta2)]] float3 aNormDelta2 : RVK_SEM_aNormDelta2;  // NORMAL2
+#endif
+#ifdef RVK_LOC_aPosDelta1
+    [[vk::location(RVK_LOC_aPosDelta1)]] float4 aPosDelta1 : RVK_SEM_aPosDelta1;  // POSITION1
+#endif
+#ifdef RVK_LOC_aPosDelta2
+    [[vk::location(RVK_LOC_aPosDelta2)]] float4 aPosDelta2 : RVK_SEM_aPosDelta2;  // POSITION2
+#endif
+#ifdef RVK_LOC_aPosDelta3
+    [[vk::location(RVK_LOC_aPosDelta3)]] float4 aPosDelta3 : RVK_SEM_aPosDelta3;  // POSITION3
+#endif
+#ifdef RVK_LOC_aNormDelta3
+    [[vk::location(RVK_LOC_aNormDelta3)]] float3 aNormDelta3 : RVK_SEM_aNormDelta3;  // NORMAL3
 #endif
 #ifdef RVK_SCENE_RECORD
     [[vk::location(RVK_SCENE_REF_LOCATION)]] uint2 rvk_sceneRef : ATTR24;  // abi.h kSceneRefLocation: (record index, free), per instance
@@ -158,14 +235,16 @@ static sVSInput_Default input;
 // ---- outputs: sVSOutput_Default (the pixel shader's inputs; vPos = SV_Position) ----------------------------------------------
 struct RvkVsOut {
     float4 position : SV_Position;
+    // all float4 and in ascending location order: D3D12 links the stages by register (declaration order) and by component mask, and the translated
+    // pixel shaders read float4 varyings (the translator's own vertex outputs are float4 too)
     [[vk::location(0)]] float4 rvk_vTex0 : VARY0;
     [[vk::location(1)]] float4 rvk_vTex1 : VARY1;
     [[vk::location(2)]] float4 rvk_vViewPos : VARY2;
     [[vk::location(3)]] float4 rvk_vPositionAndAlpha : VARY3;
     [[vk::location(4)]] float4 rvk_vNormalAndAO : VARY4;
-    [[vk::location(5)]] float3 rvk_vTangent : VARY5;
-    [[vk::location(6)]] float3 rvk_vBinormal : VARY6;
-    [[vk::location(7)]] float2 rvk_vLightmap : VARY7;
+    [[vk::location(5)]] float4 rvk_vTangent : VARY5;
+    [[vk::location(6)]] float4 rvk_vBinormal : VARY6;
+    [[vk::location(7)]] float4 rvk_vLightmap : VARY7;
 #ifndef __spirv__
     [[vk::location(8)]] float4 rvk_vPad8 : VARY8;
     [[vk::location(9)]] float4 rvk_vPad9 : VARY9;
@@ -176,10 +255,12 @@ struct RvkVsOut {
 #ifndef RVK_SCENE_RECORD
     [[vk::location(14)]] float4 rvk_vPad14 : VARY14;
 #endif
-    [[vk::location(15)]] float4 rvk_vPad15 : VARY15;
 #endif
 #ifdef RVK_SCENE_RECORD
     [[vk::location(14)]] nointerpolation uint rvk_sceneIdx : VARY14;  // abi.h kSceneVaryingLocation: the DrawRecord index (scene variant)
+#endif
+#ifndef __spirv__
+    [[vk::location(15)]] float4 rvk_vPad15 : VARY15;
 #endif
     [[vk::location(16)]] float4 rvk_vColor0 : VARY16;
 };
@@ -516,69 +597,76 @@ void Transform(out float3 a_vecWorldPosition, out float3 a_vecWorldNormal, out f
 
 void loadInputs(RvkVsIn rvk_in) {
     [unroll] for (int rvk_i = 0; rvk_i < 20; ++rvk_i) g_vShaderData[rvk_i] = RVK_VSC(232 + rvk_i);
+    input = (sVSInput_Default)0;
+#ifdef RVK_LOC_aPos
     input.vPos = rvk_in.aPos;
+#endif
+#ifdef RVK_LOC_aNorm
     input.vNorm = rvk_in.aNorm;
+#endif
+#ifdef RVK_LOC_aTangent
     input.vTangent = rvk_in.aTangent;
+#endif
+#ifdef RVK_LOC_aCol0
     input.vCol0 = rvk_in.aCol0;
+#endif
+#ifdef RVK_LOC_aCol1
     input.vCol1 = rvk_in.aCol1;
+#endif
+#ifdef RVK_LOC_aTex0
     input.vTex0 = rvk_in.aTex0;
+#endif
+#ifdef RVK_LOC_aLightmap
     input.vLightmap = rvk_in.aLightmap;
-#if XFX_VS_INPUT_TEXSETS > 1
+#endif
+#ifdef RVK_LOC_aTex1
     input.vTex1 = rvk_in.aTex1;
+#endif
+#ifdef RVK_LOC_aTex2
     input.vTex2 = rvk_in.aTex2;
+#endif
+#ifdef RVK_LOC_aTex3
     input.vTex3 = rvk_in.aTex3;
-#else
-    input.vTex1 = float2(0.0, 0.0);
-    input.vTex2 = float2(0.0, 0.0);
-    input.vTex3 = float2(0.0, 0.0);
 #endif
-#if RVK_NEED_INSTANCE
+#ifdef RVK_LOC_aInstance
     input.vInstance = rvk_in.aInstance;
-#else
-    input.vInstance = 0.0;
 #endif
-#if RVK_NEED_BILLBOARD
+#ifdef RVK_LOC_aBillboard
     input.vBillboard = rvk_in.aBillboard;
-#else
-    input.vBillboard = float2(0.0, 0.0);
 #endif
-#if RVK_NEED_INDICES0
+#ifdef RVK_LOC_aIndices0
     input.vIndices0 = int4(rvk_in.aIndices0);
-#else
-    input.vIndices0 = int4(0, 0, 0, 0);
 #endif
-#if RVK_NEED_WEIGHTS0
+#ifdef RVK_LOC_aWeights0
     input.vWeights0 = rvk_in.aWeights0;
-#else
-    input.vWeights0 = float4(0.0, 0.0, 0.0, 0.0);
 #endif
-#if RVK_NEED_WEIGHTS1
+#ifdef RVK_LOC_aWeights1
     input.vWeights1 = rvk_in.aWeights1;
-#else
-    input.vWeights1 = float4(0.0, 0.0, 0.0, 0.0);
+#ifdef RVK_LOD_FADE
+    // the billboard fade variant (Device::lodModule): the fade distances scaled by the frame parameter RVK_LOD_FADE (lod.trees)
+    input.vWeights1.xy *= rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[RVK_LOD_FADE].x;
 #endif
-#if RVK_NEED_WEIGHTS2
+#endif
+#ifdef RVK_LOC_aWeights2
     input.vWeights2 = rvk_in.aWeights2;
-#else
-    input.vWeights2 = float4(0.0, 0.0, 0.0, 0.0);
 #endif
-#if RVK_NEED_NORMDELTA12
+#ifdef RVK_LOC_aNormDelta1
     input.vNormDelta1 = rvk_in.aNormDelta1;
-    input.vNormDelta2 = rvk_in.aNormDelta2;
-#else
-    input.vNormDelta1 = float3(0.0, 0.0, 0.0);
-    input.vNormDelta2 = float3(0.0, 0.0, 0.0);
 #endif
-#if XFX_MORPHED
+#ifdef RVK_LOC_aNormDelta2
+    input.vNormDelta2 = rvk_in.aNormDelta2;
+#endif
+#ifdef RVK_LOC_aPosDelta1
     input.vPosDelta1 = rvk_in.aPosDelta1;
+#endif
+#ifdef RVK_LOC_aPosDelta2
     input.vPosDelta2 = rvk_in.aPosDelta2;
+#endif
+#ifdef RVK_LOC_aPosDelta3
     input.vPosDelta3 = rvk_in.aPosDelta3;
+#endif
+#ifdef RVK_LOC_aNormDelta3
     input.vNormDelta3 = rvk_in.aNormDelta3;
-#else
-    input.vPosDelta1 = float4(0.0, 0.0, 0.0, 0.0);
-    input.vPosDelta2 = float4(0.0, 0.0, 0.0, 0.0);
-    input.vPosDelta3 = float4(0.0, 0.0, 0.0, 0.0);
-    input.vNormDelta3 = float3(0.0, 0.0, 0.0);
 #endif
 }
 
@@ -675,9 +763,9 @@ RvkVsOut VSMain(RvkVsIn rvk_in) {
     rvk_out.rvk_vViewPos = o.vViewPos;
     rvk_out.rvk_vPositionAndAlpha = o.vPositionAndAlpha;
     rvk_out.rvk_vNormalAndAO = o.vNormalAndAO;
-    rvk_out.rvk_vTangent = o.vTangent;
-    rvk_out.rvk_vBinormal = o.vBinormal;
-    rvk_out.rvk_vLightmap = o.vLightmap;
+    rvk_out.rvk_vTangent = float4(o.vTangent, 0.0);
+    rvk_out.rvk_vBinormal = float4(o.vBinormal, 0.0);
+    rvk_out.rvk_vLightmap = float4(o.vLightmap, 0.0, 0.0);
     rvk_out.rvk_vColor0 = o.vColor0;
     // the translator's half-pixel fix
     float4 rvk_pos = o.vPos;

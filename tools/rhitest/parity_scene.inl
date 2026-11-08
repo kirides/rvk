@@ -372,7 +372,9 @@ struct CorpusShader {
 };
 
 // the first suitable vertex shaders and the pixel shader with the most textures whose varyings a vertex shader writes
-void testSceneCorpus(Harness& h, bool v2 = false) {
+// uberVs (S-1b): the scene vertex shader is the HLSL port (shader::uberVertexHlsl, the macros of the captured request, the bytecode's declared inputs) of two fixed
+// corpus vertex shaders (a rigid mesh and a skinned one) instead of their translation; the plain reference draw stays the translated shader
+void testSceneCorpus(Harness& h, bool v2 = false, bool uberVs = false) {
     rhi::Device& dev = h.dev;
     const std::filesystem::path dir = findCorpus();
     if (dir.empty()) {
@@ -415,6 +417,23 @@ void testSceneCorpus(Harness& h, bool v2 = false) {
         if (!bones && hasInput(r, shader::Usage::Normal) && hasInput(r, shader::Usage::TexCoord) && rigid.size() < 1) rigid.push_back({f, r});
         if (!skinned.empty() && !rigid.empty()) break;
     }
+    shader::MacroList uberMacros[2];
+    if (uberVs) {
+        rigid.clear();
+        skinned.clear();
+        const std::pair<const char*, shader::MacroList> fixed[2] = {
+            {"vs30_b5abe188ee334009.bin", {{"XFX_SHADERMODEL_3", "true"}, {"XFX_QUALITY", "2"}, {"XFX_TANGENTSPACE", "1"}, {"XFX_TANGENTSPACE_EYE", "1"},
+                                           {"XFX_VS_TEX0", "( XFX_VS_INPUT_TEX0 * g_vShaderData[0].xy )"}, {"XFX_VS_TEX1", "XFX_VS_INPUT_TEX0"}}},
+            {"vs30_b362997c486c91b1.bin", {{"XFX_SHADERMODEL_3", "true"}, {"XFX_QUALITY", "2"}, {"XFX_SKINNED", "true"}, {"XFX_TANGENTSPACE", "1"},
+                                           {"XFX_VS_TEX0", "XFX_VS_INPUT_TEX0"}}}};
+        for (int k = 0; k < 2; ++k) {
+            const std::filesystem::path f = dir / fixed[k].first;
+            shader::Reflection r;
+            if (!std::filesystem::exists(f) || !reflect(f, r) || !r.splitConsts || (r.varyingMask & (1u << abi::kSceneVaryingLocation)) != 0) continue;
+            (k == 0 ? rigid : skinned).push_back({f, r});
+            uberMacros[k] = fixed[k].second;
+        }
+    }
     // pixel shaders: the most 2D / cube textures among those whose varyings a vertex shader covers
     const auto pickPs = [&](const Vs& v, int minSamplers, std::filesystem::path& file, shader::Reflection& refl) {
         int best = -1;
@@ -436,7 +455,7 @@ void testSceneCorpus(Harness& h, bool v2 = false) {
         }
         return best >= 0;
     };
-    const std::string suffix = v2 ? ", ABI v2)" : ")";
+    const std::string suffix = std::string(uberVs ? ", uber vertex shader" : "") + (v2 ? ", ABI v2)" : ")");
     const std::string labels[2] = {"scene variant (corpus: rigid mesh + lit material" + suffix, "scene variant (corpus: skinned mesh + material" + suffix};
     const struct {
         const char* label;
@@ -444,7 +463,8 @@ void testSceneCorpus(Harness& h, bool v2 = false) {
         int minSamplers;
     } cases[2] = {{labels[0].c_str(), rigid.empty() ? nullptr : &rigid[0], 4}, {labels[1].c_str(), skinned.empty() ? nullptr : &skinned[0], 2}};
     shader::Reflection ignored;
-    for (const auto& k : cases) {
+    for (int ki = 0; ki < 2; ++ki) {
+        const auto& k = cases[ki];
         if (k.vs == nullptr || !selected(k.label)) {
             if (k.vs == nullptr) std::printf("[%s] %s: SKIP (no suitable vertex shader in the corpus)\n", rhi::backendName(dev.caps().backend), k.label);
             continue;
@@ -463,9 +483,17 @@ void testSceneCorpus(Harness& h, bool v2 = false) {
         const std::vector<std::uint32_t> vsTokens = readTokensFile(k.vs->file), psTokens = readTokensFile(psFile);
         shader::Reflection vsRefl;
         if (!translatedTokens(vsTokens, plainOpt, c.vs, "scene_corpus_vs", &vsRefl) || !translatedTokens(psTokens, plainOpt, c.ps, "scene_corpus_ps") ||
-            !translatedTokens(vsTokens, sceneOpt, c.svs, "scene_corpus_vs_s") || !translatedTokens(psTokens, sceneOpt, c.sps, "scene_corpus_ps_s")) {
+            (!uberVs && !translatedTokens(vsTokens, sceneOpt, c.svs, "scene_corpus_vs_s")) || !translatedTokens(psTokens, sceneOpt, c.sps, "scene_corpus_ps_s")) {
             check(false, c.label + ": translation");
             continue;
+        }
+        if (uberVs) {
+            std::vector<shader::VertexInput> inputs;
+            for (const auto& in : vsRefl.vertexInputs) inputs.push_back({in.usage, in.usageIndex, in.location});
+            if (!compileBoth("scene_corpus_uber_vs_s.hlsl", shader::uberVertexHlsl("ge_default_phong.fx", "VS_Default", uberMacros[ki], inputs, true, v2), "VSMain", "vs_6_6", c.svs)) {
+                check(false, c.label + ": uber vertex shader");
+                continue;
+            }
         }
         std::printf("  %s: vs %s + ps %s (%d textures)\n", k.label, k.vs->file.filename().string().c_str(), psFile.filename().string().c_str(),
                     static_cast<int>(std::count_if(psRefl.samplers.begin(), psRefl.samplers.begin() + abi::kPixelSamplers, [](auto t) { return t != shader::TextureType::Unknown; })));
@@ -555,4 +583,7 @@ void testScene(Harness& h) {
     testSceneUber(h, "masked", maskedZRequest(), {}, false, true, "PS_DefaultZPass");
     testSceneUber(h, "gbuffer + gi hooks", heavyRequest(), kHookDefines, true, true);
     testSceneCorpus(h, true);
+    // S-1b: the same corpus draws with the HLSL port as the scene vertex shader (both ABI forms)
+    testSceneCorpus(h, false, true);
+    testSceneCorpus(h, true, true);
 }

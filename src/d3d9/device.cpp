@@ -1617,13 +1617,25 @@ namespace {
 std::atomic<std::uint32_t> g_uberSkip{0};  // debug.ubershader_skip
 
 bool uberCovers(const MaterialSource& src) {
-    return shader::uberSupports(src.file, src.entry) &&
+    return shader::uberSupportsFile(src.file, src.entry) &&
            (shader::uberClassMask(src.entry, src.macros) & g_uberSkip.load(std::memory_order_relaxed)) == 0;
 }
 
 bool uberBaseOptions(const Shader& s, shader::TranslateOptions& o) {
     const MaterialSource* src = s.source.load(std::memory_order_acquire);
     if (s.stage != shader::Stage::Pixel || src == nullptr || !uberCovers(*src)) return false;
+    o.uber = true;
+    return true;
+}
+
+// S-1b: the scene vertex shader of a request the port covers (debug.ubershader_skip bit 256 keeps the vertex shaders translated: the A/B)
+bool uberVsCovers(const MaterialSource& src) {
+    return shader::uberVsSupports(src.file, src.entry) && (g_uberSkip.load(std::memory_order_relaxed) & 256u) == 0;
+}
+
+bool uberVertexOptions(const Shader& s, shader::TranslateOptions& o) {
+    const MaterialSource* src = s.source.load(std::memory_order_acquire);
+    if (s.stage != shader::Stage::Vertex || src == nullptr || !uberVsCovers(*src)) return false;
     o.uber = true;
     return true;
 }
@@ -1641,10 +1653,17 @@ Device::UberWhy Device::uberWhyOf(const Shader& ps, VariantSlot slot) const {
     const MaterialSource* src = ps.source.load(std::memory_order_acquire);
     if (src == nullptr) return UberWhy::NoRequest;
     if ((ps.uberSlots.load(std::memory_order_acquire) >> static_cast<std::size_t>(slot) & 1u) != 0) return UberWhy::Uber;
-    if (src->file == "ge_default_leafs.fx") return UberWhy::Leaf;
-    if (!shader::uberSupports(src->file, src->entry)) return UberWhy::None;
+    if (!shader::uberSupportsFile(src->file, src->entry)) return src->file == "ge_default_leafs.fx" ? UberWhy::Leaf : UberWhy::None;  // (S-1b: the leaf shaders are covered; Leaf = an unknown leaf entry)
     if (!uberCovers(*src)) return UberWhy::Skipped;
     return UberWhy::Failed;
+}
+
+// S-1b: the form a scene vertex shader of this slot took (0 translated / not covered, 1 ubershader, 2 failed)
+std::uint8_t Device::uberVsFormOf(const Shader& vs, VariantSlot slot) const {
+    if (!ubershader_.load(std::memory_order_relaxed)) return 0;
+    if ((vs.uberSlots.load(std::memory_order_acquire) >> static_cast<std::size_t>(slot) & 1u) != 0) return 1;
+    const MaterialSource* src = vs.source.load(std::memory_order_acquire);
+    return src != nullptr && uberVsCovers(*src) ? 2 : 0;
 }
 
 void Device::setUbershaderSkip(std::uint32_t mask) { g_uberSkip.store(mask, std::memory_order_relaxed); }
@@ -1673,7 +1692,7 @@ void Device::resetUberVariants() {
         const std::lock_guard lock(shaderMutex_);
         all.reserve(shaders_.size());
         for (const auto& [h, sh] : shaders_) {
-            if (sh->stage == shader::Stage::Pixel && sh->source.load(std::memory_order_acquire) != nullptr) all.push_back(sh);
+            if (sh->source.load(std::memory_order_acquire) != nullptr) all.push_back(sh);  // (S-1b: the vertex shaders' scene forms too)
         }
     }
     for (const auto& sh : all) {
@@ -1683,7 +1702,7 @@ void Device::resetUberVariants() {
         }
         sh->uberSlots.store(0, std::memory_order_release);
     }
-    spdlog::info("d3d9: HLSL material shaders: {} pixel shaders' variants reset", all.size());
+    spdlog::info("d3d9: HLSL material shaders: {} shaders' variants reset", all.size());
 }
 
 bool Device::uberHalf() const {
@@ -1697,10 +1716,23 @@ bool Device::uberHalf() const {
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
 // options.uberDefines); null when it does not build (the draw keeps the translated shader)
 rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
-    const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines, options.sceneRecord, options.sceneView);
+    const bool vertex = s.stage == shader::Stage::Vertex;
+    std::string glsl;
+    if (vertex) {
+        // S-1b: the inputs the bytecode declares (their registers = the locations of the pipeline's vertex input state)
+        const auto dec = shader::decode(s.bytecode);
+        if (!dec.ok()) return rhi::ShaderModule::None;
+        std::vector<shader::VertexInput> inputs;
+        for (const auto& d : dec.program.inputs) {
+            if (d.reg.type == shader::RegType::Input) inputs.push_back({d.usage, d.usageIndex, d.reg.index});
+        }
+        glsl = shader::uberVertexHlsl(src.file, src.entry, src.macros, inputs, options.sceneRecord, options.sceneView, options.uberDefines);
+    } else {
+        glsl = shader::uberPixelHlsl(src.file, src.entry, src.macros, options.uberDefines, options.sceneRecord, options.sceneView);
+    }
     if (glsl.empty()) return rhi::ShaderModule::None;
     // S-2: the lit core in real half precision (ge_default.frag.hlsl `rvkh`) when the device has 16-bit arithmetic; float otherwise (RVK_UBER_HALF=0 forces it)
-    const bool half16 = uberHalf();
+    const bool half16 = !vertex && uberHalf();
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
         options_.cacheDir.empty()
@@ -1708,7 +1740,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
             : options_.cacheDir / "spirv" /
                   std::format("{:016x}_{}_u{:08x}{}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)), half16 ? "h" : "");
     if (options_.backend == rhi::Backend::D3D12) {
-        return dxilModule(shader::Stage::Pixel, glsl, "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16);
+        return dxilModule(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16);
     }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
@@ -1719,7 +1751,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         }
     }
     if (spirv.empty()) {
-        auto compiled = shader::compileHlsl(shader::Stage::Pixel, glsl, "uber.hlsl", half16);
+        auto compiled = shader::compileHlsl(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", half16);
         if (!compiled.ok()) {
             if (ubershadersFailed_.fetch_add(1) < 12) {
                 spdlog::warn("d3d9: GLSL material shader of {:016x} ({} {} variant {}) does not compile: {}", s.hash, src.file, src.entry, tag,
@@ -1744,9 +1776,9 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
 
 rhi::ShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber) {
     if (viaUber != nullptr) *viaUber = false;
-    if (options.uber && ubershader_.load(std::memory_order_relaxed) && s.stage == shader::Stage::Pixel) {
+    if (options.uber && ubershader_.load(std::memory_order_relaxed) && (s.stage == shader::Stage::Pixel || s.stage == shader::Stage::Vertex)) {
         const MaterialSource* src = s.source.load(std::memory_order_acquire);
-        if (src != nullptr && uberCovers(*src)) {
+        if (src != nullptr && (s.stage == shader::Stage::Pixel ? uberCovers(*src) : uberVsCovers(*src))) {
             const rhi::ShaderModule m = uberModule(s, *src, options, tag);
             if (m != rhi::ShaderModule::None) {
                 if (viaUber != nullptr) *viaUber = true;
@@ -1894,7 +1926,9 @@ void Device::variantWorker() {
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
                     // S-1a: the plain scene pixel shader of a request the ubershader covers is built from it (the enhancement variants say so through their own hooks)
                     if (pixel && !hasBase && uberOn) uberBaseOptions(sh, o);
-                    if (lodVs) {
+                    // S-1b: the plain scene vertex shader of a request the vertex port covers (the fade variant stays translated)
+                    if (!pixel && !hasBase && uberOn && uberVertexOptions(sh, o) && lodVs) o.uberDefines = std::format("#define RVK_LOD_FADE {}\n", shader::abi::kFrameParamLod);
+                    if (lodVs) {  // (the translated fallback of an ubershader build that failed needs it too)
                         o.inputOverrides.push_back({shader::Usage::BlendWeight, 1,
                                                     std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
                     }

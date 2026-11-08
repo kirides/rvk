@@ -206,8 +206,13 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     }
     if (scenePipe2_ != GamePipeline::None || scenePipe_ != GamePipeline::None) {
         const UberWhy why = uberWhyOf(*ps_, scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs);
-        if (capture_ != nullptr) lastVariant_.uberPs = static_cast<std::uint8_t>(why);
+        const std::uint8_t vsForm = uberVsFormOf(*vs_, scenePipe2_ != GamePipeline::None ? VariantSlot::SceneVs2 : lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
+        if (capture_ != nullptr) {
+            lastVariant_.uberPs = static_cast<std::uint8_t>(why);
+            lastVariant_.uberVs = vsForm;
+        }
         ++sceneStats_.uberDecided[static_cast<std::size_t>(kind)][static_cast<std::size_t>(why)];
+        ++sceneStats_.uberVsDecided[static_cast<std::size_t>(kind)][vsForm];
     }
 }
 
@@ -862,8 +867,14 @@ void Device::sceneReport() {
                 ot += o[w];
             }
             if (dt == 0 && ot == 0) continue;
+            std::uint64_t vo[3], vd[3];
+            for (std::size_t w = 0; w < 3; ++w) {
+                vo[w] = s.uberVsOwned[k][w] - l.uberVsOwned[k][w];
+                vd[w] = s.uberVsDecided[k][w] - l.uberVsDecided[k][w];
+            }
             line += std::format(" [{}: owned {} = uber {} other {} leaf {} skipped {} unknown {} failed {}; decided {} = uber {} other {} leaf {} skipped {} unknown {} failed {}]", draws::name(static_cast<draws::Kind>(k)), ot,
                                 o[1], o[0], o[2], o[3], o[4], o[5], dt, d[1], d[0], d[2], d[3], d[4], d[5]);
+            line += std::format(" [{} vertex: owned uber {} translated {} failed {}; decided uber {} translated {} failed {}]", draws::name(static_cast<draws::Kind>(k)), vo[1], vo[0], vo[2], vd[1], vd[0], vd[2]);
         }
         spdlog::info("native: owned shaders (5 s): HLSL ubershader on, translated builds after an ubershader failure {} (run total):{}", uberFallbacks_.load(), line.empty() ? std::string(" no scene draws") : line);
     }

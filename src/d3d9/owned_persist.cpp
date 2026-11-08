@@ -541,6 +541,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         }
     }
     for (const OwnedItem& it : items) ++sceneStats_.uberOwned[static_cast<std::size_t>(it.cd->kind)][it.cd->v.uberPs];  // (S-1a: the pixel shader form of each owned item)
+    for (const OwnedItem& it : items) ++sceneStats_.uberVsOwned[static_cast<std::size_t>(it.cd->kind)][it.cd->v.uberVs];  // (S-1b: and the vertex shader form)
     // F2c-4c: the GPU compaction copies each record's own args: they must be the draw's (the signature covers them; this is the per-item tripwire)
     gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
     bool gpu = compact.usable(*this);
