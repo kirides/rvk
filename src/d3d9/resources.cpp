@@ -15,6 +15,11 @@ namespace rvk::d3d9 {
 
 // ---- Texture ---------------------------------------------------------------------------------------------------------
 
+namespace {
+std::atomic<bool> smallStorageFlag{false};
+}
+void Texture::setSmallStorage(bool on) { smallStorageFlag.store(on, std::memory_order_relaxed); }
+
 Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(desc) {
     dev_.trackLive(this);
     if (desc_.type != TextureType::Volume) {
@@ -48,6 +53,10 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
         td.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     } else if (isRenderTarget()) {
         td.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (smallStorageFlag.load(std::memory_order_relaxed) && fmt_.format == VK_FORMAT_R32_SFLOAT && desc_.type == TextureType::Tex2D && desc_.width <= 64 &&
+            desc_.height <= 64 && desc_.levels <= 1) {
+            td.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        }
     }
     td.swizzle = fmt_.swizzle;
     tex_ = dev_.game().createTexture(td);

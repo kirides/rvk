@@ -40,6 +40,7 @@
 #include "d3d9/device.h"
 #include "engine/scene_hooks.h"
 #include "native/effect_compose.h"
+#include "native/own_post.h"
 
 namespace rvk::hal::vulkan {
 class HalDevice;
@@ -64,6 +65,8 @@ public:
     void setPostMode(bool takeOver, bool compare);
     void setGuiMode(bool takeOver, bool compare);
     bool postOn() const { return postTake_ || postCompare_; }
+    // S-7 (native/own_post): `native.own_post`; On needs the post chain taken over, Compare needs it composed
+    void setOwnPost(OwnPost::Mode mode);
     bool guiOn() const { return guiTake_ || guiCompare_; }
     bool active() const { return maskOn() || setupOn() || postOn() || guiOn(); }
 
@@ -142,9 +145,19 @@ private:
     void capture(const d3d9::DrawTapInfo& t, fxc::EffectDraw& out, fxc::Live& live);
     // sets the device to `d` (only what differs)
     void applyDevice(const fxc::EffectDraw& d);
-    void issue();
+    void issue(bool draw = true);
     void finishUnit();
     void compareDraw(const fxc::EffectDraw& composed, const d3d9::DrawTapInfo& t, bool own);
+
+    // ---- S-7 own post: the luminance chain's eight units recorded, held (On: not drawn) until the kernel can run (own_post.cpp) ----
+    bool ownLumActive() const;
+    // issues the held units (the group broke off or the kernel could not run): the recorded draws in order, as the take-over would have
+    void flushLum();
+    std::unique_ptr<OwnPost> own_;
+    std::array<std::unique_ptr<fxc::EffectDraw>, kLumUnits> lumRec_;
+    int lumNext_ = 0;       // the next luminance unit expected (0 = no group open)
+    int lumHeld_ = 0;       // units of the open group that were not drawn (On)
+    std::uint64_t lumFlushes_ = 0, lumGroups_ = 0;
 
     // ---- N5.7 post chain (effect_ops_post.cpp) ----
     bool verifyPost();
@@ -400,7 +413,7 @@ private:
     bool leanUnit();
     // issues the unit's draws and leaves the device as the engine's code would (render states: those at the entry, the HAL's
     // technique block reverts every state the passes / visual set; the rest: the last draw's)
-    void issueLean();
+    void issueLean(bool draw = true);
     // the engine state the unit's code would have left (effect store, engine fields), predicted at the unit's composition
     void predictAfter(bool sprite);
     void adoptAfter();

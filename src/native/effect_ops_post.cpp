@@ -233,6 +233,7 @@ void EffectOps::postBegin(void* effectPtr) {
 void EffectOps::postEnd(void* /*effect*/) {
     if (postDepth_ == 0) return;
     if (--postDepth_ > 0) return;
+    if (lumNext_ != 0) flushLum();  // S-7: units of an open group that never completed
     if (unit_ == Unit::Post) finishUnit();
     postEffect_ = nullptr;
 }

@@ -1106,6 +1106,8 @@ void testOceanMips(Harness& h) {
     std::printf("[%s] %s: %s\n", rhi::backendName(dev.caps().backend), label, failures == before ? "PASS" : "FAIL");
 }
 
+#include "parity_post.inl"
+
 }  // namespace
 
 int run(rhi::Device& dev) {
@@ -1113,6 +1115,7 @@ int run(rhi::Device& dev) {
     Harness h(dev);
     testPipelines(dev);
     testOceanMips(h);
+    testPostLum(h);
     testTranslatedDraw(h);
     testUberDraw(h, "diffuse * vertex colour", simpleRequest(), "PS_Default", {}, false, false);
     testUberDraw(h, "normal map, specular, lightmap, lights", heavyRequest(), "PS_Default", {}, false, true);

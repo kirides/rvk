@@ -122,7 +122,7 @@ bool EffectOps::leanUnit() {
     return true;
 }
 
-void EffectOps::issueLean() {
+void EffectOps::issueLean(bool draw) {
     if (drawCount_ == 0) return;
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
@@ -131,6 +131,7 @@ void EffectOps::issueLean() {
         const fxc::EffectDraw& d = *draws_[k];
         applyDevice(d);
         issueIndex_ = k;
+        if (!draw) continue;  // S-7: a held unit (own_post): the state as for a draw, nothing drawn
         if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
         ++stats_->issuedDraws;

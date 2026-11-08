@@ -263,6 +263,38 @@ void Device::inject(inject::Point point) {
     perf_.injectMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
+bool Device::runPassNow(const char* name, const std::function<void(PassContext&)>& fn) {
+    if (injecting_ || !created_ || !fn) return false;
+    syncPhaseRegions();
+    const auto t0 = std::chrono::steady_clock::now();
+    endRendering();
+    gpuMark("before ad-hoc pass");
+    Surface* rt0 = rt_[0];
+    PassContext ctx{*this, game_->passCommands(), inject::Point::BeforeGui};
+    ctx.mainView = 0;
+    ctx.frameBlock = frameBlockAddress();
+    ctx.sceneHdr = imageWithRole(scene::ImageRole::SceneHdr);
+    ctx.depthMap = imageWithRole(scene::ImageRole::DepthMap);
+    ctx.refraction = imageWithRole(scene::ImageRole::Refraction);
+    ctx.target = rt0 != nullptr && !rt0->texture()->isNull() ? rt0->texture() : nullptr;
+    injecting_ = true;
+    game_->passCommands();
+    {
+        RegionScope region(*this, name);
+        fn(ctx);
+    }
+    if (game_->timestampsEnabled()) {
+        const std::uint32_t slot = game_->frameSlot();
+        game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main, game_->timestampDetails(slot) ? std::format("pass {} (now)", name) : std::string());
+    }
+    injecting_ = false;
+    invalidateRecordingState();
+    if (options_.perf) {
+        perf_.injectPassMs[std::format("{} @now", name)] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    }
+    return true;
+}
+
 bool Device::readable(Texture* texture, rhi::CommandList& cmd) {
     if (texture == nullptr || texture->isNull()) return false;
     texture->prepareForSampling(cmd);

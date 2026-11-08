@@ -505,6 +505,7 @@ struct RendererSettings {
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
+    Setting* nativeOwnPost = nullptr;          // native.own_post: the post chain on our own shaders (S-7: the luminance chain in one dispatch)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)

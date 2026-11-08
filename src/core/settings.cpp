@@ -2797,6 +2797,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnPost = &reg.add({
+        .key = "native.own_post",
+        .label = "Native frame: post chain on own shaders",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "S-7 (docs/research/frame-ownership.md 14.8; Full, needs native.scene_ops with the post group): the engine's luminance chain (eight "
+                       "draws: LogLuminance, DownSample x5, AdaptiveLiminance, the AvgLuminance copy) is one compute dispatch on our own shader that writes "
+                       "the two 1x1 adapted-luminance images. On = the units are not drawn; compare = they are drawn and the kernel's result is checked "
+                       "against the engine's (rvk.log `native: own post`, `luminance differs` lines must stay 0). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the engine's units"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeCoverage = &reg.add({
         .key = "native.coverage",
         .label = "Native frame: coverage counter",

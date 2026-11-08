@@ -139,6 +139,10 @@ public:
 
     // bytes held in CPU copies of all textures (diagnostics)
     static std::uint64_t cpuBytesTotal();
+    // S-7 (native/own_post): small R32F render targets (<= 64 x 64: the post chain's luminance levels) are created with storage usage too, so a compute
+    // pass can write the engine's persistent 1x1 images; textures made before the switch keep their usage (the pass checks `storageCapable`)
+    static void setSmallStorage(bool on);
+    bool storageCapable() const { return (tex_ != nullptr) && (tex_->desc().usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0; }
 
 private:
     friend class Device;
@@ -1347,6 +1351,10 @@ public:
     // the scene hooks: a main view begins (the once-per-view guard of its points); an injection point is reached
     void beginMainView();
     void inject(inject::Point point);
+    // S-7: one ad-hoc pass recorded NOW (mid-frame, from an engine hook such as the post chain's units): the open rendering scope is left, `fn` records
+    // its commands with nothing bound, the device's recording state is restored after it (the body of `inject` for one pass; no firing guard). False
+    // when the device is not created or a pass is already being recorded. Render thread.
+    bool runPassNow(const char* name, const std::function<void(PassContext&)>& fn);
     // Camera jitter (TAA / upscaling, enh/upscale): `source` is asked once per frame at its first main view for that frame's
     // sub-pixel jitter in pixels of the scene target (null = no jitter). The offset reaches the main view's geometry draws
     // through DrawBlock::posFix (geometryJitter) and shaders through FrameBlock::jitter; the motion vectors stay jitter-free
@@ -1401,6 +1409,8 @@ public:
     // the post chain's input: until the frame ends, draws that sample `from` get the bindless slot `slot` instead (the upscaled
     // scene, which has a different size than the engine's scene target; the engine samples both by uv)
     void setSceneSubstitute(const Texture* from, std::uint32_t slot) { substituteFrom_ = from; substituteSlot_ = slot; }
+    const Texture* sceneSubstituteFrom() const { return substituteFrom_; }
+    std::uint32_t sceneSubstituteSlot() const { return substituteSlot_; }
     // this frame's jitter in pixels of the scene target (0, 0 = none)
     std::array<float, 2> jitter() const { return {jitter_[0], jitter_[1]}; }
     // draw replacement (enh/water, enh/shadows): a replacer must outlive its registration; adding twice is a no-op
