@@ -662,14 +662,30 @@ bool OwnPost::runDofMid(const std::array<const fxc::EffectDraw*, kMaxGroupUnits>
     rhi::Texture* oursS = nullptr;
     const auto record = [&](d3d9::PassContext& ctx) {
         rhi::CommandList& cmd = ctx.cmd;
-        if (!dev_.readable(dsc, cmd)) return;
         const VkExtent2D ext{set.w, set.h};
+        // the engine's image pool shares textures between filters whose lifetimes do not overlap: the SmallBlur (or BlurV) target can be the DoFDown image itself, which
+        // this kernel reads while it writes (a SRV / UAV alias: found by D3D12 GPU-based validation): the input is copied aside then
+        rhi::Texture* in = &dsc->rhi();
+        if (write && (dsc == engV || dsc == engS)) {
+            rhi::Texture* copy = dev_.transient("post.dof.in", {VK_FORMAT_R8G8B8A8_UNORM, ext});
+            if (copy == nullptr) return;
+            cmd.transition(dsc->rhi(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cmd.transition(*copy, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            rhi::TextureCopy region{};
+            region.extent = {set.w, set.h, 1};
+            cmd.copyTexture(*copy, dsc->rhi(), std::span<const rhi::TextureCopy>(&region, 1));
+            cmd.transition(*copy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            in = copy;
+            ++aliasedInputs_;
+        } else if (!dev_.readable(dsc, cmd)) {
+            return;
+        }
         rhi::Texture* outV = write ? &engV->rhi() : dev_.transient("post.dof.v", {VK_FORMAT_R8G8B8A8_UNORM, ext});
         rhi::Texture* outS = write ? &engS->rhi() : dev_.transient("post.dof.s", {VK_FORMAT_R8G8B8A8_UNORM, ext});
         if (outV == nullptr || outS == nullptr) return;
         const rhi::RingAlloc pa = dev_.ring(sizeof(PostDofMidParams), 16);
         if (pa.ptr == nullptr) return;
-        set.p.tex[0] = dsc->bindlessSlot();
+        set.p.tex[0] = in->heapSampled();
         std::memcpy(pa.ptr, &set.p, sizeof(set.p));
         PostGroupPush push{};
         push.h.frame = ctx.frameBlock.bits;

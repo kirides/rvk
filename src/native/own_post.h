@@ -160,6 +160,7 @@ private:
     };
     std::array<GroupStats, kGroupCount> gstats_{};
     std::uint32_t dumped_ = 0;
+    std::uint64_t aliasedInputs_ = 0;  // DoF middle runs whose DoFDown image was also a target (copied aside)
     std::map<std::string, GroupStats> named_;  // per compared image
     std::string groupWhy_[kGroupCount];
     std::uint32_t groupWhyLogged_[kGroupCount]{};

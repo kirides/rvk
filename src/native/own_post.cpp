@@ -357,6 +357,7 @@ void OwnPost::report() {
                      kNames[g], gs.runs, gs.refused, gs.compared, gs.differing, gs.maxStep, gs.maxRel, gs.compared != 0 ? gs.sumRel / static_cast<double>(gs.compared) : 0.0,
                      gs.offPixels, gs.pixels);
     }
+    if (aliasedInputs_ != 0) spdlog::info("native: own post (5 s): DoF middle: {} runs read a copy of the DoFDown image (the pool shares it with a target)", aliasedInputs_);
     for (const auto& [name, n] : named_) {
         spdlog::info("native: own post (5 s):   image '{}': {} compared, max {} steps, max rel {:.3g}, mean rel {:.3g}, {:.4f} % of the pixels more than 1 step off", name, n.compared, n.maxStep,
                      n.maxRel, n.sumRel / static_cast<double>(std::max<std::uint64_t>(n.compared, 1)), 100.0 * static_cast<double>(n.offPixels) / static_cast<double>(std::max<std::uint64_t>(n.pixels, 1)));
