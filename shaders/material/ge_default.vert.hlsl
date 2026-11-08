@@ -635,7 +635,13 @@ void loadInputs(RvkVsIn rvk_in) {
     input.vBillboard = rvk_in.aBillboard;
 #endif
 #ifdef RVK_LOC_aIndices0
-    input.vIndices0 = int4(rvk_in.aIndices0);
+    // D3D12 reads a D3D9 UBYTE4 attribute as R8G8B8A8_UNORM (no scaled formats in DXGI); the draw's push flags bit 17 + register mark it (abi.h, the
+    // translator does the same for every input): without the scale every bone index became 0 or 1 (a black hero with a detached boot)
+    {
+        float4 rvk_bi = rvk_in.aIndices0;
+        if (RVK_LOC_aIndices0 < 15 && ((rvkDrawFlags() >> (17u + uint(RVK_LOC_aIndices0))) & 1u) != 0u) rvk_bi = round(rvk_bi * 255.0);
+        input.vIndices0 = int4(rvk_bi);
+    }
 #endif
 #ifdef RVK_LOC_aWeights0
     input.vWeights0 = rvk_in.aWeights0;

@@ -36,6 +36,7 @@ struct SceneCase {
     std::vector<std::uint8_t> vertices;                    // 6 vertices of `stride` bytes
     // register files and DrawBlock of draw i (the texture heap indices are the caller's)
     std::function<void(std::uint32_t draw, StageBlock& vs, StageBlock& ps, abi::DrawBlock& db)> fill;
+    std::uint32_t ubyteMask = 0;                           // vertex input locations read from UBYTE4 attributes (D3D12: the draws' push flags bits 17.. mark them)
     bool expectDistinct = false;                           // the draws are placed so that they do not overlap: the picture must show every one of them
 };
 
@@ -103,6 +104,8 @@ void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n, int mode = 0) {
         pushes[i] = pushFor(*bVs, *bPs, *bDraw, *bFrame);
         pushes[i].drawId = i;
         pushes[i].flags = abi::drawFlags(1, 2, 3);
+        // D3D12 reads UBYTE4 as UNORM (no scaled formats in DXGI): the device flags the inputs (bit 17 + location) and the shaders scale back by 255
+        if (dev.caps().backend == rhi::Backend::D3D12) pushes[i].flags |= c.ubyteMask << 17;
         abi::DrawRecord& r = records[i];
         for (std::uint32_t w = 0; w < abi::kConstWindows; ++w) {
             r.vsWin[w] = pushes[i].vsWin[w];
@@ -404,7 +407,7 @@ void testSceneCorpus(Harness& h, bool v2 = false, bool uberVs = false) {
         std::filesystem::path file;
         shader::Reflection r;
     };
-    std::vector<Vs> skinned, rigid;
+    std::vector<Vs> skinned, rigid, morphed;
     for (const auto& f : vsFiles) {
         shader::Reflection r;
         if (!reflect(f, r) || !r.splitConsts || (r.varyingMask & (1u << abi::kSceneVaryingLocation)) != 0) continue;
@@ -417,20 +420,23 @@ void testSceneCorpus(Harness& h, bool v2 = false, bool uberVs = false) {
         if (!bones && hasInput(r, shader::Usage::Normal) && hasInput(r, shader::Usage::TexCoord) && rigid.size() < 1) rigid.push_back({f, r});
         if (!skinned.empty() && !rigid.empty()) break;
     }
-    shader::MacroList uberMacros[2];
+    shader::MacroList uberMacros[3];
     if (uberVs) {
         rigid.clear();
         skinned.clear();
-        const std::pair<const char*, shader::MacroList> fixed[2] = {
+        const std::pair<const char*, shader::MacroList> fixed[3] = {
             {"vs30_b5abe188ee334009.bin", {{"XFX_SHADERMODEL_3", "true"}, {"XFX_QUALITY", "2"}, {"XFX_TANGENTSPACE", "1"}, {"XFX_TANGENTSPACE_EYE", "1"},
                                            {"XFX_VS_TEX0", "( XFX_VS_INPUT_TEX0 * g_vShaderData[0].xy )"}, {"XFX_VS_TEX1", "XFX_VS_INPUT_TEX0"}}},
             {"vs30_b362997c486c91b1.bin", {{"XFX_SHADERMODEL_3", "true"}, {"XFX_QUALITY", "2"}, {"XFX_SKINNED", "true"}, {"XFX_TANGENTSPACE", "1"},
-                                           {"XFX_VS_TEX0", "XFX_VS_INPUT_TEX0"}}}};
-        for (int k = 0; k < 2; ++k) {
+                                           {"XFX_VS_TEX0", "XFX_VS_INPUT_TEX0"}}},
+            // the hero's class: skinned + morph targets (bone rows of window 2, the morph weights c31, three position / normal deltas)
+            {"vs30_5d3d2ccda5a8b178.bin", {{"XFX_SHADERMODEL_3", "true"}, {"XFX_QUALITY", "2"}, {"XFX_SKINNED", "true"}, {"XFX_MORPHED", "true"}, {"XFX_TANGENTSPACE", "1"},
+                                           {"XFX_COMPRESSEDNORMALMAP", "true"}, {"XFX_LIGHTINGTYPE", "2"}, {"XFX_SPECULAR", "true"}, {"XFX_VS_TEX0", "XFX_VS_INPUT_TEX0"}}}};
+        for (int k = 0; k < 3; ++k) {
             const std::filesystem::path f = dir / fixed[k].first;
             shader::Reflection r;
             if (!std::filesystem::exists(f) || !reflect(f, r) || !r.splitConsts || (r.varyingMask & (1u << abi::kSceneVaryingLocation)) != 0) continue;
-            (k == 0 ? rigid : skinned).push_back({f, r});
+            (k == 0 ? rigid : k == 1 ? skinned : morphed).push_back({f, r});
             uberMacros[k] = fixed[k].second;
         }
     }
@@ -456,14 +462,18 @@ void testSceneCorpus(Harness& h, bool v2 = false, bool uberVs = false) {
         return best >= 0;
     };
     const std::string suffix = std::string(uberVs ? ", uber vertex shader" : "") + (v2 ? ", ABI v2)" : ")");
-    const std::string labels[2] = {"scene variant (corpus: rigid mesh + lit material" + suffix, "scene variant (corpus: skinned mesh + material" + suffix};
+    const std::string labels[3] = {"scene variant (corpus: rigid mesh + lit material" + suffix, "scene variant (corpus: skinned mesh + material" + suffix,
+                                   "scene variant (corpus: skinned + morphed mesh + material" + suffix};
     const struct {
         const char* label;
         const Vs* vs;
         int minSamplers;
-    } cases[2] = {{labels[0].c_str(), rigid.empty() ? nullptr : &rigid[0], 4}, {labels[1].c_str(), skinned.empty() ? nullptr : &skinned[0], 2}};
+    } cases[3] = {{labels[0].c_str(), rigid.empty() ? nullptr : &rigid[0], 4},
+                  {labels[1].c_str(), skinned.empty() ? nullptr : &skinned[0], 2},
+                  {labels[2].c_str(), morphed.empty() ? nullptr : &morphed[0], 2}};
     shader::Reflection ignored;
-    for (int ki = 0; ki < 2; ++ki) {
+    for (int ki = 0; ki < 3; ++ki) {
+        if (ki == 2 && !uberVs) continue;  // the morph case only exists with the fixed requests
         const auto& k = cases[ki];
         if (k.vs == nullptr || !selected(k.label)) {
             if (k.vs == nullptr) std::printf("[%s] %s: SKIP (no suitable vertex shader in the corpus)\n", rhi::backendName(dev.caps().backend), k.label);
@@ -510,15 +520,26 @@ void testSceneCorpus(Harness& h, bool v2 = false, bool uberVs = false) {
                 case shader::Usage::Normal: val[0] = 0.0f; val[1] = 0.0f; val[2] = 1.0f; val[3] = 0.0f; break;
                 case shader::Usage::Tangent: val[0] = 1.0f; val[1] = 0.0f; val[2] = 0.0f; val[3] = 0.0f; break;
                 case shader::Usage::Binormal: val[0] = 0.0f; val[1] = 1.0f; val[2] = 0.0f; val[3] = 0.0f; break;
-                case shader::Usage::BlendIndices: val[0] = 0.0f; val[1] = 1.0f; val[2] = 2.0f; val[3] = 3.0f; break;
+                case shader::Usage::BlendIndices: val[0] = 0.0f; val[1] = 1.0f; val[2] = 2.0f; val[3] = 3.0f; break;  // (bytes below: UBYTE4, as the engine's skinned meshes)
                 case shader::Usage::BlendWeight: val[0] = 0.5f; val[1] = 0.5f; val[2] = 0.0f; val[3] = 0.0f; break;
                 case shader::Usage::Color: val[0] = 0.8f; val[1] = 0.6f; val[2] = 0.4f; val[3] = 1.0f; break;
                 default: break;
                 }
+                if (in.usage == shader::Usage::BlendIndices) {
+                    // UBYTE4 as in the engine's meshes: bone rows 0 / 7 / 2 + v (distinct, > 1: the D3D12 UNORM read must be scaled back by 255)
+                    const std::uint8_t b[4] = {static_cast<std::uint8_t>(v), static_cast<std::uint8_t>(7 + v), static_cast<std::uint8_t>(2 + v), static_cast<std::uint8_t>(30 + v)};
+                    std::memset(c.vertices.data() + static_cast<std::size_t>(v) * c.stride + a * 16, 0, 16);
+                    std::memcpy(c.vertices.data() + static_cast<std::size_t>(v) * c.stride + a * 16, b, 4);
+                    continue;
+                }
                 std::memcpy(c.vertices.data() + static_cast<std::size_t>(v) * c.stride + a * 16, val, 16);
             }
         }
-        for (std::size_t a = 0; a < vsRefl.vertexInputs.size(); ++a) c.attrs.push_back({vsRefl.vertexInputs[a].location, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<std::uint32_t>(a) * 16});
+        for (std::size_t a = 0; a < vsRefl.vertexInputs.size(); ++a) {
+            const bool ubyte = vsRefl.vertexInputs[a].usage == shader::Usage::BlendIndices;
+            if (ubyte && vsRefl.vertexInputs[a].location < 15) c.ubyteMask |= 1u << vsRefl.vertexInputs[a].location;
+            c.attrs.push_back({vsRefl.vertexInputs[a].location, 0, ubyte ? VK_FORMAT_R8G8B8A8_USCALED : VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<std::uint32_t>(a) * 16});
+        }
         // textures by the pixel shader's sampler types; draw i uses the set i & 1
         const rhi::SamplerIndex linear = dev.createSampler({VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT});
         std::uint32_t texSets[2][16] = {};
