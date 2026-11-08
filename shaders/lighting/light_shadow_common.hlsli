@@ -10,10 +10,11 @@
 
 struct LightShadowPush {
     RVK_PASS_PUSH_HEADER
-    uint2 table;   // the light table device buffer's read reference
     uint4 tex;     // x depth map (t2D), y raw entries (t2D, filter pass), z width, w height
     float4 cfg;    // x light radius (units: the soft shadow's disc), y ray reach (units), z origin bias (units), w rays per light
     uint4 misc;    // x frame index, y RVK_RT_TRACE_* flags, z debug, w 0
+    uint2 table;   // the light table device buffer's read reference (LAST: a ConstantBuffer packs a 4-component member to a 16-byte boundary, so a uint2 before
+                   // the uint4s moved them by 8 bytes on D3D12: tex.x read the width as a heap index = GBV "uninitialized descriptor heap index 1600")
 };
 RVK_PUSH(LightShadowPush, pc);
 

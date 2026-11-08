@@ -14,6 +14,7 @@
 // Stage (b) (GPU-driven draws that consume the table instead of engine lists) and stage (c) (point-light shadow cubes) build on the same buffer.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -70,12 +71,14 @@ static_assert(sizeof(LightClusterPush) == 128 && sizeof(LightClusterPush) <= sha
 // mirror of shaders/lighting/light_shadow_common.hlsli LightShadowPush (the ray-traced lamp shadow passes)
 struct LightShadowPush {
     shader::abi::PassPushHeader h;
-    std::uint32_t table[2];
     std::uint32_t tex[4];   // depth map slot, raw entries slot, width, height
     float cfg[4];           // lamp radius (units), ray reach, origin bias, rays per light
     std::uint32_t misc[4];  // frame index, RVK_RT_TRACE_* flags, debug, 0
+    std::uint32_t table[2];  // last: HLSL's constant buffer packing puts every 4-component member on a 16-byte boundary (D3D12 root constants)
 };
 static_assert(sizeof(LightShadowPush) <= shader::abi::kPushConstantBudget);
+static_assert(offsetof(LightShadowPush, tex) % 16 == 0 && offsetof(LightShadowPush, cfg) % 16 == 0 && offsetof(LightShadowPush, misc) % 16 == 0,
+              "a push block's 4-component members must sit on 16-byte boundaries (D3D12 root constants pack that way)");
 inline constexpr std::uint32_t kLightShadowMax = 31;  // RVK_LIGHT_SHADOW_MAX
 
 // pure cluster math (rvk_tests; the same formulas as the shader)
