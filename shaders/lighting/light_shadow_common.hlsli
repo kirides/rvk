@@ -19,6 +19,10 @@ struct LightShadowPush {
 RVK_PUSH(LightShadowPush, pc);
 
 static const float LS_SKY = 0.999;  // depth map values from here on are the cleared background
+// A blocked lamp still lights its surroundings by bounce (the lit table top, walls, the room): a surface the table's plane shades from a candle ON the table
+// (the whole rug: the shadow of the top reaches 2.5 m) is no black hole. The traced visibility is lerped this far towards 1; 0 = hard physical shade.
+// (gpu-scene.md 9.13: pub_interior's rugs went near-black with the light shadows on, every ray to the candle hit the table top.)
+static const float LS_FILL = 0.4;
 
 float lsDepth(int2 q) { return rvkFetch2D(pc.tex.x, clamp(q, int2(0, 0), int2(pc.tex.zw) - 1)).r; }
 
