@@ -16,6 +16,7 @@
 #include "enh/rhi_scope.h"
 #include "shader/embedded.h"
 #include "engine/memread.h"
+#include "shader/pass_push.h"
 
 namespace rvk::enh {
 
@@ -2663,11 +2664,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         dev_.game().captureAccess(cl, true);  // (D3D12: the capture pool in its write state)
         cl.bindPipeline(*skinPipe_);
-        struct Push {
-            abi::PassPushHeader h;
-            std::uint32_t table[2];
-            std::uint32_t pad[2];
-        } push{};
+        abi::SkinPush push{};
         push.h.frame = 0;
         push.table[0] = t.ref.low();
         push.table[1] = t.ref.high();

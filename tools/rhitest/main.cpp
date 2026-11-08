@@ -48,6 +48,9 @@
 namespace rvk::parity {
 int run(rhi::Device& dev);  // tools/rhitest/parity.cpp
 }
+namespace rvk::abiprobe {
+int run(rhi::Device& dev);  // tools/rhitest/abi_probe.cpp: every C++ / HLSL shared block read back on the GPU (src/shader/abi_blocks.cpp)
+}
 namespace rvk::ffxtest {
 int run(bool fsr, bool fg, const std::string& dll, bool validation);  // tools/rhitest/ffx.cpp (D3D12 only)
 }
@@ -1861,6 +1864,12 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
         sc.reset();
         if (hwnd != nullptr) DestroyWindow(hwnd);
     }
+    if (std::getenv("RVK_ABI_ONLY") != nullptr) {  // only the ABI probe (a quick run under the D3D12 GPU-based validation)
+        failures += abiprobe::run(*dev);
+        check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
+        std::printf("[%s] %s (RVK_ABI_ONLY)\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
+        return failures == before;
+    }
     testTextures(*dev, sh);
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
@@ -1871,6 +1880,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
+    failures += abiprobe::run(*dev);
     failures += parity::run(*dev);
     check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
     std::printf("[%s] %s\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");

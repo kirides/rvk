@@ -14,6 +14,7 @@
 #include "d3d9/device.h"
 #include "gpuscene/verify.h"
 #include "shader/embedded.h"
+#include "shader/pass_push.h"
 
 namespace rvk::gpuscene {
 
@@ -221,11 +222,7 @@ void LightingImages::flushLocked(d3d9::Device& dev, bool verify) {
     list.memoryBarrier(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT);
     list.bufferBarrier(*images_, rhi::BufferAccess::ShaderWrite);
-    struct Push {
-        std::uint32_t illums[2], sets[2], jobs[2], images[2];
-        std::uint32_t count, pad[3];
-    } push{};
-    static_assert(sizeof(Push) == 48);
+    shader::abi::LightingComposePush push{};
     const auto ir = illums.illumRef().pair();
     const auto sr = illums.setRef().pair();
     const auto jr = jobs_.ref().pair();

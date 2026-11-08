@@ -13,6 +13,7 @@
 #include "engine/exposure.h"
 #include "enh/rhi_scope.h"
 #include "shader/embedded.h"
+#include "shader/pass_push.h"
 
 namespace rvk::enh {
 
@@ -28,20 +29,9 @@ float halton(int index, int base) {
     return r;
 }
 
-// mirror of shaders/upscale/prep.comp UpscalePush
-struct PrepPush {
-    shader::abi::PassPushHeader h;
-    std::uint32_t depthTex, width, height, pad;
-};
-static_assert(sizeof(PrepPush) == 32 && sizeof(PrepPush) <= shader::abi::kPushConstantBudget);
-
-// mirror of shaders/upscale/exposure.comp ExposurePush
-struct ExposurePush {
-    shader::abi::PassPushHeader h;
-    std::uint32_t lumTex;
-    float factor, lumMin, lumMax;
-};
-static_assert(sizeof(ExposurePush) == 32 && sizeof(ExposurePush) <= shader::abi::kPushConstantBudget);
+// the push blocks of shaders/upscale/prep.comp (UpscalePush) and exposure.comp (ExposurePush): shader/pass_push.h
+using PrepPush = shader::abi::DepthPrepPush;
+using ExposurePush = shader::abi::ExposurePush;
 
 constexpr VkFormat kDepthFormat = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat kOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;  // the scene HDR target's format (A16B16G16R16F)

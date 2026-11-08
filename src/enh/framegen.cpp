@@ -12,25 +12,15 @@
 #include "enh/gbuffer.h"
 #include "enh/rhi_scope.h"
 #include "shader/embedded.h"
+#include "shader/pass_push.h"
 
 namespace rvk::enh {
 
 namespace {
 
-// mirror of shaders/upscale/prep.comp UpscalePush
-struct PrepPush {
-    shader::abi::PassPushHeader h;
-    std::uint32_t depthTex, width, height, pad;
-};
-static_assert(sizeof(PrepPush) == 32 && sizeof(PrepPush) <= shader::abi::kPushConstantBudget);
-
-// mirror of shaders/framegen/debug.frag FramegenPush
-struct DebugPush {
-    shader::abi::PassPushHeader h;
-    std::uint32_t srcTex, sampler0, mode, pad;
-    float nearZ, farZ, pad1, pad2;
-};
-static_assert(sizeof(DebugPush) == 48 && sizeof(DebugPush) <= shader::abi::kPushConstantBudget);
+// the push blocks of shaders/upscale/prep.comp and shaders/framegen/debug.frag: shader/pass_push.h
+using PrepPush = shader::abi::DepthPrepPush;
+using DebugPush = shader::abi::FramegenDebugPush;
 
 constexpr VkFormat kDepthFormat = VK_FORMAT_R32_SFLOAT;
 constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;

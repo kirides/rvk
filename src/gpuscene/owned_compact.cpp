@@ -17,6 +17,7 @@
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "shader/embedded.h"
+#include "shader/pass_push.h"
 
 extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char* name, char* buffer, unsigned long size);
 
@@ -181,13 +182,7 @@ void OwnedCompact::flush(d3d9::Device& dev) {
                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT);
         list.bufferBarrier(*s.buffer, rhi::BufferAccess::ShaderWrite);
         list.bindPipeline(*pipeline_->pipe);
-        struct Push {
-            std::uint32_t records[2], list[2], jobs[2], out[2];
-            std::uint32_t countsBase, argsBase, slotCount, viewSlots;
-            std::uint32_t clusters[2], views[2];
-            std::uint32_t clusterRows, pad[3];
-        } push{};
-        static_assert(sizeof(Push) == 80);
+        shader::abi::OwnedCompactPush push{};
         const auto rr = drawrecords().recordsRef().pair();
         const auto wr = s.buffer->shaderRefRw(0);
         for (const Job& j : s.jobs) {

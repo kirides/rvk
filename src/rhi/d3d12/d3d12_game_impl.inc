@@ -1147,9 +1147,8 @@ bool D3D12DeviceImpl::blitDraw(ID3D12GraphicsCommandList* list, D3DTexture& dst,
     list->RSSetViewports(1, &vp);
     list->RSSetScissorRects(1, &dstRect);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    const std::uint32_t pc[8] = {slot, blitSamplers_[linear ? 1 : 0], 0, 0, std::bit_cast<std::uint32_t>(uvRect[0]), std::bit_cast<std::uint32_t>(uvRect[1]),
-                                 std::bit_cast<std::uint32_t>(uvRect[2]), std::bit_cast<std::uint32_t>(uvRect[3])};
-    list->SetGraphicsRoot32BitConstants(0, 8, pc, 0);
+    const shader::abi::BlitPush pc{slot, blitSamplers_[linear ? 1 : 0], 0, 0, {uvRect[0], uvRect[1], uvRect[2], uvRect[3]}};
+    list->SetGraphicsRoot32BitConstants(0, sizeof(pc) / 4, &pc, 0);
     list->DrawInstanced(3, 1, 0, 0);
     nb = 0;
     add(src, srcIdx, srcTo, srcFrom);

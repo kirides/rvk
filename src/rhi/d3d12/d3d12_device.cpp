@@ -41,6 +41,7 @@
 #include "rhi/game_device.h"
 #include "rhi/rhi.h"
 #include "shader/embedded.h"
+#include "shader/pass_push.h"
 
 #include <imgui.h>
 #include "imgui_impl_dx12.h"
