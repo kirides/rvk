@@ -91,7 +91,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
                     float tmax = max(dt - 18.0, 1.0);
                     sum += rvkRtVisibility(f, o, dir, 0.25, min(tmax, pc.cfg.y), 0.0, 0.0, pc.misc.y);
                 }
-                vis = sum / float(rays);
+                vis = lerp(sum / float(rays), 1.0, LS_FILL);
             }
             result[e] = lsEncode(sid, vis);
         }

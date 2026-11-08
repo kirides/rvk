@@ -1559,6 +1559,11 @@ void Device::shaderWorker() {
     }
 }
 
+std::size_t Device::queuedShaderJobs() const {
+    const std::lock_guard lock(shaderJobMutex_);
+    return shaderJobs_.size();
+}
+
 void Device::prioritizeShader(Shader& s) {
     if (s.promoted.exchange(true, std::memory_order_acq_rel)) return;
     const std::lock_guard lock(shaderJobMutex_);

@@ -1721,6 +1721,8 @@ private:
 public:
     // a draw needs `s` now: its compile goes to the front of the queue (once per shader); the draw itself is skipped until the module exists
     void prioritizeShader(Shader& s);
+    // translated shaders queued for the workers right now (not yet picked up; a job being compiled is not counted)
+    std::size_t queuedShaderJobs() const;
 private:
     void shaderWorker();
     void stopShaderWorkers();
@@ -2188,7 +2190,7 @@ private:
     std::atomic<std::uint64_t> uberFallbacks_{0};  // S-1a: ubershader builds that failed and were taken by the translated shader
     std::deque<VariantJob> variantJobs_;
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
-    std::mutex shaderJobMutex_;
+    mutable std::mutex shaderJobMutex_;
     std::condition_variable shaderJobCv_;
     struct ShaderJob {
         Shader* shader = nullptr;
