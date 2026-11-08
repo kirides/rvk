@@ -541,7 +541,7 @@ Three consumers:
 - **Models** (`rvk_tests`: `abi_blocks_descriptions_match_the_layout_models`): the C++ offsets of every block equal the Vulkan (std430) and D3D12 (constant buffer / `Load<T>`) layouts of the
   description, the fields cover every byte of the C++ struct (padding included), a push block is <= 128 bytes, raw offsets keep the alignment `rvkRawLoad` promises.
 
-Result on main (2026-11-08): all 52 blocks read back exactly on Vulkan and D3D12 (4,248 words; `--validation` and `--sync-validation` clean, D3D12 GPU-based validation clean): no layout mismatch
+Result on main (2026-11-08): all 52 blocks read back exactly on Vulkan and D3D12 (4,248 words; Vulkan `--validation` clean, `--sync-validation` shows only the 2 pre-existing render-pass-layout messages of the basic swapchain test; D3D12 debug layer clean, GPU-based validation of the probe did not finish within 20 minutes: `RVK_ABI_ONLY=1` runs only the probe, `RVK_NO_GBV=1` drops GBV): no layout mismatch
 is left in the blocks listed above (the ones found earlier are fixed). What the probe does NOT cover: byte offsets hard-coded in HLSL helpers (`rvkLightClusterAt`, the illumination / material /
 mesh-part loaders): those are checked by their own parity tests. New block = new `BLOCK` entry (+ the C++ struct in a header the registry can include); a struct that is only a local
 variable of a .cpp has no twin the probe can offsetof.
