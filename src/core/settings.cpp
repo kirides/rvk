@@ -1864,8 +1864,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "\"Slots filled\" how many of the shader's light slots the table fills (red 1, green 2, yellow 3, dim blue none), \"Light shadows\" the ray-traced lamp shadows (white lit, red shadowed, dark blue no shadow-casting lamp).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "clusters", "slots", "shadows"},
-        .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows"},
+        .options = {"off", "clusters", "slots", "shadows", "bake", "prebake", "path"},
+        .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows", "Baked light shadow", "Colour before the baked-light shadow", "Cluster path used"},
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Clustered lights",
     });

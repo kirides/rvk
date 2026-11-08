@@ -749,6 +749,19 @@ void rvkMvEpilogue(inout float4 c0) {
         } else if (dbg == 3u && rvk_clCount != 0xFFFFFFFFu) {
             // ray-traced light shadows: grey = no shadow-casting light here, white lit .. red shadowed
             c0.rgb = rvk_clShadowTested > 0.5 ? lerp(float3(1.0, 0.0, 0.0), float3(1.0, 1.0, 1.0), rvk_clShadow) : (rvk_clKeptState > 2.5 ? float3(0.6, 0.0, 0.6) : rvk_clKeptState > 1.5 ? float3(0.0, 0.5, 0.0) : rvk_clKeptState > 0.5 ? float3(0.6, 0.6, 0.0) : float3(0.0, 0.0, 0.25));
+        } else if (dbg == 4u && rvk_clCount != 0xFFFFFFFFu) {
+            // the baked-light term: r = the darkening share (0 .. 1), g = lamp light sum (clamped), b = lamps with a shadow id (0 / 1)
+            c0.rgb = float3(saturate(rvk_clBake.x / (rvk_clBake.y + 0.05)), saturate(rvk_clBake.y), rvk_clBake.y > 0.0 ? 1.0 : 0.0);
+        } else if (dbg == 5u && rvk_clCount != 0xFFFFFFFFu) {
+            // the colour before the baked-light darkening: red = NaN, green = infinite, else its luminance (clamped)
+            float lc = dot(c0.rgb, float3(0.3, 0.59, 0.11));
+            c0.rgb = (lc != lc) ? float3(1.0, 0.0, 0.0) : (abs(lc) > 1e30 ? float3(0.0, 1.0, 0.0) : float3(saturate(lc), saturate(lc), saturate(lc)));
+            rvk_clBake = float2(0.0, 0.0);
+            c0.a = 1.0;
+        } else if (dbg == 6u) {
+            // which draws run the cluster code at all: magenta = the table is not used for this pixel, green = used, yellow = used and refilled slots; alpha 1
+            c0 = rvk_clCount == 0xFFFFFFFFu ? float4(1.0, 0.0, 1.0, 1.0) : (rvk_clUsed > 0u ? float4(1.0, 1.0, 0.0, 1.0) : float4(0.0, 1.0, 0.0, 1.0));
+            rvk_clBake = float2(0.0, 0.0);
         } else if (dbg == 2u && rvk_clCount != 0xFFFFFFFFu) {
             c0.rgb = float3(rvk_clUsed == 1u || rvk_clUsed == 3u ? 1.0 : 0.0, rvk_clUsed >= 2u ? 1.0 : 0.0, rvk_clUsed == 0u ? 0.3 : 0.0);
         }

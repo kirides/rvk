@@ -974,7 +974,7 @@ void HalDevice::applyLighting() {
     const auto& rs = settings::renderer();
     if (!lightTable_ || rs.lightingEnabled == nullptr) return;
     const std::string_view d = rs.lightingDebug->asEnum();
-    lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : 0,
+    lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : d == "bake" ? 4 : d == "prebake" ? 5 : d == "path" ? 6 : 0,
                            frozen::kMaterialRoughness);
     lightTable_->setCollectRadius(frozen::kLightCollectRadius);
     {
