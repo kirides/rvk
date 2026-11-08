@@ -276,6 +276,7 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t vi
         v.valid = v.scene = true;
         v.pipeline = pipeline;
         v.viHash = hashVi(*p.vi);
+        v.vi = p.vi;
         v.dynHash = p.dyn != nullptr ? hashDyn(*p.dyn) : 0;
         v.indexBuffer = p.indexBuffer;
         v.indexOffset = p.indexOffset;
@@ -434,8 +435,10 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
     out.pipeline = c.scenePipeline;
     if (out.scene) {
         if (!ensureSceneRef()) return 9;
-        out.viHash = hashVi(*internSceneVi(c.vi));
+        out.vi = internSceneVi(c.vi);
+        out.viHash = hashVi(*out.vi);
     } else {
+        out.vi = &c.vi;
         out.viHash = hashVi(c.vi);
     }
     out.dynHash = hashDyn(c.dyn);

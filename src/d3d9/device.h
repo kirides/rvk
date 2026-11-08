@@ -1100,6 +1100,7 @@ public:
         bool capture = false;  // (probe) the draw went with a capture variant (an observer asked for the vertex shader's outputs): it is no scene draw by design
         GamePipeline pipeline = GamePipeline::None;
         std::uint64_t viHash = 0, dynHash = 0, indexBuffer = 0, indexOffset = 0;
+        const rhi::VertexInputValues* vi = nullptr;  // the vertex input (interned: valid within the frame; for the DIFFERING detail only)
         std::uint32_t first = 0, count = 0, flags = 0;
         std::int32_t vertexOffset = 0;
         bool index32 = false;

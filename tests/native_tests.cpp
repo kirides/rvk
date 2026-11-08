@@ -694,6 +694,18 @@ TEST(actor_morph_targets_and_bones) {
     CHECK(sc::boneRegister(0) == 33 && sc::boneRegister(65) == 228);
 }
 
+TEST(packet_cache_failed_capture_drops_a_stale_entry) {
+    // an actor's pick changed (the entry's description differs: no match), then the capture failed (a pipeline still compiling): the entry of the previous pick
+    // must go, else the op record built after the draw takes its morph stream offsets (7.41 addendum)
+    CHECK(sc::packetAfterCapture(false, true, false) == sc::PacketAfterCapture::Erase);
+    CHECK(sc::packetAfterCapture(false, true, true) == sc::PacketAfterCapture::Erase);
+    CHECK(sc::packetAfterCapture(false, false, false) == sc::PacketAfterCapture::Nothing);
+    // captured: a matching entry is refreshed, a differing or missing one is replaced / inserted
+    CHECK(sc::packetAfterCapture(true, true, true) == sc::PacketAfterCapture::Refresh);
+    CHECK(sc::packetAfterCapture(true, true, false) == sc::PacketAfterCapture::Insert);
+    CHECK(sc::packetAfterCapture(true, false, false) == sc::PacketAfterCapture::Insert);
+}
+
 TEST(native_attribution_skinned_zero_draws) {
     // a skinned op without draws is explained when its draw condition (frame_tap animationState) lacks a bit
     Op op;
