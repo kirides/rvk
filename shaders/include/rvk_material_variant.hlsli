@@ -42,6 +42,22 @@
 #endif
 
 static float4 rvk_gi[8];  // [0] = g_IndoorAmbientColor, [1..7] = g_AmbientLight
+#if defined(RVK_UBER_HOOKS) && defined(RVK_HALF16) && defined(RVK_MV_AMBIENT)
+// The ubershader (16-bit build) keeps the ambient as 16 packed words from the end of the prologue on (S-2b, frame-ownership.md 14.8): 16 live VGPRs through
+// the texture phase and the light loop instead of 32, the lit core reads it as half anyway; rvkGiGet unpacks one register where it is used
+#define RVK_GI_PACKED 1
+static uint rvk_giP[16];
+void rvkGiPack() {
+    [unroll] for (uint i = 0; i < 8; ++i) {
+        rvk_giP[2 * i] = f32tof16(rvk_gi[i].x) | (f32tof16(rvk_gi[i].y) << 16);
+        rvk_giP[2 * i + 1] = f32tof16(rvk_gi[i].z) | (f32tof16(rvk_gi[i].w) << 16);
+    }
+}
+float4 rvkGiGet(uint i) {
+    uint a = rvk_giP[2 * i], b = rvk_giP[2 * i + 1];
+    return float4(f16tof32(a & 0xFFFFu), f16tof32(a >> 16), f16tof32(b & 0xFFFFu), f16tof32(b >> 16));
+}
+#endif
 static uint rvk_giCascade = 0xFFu;
 static float3 rvk_giN = float3(0.0, 1.0, 0.0);  // geometric normal (towards the viewer)
 static float3 rvk_mvP = float3(0.0, 0.0, 0.0);  // world position
@@ -139,13 +155,12 @@ void rvkMvLoadEngineAmbient() {
 #endif
 }
 
-void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
-    float4 regs[7];
-    if (!rvkGiValid(f) || (f.frameInfo.y & RVK_FRAME_CAMERA_VALID) == 0u || !rvkGiLookup(f, P, n, V, regs, rvk_giCascade)) {
-        rvkMvLoadEngineAmbient();
-        return;
-    }
-    RvkGiVolume v = rvkGiVolume(f);
+// The screen probes' per-surface correction of the DDGI irradiance (rtgi.md 11), read BEFORE the probe lookup (S-2b, frame-ownership.md 14.8: the gathers
+// and the lookup no longer overlap: nothing of the 28 summed registers is live while the image taps run): k = the factor per colour channel, dg = the
+// directional correction (added to the registers' L1 vector); returns 0 = no correction, 1 = k only, 2 = k and dg
+uint rvkMvSgiFactors(RvkFrame f, out float3 kOut, out float3 dgOut) {
+    kOut = float3(1.0, 1.0, 1.0);
+    dgOut = float3(0.0, 0.0, 0.0);
 #ifdef RVK_MV_GBUFFER
     // the screen probes (rtgi.md 11): this frame's per-surface correction of the DDGI irradiance (the registers are per
     // colour channel: c15 / c18 red, c16 / c19 green, c17 / c20 blue, c21.rgb)
@@ -162,35 +177,61 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
         } else {
             s = rvkFetch2D(sg.x, int2(rvk_mvFrag.xy));
         }
-        {
-            bool hit = sgiHalf ? tapsHit : (s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0));
-            bool direct = hit;
-            if (!hit) {
-                float4 g = rvkMvGather(sg.x, myZ, false, sgiHalf ? 0.5 : 1.0);
-                s = float4(lerp(float3(1.0, 1.0, 1.0), g.rgb, g.w), 1.0);
-                hit = g.w > 0.0;
+        bool hit = sgiHalf ? tapsHit : (s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0));
+        bool direct = hit;
+        if (!hit) {
+            float4 g = rvkMvGather(sg.x, myZ, false, sgiHalf ? 0.5 : 1.0);
+            s = float4(lerp(float3(1.0, 1.0, 1.0), g.rgb, g.w), 1.0);
+            hit = g.w > 0.0;
+        }
+        if (hit) {
+            float3 k = clamp(s.rgb, float3(0.0, 0.0, 0.0), float3(3.2, 3.2, 3.2));  // luminance ratio (cap 2) x chroma (up to 1.6)
+            rvk_mvSgi = k;
+            kOut = k;
+            // directional correction (gi.directional, rtgi.md 20): the screen probes' slope of the traced irradiance with
+            // the normal minus the DDGI's (their luminance, in world space, from the resolve's second image): added to
+            // the registers' L1 vector, with the constant term moved so the irradiance at the geometric normal stays
+            // what the ratio made it: normal-mapped and curved surfaces then follow the direction the light comes from
+            if (direct && sg.w != 0u) {
+                float3 dg = sgiHalf ? dgTaps : rvkFetch2D(sg.w, int2(rvk_mvFrag.xy)).rgb;
+                float lum = dot(k, float3(0.2126, 0.7152, 0.0722));
+                // dc_c = dg x (k_c / lum), applied per channel below
+                if (lum > 1e-3) {
+                    dgOut = dg / lum;
+                    return 2u;
+                }
+                dgOut = dg;  // (the luminance ~0: dc = dg for every channel)
+                return 3u;
             }
-            if (hit) {
-                float3 k = clamp(s.rgb, float3(0.0, 0.0, 0.0), float3(3.2, 3.2, 3.2));  // luminance ratio (cap 2) x chroma (up to 1.6)
-                rvk_mvSgi = k;
-                for (int c = 0; c < 3; ++c) {
-                    regs[c] *= k[c];
-                    regs[3 + c] *= k[c];
-                }
-                regs[6].rgb *= k;
-                // directional correction (gi.directional, rtgi.md 20): the screen probes' slope of the traced irradiance with
-                // the normal minus the DDGI's (their luminance, in world space, from the resolve's second image): added to
-                // the registers' L1 vector, with the constant term moved so the irradiance at the geometric normal stays
-                // what the ratio made it: normal-mapped and curved surfaces then follow the direction the light comes from
-                if (direct && sg.w != 0u) {
-                    float3 dg = sgiHalf ? dgTaps : rvkFetch2D(sg.w, int2(rvk_mvFrag.xy)).rgb;
-                    float lum = dot(k, float3(0.2126, 0.7152, 0.0722));
-                    for (int c = 0; c < 3; ++c) {
-                        float3 dc = dg * (lum > 1e-3 ? k[c] / lum : 1.0);
-                        regs[c].xyz += dc;
-                        regs[c].w -= dot(dc, rvk_giN);
-                    }
-                }
+            return 1u;
+        }
+    }
+#endif
+    return 0u;
+}
+
+void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
+    float4 regs[7];
+    const bool giOk = rvkGiValid(f) && (f.frameInfo.y & RVK_FRAME_CAMERA_VALID) != 0u;
+    float3 sgK, sgDg;
+    const uint sgMode = giOk ? rvkMvSgiFactors(f, sgK, sgDg) : 0u;
+    if (!giOk || !rvkGiLookupLean(rvkGiVolume(f), P, n, V, regs, rvk_giCascade)) {
+        rvkMvLoadEngineAmbient();
+        return;
+    }
+    RvkGiVolume v = rvkGiVolume(f);
+#ifdef RVK_MV_GBUFFER
+    if (sgMode != 0u) {
+        for (int c = 0; c < 3; ++c) {
+            regs[c] *= sgK[c];
+            regs[3 + c] *= sgK[c];
+        }
+        regs[6].rgb *= sgK;
+        if (sgMode >= 2u) {
+            for (int c = 0; c < 3; ++c) {
+                float3 dc = sgMode == 2u ? sgDg * sgK[c] : sgDg;
+                regs[c].xyz += dc;
+                regs[c].w -= dot(dc, rvk_giN);
             }
         }
     }
@@ -200,15 +241,12 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
     // average >= 0 and makes it 0 for outdoor draws (engine = sky)
     rvkMvLoadEngineAmbient();
     // (the engine's registers and the frame's sky are read where they are used, not copied: 56 live VGPRs less)
+    // (rvkGiAverage written out on the registers: no eng[7] / sk[7] copies, 56 live floats less)
     float3 le, ls;
     {
-        float4 eng[7], sk[7];
-        for (int i = 0; i < 7; ++i) {
-            eng[i] = rvk_gi[1 + i];
-            sk[i] = v.Get().sky[i];
-        }
-        le = max(rvkGiAverage(eng), float3(0.0, 0.0, 0.0));
-        ls = rvkGiAverage(sk);
+        RvkGiVolume sv = v;
+        le = max(float3(rvk_gi[1].w + rvk_gi[4].z / 3.0, rvk_gi[2].w + rvk_gi[5].z / 3.0, rvk_gi[3].w + rvk_gi[6].z / 3.0), float3(0.0, 0.0, 0.0));
+        ls = float3(sv.Get().sky[0].w + sv.Get().sky[3].z / 3.0, sv.Get().sky[1].w + sv.Get().sky[4].z / 3.0, sv.Get().sky[2].w + sv.Get().sky[5].z / 3.0);
     }
     float fk = 1.0;  // (GLSL: f)
     for (int c = 0; c < 3; ++c) {
@@ -248,20 +286,25 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
 
 #ifdef RVK_MV_GBUFFER
 // ambient occlusion (enh/gbuffer GTAO): this frame's (after the z pre-pass) at this pixel scales the ambient
-void rvkMvAo(RvkFrame f, float3 P) {
+// (read before the probe lookup, applied after it: rvkMvAmbientNow; 1 = no occlusion image / not valid for this pixel)
+float rvkMvAoFactor(RvkFrame f) {
     uint4 a = f.ao;
-    if ((a.z & RVK_FRAME_AO_VALID) == 0u || a.x == 0u) return;
+    if ((a.z & RVK_FRAME_AO_VALID) == 0u || a.x == 0u) return 1.0;
     // this frame's (computed after the z pre-pass) at this pixel, when its depth is this surface's
     float2 s = rvkFetch2D(a.x, int2(rvk_mvFrag.xy)).rg;
     float myZ = rvkMvViewDepth(f);
     if (s.g <= 0.0 || abs(s.g - myZ) > max(myZ * 0.02, 4.0)) {
         float4 g = rvkMvGather(a.x, myZ, true, 1.0);
-        if (g.w <= 0.0) return;
+        if (g.w <= 0.0) return 1.0;
         s = float2(lerp(1.0, g.x, g.w), myZ);
     }
     float ao = clamp(s.r, 0.0, 1.0);
     float fk = lerp(1.0, ao, clamp(asfloat(a.w), 0.0, 1.0));
     rvk_mvAo = fk;
+    return fk;
+}
+void rvkMvAoApply(float fk) {
+    if (fk == 1.0) return;
     for (int i = 1; i < 7; ++i) rvk_gi[i] *= fk;
     rvk_gi[7].rgb *= fk;
     rvk_gi[0].rgb *= fk;
@@ -281,7 +324,12 @@ void rvkMvAo(RvkFrame f, float3 P) {
 //   - the other slots take the best lights of the pixel's cluster, scored by luminance x falloff x (0.25 + 0.75 sat(N.L)); an unused slot gets
 //     colour 0 (the loop still runs, adds nothing)
 // style physical: the colour of every table light is scaled by phys(d) / orig(d) (rvkLmPhysicalRatio).
-static float4 rvk_cl[RVK_MV_CL_COUNT * 4];
+// The per-pixel point-light registers are NOT held as 4 x COUNT float4 any more (S-2b, frame-ownership.md 14.8: 48 live VGPRs through the light loop): a slot
+// is compact state (where it comes from + one colour factor) and rvkClReg(slot, comp) reads the values where the light loop uses them: the engine's
+// register (a uniform load) or the table light's record (one divergent load), colour x factor.
+static uint rvk_clSrc[RVK_MV_CL_COUNT];  // 0 = the slot's own engine registers (kept lights, the table not used), n = table light n - 1
+static float rvk_clK[RVK_MV_CL_COUNT];   // the colour factor of the slot (physical law x ray-traced shadow; 0 = an unused slot)
+static RvkAddr rvk_clLb;                 // the table's light array
 static uint rvk_clCount = 0xFFFFFFFFu;  // lights in the pixel's cluster (0xFFFFFFFF = table not used: the engine's values)
 static uint rvk_clUsed = 0;             // table lights written into the registers
 static bool rvk_clPhysical = false;     // lighting.style = physical and the table valid for this pixel: the PBR evaluation (rvkMvPbr) runs on every lit draw
@@ -305,8 +353,26 @@ float rvkMvLightShadow(uint slot, uint size, uint sid) {
 
 float4 rvkMvEngineReg(uint reg) { return rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), reg * 16u)); }
 
+// register `comp` (0 position + 1 / R^2, 1 diffuse, 2 specular, 3 shadow channel selector) of point-light slot `slot` as the light loop reads it
+float4 rvkClReg(uint slot, uint comp) {
+    uint src = rvk_clSrc[slot];
+    float4 e = rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * slot + comp);
+    if (src == 0u) {
+        if (comp == 1u || comp == 2u) e.rgb *= rvk_clK[slot];
+        return e;
+    }
+    RvkAddr rec = rvkAddrAdd(rvk_clLb, (src - 1u) * RVK_LIGHT_BYTES);
+    if (comp == 0u) return rvkRawLoad<float4, 16>(rec);
+    if (comp == 3u) return float4(0.0, 0.0, 0.0, 0.0);
+    float4 c = rvkRawLoad<float4, 16>(rvkAddrAdd(rec, comp == 1u ? 16u : 32u));
+    return float4(c.rgb * rvk_clK[slot], e.w);
+}
+
 void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
-    [unroll] for (uint k = 0; k < RVK_MV_CL_COUNT * 4u; ++k) rvk_cl[k] = rvkMvEngineReg(uint(RVK_MV_CL_REG) + k);
+    [unroll] for (uint k0 = 0; k0 < RVK_MV_CL_COUNT; ++k0) {
+        rvk_clSrc[k0] = 0u;
+        rvk_clK[k0] = 1.0;
+    }
     uint2 ref = asuint(f.params[RVK_MV_CL_PARAM].xy);
     float4 ctl = f.params[RVK_MV_CL_PARAM + 1];  // x enabled, y style (0 original, 1 physical), z debug view
     if ((ref.x | ref.y) == 0u || ctl.x < 0.5) return;
@@ -327,7 +393,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     uint twinSid[RVK_MV_CL_COUNT];  // the ray-traced shadow id of the table twin of each engine light (0 = none)
     [unroll] for (uint i0 = 0; i0 < RVK_MV_CL_COUNT; ++i0) twinSid[i0] = 0u;
     [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
-        float4 pr = rvk_cl[4 * i], col = rvk_cl[4 * i + 1], sel = rvk_cl[4 * i + 3];
+        float4 pr = rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i), col = rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i + 1u), sel = rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i + 3u);
         ePos[i] = pr.xyz;
         float3 lv = pr.xyz - P;
         if (rvkLmLum(col.rgb) > 0.0 && pr.w > 0.0 && dot(lv, lv) * pr.w < 1.0) litMask |= 1u << i;
@@ -341,6 +407,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
         cIdx[i] = 0xFFFFFFFFu;
     }
     RvkAddr lb = rvkAddrAdd(base, offs.x);
+    rvk_clLb = lb;
     for (uint j = 0; j < cnt; ++j) {
         uint idx = rvkRawLoad<uint, 4>(rvkAddrAdd(cb, 4u + 4u * j));
         float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES));
@@ -367,7 +434,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 knownMask |= 1u << i;
                 // (the engine's own light of this object keeps its slot and its colour: the engine weights every static light per object, 0.2 .. 2.0 of
                 // the registry's colour (gpu-scene.md 9.10), which the table cannot know; its table twin must not count a second time)
-                if ((selMask >> i & 1u) != 0u || rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0) {
+                if ((selMask >> i & 1u) != 0u || rvkLmLum(rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i + 1u).rgb) > 0.0) {
                     twin = true;
                     if ((selMask >> i & 1u) == 0u) {
                         uint tsid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u));
@@ -399,24 +466,23 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     // the slots: kept (shadow selector, or lit by a light the table does not know) or refilled from the top list
     uint next = 0;
     [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
-        bool keep = (selMask >> i & 1u) != 0u || rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0;
+        bool keep = (selMask >> i & 1u) != 0u || rvkLmLum(rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i + 1u).rgb) > 0.0;
         if (keep) {
+            float kk = 1.0;
             if (ctl.y > 0.5 && (selMask >> i & 1u) == 0u && (knownMask >> i & 1u) != 0u) {
                 // physical style: the engine's light of this slot follows the physical distance law as well
-                float3 lv = rvk_cl[4 * i].xyz - P;
-                float k = rvkLmPhysicalRatio(dot(lv, lv), rvk_cl[4 * i].w);
-                rvk_cl[4 * i + 1].rgb *= k;
-                rvk_cl[4 * i + 2].rgb *= k;
+                float3 lv = ePos[i] - P;
+                kk = rvkLmPhysicalRatio(dot(lv, lv), rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i).w);
             }
             if (twinSid[i] == 0u) rvk_clKeptState = max(rvk_clKeptState, (selMask >> i & 1u) != 0u ? 3.0 : ((knownMask >> i & 1u) != 0u ? 1.0 : 2.0));
             if (twinSid[i] != 0u) {
                 // the engine's own (unshadowed) light of this slot: its table twin's ray-traced visibility shades it (the shadow-channel lights keep the engine's mask)
                 float sv = rvkMvLightShadow(h0.z, h0.w, twinSid[i]);
-                rvk_cl[4 * i + 1].rgb *= sv;
-                rvk_cl[4 * i + 2].rgb *= sv;
+                kk *= sv;
                 rvk_clShadow = min(rvk_clShadow, sv);
                 rvk_clShadowTested = 1.0;
             }
+            rvk_clK[i] = kk;
             continue;
         }
         uint pick = 0xFFFFFFFFu;
@@ -425,11 +491,9 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
         }
         if (pick != 0xFFFFFFFFu) {
             ++next;
-            float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES));
-            float4 cr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES + 16u));
-            float4 sr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES + 32u));
             float k = 1.0;
             if (ctl.y > 0.5) {
+                float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES));
                 float3 lv = pr.xyz - P;
                 k = rvkLmPhysicalRatio(dot(lv, lv), pr.w);
             }
@@ -440,14 +504,11 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 rvk_clShadow = min(rvk_clShadow, sv);
                 rvk_clShadowTested = 1.0;
             }
-            rvk_cl[4 * i] = pr;
-            rvk_cl[4 * i + 1] = float4(cr.rgb * k, rvk_cl[4 * i + 1].w);
-            rvk_cl[4 * i + 2] = float4(sr.rgb * k, rvk_cl[4 * i + 2].w);
-            rvk_cl[4 * i + 3] = float4(0.0, 0.0, 0.0, 0.0);
+            rvk_clSrc[i] = pick + 1u;
+            rvk_clK[i] = k;
             ++rvk_clUsed;
         } else {
-            rvk_cl[4 * i + 1] = float4(0.0, 0.0, 0.0, rvk_cl[4 * i + 1].w);
-            rvk_cl[4 * i + 2] = float4(0.0, 0.0, 0.0, rvk_cl[4 * i + 2].w);
+            rvk_clK[i] = 0.0;  // an unused slot: colour 0 (the loop still runs, adds nothing)
         }
     }
 }
@@ -488,9 +549,15 @@ void rvkMvClusterNow() { rvkMvCluster(rvkLoadFrame(pc.frame), rvk_mvP, rvk_giN);
 #ifdef RVK_MV_AMBIENT
 void rvkMvAmbientNow() {
     RvkFrame f = rvkLoadFrame(pc.frame);
+#ifdef RVK_MV_GBUFFER
+    const float aoK = rvkMvAoFactor(f);  // (the image taps first, then the lookup: the two do not overlap)
+#endif
     rvkMvGi(f, rvk_mvP, rvk_giN, normalize(f.cameraPos.xyz - rvk_mvP));  // (loads the engine's registers into rvk_gi after the probe lookup: 32 VGPRs fewer live in it)
 #ifdef RVK_MV_GBUFFER
-    rvkMvAo(f, rvk_mvP);
+    rvkMvAoApply(aoK);
+#endif
+#ifdef RVK_GI_PACKED
+    rvkGiPack();
 #endif
 }
 #endif
@@ -513,7 +580,7 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
 // RVK_MV_PBR_SHADOW_SLOT (the shadow mask's sampler). The translator captures the diffuse texld (coordinate, colour) of sampler s9.
 // Frame params[2] = (quality 0 off .. 3, specular strength, environment strength, debug view).
 #ifdef RVK_MV_CLUSTER
-#define RVK_MV_PL(k) rvk_cl[k]  // the per-pixel point-light registers (RVK_MV_PBR_PNT_REG == RVK_MV_CL_REG)
+#define RVK_MV_PL(k) rvkClReg((k) >> 2, (k) & 3)  // the per-pixel point-light registers (RVK_MV_PBR_PNT_REG == RVK_MV_CL_REG)
 #else
 #define RVK_MV_PL(k) RVK_PSC(RVK_MV_PBR_PNT_REG + (k))
 #endif
@@ -716,7 +783,11 @@ void rvkMvEpilogue(inout float4 c0) {
         uint dbg = rvkGiVolume(f).Get().info.y;
         if (dbg == 1u) {
             float4 r[7];
+#ifdef RVK_GI_PACKED
+            for (int i = 0; i < 7; ++i) r[i] = rvkGiGet(1 + i);
+#else
             for (int i = 0; i < 7; ++i) r[i] = rvk_gi[1 + i];
+#endif
             c0 = float4(pow(max(rvkGiEvalRegs(r, rvk_giN), float3(0.0, 0.0, 0.0)), float3(0.45, 0.45, 0.45)), c0.a);
         } else if (dbg == 3u) {
             c0 = float4(rvk_mvVao, rvk_mvVao, rvk_mvVao, c0.a);

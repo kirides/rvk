@@ -217,7 +217,11 @@ float4 texCUBE(int slot, float3 dir) {
 #define g_ViewToScreenScale g_ViewToScreenPos.xy
 #define g_ViewToScreenOffset g_ViewToScreenPos.zw
 #ifdef RVK_MV_AMBIENT
+#ifdef RVK_GI_PACKED
+#define g_IndoorAmbientColor rvkGiGet(0)  // (packed halves, rvk_material_variant.hlsli)
+#else
 #define g_IndoorAmbientColor rvk_gi[0]  // enhancement variants: the GI probes' ambient (rvk_material_variant.hlsli)
+#endif
 #else
 #define g_IndoorAmbientColor RVK_PSC(14)
 #endif
@@ -226,7 +230,11 @@ float4 texCUBE(int slot, float3 dir) {
 #define g_ShaderData_c(i) RVK_PSC(6 + (i))
 static float4 g_ShaderData[8];
 #ifdef RVK_MV_AMBIENT
+#ifdef RVK_GI_PACKED
+#define g_AmbientLight_c(i) rvkGiGet(1 + (i))
+#else
 #define g_AmbientLight_c(i) rvk_gi[1 + (i)]
+#endif
 #else
 #define g_AmbientLight_c(i) RVK_PSC(15 + (i))
 #endif
@@ -235,10 +243,10 @@ static float4 g_ShaderData[8];
 #define g_DirLight_Direction RVK_PSC(24)
 #ifdef RVK_MV_CLUSTER
 // the Full-owned light table (rvk_material_variant.hlsli rvkMvCluster, run right before the point lights): the per-pixel registers
-#define g_PointLight_PosAndRcpRange(i) rvk_cl[4 * (i)]
-#define g_PointLight_Diffuse(i) rvk_cl[4 * (i) + 1]
-#define g_PointLight_Specular(i) rvk_cl[4 * (i) + 2]
-#define g_PointLight_ShadowMask(i) rvk_cl[4 * (i) + 3]
+#define g_PointLight_PosAndRcpRange(i) rvkClReg(i, 0)
+#define g_PointLight_Diffuse(i) rvkClReg(i, 1)
+#define g_PointLight_Specular(i) rvkClReg(i, 2)
+#define g_PointLight_ShadowMask(i) rvkClReg(i, 3)
 #else
 #define g_PointLight_PosAndRcpRange(i) RVK_PSC(25 + 4 * (i))
 #define g_PointLight_Diffuse(i) RVK_PSC(26 + 4 * (i))

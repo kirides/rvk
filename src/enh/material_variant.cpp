@@ -107,7 +107,7 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
         if (gbuffer || pbr) o.dotCaptures.push_back({static_cast<std::uint32_t>(amb.reg), "rvk_gbN"});
     }
     if (cluster) {
-        for (int k = 0; k < 4 * clCount; ++k) o.constOverrides[static_cast<std::uint32_t>(pntLights.reg + k)] = std::format("rvk_cl[{}]", k);
+        for (int k = 0; k < 4 * clCount; ++k) o.constOverrides[static_cast<std::uint32_t>(pntLights.reg + k)] = std::format("rvkClReg({}, {})", k / 4, k % 4);
     }
     if (pbr) o.texCaptures.push_back({9, "rvk_pbrUv", "rvk_pbrAlbedo", "rvk_pbrOk"});  // the diffuse (g_SamplerData[0] = s9)
     return true;
