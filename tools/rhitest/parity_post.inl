@@ -55,7 +55,7 @@ void testPostLum(Harness& h) {
     }
     auto pipeline = dev.createComputePipeline({cs.shader(), "post lum"});
     auto pipelineTile = dev.createComputePipeline({cst.shader(), "post lum tile"});
-    rhi::TextureDesc td8{VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {8, 8, 1}, 1, 1, VK_IMAGE_USAGE_STORAGE_BIT, "post lum tile"};
+    rhi::TextureDesc td8{VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {8, 9, 1}, 1, 1, VK_IMAGE_USAGE_STORAGE_BIT, "post lum tile"};
     auto tileImg = dev.createTexture(td8);
     auto params = dev.createBuffer({sizeof(Params), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "post lum params"});
     if (!scene || !prev || !outA || !outB || !staging || !prevStaging || !readback || !pipeline || !pipelineTile || !tileImg || !params) {
@@ -113,8 +113,6 @@ void testPostLum(Harness& h) {
         cl.transition(*prev, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         cl.copyBufferToTexture(*prev, *prevStaging, 0);
         cl.transition(*prev, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        cl.transition(*outA, VK_IMAGE_LAYOUT_GENERAL);
-        cl.transition(*outB, VK_IMAGE_LAYOUT_GENERAL);
         cl.transition(*tileImg, VK_IMAGE_LAYOUT_GENERAL);
         cl.bindPipeline(*pipelineTile);
         rhi::Texture* const tileStorage[] = {tileImg.get()};
@@ -122,6 +120,8 @@ void testPostLum(Harness& h) {
         cl.setPushConstants(&push, sizeof(push));
         cl.dispatch(8, 8, 1);
         cl.computeBarrier();
+        cl.transition(*outA, VK_IMAGE_LAYOUT_GENERAL);
+        cl.transition(*outB, VK_IMAGE_LAYOUT_GENERAL);
         cl.bindPipeline(*pipeline);
         rhi::Texture* const storage[] = {outA.get(), outB.get(), tileImg.get()};
         cl.setStorageTextures(storage);

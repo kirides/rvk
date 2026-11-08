@@ -59,7 +59,8 @@ public:
     static int lumUnit(std::string_view name);
     // the pure part: the kernel's parameters from the eight composed draws (viewport sizes, quad data, VS / PS constants); false + `why`: not as
     // expected (the units then run as the engine's draws)
-    static bool lumParams(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, PostLumParams& out, std::string& why);
+    // `sceneSubstituted`: the scene texture is replaced by the upscaler's output at draw time (its size is the taps' 1 / cx, 1 / cy, not the engine image's)
+    static bool lumParams(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, bool sceneSubstituted, PostLumParams& out, std::string& why);
     // the compute pipeline exists (built in the background after the mode is switched on)
     bool lumReady();
     // records the dispatch now (runPassNow). `write`: the engine's two persistent images get the result (the units are not drawn); else (compare) the

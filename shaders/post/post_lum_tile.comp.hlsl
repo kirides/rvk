@@ -55,4 +55,6 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     }
     GroupMemoryBarrierWithGroupSync();
     if (t == 0u) tileOut[int2(gid.xy)] = (tile[80] + tile[81] + tile[82] + tile[83]) * 0.25;
+    // the previous adapted luminance rides along in row 8 (the final dispatch writes the image it is read from: no SRV / UAV aliasing on D3D12)
+    if (gid.x == 0u && gid.y == 0u && t == 0u) tileOut[int2(0, 8)] = rvkFetch2D(p.tex.y, int2(0, 0)).r;
 }

@@ -137,7 +137,7 @@ bool OwnPost::lumReady() {
     return true;
 }
 
-bool OwnPost::lumParams(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, PostLumParams& out, std::string& why) {
+bool OwnPost::lumParams(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, bool sceneSubstituted, PostLumParams& out, std::string& why) {
     std::memset(&out, 0, sizeof(out));
     // sizes: the targets are 64 .. 2 and 1 (viewport), the sources the scene (a texture, any size) and the previous level
     static constexpr std::uint32_t kDim[7] = {64, 32, 16, 8, 4, 2, 1};
@@ -160,7 +160,7 @@ bool OwnPost::lumParams(const std::array<const fxc::EffectDraw*, kLumUnits>& rec
             return false;
         }
         const double w = s == 0 ? src->desc().width : 2.0 * kDim[s], h = s == 0 ? src->desc().height : 2.0 * kDim[s];
-        if (std::abs(out.stage[s].tap[0] * w - 1.0) > 2e-3 || std::abs(out.stage[s].tap[1] * h - 1.0) > 2e-3) {
+        if (!(s == 0 && sceneSubstituted) && (std::abs(out.stage[s].tap[0] * w - 1.0) > 2e-3 || std::abs(out.stage[s].tap[1] * h - 1.0) > 2e-3)) {
             why = std::format("unit {}: tap offsets ({}, {}) are not 1 / {}x{}", s, out.stage[s].tap[0], out.stage[s].tap[1], w, h);
             return false;
         }
@@ -209,7 +209,9 @@ bool OwnPost::runLum(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, b
     }
     PostLumParams p;
     std::string why;
-    if (!lumParams(rec, p, why)) {
+    const auto* sceneTex = static_cast<const d3d9::Texture*>(rec[0]->textures[0]);
+    const bool substituted = sceneTex == dev_.sceneSubstituteFrom() && dev_.sceneSubstituteSlot() != 0;
+    if (!lumParams(rec, substituted, p, why)) {
         ++stats_.refused;
         if (why != lastWhy_ || whyLogged_ < 3) {
             lastWhy_ = why;
@@ -227,7 +229,6 @@ bool OwnPost::runLum(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, b
         if (whyLogged_++ < 3) spdlog::info("native: own post: the 1x1 luminance images have no storage usage (created before the setting was on): the units stay the engine's");
         return false;
     }
-    const bool substituted = scene == dev_.sceneSubstituteFrom() && dev_.sceneSubstituteSlot() != 0;
     bool ok = false;
     const auto record = [&](d3d9::PassContext& ctx) {
         rhi::CommandList& cmd = ctx.cmd;
@@ -255,10 +256,8 @@ bool OwnPost::runLum(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, b
             outA = scratchA;
             outB = scratchB;
         }
-        rhi::Texture* tileImg = dev_.transient("post.lum.tile", {VK_FORMAT_R32_SFLOAT, {8, 8}});
+        rhi::Texture* tileImg = dev_.transient("post.lum.tile", {VK_FORMAT_R32_SFLOAT, {8, 9}});
         if (tileImg == nullptr) return;
-        cmd.transition(*outA, VK_IMAGE_LAYOUT_GENERAL);
-        cmd.transition(*outB, VK_IMAGE_LAYOUT_GENERAL);
         cmd.transition(*tileImg, VK_IMAGE_LAYOUT_GENERAL);
         // A: 64 tiles (levels 0..3) from the scene
         cmd.bindPipeline(*tile_);
@@ -267,7 +266,9 @@ bool OwnPost::runLum(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, b
         cmd.setPushConstants(&push, sizeof(push));
         cmd.dispatch(8, 8, 1);
         cmd.computeBarrier();
-        // B: levels 4, 5 and the adaptation (u0 / u1 the two outputs, u2 the tile image)
+        // B: levels 4, 5 and the adaptation (u0 / u1 the two outputs, u2 the tile image); the outputs only now leave the layout they were read in
+        cmd.transition(*outA, VK_IMAGE_LAYOUT_GENERAL);
+        cmd.transition(*outB, VK_IMAGE_LAYOUT_GENERAL);
         cmd.bindPipeline(*lum_);
         rhi::Texture* const storage[] = {outA, outB, tileImg};
         cmd.setStorageTextures(storage);

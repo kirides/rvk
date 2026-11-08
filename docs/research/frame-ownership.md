@@ -2540,3 +2540,62 @@ billboards is the same `PS_Default` text): up to ~4,500 of the 5,944 draws of a 
 **Soaks** (private copy `risen-test-vk-s1`, instance 44, lock `rvk-s1`; all owned settings + `debug.ubershader` + FSR performance + frame generation + GI + AO): first run `-Validation` + GPU-assisted on pub_interior (0 errors); then GPU-assisted spots pub_interior + jungle PASS (only AMD's frame-generation `rw_output` format findings, 10 errors / 12 VUID lines as in 7.44); savegame hold PASS 0 errors; `rvk_rtwalk` walk 1 PASS 0; walk 2 (+ `shadows.rt=near`, `rt_skin_verify`) PASS 0; turning burst plain PASS (peak 5,146 live records), with `-Validation` PASS (only the `rw_output` findings); spots pub_interior / jungle / harbour_docks / monastery_hall PASS; hero_idle + pub_idle PASS. No device loss, no stage turned itself off.
 
 **Open.** (1) SpeedTree leaf pixel shaders (39 % of owned tree items) stay translated until S-1b (`uberSupports` excludes `ge_default_leafs.fx`; the port exists: `uberSupportsFile`). (2) Variants are checked by rhitest / dxil-check / in-game only, not by `shadereq`. (3) The lit v1 plain form is +8 VGPR, the z pass +2: S-2's diet should start from the v2 numbers. (4) No D3D12 game run was made (rhitest parity on D3D12 only). `rvk_d3d9test` PASS 0 failures / 0 validation errors on Vulkan and D3D12, `--validation` and `--sync-validation`.
+
+### 14.8 S-7 result: the post chain on our own shaders - the catalogue, and the luminance chain as two dispatches (2026-11-08; code eb011ed + the fixes after it; setting `native.own_post` = off | on | compare, Debug, Full, default off; settings count 143)
+
+**The catalogue overturns the S-0 premise.** The post chain is **not** bandwidth-bound and is not "12 full-resolution RGBA16F passes, ~275 MB". Frame 2500 of the savegame hold (`-LogFrame`, 1600x900, the engine's default DoF graph, 19 effect draws,
+every target logged) and the shaders' tap lists (`rvk_fxtool dump --listing` of the corpus's post_hdr / post_bloom / post_dof / post_streaks variants):
+
+| # | unit (filter : technique) | target | reads | bytes (read + write) | GPU, XTX (ms) |
+|---|---|---|---|---|---|
+| 1 | Down64x64 : LogLuminance | 64x64 R32F | scene RGBA16F, 4 point taps per texel (16 K taps) | 0.13 MB + 16 KB | 0.005 |
+| 2 - 6 | Down32x32 .. Down2x2 : DownSample | 32 .. 2 R32F | previous level, 4 point taps | < 20 KB each | 0.003 - 0.004 each |
+| 7, 8 | AdaptiveLiminance, AvgLuminance : Copy | 1x1 R32F (the persistent adapted luminance) | 2x2 level, the previous value | ~0 | 0.004 each |
+| 9 | BrightPass (BrightPassAlphaMask) | 309x210 A8R8G8B8 | scene 4 taps / texel, depth map, avg luminance | 2.4 + 0.26 MB | 0.010 |
+| 10 - 12 | GlowH, Streak (64 radial taps), GlowVAddBloom2 | 309x210 A8R8G8B8 | bloom images (cache-resident) | ~0.5 MB each | 0.006 / 0.012 / 0.006 |
+| 13 | ToneMap | **1600x900 A8R8G8B8** (not FP16) | scene | 11.5 + 5.8 MB | 0.013 |
+| 14 | DoFDown | 400x225 A8R8G8B8 | ToneMap (4 taps = all of it) + depth map (16 taps = all of it) | 11.5 + 0.36 MB | 0.011 |
+| 15 - 18 | BlurH, BlurV, CalcNearCoc, SmallBlur | 400x225 A8R8G8B8 | the 400x225 images | ~0.7 MB each | 0.005 each |
+| 19 | DoF (screen) | back buffer X8R8G8B8 | ToneMap 5 taps, depth map, blur images, bloom | 12 + 5.8 MB | 0.030 |
+
+Total **~48 MB** per frame (6x less than 14.1.6's 275 MB: every intermediate is 8 bit or a small R32F; only ToneMap / DoFDown / DoF touch full-resolution images) and **0.15 - 0.17 ms** of GPU time on the XTX (19 passes; `postsum.py`
+over `-PerfFrame` logs): the three full-resolution passes are 0.054 ms (36 %), the luminance chain 0.030 - 0.046 (20 - 27 %), the bloom chain 0.033 (22 %), the DoF middle 0.019 (12 %), pass barriers the rest. On the XTX the chain is
+**per-pass overhead, not bandwidth** (3 - 6 us for a 16 KB pass); on the 680M the 48 MB are ~0.5 - 0.8 ms of its 50 - 100 GB/s plus the same per-pass overhead x ~3 - 5 [I, not measured]. Consequences for the plan: "R11G11B10 / half-res
+intermediates" gains nothing (they are already 8 bit); folding ToneMap into DoFDown + DoF saves ~13 % of the bytes (the scene is re-read as RGBA16F instead of the 8-bit ToneMap image) and a quantisation step; the real saving is **fewer passes**
+(19 -> ~7 possible: luminance 8 -> 1 (built), bloom 4 -> 2, ToneMap folded in, DoF middle 4 -> 1), and S-7's -0.8..-1.3 ms of 14.3 is an overestimate: ~-0.2 .. -0.4 ms on the 680M by the pass-count model.
+
+**What is built (group 1: the luminance chain, 8 passes -> 2 dispatches).** `native.own_post` (Full; `on` needs the post chain taken over, `compare` needs it composed): the eight luminance units of the scene graph are recorded as `EffectOps`
+composes them (the composed draws are the source of every parameter: the quad's uv at the sample points, the taps' offsets, the adaptation constants c1.x lerp factor and c0.xy AvgLumClamp, the textures, the targets), held (not drawn), and
+when the eighth is composed `native/own_post.cpp` records two compute dispatches (`Device::runPassNow`, new: an ad-hoc pass mid-frame, the body of `inject` for one pass): `post_lum_tile.comp.hlsl` (64 groups of 8x8: the 64x64 level straight
+from the scene with the engine's tap order, then 2x2 boxes down to one texel of the 8x8 level) and `post_lum.comp.hlsl` (one group: levels 4, 5, the geometric mean, the lerp with the previous value, the clamp) which writes the Adaptive
+unit's 1x1 target and the persistent AvgLuminance image (`Texture::setSmallStorage`: R32F render targets <= 64x64 get storage usage while the setting is on; Vulkan's storage view of the swizzled (r, 1, 1, 1) R32F image is its identity view,
+fixed in `rhi/vulkan`). The previous value rides to dispatch B in row 8 of the tile image (the output is also the source: no SRV / UAV aliasing, found by D3D12 GPU-based validation). The tile stages need the engine's DownSample taps to be aligned 2x2
+blocks (checked per run). A group that breaks off (a unit fails composition, another unit arrives) or a kernel that cannot run (pipeline not built, tap geometry not as expected, textures without storage, FSR frames where the post chain sees
+the display-size image but no substitute is set: ~1 - 3 % of the frames) **flushes the held units as draws** at that point, in order: the picture is then the engine's. Findings that cost a run each: the renderer shifts every D3D9 draw by the half
+pixel (`posFix` = (+1/W, -1/H) in clip space), so D3D9 pixel p samples the quad at NDC 2p/W - 1, not at the pixel centre (the first kernel with centre sampling was 0.15 % off); with FSR the post chain's scene texture is the upscaler's output (taps 1/1600
+while the engine image is 1066x600): the kernel samples the substitute's slot.
+
+**Gates.**
+* `rvk_tests` 321 / 0. `dxil-check embedded`: post_lum.comp and post_lum_tile.comp PASS. `rvk_rhitest` case "post luminance chain by compute" (new, `tools/rhitest/parity_post.inl`: an RGBA16F scene through the bindless heap, the parameter block by reference,
+  two dispatches, two storage outputs; CPU port of the eight draws; the backends cross-checked): PASS on Vulkan and D3D12 with `--validation` (rel difference to the CPU 0, Vulkan vs D3D12 0) and `--sync-validation` (only the two swapchain-acquire
+  WRITE_AFTER_READ hazards every Vulkan `--sync-validation` run of this tool prints, also with no case selected).
+* **Picture equality, in the game, numerically** (`native.own_post=compare`: the kernel next to the engine's units, before the Copy overwrites the previous value; read back and compared with the Adaptive unit's target): relative difference
+  **max 3.9e-5, mean 1.7e-6** over 4,600 frames (pub_interior + jungle; 0.1 % of the frames above 1e-5). Tolerance: the luminance divides ToneMap's exposure, 4e-5 relative = 0.004 % brightness, a hundredth of one 8-bit step; the rest is fp32
+  summation order and the engine's `_pp` taps.
+* ON vs OFF pictures (`water-compare -Mode full`, frozen spots; control = off vs off, `tools/sbs_diff.py`): mean |d| ON 0.72 / 1.36 / 1.55 / 2.85 / 3.90 / 0.08 (pub_interior, monastery_hall, harbour_docks, jungle, beach_sun, sea_horizon) vs control
+  0.47 / 1.48 / 0.20 / 3.68 / 2.48 / 0.51; luma differences inside the control's. `shot-reviewer` (crops, radial glow profiles of beach_sun / sea_horizon, a 12-cell grid of harbour_docks): no exposure, bloom, glare or colour change beyond the control
+  (harbour_docks' +2.4 % luma = one splash particle on one side); the hard sun disc is not in frame in beach_sun, the flare is judged through the horizon glow (sea_horizon identical: 0.08).
+* Game runs, private copy `risen-test-vk-s7` (instance 45, lock `rvk-s7`), Full + `native.own_post=on` + `native.scene_ops_compare` + `native.lean_check=10` (the held units' compositions compared with the engine's draws on check frames): first run
+  `-Validation` + GPU-assisted (pub_interior): **0 messages**; FSR quality + `-SyncValidation` (harbour_docks, jungle): only AMD's own `rw_spd_mip3` format warning; FSR quality + frame generation (savegame hold): PASS; **D3D12** (`-Api d3d12 -Validation`,
+  `RVK_NO_GBV=1`): only the DSV-format warning the baseline prints; with GPU-based validation the aliasing described above was found and fixed (3,708 reports, 0 after); turning burst (`rvk_rtwalk` burst, savegame, `-Validation`): 0 messages, check
+  frames `after 0 / 43,337 differing, store 0 / 43,337, fields 0 / 87,034`, composition mismatches 0; the walk ran before the last fixes (storage-view VUID only, fixed since). Defaults unchanged (off), `Debug` setting.
+
+**GPU per pass** (XTX, `-PerfFrame` 24-frame means, `RisenTest.exe`, vsync off, shared copy, `-All`; three runs each, `postsum.py`; the post range = first luminance pass .. DoF screen pass): savegame hold off 0.170 / 0.181 (a third log without a post range)
+-> on 0.151 / 0.130 / 0.202 (one spiked frame, min 0.102); harbour_docks off 0.140 / 0.115 / 0.208 (spike) -> on 0.113 / 0.110 / 0.110; the luminance part: eight draws 0.030 - 0.046 ms -> `post.lum` (both dispatches) **0.010 ms**; passes in the range 19 -> 12.
+Net **-0.02 .. -0.03 ms of 0.15 - 0.17** (about -15 %, of ~3.5 ms per frame < 1 %): inside the run-to-run noise of a single run, consistent across the six. A first version with ONE workgroup was 0.035 ms (slower than the draws: 16 K dependent point fetches on one CU),
+hence the tile dispatch. Bytes per frame ~48 -> ~47.7 MB (the luminance units are 0.3 MB): unchanged. 680M extrapolation (pass-count model, per-pass overhead 3 - 5x the XTX's, kernel time x ~3): -7 passes x ~15 - 25 us - ~30 us = **-0.07 .. -0.15 ms**
+[I, unmeasured].
+
+**Not built (S-7 remains open).** Bloom (BrightPass + GlowH + Streak + GlowV: 4 -> 2 with the streak's 64 radial taps), the ToneMap fold into DoFDown / DoF (needs inline tonemapping of 4 + 5 taps and a quantisation decision: the engine's ToneMap image is 8 bit), the DoF middle
+(BlurH / BlurV / NearCoc / SmallBlur -> 1 group per tile with halos), and the HDRI-only graph's other filters; each is a port from the translated shaders (listings: `rvk_fxtool dump --listing`) + a compare mode like this one. By the table above the remaining
+gain on the XTX is ~0.05 - 0.08 ms and on the 680M ~0.2 - 0.3 ms: worth doing for the iGPU target, not a large share of the frame; S-8 (shadow mask, iGPU preset) and the S-2 / S-3 pixel shader work are larger.

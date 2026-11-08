@@ -1211,6 +1211,8 @@ VkImageView VkTextureImpl::storageView(std::uint32_t mip, std::uint32_t layer) {
     const VkComponentMapping& sw = image_->desc().swizzle;
     const bool identity = sw.r == VK_COMPONENT_SWIZZLE_IDENTITY && sw.g == VK_COMPONENT_SWIZZLE_IDENTITY && sw.b == VK_COMPONENT_SWIZZLE_IDENTITY &&
                           sw.a == VK_COMPONENT_SWIZZLE_IDENTITY;
+    // a swizzled sampled view (R32F's (r, 1, 1, 1): the engine's small render targets that a compute pass writes) cannot be a storage view: the image's identity views
+    if (!identity) return image_->attachmentView(dev_.ctx(), mip, layer);
     if (plain2D() && (identity || !external_)) return image_->view();
     return view(VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1);
 }

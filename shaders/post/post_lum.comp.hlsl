@@ -84,7 +84,7 @@ void CSMain(uint3 tid : SV_GroupThreadID) {
         a += lvl[src + uint(t2.y) * 2u + uint(t2.x)] * 0.25;
         a += lvl[src + uint(t3.y) * 2u + uint(t3.x)] * 0.25;
         const float geo = exp2(a * 1.44269502);
-        const float prev = rvkFetch2D(p.tex.y, int2(0, 0)).r;
+        const float prev = tileIn[int2(0, 8)];
         const float cur = p.adapt.x * (geo - prev) + prev;  // lrp
         const float v = min(p.adapt.z, max(cur, p.adapt.y));
         outAdapt[int2(0, 0)] = v;
