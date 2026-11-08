@@ -348,15 +348,12 @@ StaticOps::Skip StaticOps::composeActorImpl(const Op& op) {
         ++st.morphOps;
         U8* setup = ptr(ai, 0x1d0);
         if (setup == nullptr) return Skip::Unreadable;
-        std::vector<float> w(targets);
-        for (std::uint32_t k = 0; k < targets; ++k) {
-            if (!rd(setup, 0xc * static_cast<std::size_t>(k) + 4, &w[k], 4)) return Skip::Unreadable;
-        }
-        const sc::MorphPick pick = sc::pickMorphTargets(w);
+        // (the pick of this frame, shared with the stamps / records / owned draws: ONE pick per actor instance and frame whatever order the views read it in; F-INT 7.43)
+        std::uint32_t pickT[3] = {};
+        if (!actorPick(ai, setup, targets, weights, pickT)) return Skip::Unreadable;
         const std::uint32_t lodVertices = get<std::uint32_t>(hra, 0x48 + 0x14 * static_cast<std::size_t>(lod));
         for (std::uint32_t i = 0; i < 3; ++i) {
-            weights[i] = pick.weight[i];
-            if (g.streams[i + 1].buffer != nullptr) g.streams[i + 1].offset = sc::morphStreamOffset(pick.target[i], lodVertices);
+            if (g.streams[i + 1].buffer != nullptr) g.streams[i + 1].offset = sc::morphStreamOffset(pickT[i], lodVertices);
         }
         if (weights[0] != 0.0f || weights[1] != 0.0f || weights[2] != 0.0f) ++st.morphActive;
         if (f6m::on()) {

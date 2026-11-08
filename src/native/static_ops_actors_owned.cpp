@@ -87,6 +87,34 @@ void StaticOps::setOwnedActors(bool on) {
     }
 }
 
+bool StaticOps::actorPick(const std::uint8_t* ai, const std::uint8_t* setup, std::uint32_t targets, float (&weights)[3], std::uint32_t (&pick)[3]) {
+    const std::uint64_t frame = dev_.stats().frames;
+    if (pickMemoFrame_ != frame) {
+        pickMemo_.clear();
+        pickMemoFrame_ = frame;
+    }
+    const auto hit = pickMemo_.find(ai);
+    if (hit != pickMemo_.end() && hit->second.targets == targets) {
+        std::memcpy(weights, hit->second.weights, sizeof(weights));
+        std::memcpy(pick, hit->second.pick, sizeof(pick));
+        return true;
+    }
+    thread_local std::vector<float> w;
+    w.resize(targets);
+    for (std::uint32_t k = 0; k < targets; ++k) {
+        if (!rd(setup, 0xc * static_cast<std::size_t>(k) + 4, &w[k], 4)) return false;
+    }
+    const sc::MorphPick mp = sc::pickMorphTargets(w);
+    PickMemo m;
+    m.targets = targets;
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        weights[i] = m.weights[i] = mp.weight[i];
+        pick[i] = m.pick[i] = mp.target[i];
+    }
+    pickMemo_[ai] = m;
+    return true;
+}
+
 // composeActorImpl's reads, up to the primitive's shader (and the morph pick when asked)
 int StaticOps::actorRead(const Op& op, ActorIn& in, bool weights) {
     in = {};
@@ -135,30 +163,7 @@ int StaticOps::actorRead(const Op& op, ActorIn& in, bool weights) {
             U8* setup = ptr(in.ai, 0x1d0);
             if (setup == nullptr) return 1;
             // (the weights are the actor instance's: every part of it and every view of the frame reads the same ones, kept per instance and frame)
-            const std::uint64_t frame = dev_.stats().frames;
-            if (pickMemoFrame_ != frame) {
-                pickMemo_.clear();
-                pickMemoFrame_ = frame;
-            }
-            const auto hit = pickMemo_.find(in.ai);
-            if (hit != pickMemo_.end() && hit->second.targets == in.targets) {
-                std::memcpy(in.weights, hit->second.weights, sizeof(in.weights));
-                std::memcpy(in.pick, hit->second.pick, sizeof(in.pick));
-            } else {
-                thread_local std::vector<float> w;
-                w.resize(in.targets);
-                for (std::uint32_t k = 0; k < in.targets; ++k) {
-                    if (!rd(setup, 0xc * static_cast<std::size_t>(k) + 4, &w[k], 4)) return 1;
-                }
-                const sc::MorphPick pick = sc::pickMorphTargets(w);
-                PickMemo m;
-                m.targets = in.targets;
-                for (std::uint32_t i = 0; i < 3; ++i) {
-                    in.weights[i] = m.weights[i] = pick.weight[i];
-                    in.pick[i] = m.pick[i] = pick.target[i];
-                }
-                pickMemo_[in.ai] = m;
-            }
+            if (!actorPick(in.ai, setup, in.targets, in.weights, in.pick)) return 1;
         }
     }
     return 0;

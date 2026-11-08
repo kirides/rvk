@@ -31,7 +31,7 @@ struct ZeroBlock {
 
 class DrawRecordTable {
 public:
-    static constexpr std::uint32_t kCapacity = 4096;  // slots: 512 KiB of records + 832 KiB of blocks (measured: ~1,100 live records at most)
+    static constexpr std::uint32_t kCapacity = 16384;  // slots: 2 MiB of records + 3.3 MiB of blocks (F-INT, 7.43: 4,096 filled while turning with everything owned)
 
     void setActive(bool on) { active_ = on; }
     bool active() const { return active_; }
@@ -83,7 +83,7 @@ private:
         std::uint64_t dueFrame;
     };
     std::deque<Pending> pending_;
-    std::uint32_t used_ = 0, liveCount_ = 0, peak_ = 0;
+    std::uint32_t used_ = 0, liveCount_ = 0, peak_ = 0, windowPeak_ = 0;
     std::uint64_t frame_ = 0;
     Stats stats_{}, last_{};
     double lastReport_ = 0.0;

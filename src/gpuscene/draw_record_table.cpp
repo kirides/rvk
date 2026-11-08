@@ -74,6 +74,7 @@ std::uint32_t DrawRecordTable::alloc() {
     blocks_->mark(s);
     ++liveCount_;
     peak_ = std::max(peak_, liveCount_);
+    windowPeak_ = std::max(windowPeak_, liveCount_ + static_cast<std::uint32_t>(pending_.size()));
     ++stats_.allocs;
     return s;
 }
@@ -127,11 +128,12 @@ void DrawRecordTable::flush(d3d9::Device& dev) {
     lastReport_ = now;
     const auto& rs = records_->stats();
     const auto& bs = blocks_->stats();
-    spdlog::info("native: draw record table (5 s): {} slots live (peak {}, cursor {} of {}), {} allocated, {} released, {} reused, FULL refusals {}; writes {} changed / {} unchanged; "
+    spdlog::info("native: draw record table (5 s): {} slots live (peak {}, window peak live + deferred {}, deferred now {}, cursor {} of {}), {} allocated, {} released, {} reused, FULL refusals {}; writes {} changed / {} unchanged; "
                  "uploaded records {} / blocks {} in total; read-backs {} / {} DIFFERING {} / {}",
-                 liveCount_, peak_, used_, kCapacity, stats_.allocs - last_.allocs, stats_.releases - last_.releases, stats_.reused - last_.reused, stats_.full - last_.full, stats_.writes - last_.writes,
+                 liveCount_, peak_, windowPeak_, pending_.size(), used_, kCapacity, stats_.allocs - last_.allocs, stats_.releases - last_.releases, stats_.reused - last_.reused, stats_.full - last_.full, stats_.writes - last_.writes,
                  stats_.same - last_.same, rs.slotsUploaded, bs.slotsUploaded, rs.verifyDone, bs.verifyDone, rs.verifyBad, bs.verifyBad);
     last_ = stats_;
+    windowPeak_ = liveCount_ + static_cast<std::uint32_t>(pending_.size());
 }
 
 }  // namespace rvk::gpuscene

@@ -143,6 +143,8 @@ bool OwnedCompact::reserve(d3d9::Device& dev, std::uint32_t items, std::uint32_t
     r.firstCount = s.buckets;
     s.items += items;
     s.buckets += buckets;
+    stats_.peakItems = std::max<std::uint64_t>(stats_.peakItems, s.items);
+    stats_.peakBuckets = std::max<std::uint64_t>(stats_.peakBuckets, s.buckets);
     return true;
 }
 
@@ -385,10 +387,10 @@ void OwnedCompact::report() {
     if (stats_.flushes == 0 && stats_.cpuFull == 0) return;
     const Stats& s = stats_;
     const Stats& l = last_;
-    spdlog::info("native: owned compaction (5 s): {} frames, {} flushes ({} items, {} buckets, {} dispatches); CPU fallbacks: frame full {}, not ready {}, record args differ from the draw {}; "
+    spdlog::info("native: owned compaction (5 s): {} frames, {} flushes ({} items, {} buckets, {} dispatches); CPU fallbacks: frame full {}, not ready {}, record args differ from the draw {}; per-frame peak {} of {} argument records, {} of {} counts; "
                  "checks {} ({} buckets, {} records compared) DIFFERING {} (counts {}), skipped {}; {} KiB GPU",
                  s.frames - l.frames, s.flushes - l.flushes, s.items - l.items, s.buckets - l.buckets, s.dispatches - l.dispatches, s.cpuFull - l.cpuFull, s.cpuNotReady - l.cpuNotReady,
-                 s.argsMismatch - l.argsMismatch, s.checks - l.checks, s.checkedBuckets - l.checkedBuckets, s.checkedRecords - l.checkedRecords, s.differing - l.differing,
+                 s.argsMismatch - l.argsMismatch, s.peakItems, kMaxItems, s.peakBuckets, kMaxBuckets, s.checks - l.checks, s.checkedBuckets - l.checkedBuckets, s.checkedRecords - l.checkedRecords, s.differing - l.differing,
                  s.countDiffering - l.countDiffering, s.skipped - l.skipped, bytes() / 1024);
     if (s.cullItems != 0 || s.cullChecked != 0) {
         const auto pct = [](std::uint64_t a, std::uint64_t b) { return b != 0 ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0; };
@@ -408,6 +410,8 @@ void OwnedCompact::report() {
                      s.runs - l.runs, s.badRuns - l.badRuns, s.inexact - l.inexact, tri);
     }
     last_ = stats_;
+    stats_.peakItems = stats_.peakBuckets = 0;
+    last_.peakItems = last_.peakBuckets = 0;
 }
 
 }  // namespace rvk::gpuscene

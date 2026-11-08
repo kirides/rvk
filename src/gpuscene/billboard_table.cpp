@@ -27,7 +27,10 @@ std::uint32_t BbTable::intern(const float* consts, std::uint32_t n) {
             if (tailZero) return s;
         }
     }
-    if (used_ >= kCapacity) return kNone;
+    if (used_ >= kCapacity) {
+        ++full_;
+        return kNone;
+    }
     const std::uint32_t slot = used_++;
     BbConstRecord& r = shadow_[slot];
     std::memset(&r, 0, sizeof(r));

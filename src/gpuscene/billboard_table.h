@@ -28,7 +28,7 @@ struct alignas(16) BbConstRecord {
 
 class BbTable {
 public:
-    static constexpr std::uint32_t kCapacity = 128;
+    static constexpr std::uint32_t kCapacity = 256;  // images (0.8 MiB; never freed, interned by content: 2 used in every test scene; F-INT 7.43: refusals are counted now, a full table leaves the rest composed)
     static constexpr std::uint32_t kNone = 0xffffffffu;
 
     void setActive(bool on) { active_ = on; }
@@ -43,6 +43,7 @@ public:
     void flush(d3d9::Device& dev);
     bool ready() const { return buffer_ != nullptr; }
     std::uint32_t used() const { return used_; }
+    std::uint64_t fullRefusals() const { return full_; }
     std::uint64_t uploads() const { return uploads_; }
 
 private:
@@ -52,7 +53,7 @@ private:
     std::vector<BbConstRecord> shadow_ = std::vector<BbConstRecord>(kCapacity);
     std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> byHash_;
     std::uint32_t used_ = 0, uploaded_ = 0;
-    std::uint64_t uploads_ = 0;
+    std::uint64_t uploads_ = 0, full_ = 0;
 };
 
 BbTable& bbtable();

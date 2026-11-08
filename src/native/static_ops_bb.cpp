@@ -1020,10 +1020,10 @@ void StaticOps::bbReport() {
                  w.constRegsCompared, w.alphaRefCarry, w.c5wCarry, w.viewDup, w.auditChecked, w.auditCaught, w.auditDisagree, list(w.auditBy, orec::kAuditNames, orec::kAuditCount), w.ownedOps, w.ownedDraws,
                  list(w.refuse, bbrec::kRefuseNames, bbrec::kRefuseCount), static_cast<double>(w.buildNs) / frame / 1000.0, w.builds, static_cast<double>(w.deriveNs) / frame / 1000.0, w.derives,
                  static_cast<double>(w.stampNs) / frame / 1000.0, static_cast<double>(w.auditNs) / frame / 1000.0, static_cast<double>(w.replayNs) / frame / 1000.0);
-    spdlog::info("native: owned billboards (total): {} recordable ops, {} draws, valid at entry {}, built {}, rebuilt {}, derived {}, compared {}, DIFFERING {} ({}), audit DISAGREEMENTS {} ({} more caught by the post stamps) of {} checks, constants stale {} of {}, owned ops {} draws {}",
+    spdlog::info("native: owned billboards (total): {} recordable ops, {} draws, valid at entry {}, built {}, rebuilt {}, derived {}, compared {}, DIFFERING {} ({}), audit DISAGREEMENTS {} ({} more caught by the post stamps) of {} checks, constants stale {} of {}, owned ops {} draws {}; constants table {} of {} images, FULL refusals {}",
                  B.total.ops, B.total.draws, B.total.validAtEntry, B.total.built, B.total.rebuilt, B.total.derived, B.total.compared, B.total.differing,
                  list(B.total.byField, bbrec::kFieldNames, bbrec::kFieldCount), B.total.auditDisagree, B.total.auditCaught, B.total.auditChecked, B.total.constStale, B.total.constChecks, B.total.ownedOps,
-                 B.total.ownedDraws);
+                 B.total.ownedDraws, gpuscene::bbtable().used(), gpuscene::BbTable::kCapacity, gpuscene::bbtable().fullRefusals());
     w = {};
 }
 

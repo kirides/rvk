@@ -79,7 +79,7 @@ public:
     void destroy();
 
     struct Stats {
-        std::uint64_t flushes = 0, items = 0, buckets = 0, dispatches = 0, frames = 0, cpuFull = 0, cpuNotReady = 0, argsMismatch = 0;
+        std::uint64_t flushes = 0, items = 0, buckets = 0, dispatches = 0, frames = 0, cpuFull = 0, cpuNotReady = 0, argsMismatch = 0, peakItems = 0, peakBuckets = 0;  // (peaks: the most argument records / counts one frame reserved; reset per 5 s window)
         std::uint64_t checks = 0, checkedBuckets = 0, checkedRecords = 0, differing = 0, countDiffering = 0, skipped = 0;
         // F5-2: culled-capable items / jobs with the cull; check frames: items compared, clusters (all / the exact test's visible / covered by the GPU's runs), false negatives, extras,
         // whole-range fallbacks, items with no records, runs, bad run records, exact evaluations impossible; indices of the checked flushes per view kind before / after

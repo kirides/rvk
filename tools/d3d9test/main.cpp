@@ -1572,6 +1572,46 @@ mov oC0, r0
         ++g_failures;
         return;
     }
+    // F-INT (frame-ownership.md 7.43): capacity. Every slot can be taken, the next request is a counted refusal, released slots come back only after the frames in flight
+    {
+        std::vector<std::uint32_t> all;
+        for (;;) {
+            const std::uint32_t s = tab.alloc();
+            if (s == gpuscene::kNoSlot) break;
+            all.push_back(s);
+        }
+        bool uniq = true;
+        std::vector<std::uint8_t> seen(gpuscene::DrawRecordTable::kCapacity, 0);
+        for (const std::uint32_t s : all) {
+            uniq = uniq && s < gpuscene::DrawRecordTable::kCapacity && seen[s] == 0;
+            if (s < seen.size()) seen[s] = 1;
+        }
+        if (all.size() != gpuscene::DrawRecordTable::kCapacity || !uniq || tab.stats().full != 1 || tab.liveCount() != gpuscene::DrawRecordTable::kCapacity) {
+            std::printf("  FAIL record table capacity: %zu slots handed out (capacity %u), unique %d, refusals %llu\n", all.size(), gpuscene::DrawRecordTable::kCapacity, uniq,
+                        static_cast<unsigned long long>(tab.stats().full));
+            ++g_failures;
+        }
+        for (auto it = all.rbegin(); it != all.rend(); ++it) tab.release(*it);  // (descending: the free list hands the LOWEST slots out first, the draws below get the highest)
+        if (tab.alloc() != gpuscene::kNoSlot) {
+            std::printf("  FAIL record table capacity: a released slot was handed out before the frames in flight were done\n");
+            ++g_failures;
+        }
+        for (std::uint32_t i = 0; i < rhi::kFramesInFlight + 2; ++i) tab.flush(dev);
+        const std::uint32_t again = tab.alloc();
+        if (again == gpuscene::kNoSlot) {
+            std::printf("  FAIL record table capacity: no slot came back after the deferral\n");
+            ++g_failures;
+        }
+        tab.release(again);
+        for (std::uint32_t i = 0; i < rhi::kFramesInFlight + 2; ++i) tab.flush(dev);
+    }
+    // the slots below are the table's LAST ones: the draws read records far above the old 4,096 (and above any 16-bit field)
+    std::vector<std::uint32_t> parked;
+    for (std::uint32_t i = 0; i + 16 < gpuscene::DrawRecordTable::kCapacity; ++i) {
+        const std::uint32_t s = tab.alloc();
+        if (s == gpuscene::kNoSlot) break;
+        parked.push_back(s);
+    }
     // F2c-4c: the draws below go through the GPU compaction (the compute pass + DrawIndexedIndirectCount) when the device offers it; the pipeline is built in the background
     gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
     compact.setCheckEvery(1);

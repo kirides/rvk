@@ -95,6 +95,7 @@ void FrameTap::apply(bool on) {
 
 void FrameTap::setStaticOpsActive(bool on) {
     staticsWanted_ = on;
+    if (on && observeWanted_) spdlog::warn("native: owned observe is on: no view is owned while it is (it verifies the engine's whole lists); turn it off to own draws");
     update();
 }
 
@@ -105,6 +106,8 @@ void FrameTap::setEffectOpsActive(bool on) {
 
 void FrameTap::setObserve(bool on) {
     observeWanted_ = on;
+    // F-INT (7.43): the observe stage and ownership exclude each other (an observed frame keeps every list whole): say so instead of a silent 0 % owned share
+    if (on && staticsWanted_) spdlog::warn("native: owned observe is on: no view is owned while it is (it verifies the engine's whole lists); turn it off to own draws");
     update();
 }
 
