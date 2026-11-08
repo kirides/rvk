@@ -26,6 +26,8 @@ param(
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,
     [string[]]$Param = @(),
+    # environment variables of both runs (run.ps1 -Environment), e.g. 'RVK_DOF_TEST=1'
+    [string[]]$Environment = @(),
     [switch]$Validation,
     [switch]$SyncValidation,
     [switch]$Perf,
@@ -54,6 +56,7 @@ function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
     $runArgs = @{ Api = $Api; Config = $Config; Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, "burst=$burstCount", "interval=$Interval") + $Param; Setting = $settings; RvkFilter = 'enh: water: (first|wet|material .* none)|\[error\]' }
+    if ($Environment.Count -gt 0) { $runArgs.Environment = $Environment }
     if ($Validation) { $runArgs.Validation = $true }
     if ($SyncValidation) { $runArgs.SyncValidation = $true }
     if ($Perf) { $runArgs.Perf = $true }

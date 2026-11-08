@@ -34,6 +34,15 @@ return {
         notes = "the same view in sunshine: sun shadows, water specular, sky dome, bloom",
     },
     {
+        id = "sun_disc",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 900, 0 }, yaw = 238, pitch = 24, distance = 700 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 17, 30 }, weather = "Sunny_Full",
+        settle = 900, explicit = true,
+        notes = "the beach looking up at the low evening sun (the disc in frame): the bright pass, the streaks (god rays) and the bloom around it (S-7b)",
+    },
+    {
         id = "sea_cliff",
         player = { x = -38559, y = 15, z = -5770, yaw = 58 },
         camera = { target = { -44000, 0, -9500 }, abs = true, yaw = 238, pitch = -16, distance = 5500 },

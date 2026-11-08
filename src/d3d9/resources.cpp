@@ -56,6 +56,12 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
         if (smallStorageFlag.load(std::memory_order_relaxed) && fmt_.format == VK_FORMAT_R32_SFLOAT && desc_.type == TextureType::Tex2D && desc_.width <= 64 &&
             desc_.height <= 64 && desc_.levels <= 1) {
             td.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        } else if (smallStorageFlag.load(std::memory_order_relaxed) && fmt_.format == VK_FORMAT_B8G8R8A8_UNORM && desc_.type == TextureType::Tex2D && desc_.width > 64 &&
+                   desc_.width <= 1024 && desc_.height > 64 && desc_.height <= 1024 && desc_.levels <= 1 && (desc_.usage & USAGE_DYNAMIC) == 0) {
+            // S-7b: the post chain's small A8R8G8B8 images (bloom 309 x 210, DoF 400 x 225 ...) as storage targets: BGRA8 is no guaranteed storage format, so they
+            // are RGBA8 (the same colours: a texture's channels are named by its format, the byte order is not visible to shaders)
+            td.format = VK_FORMAT_R8G8B8A8_UNORM;
+            td.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         }
     }
     td.swizzle = fmt_.swizzle;

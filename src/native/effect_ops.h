@@ -154,10 +154,13 @@ private:
     // issues the held units (the group broke off or the kernel could not run): the recorded draws in order, as the take-over would have
     void flushLum();
     std::unique_ptr<OwnPost> own_;
-    std::array<std::unique_ptr<fxc::EffectDraw>, kLumUnits> lumRec_;
-    int lumNext_ = 0;       // the next luminance unit expected (0 = no group open)
-    int lumHeld_ = 0;       // units of the open group that were not drawn (On)
-    std::uint64_t lumFlushes_ = 0, lumGroups_ = 0;
+    std::array<std::unique_ptr<fxc::EffectDraw>, kMaxGroupUnits> grpRec_;
+    int grpOpen_ = -1;      // the open group (OwnGroup), -1 = none
+    int grpNext_ = 0;       // the next unit of it expected
+    int grpHeld_ = 0;       // units of the open group that were not drawn (On)
+    int grpCompare_ = -1;   // Compare: the group whose last unit's engine draw is compared at effectEnd
+    std::array<std::uint64_t, kGroupCount> grpRuns_{};
+    std::uint64_t grpFlushes_ = 0;
 
     // ---- N5.7 post chain (effect_ops_post.cpp) ----
     bool verifyPost();

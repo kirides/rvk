@@ -22,8 +22,10 @@ constexpr std::string_view kLumNames[kLumUnits] = {"Down64x64 LogLuminance", "Do
 // D3DDECLUSAGE_POSITION / TEXCOORD, D3DDECLTYPE_FLOAT2 .. FLOAT4
 constexpr std::uint8_t kUsagePosition = 0, kUsageTexcoord = 5, kTypeFloat2 = 1, kTypeFloat4 = 3;
 
+}  // namespace
+
 // the full-screen quad of a unit: position (x, y) and uv of its vertices -> the uv at the sample point of pixel (0, 0) and its step per pixel of a W x H target
-bool quadUv(const fxc::EffectDraw& d, std::uint32_t w, std::uint32_t h, float out[4], std::string& why) {
+bool OwnPost::quadUv(const fxc::EffectDraw& d, std::uint32_t w, std::uint32_t h, float out[4], std::string& why) {
     const auto* decl = static_cast<const d3d9::VertexDecl*>(d.decl);
     const auto* buf = static_cast<const d3d9::Buffer*>(d.streams[0].buffer);
     if (decl == nullptr || buf == nullptr || d.streams[0].stride == 0 || d.numVertices < 3 || d.numVertices > 16) {
@@ -79,13 +81,14 @@ bool quadUv(const fxc::EffectDraw& d, std::uint32_t w, std::uint32_t h, float ou
     return true;
 }
 
-}  // namespace
-
 OwnPost::OwnPost(d3d9::Device& dev) : dev_(dev) {}
 
 OwnPost::~OwnPost() {
     if (building_.valid()) building_.wait();
     if (buildingTile_.valid()) buildingTile_.wait();
+    for (auto& f : kernBuilding_) {
+        if (f.valid()) f.wait();
+    }
     readback_.reset();
 }
 
@@ -110,6 +113,22 @@ void OwnPost::setMode(Mode m) {
                 d.name = "post.lum.tile";
                 return rdev->createComputePipeline(d);
             });
+        }
+    }
+    if (m != Mode::Off && !kernFailed_ && !kernBuilding_[0].valid() && !kern_[0]) {
+        rhi::Device* rdev = dev_.rhi();
+        static constexpr const char* kNames[4] = {"post/post_bright.comp", "post/post_glow.comp", "post/post_bloom.comp", "post/post_dofmid.comp"};
+        if (rdev != nullptr) {
+            for (int i = 0; i < 4; ++i) {
+                const char* name = kNames[i];
+                kernBuilding_[static_cast<std::size_t>(i)] = std::async(std::launch::async, [rdev, name]() {
+                    rhi::ComputePipelineDesc d;
+                    d.cs.spirv = shader::embedded::spirv(name);
+                    d.cs.dxil = shader::embedded::dxilOnDemand(name);
+                    d.name = name;
+                    return rdev->createComputePipeline(d);
+                });
+            }
         }
     }
     spdlog::info("native: own post: {}", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
@@ -330,6 +349,18 @@ void OwnPost::report() {
     lastLog_ = now;
     spdlog::info("native: own post (5 s): luminance kernel runs {}, refused {}; compare {} frames, differing {} (rel > 1e-5), max rel {:.3g}, mean rel {:.3g}", stats_.runs,
                  stats_.refused, stats_.compared, stats_.differing, stats_.maxRel, stats_.compared != 0 ? stats_.sumRel / static_cast<double>(stats_.compared) : 0.0);
+    static constexpr const char* kNames[kGroupCount] = {"luminance", "bloom chain", "DoF middle"};
+    for (int g = 1; g < kGroupCount; ++g) {
+        const GroupStats& gs = gstats_[static_cast<std::size_t>(g)];
+        spdlog::info("native: own post (5 s): {} runs {}, refused {}; compare {} images, differing {} (max step > 3 or sum|d| / sum > 2e-3), max {} steps, max rel {:.3g}, mean rel {:.3g}, "
+                     "{} of {} pixels more than 1 step off",
+                     kNames[g], gs.runs, gs.refused, gs.compared, gs.differing, gs.maxStep, gs.maxRel, gs.compared != 0 ? gs.sumRel / static_cast<double>(gs.compared) : 0.0,
+                     gs.offPixels, gs.pixels);
+    }
+    for (const auto& [name, n] : named_) {
+        spdlog::info("native: own post (5 s):   image '{}': {} compared, max {} steps, max rel {:.3g}, mean rel {:.3g}, {:.4f} % of the pixels more than 1 step off", name, n.compared, n.maxStep,
+                     n.maxRel, n.sumRel / static_cast<double>(std::max<std::uint64_t>(n.compared, 1)), 100.0 * static_cast<double>(n.offPixels) / static_cast<double>(std::max<std::uint64_t>(n.pixels, 1)));
+    }
 }
 
 }  // namespace rvk::native

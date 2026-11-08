@@ -233,7 +233,7 @@ void EffectOps::postBegin(void* effectPtr) {
 void EffectOps::postEnd(void* /*effect*/) {
     if (postDepth_ == 0) return;
     if (--postDepth_ > 0) return;
-    if (lumNext_ != 0) flushLum();  // S-7: units of an open group that never completed
+    if (grpOpen_ >= 0) flushLum();  // S-7: units of an open group that never completed
     if (unit_ == Unit::Post) finishUnit();
     postEffect_ = nullptr;
 }
@@ -343,13 +343,16 @@ EffectOps::Skip EffectOps::semanticValue(const std::uint8_t* obj, std::uint32_t 
         }
         case 10: {  // FOCALRANGENEAR
             float v[2];
-            fxc::focalRangeNear(get<float>(cam, 0xe4), camFar, *epsilon_, minusOne_, v);
+            // (RVK_DOF_TEST=1: a strong depth of field in every view, for the pictures of the DoF kernels (S-7b); the composed draws then differ from the engine's)
+            static const bool dofTest = GetEnvironmentVariableA("RVK_DOF_TEST", nullptr, 0) != 0;
+            fxc::focalRangeNear(dofTest ? 2500.0f : get<float>(cam, 0xe4), camFar, *epsilon_, minusOne_, v);
             putBytes(out, v, 2);
             return Skip::None;
         }
         case 11: {  // FOCALRANGEFAR
             float v[2];
-            fxc::focalRangeFar(get<float>(cam, 0xe8), get<float>(cam, 0xec), camFar, one_, v);
+            static const bool dofTest = GetEnvironmentVariableA("RVK_DOF_TEST", nullptr, 0) != 0;
+            fxc::focalRangeFar(dofTest ? 6000.0f : get<float>(cam, 0xe8), dofTest ? 14000.0f : get<float>(cam, 0xec), camFar, one_, v);
             putBytes(out, v, 2);
             return Skip::None;
         }
