@@ -1112,11 +1112,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "Bit mask of material shader classes that stay on the translated shaders (1 z pass, 2 masked, 4 alpha blend, "
-                       "8 lightmap, 16 normal map, 32 specular, 64 distortion, 128 plain): to find which kind differs.",
+                       "8 lightmap, 16 normal map, 32 specular, 64 distortion, 128 plain, 256 the vertex shaders): to find which kind differs.",
         .type = Type::Int,
         .defaultValue = 0,
         .min = 0,
-        .max = 255,
+        .max = 511,
         .flags = Flag::Debug | Flag::NoAB,
         .page = "Debug", .section = "Renderer internals",
     });

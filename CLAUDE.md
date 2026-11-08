@@ -303,7 +303,7 @@ expressions are valid HLSL as they are). `python tools/ubershader_check.py out/m
 `tools/hlsl_infer.py` / `tools/hlsl_match.py` reproduce a corpus shader from the engine's HLSL + defines instruction for instruction (`out/hlsl-fx`, the pool was compiled with
 `d3dx9_29.dll`, flags 0, `half3 vecWorldEye`). **HLSL material shader at run time** (shader-permutations.md 8-10): `-Setting 'debug.material_sources=true'` writes the engine's
 request per material shader (`bin/rvk/cache/materials/sources.jsonl`; copy to `out/matsrc/`); `-Setting 'debug.ubershader=true'` (default off; `debug.ubershader_skip` = bit mask of
-classes kept translated) uses it at run time.
+classes kept translated, bit 256 = the vertex shaders) uses it at run time, the vertex shaders (`ge_default.vert.hlsl`, S-1b, frame-ownership.md 14.9) and the leaf pixel shaders included; `python tools/vs_equiv.py out/matsrc/*.jsonl` proves the vertex port on the GPU (52 of 52 EQUAL).
 
 ## Hand-written shaders (HLSL, compiled at run time by DXC)
 

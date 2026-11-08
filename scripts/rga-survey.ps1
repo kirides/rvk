@@ -7,6 +7,8 @@ param(
     [Parameter(Mandatory)] [string] $SpirvDir,
     [Parameter(Mandatory)] [string] $Out,
     [string] $Hash = '',
+    [string] $Stage = 'frag',      # frag | vert (S-1b: the scene vertex shaders: -Pattern '*_scene_vs2_*')
+    [string] $Pattern = '*.spv',
     [string] $Rga = 'B:\DevDrive\rvk-work\scratch\rga291\x\rga.exe',
     [string] $Asic = 'gfx1035',
     [int] $Jobs = 6,
@@ -15,18 +17,18 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path $Rga)) { throw "rga.exe not found: $Rga" }
-$files = Get-ChildItem $SpirvDir -Filter '*.spv' | Where-Object { ($Hash -eq '' -or $_.Name -like "*_u$Hash*")  } | Select-Object -First $Limit
+$files = Get-ChildItem $SpirvDir -Filter $Pattern | Where-Object { ($Hash -eq '' -or $_.Name -like "*_u$Hash*")  } | Select-Object -First $Limit
 New-Item -ItemType Directory -Force $Work | Out-Null
 $rows = $files | ForEach-Object -ThrottleLimit $Jobs -Parallel {
     $f = $_
     $w = Join-Path $using:Work ([guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force $w | Out-Null
     try {
-        & $using:Rga -s vk-spv-offline -c $using:Asic --frag $f.FullName --isa "$w\isa.txt" -a "$w\st.csv" 2>&1 | Out-Null
-        $csv = Get-ChildItem $w -Filter '*_frag.csv' | Select-Object -First 1
+        & $using:Rga -s vk-spv-offline -c $using:Asic --$using:Stage $f.FullName --isa "$w\isa.txt" -a "$w\st.csv" 2>&1 | Out-Null
+        $csv = Get-ChildItem $w -Filter "*_$using:Stage.csv" | Select-Object -First 1
         if ($csv) {
             $r = Import-Csv $csv.FullName | Select-Object -First 1
-            $tag = if ($f.Name -match '_t12_u[0-9a-f]{8}h?\.spv$') { ($f.Name -replace '^[0-9a-f]{16}_', '' -replace '_t12_u[0-9a-f]{8}h?\.spv$', '') } else { ($f.BaseName -replace '^.*_PS_Default(ZPass)?_','') }
+            $tag = if ($using:Stage -eq 'vert') { ($f.Name -replace '^[0-9a-f]{16}_', '' -replace '_h?u?[0-9a-f]{8}h?\.spv$', '') } elseif ($f.Name -match '_t12_u[0-9a-f]{8}h?\.spv$') { ($f.Name -replace '^[0-9a-f]{16}_', '' -replace '_t12_u[0-9a-f]{8}h?\.spv$', '') } else { ($f.BaseName -replace '^.*_PS_Default(ZPass)?_','') }
             [pscustomobject]@{ module = $f.Name; shader = $f.Name.Substring(0, 16); tag = $tag; bytes = $f.Length; vgprs = [int]$r.USED_VGPRs; sgprs = [int]$r.USED_SGPRs; vgpr_spills = [int]$r.VGPR_SPILLS; scratch = [int]$r.SCRATCH_MEM; isa_bytes = [int]$r.ISA_SIZE }
         } else {
             [pscustomobject]@{ module = $f.Name; shader = $f.Name.Substring(0, 16); tag = 'FAILED'; bytes = $f.Length; vgprs = -1; sgprs = -1; vgpr_spills = -1; scratch = -1; isa_bytes = -1 }

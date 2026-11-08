@@ -335,7 +335,7 @@ bool parseUberLine(const std::string& line, UberRequest& r) {
 int cmdDxilUber(int argc, char** argv) {
     int jobs = defaultJobs(), limit = 1 << 30, maxErrors = 30;
     bool half = false;
-    std::vector<UberRequest> reqs;
+    std::vector<UberRequest> reqs, vsReqs;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--jobs" && i + 1 < argc) { jobs = std::atoi(argv[++i]); continue; }
@@ -347,6 +347,7 @@ int cmdDxilUber(int argc, char** argv) {
         while (std::getline(in, line)) {
             UberRequest r;
             if (parseUberLine(line, r) && rvk::shader::uberSupportsFile(r.file, r.entry)) reqs.push_back(std::move(r));
+            else if (parseUberLine(line, r) && rvk::shader::uberVsSupports(r.file, r.entry)) vsReqs.push_back(std::move(r));  // (S-1b: the vertex shaders)
         }
     }
     if (static_cast<int>(reqs.size()) > limit) reqs.resize(static_cast<std::size_t>(limit));
@@ -390,7 +391,44 @@ int cmdDxilUber(int argc, char** argv) {
         r.optLevel = 1;
         items[i].r = compileBoth(r, tools);
     });
-    std::printf("%zu captured requests x %zu variants\n", reqs.size(), kN);
+    // S-1b: the vertex shaders: offline (the macros decide the inputs), and with a declared-input set (RVK_VS_DECL: every attribute, registers in the order
+    // of tools/vs_equiv.py's slots) as the plain / scene / scene-view forms
+    using rvk::shader::Usage;
+    static const rvk::shader::VertexInput kAllInputs[] = {
+        {Usage::Position, 0, 0}, {Usage::Normal, 0, 1}, {Usage::Tangent, 0, 2}, {Usage::Color, 0, 3}, {Usage::Color, 1, 4}, {Usage::TexCoord, 0, 5},
+        {Usage::TexCoord, 1, 6}, {Usage::TexCoord, 2, 7}, {Usage::TexCoord, 3, 8}, {Usage::TexCoord, 4, 9}, {Usage::TexCoord, 5, 10}, {Usage::TexCoord, 6, 11},
+        {Usage::Position, 1, 12}, {Usage::Normal, 1, 13}, {Usage::Position, 2, 14}, {Usage::Normal, 2, 15}, {Usage::Position, 3, 16}, {Usage::Normal, 3, 17},
+        {Usage::BlendIndices, 0, 18}, {Usage::BlendWeight, 0, 19}, {Usage::BlendWeight, 1, 20}, {Usage::BlendWeight, 2, 21},
+    };
+    constexpr std::size_t kVsN = 4;
+    const std::size_t psItems = items.size();
+    items.resize(psItems + vsReqs.size() * kVsN);
+    parallelFor(vsReqs.size() * kVsN, jobs, [&](std::size_t j) {
+        const UberRequest& q = vsReqs[j / kVsN];
+        const std::size_t form = j % kVsN;
+        Item& it = items[psItems + j];
+        spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+        static const char* const kNames[kVsN] = {"vs offline", "vs decl", "vs decl+scene", "vs decl+sceneview"};
+        it.label = std::format("{} {} {}", q.hash, q.entry, kNames[form]);
+        it.family = std::string("uber ") + kNames[form];
+        rvk::shader::dxc::Request r;
+        r.file = "uber_vs.hlsl";
+        if (form == 0) {
+            r.source = rvk::shader::uberVertexHlsl(q.file, q.entry, q.macros, {}, false, false);
+            r.source.replace(r.source.find("#define RVK_VS_DECL 1\n"), 22, "");  // the offline order (the macros decide)
+        } else {
+            r.source = rvk::shader::uberVertexHlsl(q.file, q.entry, q.macros, kAllInputs, form >= 2, form == 3);
+        }
+        if (r.source.empty()) {
+            it.r.spirvMsg = "uber: invalid macro name";
+            return;
+        }
+        r.entry = "VSMain";
+        r.profile = "vs_6_6";
+        r.optLevel = 1;
+        it.r = compileBoth(r, tools);
+    });
+    std::printf("%zu captured requests x %zu variants + %zu vertex shaders x %zu forms\n", reqs.size(), kN, vsReqs.size(), kVsN);
     return reportDxil(items, maxErrors, true);
 }
 

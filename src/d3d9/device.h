@@ -918,6 +918,9 @@ public:
         // S-1a: pixel shader form per draw kind x UberWhy: counted per scene draw decision (decided) and per owned item per flush (owned)
         std::uint64_t uberDecided[static_cast<std::size_t>(draws::Kind::Count)][6] = {};
         std::uint64_t uberOwned[static_cast<std::size_t>(draws::Kind::Count)][6] = {};
+        // S-1b: vertex shader form per draw kind: 0 translated (not covered) / 1 ubershader / 2 failed (translated)
+        std::uint64_t uberVsDecided[static_cast<std::size_t>(draws::Kind::Count)][3] = {};
+        std::uint64_t uberVsOwned[static_cast<std::size_t>(draws::Kind::Count)][3] = {};
     };
     void setSceneDraws(bool on, std::uint32_t checkEvery);
     // F2c-4-0 (frame-ownership.md 7.19): scene ABI v2 (the view table). `on` = the retained draws also get the v2 form's pipeline (CachedDraw::scenePipeline2); the table itself
@@ -1058,6 +1061,7 @@ public:
             rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
             rhi::ShaderModule uberAsked = rhi::ShaderModule::None;  // S-1a: the plain HLSL ubershader module the draw was offered (debug.ubershader; None = not built / not covered)
             std::uint8_t uberPs = 0;  // S-1a: which pixel shader the scene form took: see UberWhy
+            std::uint8_t uberVs = 0;  // S-1b: which vertex shader: 0 translated, 1 ubershader, 2 failed (Device::uberVsFormOf)
         } v;
         std::uint32_t streamMask = 0;
         bool clusterUsing = false;      // ... or it drew with the entry's clustered copy (the draw is remade when the entry is gone)
@@ -1523,12 +1527,13 @@ public:
     enum class UberWhy : std::uint8_t {
         None = 0,        // the setting is off / not a material pixel shader (sky, particles ...): the translated shader, not a fallback
         Uber = 1,        // the HLSL ubershader
-        Leaf = 2,        // ge_default_leafs.fx (S-1b): stays translated
+        Leaf = 2,        // an unknown ge_default_leafs.fx entry (S-1b: PS_Default / PS_DefaultZPass are covered): stays translated
         Skipped = 3,     // class kept translated by debug.ubershader_skip
         NoRequest = 4,   // the engine's request of this shader is unknown (no Shader::source)
         Failed = 5,      // the ubershader did not build (or the translated scene form was taken first): translated
         Count
     };
+    std::uint8_t uberVsFormOf(const Shader& vs, VariantSlot slot) const;
     UberWhy uberWhyOf(const Shader& ps, VariantSlot slot) const;  // the form a scene pixel shader of this slot took (device.cpp)
     // the plain ubershader module a draw of `ps` is offered now (None: off, no request, not built / not covered): read only; CachedDraw::Variant::uberAsked is its value at capture
     rhi::ShaderModule uberAskedNow(const Shader& ps) const;
