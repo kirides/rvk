@@ -365,3 +365,47 @@ TEST(dxil_every_embedded_shader_compiles_signed) {
     CHECK(n >= 30);
 }
 
+// A pass push block is a ConstantBuffer / root-constant block on D3D12: a 2-4 component member must not straddle a 16-byte boundary (HLSL packing moves it to
+// the next one, so the C++ mirror's offsets differ: LightShadowPush's uint2 before its uint4s made tex.x read the width as a heap index, GBV "uninitialized
+// descriptor heap index 1600"). Scans every embedded struct that starts with RVK_PASS_PUSH_HEADER (16 bytes).
+TEST(pass_push_blocks_do_not_straddle_16_bytes) {
+    int blocks = 0;
+    for (const auto& src : embedded::hlslSources()) {
+        const std::string text(src.text);
+        std::size_t at = 0;
+        while ((at = text.find("RVK_PASS_PUSH_HEADER", at)) != std::string::npos) {
+            at += 20;
+            const std::size_t close = text.find('}', at);
+            if (close == std::string::npos) break;
+            std::size_t off = 16;
+            ++blocks;
+            std::size_t pos = at;
+            while (pos < close) {
+                const std::size_t end = text.find(';', pos);
+                if (end == std::string::npos || end > close) break;
+                std::string decl = text.substr(pos, end - pos);
+                pos = end + 1;
+                std::size_t nl;  // (drop the comment lines in front of the declaration)
+                while ((nl = decl.find('\n')) != std::string::npos) decl = decl.substr(nl + 1);
+                const std::size_t i = decl.find_first_not_of(" \t");
+                if (i == std::string::npos) continue;
+                decl = decl.substr(i);
+                std::size_t n = 0;
+                for (const char* ty : {"uint", "int", "float"}) {
+                    if (decl.rfind(ty, 0) != 0) continue;
+                    const std::size_t l = std::strlen(ty);
+                    n = (l < decl.size() && decl[l] >= '1' && decl[l] <= '4') ? static_cast<std::size_t>(decl[l] - '0') : 1;
+                    break;
+                }
+                if (n == 0) continue;
+                if (n >= 2 && (off % 16) + 4 * n > 16) {
+                    CHECK_MSG(false, std::format("{}: push member '{}' straddles a 16-byte boundary at offset {}", std::string(src.name), decl, off).c_str());
+                    off = (off + 15) / 16 * 16;
+                }
+                off += 4 * n;
+            }
+        }
+    }
+    CHECK(blocks > 5);
+}
+

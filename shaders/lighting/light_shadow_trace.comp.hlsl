@@ -12,6 +12,8 @@
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     int2 q = int2(id.xy);
+    // a push block that does not describe a valid depth map / extent never reaches a descriptor or the image (a mis-laid-out block must not fault the GPU)
+    if (pc.tex.x == 0u || pc.tex.x >= 65536u || pc.tex.z == 0u || pc.tex.w == 0u || pc.tex.z > 16384u || pc.tex.w > 16384u) return;
     if (q.x >= int(pc.tex.z) || q.y >= int(pc.tex.w)) return;
     float4 result = float4(0.0, 0.0, 0.0, 0.0);
     RvkFrame f = rvkLoadFrame(pc.frame);
@@ -55,7 +57,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
                 }
             }
         }
-        const uint rays = max(uint(pc.cfg.w), 1u);
+        const uint rays = clamp(uint(pc.cfg.w), 1u, 8u);
         float3 o = P + N * (pc.cfg.z + vz * 0.0006);
         [unroll] for (uint e = 0; e < RVK_LS_ENTRIES; ++e) {
             if (pick[e] == 0xFFFFFFFFu) continue;
