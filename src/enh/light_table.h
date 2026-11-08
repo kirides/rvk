@@ -111,7 +111,7 @@ public:
         int mode = 0;            // lighting.light_shadows: 0 off, 1 nearby (8 lights within 25 m), 2 many (31 within 60 m)
         int quality = 2;         // 1 low (cut-outs solid), 2 medium, 3 high (2 rays per light)
         float radius = 20.0f;    // the lamps' size (world units): the soft shadow's disc
-        float baked = 0.8f;      // lighting.light_shadow_baked: the share of the baked light a traced shadow takes away (frame param z)
+        float baked = 0.4f;      // lighting.light_shadow_baked: the share of the baked light a traced shadow takes away (frame param z)
     };
     // A drawn object's light (its list entry: reg0 = position + 1 / R^2, reg1 = colour), handed over by native::StaticOps for lists it composed. The next
     // build adds those the registry walk did not return (within 8 units = the same light). Thread-safe.

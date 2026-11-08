@@ -72,7 +72,7 @@ constexpr int kGiLightCount = 128;
 constexpr bool kGiCharacters = true, kGiCutoutsTested = true;
 constexpr int kGiLightsWorld = 1;
 constexpr float kAoRadiusMetres = 1.0f;
-constexpr float kLightCollectRadius = 96000.0f, kLampRadiusCm = 20.0f, kLampShadowBaked = 0.8f;
+constexpr float kLightCollectRadius = 96000.0f, kLampRadiusCm = 20.0f, kLampShadowBaked = 0.4f;
 constexpr bool kTrustTable = false, kTreeMerge = true;
 constexpr float kMaterialSpecular = 1.0f, kMaterialEnvironment = 1.0f, kMaterialRtStrength = 1.0f, kMaterialRoughness = 0.7f;
 constexpr float kDeriveMin = 0.25f, kDeriveMax = 0.9f, kPuddleShare = 0.7f;  // puddles = materials.rain_wetness x 0.7
