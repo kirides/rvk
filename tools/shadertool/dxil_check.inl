@@ -334,12 +334,14 @@ bool parseUberLine(const std::string& line, UberRequest& r) {
 
 int cmdDxilUber(int argc, char** argv) {
     int jobs = defaultJobs(), limit = 1 << 30, maxErrors = 30;
+    bool half = false;
     std::vector<UberRequest> reqs;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--jobs" && i + 1 < argc) { jobs = std::atoi(argv[++i]); continue; }
         if (a == "--limit" && i + 1 < argc) { limit = std::atoi(argv[++i]); continue; }
         if (a == "--max-errors" && i + 1 < argc) { maxErrors = std::atoi(argv[++i]); continue; }
+        if (a == "--half") { half = true; continue; }  // the 16-bit build (RVK_HALF16: -enable-16bit-types)
         std::ifstream in(a);
         std::string line;
         while (std::getline(in, line)) {
@@ -392,10 +394,109 @@ int cmdDxilUber(int argc, char** argv) {
     return reportDxil(items, maxErrors, true);
 }
 
+
+// ---- uber-spv: the SPIR-V (optionally DXIL) of the ubershader's variants for a set of captured requests, for offline register analysis (RGA, scripts/rga-survey.ps1) ----
+// the hook defines the renderer builds for a lit material pixel shader (enh/material_variant.cpp): the engine's register map c14 / c15 / c25
+std::string uberVariantDefines(const std::string& kind, const UberRequest& q) {
+    const auto macro = [&](const char* n) -> std::string {
+        for (const auto& [k, v] : q.macros) if (k == n) return v;
+        return {};
+    };
+    const bool lit = macro("XFX_DISABLELIGHTING") != "true" && q.entry == "PS_Default";
+    const bool ambient = lit && macro("XFX_AMBIENTLIGHT") == "true";
+    int pnt = 0;
+    if (lit) pnt = std::atoi(macro("XFX_PNTLIGHTCOUNT").c_str());
+    std::string d;
+    if (kind == "plain" || kind == "scene2") return d;
+    if (!ambient && kind != "gbuf") return d;
+    if (ambient) d += "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n";
+    const bool cl = pnt >= 1 && kind.find("cl") != std::string::npos;
+    if (cl) d += std::format("#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG 25\n#define RVK_MV_CL_COUNT {}\n#define RVK_MV_CL_PARAM 4\n", std::min(3, pnt));
+    if (kind.starts_with("gbuf")) d += "#define RVK_MV_GBUFFER 1\n#define RVK_MV_GB_NORMAL 1\n#define RVK_MV_GB_MOTION 1\n";
+    d += "#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n";
+    return d;
+}
+
+int cmdUberSpv(int argc, char** argv) {
+    if (argc < 4) { std::printf("usage: dxil-check uber-spv <outdir> [--variants plain,scene2,gi_cl,gbuf_cl] [--half] [--stride K] [--limit N] [--dxil] <jsonl>...\n"); return 2; }
+    const fs::path outDir = argv[3];
+    std::vector<std::string> variants = {"plain", "scene2", "gi_cl", "gbuf_cl"};
+    bool half = false, dxil = false;
+    int stride = 1, limit = 1 << 30, jobs = defaultJobs();
+    std::vector<UberRequest> reqs;
+    for (int i = 4; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--half") { half = true; continue; }
+        if (a == "--dxil") { dxil = true; continue; }
+        if (a == "--stride" && i + 1 < argc) { stride = std::max(1, std::atoi(argv[++i])); continue; }
+        if (a == "--limit" && i + 1 < argc) { limit = std::atoi(argv[++i]); continue; }
+        if (a == "--jobs" && i + 1 < argc) { jobs = std::atoi(argv[++i]); continue; }
+        if (a == "--variants" && i + 1 < argc) {
+            variants.clear();
+            std::string v = argv[++i];
+            for (std::size_t p = 0; p <= v.size();) {
+                const std::size_t e = std::min(v.find(',', p), v.size());
+                variants.push_back(v.substr(p, e - p));
+                p = e + 1;
+            }
+            continue;
+        }
+        std::ifstream in(a);
+        std::string line;
+        int n = 0;
+        while (std::getline(in, line)) {
+            UberRequest r;
+            if (parseUberLine(line, r) && rvk::shader::uberSupports(r.file, r.entry) && (n++ % stride) == 0) reqs.push_back(std::move(r));
+        }
+    }
+    if (static_cast<int>(reqs.size()) > limit) reqs.resize(static_cast<std::size_t>(limit));
+    if (!requireDxc()) return 2;
+    fs::create_directories(outDir);
+    std::vector<Item> items(reqs.size() * variants.size());
+    parallelFor(items.size(), jobs, [&](std::size_t i) {
+        const UberRequest& q = reqs[i / variants.size()];
+        const std::string& v = variants[i % variants.size()];
+        spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+        items[i].label = std::format("{}_{}_{}", q.hash, q.entry, v);
+        items[i].family = "uber-spv " + v;
+        rvk::shader::dxc::Request r;
+        r.file = "uber.hlsl";
+        const bool scene = v != "plain";
+        r.source = rvk::shader::uberPixelHlsl(q.file, q.entry, q.macros, uberVariantDefines(v, q), scene, scene);
+        r.entry = "PSMain";
+        r.profile = "ps_6_6";
+        r.optLevel = 1;
+        r.half16 = half;
+        r.cache = false;
+        r.target = rvk::shader::dxc::Target::Spirv;
+        const auto sp = rvk::shader::dxc::compile(r);
+        if (!sp.ok()) { items[i].r.spirvMsg = "compile: " + firstError(sp.log); return; }
+        std::string vlog;
+        tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog += m; vlog += '\n'; });
+        if (!tools.Validate(sp.words)) { items[i].r.spirvMsg = "spirv-val: " + vlog.substr(0, vlog.find('\n')); return; }
+        items[i].r.spirvOk = true;
+        std::ofstream f(outDir / (items[i].label + ".spv"), std::ios::binary);
+        f.write(reinterpret_cast<const char*>(sp.words.data()), static_cast<std::streamsize>(sp.words.size() * 4));
+        if (dxil) {
+            r.target = rvk::shader::dxc::Target::Dxil;
+            const auto dx = rvk::shader::dxc::compile(r);
+            if (!dx.ok()) { items[i].r.dxilMsg = "dxil: " + firstError(dx.log); return; }
+            items[i].r.dxilOk = true;
+            items[i].r.dxilSigned = dx.dxilSigned;
+        } else {
+            items[i].r.dxilOk = true;
+            items[i].r.dxilSigned = true;
+        }
+    });
+    std::printf("%zu requests x %zu variants%s -> %s\n", reqs.size(), variants.size(), half ? " (16-bit types)" : "", outDir.string().c_str());
+    return reportDxil(items, 30, true);
+}
+
 int cmdDxilCheck(int argc, char** argv) {
     const std::string what = argv[2];
     if (what == "embedded") return cmdDxilEmbedded(argc, argv);
     if (what == "uber") return cmdDxilUber(argc, argv);
+    if (what == "uber-spv") return cmdUberSpv(argc, argv);
     if (what == "corpus" && argc >= 4) {
         TranslateOptions options;
         VariantFn variant = nullptr;

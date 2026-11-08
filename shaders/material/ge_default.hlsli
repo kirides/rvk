@@ -233,10 +233,18 @@ static float4 g_ShaderData[8];
 #define g_DirLight_Diffuse RVK_PSC(22)
 #define g_DirLight_Specular RVK_PSC(23)
 #define g_DirLight_Direction RVK_PSC(24)
+#ifdef RVK_MV_CLUSTER
+// the Full-owned light table (rvk_material_variant.hlsli rvkMvCluster, run right before the point lights): the per-pixel registers
+#define g_PointLight_PosAndRcpRange(i) rvk_cl[4 * (i)]
+#define g_PointLight_Diffuse(i) rvk_cl[4 * (i) + 1]
+#define g_PointLight_Specular(i) rvk_cl[4 * (i) + 2]
+#define g_PointLight_ShadowMask(i) rvk_cl[4 * (i) + 3]
+#else
 #define g_PointLight_PosAndRcpRange(i) RVK_PSC(25 + 4 * (i))
 #define g_PointLight_Diffuse(i) RVK_PSC(26 + 4 * (i))
 #define g_PointLight_Specular(i) RVK_PSC(27 + 4 * (i))
 #define g_PointLight_ShadowMask(i) RVK_PSC(28 + 4 * (i))
+#endif
 
 #define RVK_LOAD_SHADER_DATA() \
     [unroll] for (int rvk_i = 0; rvk_i < 8; ++rvk_i) g_ShaderData[rvk_i] = g_ShaderData_c(rvk_i)

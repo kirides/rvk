@@ -482,6 +482,7 @@ struct DeviceCaps {
     bool multiDrawIndirect = false;          // CommandList::drawIndexedIndirect with drawCount > 1 as one call (Vulkan multiDrawIndirect, always on DX12)
     bool drawIndirectFirstInstance = false;  // indirect records may carry a non-zero firstInstance (Vulkan drawIndirectFirstInstance, always on DX12)
     bool textureBlit = false;        // CommandList::blitTexture (Vulkan only: the DX12 backend has no scaling copy)
+    bool shaderFloat16 = false;      // real 16-bit arithmetic in shaders: Vulkan shaderFloat16 (SPIR-V Float16), D3D12 Native16BitShaderOpsSupported (DXIL -enable-16bit-types); the ubershader's half precision (frame-ownership.md 14.7)
     bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
     std::uint32_t agilitySdkVersion = 0;  // DX12: the D3D12SDKVersion of the Agility SDK the device was created from (0 = the system runtime; always 0 on Vulkan)
     // DX12: ray tracing generation of the device (0 none, 10 / 11 / 12 = DXR 1.0 / 1.1 / 1.2); DXR 1.2 = opacity micromaps + shader execution reordering

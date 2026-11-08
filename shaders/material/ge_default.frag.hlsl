@@ -2,8 +2,11 @@
 // Port of ge_default.frag (which ported the shipped HLSL to GLSL). Entry point PSMain: PS_Default (XFX_PASS = XFX_PASS_DEFAULT) and
 // PS_DefaultZPass (XFX_PASS_ZPASS: depth / shadow map / variance map). PS_DefaultRadiosityPass (the editor's radiosity baker) is not ported:
 // the game never draws it.
-// Notes against the engine's HLSL: `half` is `float` (the D3D9 _pp hints do not exist in Vulkan); vFace is SV_IsFrontFace as the
-// translator reads it (+1 front / -1 back).
+// Notes against the engine's HLSL: the engine's `half` / _pp ALU (89 % of PS_Default's instructions) is `rvkh` here: a real 16-bit type
+// when the host compiles with RVK_HALF16 (-enable-16bit-types: SPIR-V Float16 / DXIL native 16-bit ops, only on a device that has them),
+// else plain float (the fallback; bit-identical to the translated shader). Texture-graph expressions (XFX_PS_*) stay float: only the lit
+// core (tangent frame, normals, light terms, colours) is half. Positions, depths, texture coordinates, the specular power and the fog
+// stay float (range / exponent amplification). vFace is SV_IsFrontFace as the translator reads it (+1 front / -1 back).
 // See ge_default.hlsli for the defines. With RVK_UBER_HOOKS the enhancement hooks (rvk_gi.hlsli, rvk_material_variant.hlsli) are part of
 // the shader; the RVK_MV_* defines select what they do (the same defines enh/material_variant.cpp sets for the translated shaders).
 
@@ -13,6 +16,18 @@
 #include "rvk_material_variant.hlsli"
 #endif
 #include "ge_default.hlsli"
+
+#if RVK_HALF16
+typedef half rvkh;
+typedef half2 rvkh2;
+typedef half3 rvkh3;
+typedef half4 rvkh4;
+#else
+typedef float rvkh;
+typedef float2 rvkh2;
+typedef float3 rvkh3;
+typedef float4 rvkh4;
+#endif
 
 // ---- varyings: sPSInput_Default (location = TEXCOORD index, COLOR0 = 16) ------------------------------------------------------
 struct RvkPsIn {
@@ -75,61 +90,61 @@ static bool rvk_front;
 #define eLightType_PntLight 1
 
 struct sPassLight {
-    float3 m_vecLight;
-    float3 m_colSpecular;
-    float3 m_colDiffuse;
-    float m_fFallOff;
-    float m_fShadow;
+    rvkh3 m_vecLight;
+    rvkh3 m_colSpecular;
+    rvkh3 m_colDiffuse;
+    rvkh m_fFallOff;
+    rvkh m_fShadow;
     int m_iLightType;
 };
 
 struct sPassData {
-    float3 m_matTangentSpace[3];
+    rvkh3 m_matTangentSpace[3];
     float3 m_vecWorldPos;
-    float3 m_vecWorldNormal;
-    float3 m_vecTangentNormal;
-    float3 m_vecWorldReflect;
-    float3 m_vecWorldEye;
-    float3 m_vecTangentEye;
+    rvkh3 m_vecWorldNormal;
+    rvkh3 m_vecTangentNormal;
+    float3 m_vecWorldReflect;  // float: feeds the specular exponent
+    rvkh3 m_vecWorldEye;
+    rvkh3 m_vecTangentEye;
     float4 m_vecViewPos;
     float2 m_vecScreenPos;
-    float m_fVertexAmbientOcclusion;
-    float m_fScreenSpaceAmbientOcclusion;
+    rvkh m_fVertexAmbientOcclusion;
+    rvkh m_fScreenSpaceAmbientOcclusion;
     float m_fCamDistance;
     float2 m_vecLightMapCoord;
     float m_fSrcDepth;
     float m_fDestDepth;
-    float m_fGlobalAlpha;
-    float m_fFresnel;
-    float4 m_colVertex;
+    rvkh m_fGlobalAlpha;
+    rvkh m_fFresnel;
+    rvkh4 m_colVertex;
 
     float2 m_vecTex0;
     float2 m_vecTex1;
     float2 m_vecTex2;
     float2 m_vecTex3;
 
-    float4 m_vecShadowMask;
+    rvkh4 m_vecShadowMask;
 
-    float4 m_colDiffuseAndAlpha;
-    float3 m_colSelfIllumination;
-    float3 m_colSpecularMask;
-    float3 m_colLightEmission;
+    rvkh4 m_colDiffuseAndAlpha;
+    rvkh3 m_colSelfIllumination;
+    rvkh3 m_colSpecularMask;
+    rvkh3 m_colLightEmission;
 
     float2 m_vecDistortionOffset;
     float m_fSpecularPower;
-    float3 m_colAccDiffuse;
-    float3 m_colAccSpecular;
+    rvkh3 m_colAccDiffuse;
+    rvkh3 m_colAccSpecular;
 
     int m_iLightCount;
 };
 
 // material expression macros (ge_default.fxh): the generated XFX_PS_* code refers to these
 #define XFX_PS_REFLECT PassData.m_vecWorldReflect
-#define XFX_PS_TANGENTEYE PassData.m_vecTangentEye.xy  // only used as (float2 expr) * XFX_PS_TANGENTEYE: HLSL truncates the float3
-#define XFX_PS_WORLDEYE PassData.m_vecWorldEye
-#define XFX_PS_WORLDNORMAL PassData.m_vecWorldNormal
-#define XFX_PS_TANGENTNORMAL PassData.m_vecTangentNormal
-#define XFX_PS_FRESNEL PassData.m_fFresnel
+#define XFX_PS_TANGENTEYE ((float2)PassData.m_vecTangentEye.xy)  // only used as (float2 expr) * XFX_PS_TANGENTEYE: HLSL truncates the float3
+#define XFX_PS_WORLDEYE ((float3)PassData.m_vecWorldEye)
+#define XFX_PS_WORLDNORMAL ((float3)PassData.m_vecWorldNormal)
+#define XFX_PS_TANGENTNORMAL ((float3)PassData.m_vecTangentNormal)
+#define XFX_PS_FRESNEL ((float)PassData.m_fFresnel)
 #define XFX_PS_CAMDISTANCE PassData.m_fCamDistance
 #define XFX_PS_PROJDISTANCE PassData.m_fSrcDepth
 #define XFX_PS_SCENEDEPTH PassData.m_fDestDepth
@@ -137,20 +152,20 @@ struct sPassData {
 #define XFX_PS_TEX1 PassData.m_vecTex1
 #define XFX_PS_TEX2 PassData.m_vecTex2
 #define XFX_PS_TEX3 PassData.m_vecTex3
-#define XFX_PS_VERTEXCOLOR PassData.m_colVertex
+#define XFX_PS_VERTEXCOLOR ((float4)PassData.m_colVertex)
 #define XFX_PS_VIEWPOS PassData.m_vecViewPos
 
 // ---- material hooks (ge_default.fxh) ------------------------------------------------------------------------------------------
 // (explicit casts = the GLSL port's constructors: HLSL's implicit splat / truncation of the engine's expressions, without the warnings)
 void GetDiffuseMap(inout sPassData PassData) {
 #ifdef XFX_PS_DIFFUSE
-    PassData.m_colDiffuseAndAlpha = (float4)(XFX_PS_DIFFUSE);
+    PassData.m_colDiffuseAndAlpha = (rvkh4)((float4)(XFX_PS_DIFFUSE));
 #endif
 }
 
 void GetOpacityMap(inout sPassData PassData) {
 #ifdef XFX_PS_OPACITY
-    PassData.m_colDiffuseAndAlpha.a = (float)(XFX_PS_OPACITY);
+    PassData.m_colDiffuseAndAlpha.a = (rvkh)((float)(XFX_PS_OPACITY));
 #endif
 }
 
@@ -160,9 +175,9 @@ void GetNormalMap(inout sPassData PassData) {
 
 #if XFX_COMPRESSEDNORMALMAP
     // DXT5nm: x in alpha, y in green
-    PassData.m_vecTangentNormal = float3(NormalMapColor.w, NormalMapColor.y, sqrtD3D(1.0 - NormalMapColor.w * NormalMapColor.w - NormalMapColor.y * NormalMapColor.y));
+    PassData.m_vecTangentNormal = (rvkh3)float3(NormalMapColor.w, NormalMapColor.y, sqrtD3D(1.0 - NormalMapColor.w * NormalMapColor.w - NormalMapColor.y * NormalMapColor.y));
 #else
-    PassData.m_vecTangentNormal = nrmD3D(NormalMapColor.xyz);
+    PassData.m_vecTangentNormal = (rvkh3)nrmD3D(NormalMapColor.xyz);
 #endif
 
     // world space normal
@@ -170,7 +185,7 @@ void GetNormalMap(inout sPassData PassData) {
     PassData.m_vecWorldNormal += PassData.m_vecTangentNormal.yyy * PassData.m_matTangentSpace[1];
     PassData.m_vecWorldNormal += PassData.m_vecTangentNormal.zzz * PassData.m_matTangentSpace[2];
 
-    PassData.m_vecWorldReflect = reflect(-PassData.m_vecWorldEye, PassData.m_vecWorldNormal);
+    PassData.m_vecWorldReflect = reflect(-(float3)PassData.m_vecWorldEye, (float3)PassData.m_vecWorldNormal);
     PassData.m_fFresnel = dot(PassData.m_vecWorldNormal, PassData.m_vecWorldEye);
 #endif
 }
@@ -183,19 +198,19 @@ void GetSpecularPower(inout sPassData PassData) {
 
 void GetSelfIlluminationMap(inout sPassData PassData) {
 #ifdef XFX_PS_SELFILLUMINATION
-    PassData.m_colSelfIllumination = (float3)(XFX_PS_SELFILLUMINATION);
+    PassData.m_colSelfIllumination = (rvkh3)((float3)(XFX_PS_SELFILLUMINATION));
 #endif
 }
 
 void GetSpecularMaskMap(inout sPassData PassData) {
 #ifdef XFX_PS_SPECULAR
-    PassData.m_colSpecularMask = (float3)(XFX_PS_SPECULAR);
+    PassData.m_colSpecularMask = (rvkh3)((float3)(XFX_PS_SPECULAR));
 #endif
 }
 
 void GetEmissionMap(inout sPassData PassData) {
 #ifdef XFX_PS_EMISSION
-    PassData.m_colLightEmission = (float3)(XFX_PS_EMISSION);
+    PassData.m_colLightEmission = (rvkh3)((float3)(XFX_PS_EMISSION));
 #endif
 }
 
@@ -204,13 +219,13 @@ void GetDistortionMap(inout sPassData PassData) {
     PassData.m_vecDistortionOffset = (float2)(XFX_PS_DISTORTION);
 #ifdef XFX_PS_NORMAL
     // use the tangent space normal for the distortion offset
-    PassData.m_vecDistortionOffset *= PassData.m_vecTangentNormal.xy;
+    PassData.m_vecDistortionOffset *= (float2)PassData.m_vecTangentNormal.xy;
 #endif
 #endif
 }
 
 float PhongSpecular(sPassData PassData, float3 vecLight) {
-    float Specular = saturate(dot(PassData.m_vecWorldReflect, vecLight));
+    float Specular = saturate(dot(PassData.m_vecWorldReflect, vecLight));  // float: the exponent below amplifies any error in the base
     return powD3D(Specular, PassData.m_fSpecularPower * 128.0);
 }
 
@@ -228,40 +243,41 @@ void Refract(inout float3 OutputColor, sPassData PassData, float fAlpha) {
 }
 
 // ---- ambient (ge_common.fxh CalcAmbientLight*; ge_default_phong.fx CustumFragmentAmbient) -------------------------------------
-float3 CalcAmbientLightSimple(float3 n) {
-    return float3(dot(g_AmbientLight_c(0), float4(n, 1.0)), dot(g_AmbientLight_c(1), float4(n, 1.0)), dot(g_AmbientLight_c(2), float4(n, 1.0)));
+rvkh3 CalcAmbientLightSimple(rvkh3 n) {
+    const rvkh4 n1 = rvkh4(n, 1.0);
+    return rvkh3(dot((rvkh4)g_AmbientLight_c(0), n1), dot((rvkh4)g_AmbientLight_c(1), n1), dot((rvkh4)g_AmbientLight_c(2), n1));
 }
 
-float3 CalcAmbientLightComplex(float3 n) {
-    float3 AmbientColor = CalcAmbientLightSimple(n);
+rvkh3 CalcAmbientLightComplex(rvkh3 n) {
+    rvkh3 AmbientColor = CalcAmbientLightSimple(n);
 
     // 4 of the quadratic polynomials
-    float4 vB = n.xyzz * n.yzzx;
-    AmbientColor.r += dot(g_AmbientLight_c(3), vB);
-    AmbientColor.g += dot(g_AmbientLight_c(4), vB);
-    AmbientColor.b += dot(g_AmbientLight_c(5), vB);
+    rvkh4 vB = n.xyzz * n.yzzx;
+    AmbientColor.r += dot((rvkh4)g_AmbientLight_c(3), vB);
+    AmbientColor.g += dot((rvkh4)g_AmbientLight_c(4), vB);
+    AmbientColor.b += dot((rvkh4)g_AmbientLight_c(5), vB);
 
     // final quadratic polynomial
-    float vC = n.x * n.x - n.y * n.y;
-    AmbientColor += g_AmbientLight_c(6).rgb * vC;
+    rvkh vC = n.x * n.x - n.y * n.y;
+    AmbientColor += (rvkh3)g_AmbientLight_c(6).rgb * vC;
     return AmbientColor;
 }
 
 #if RVK_LEAFS
 // ge_default_leafs.fx CustumFragmentAmbient: always the complex SH ambient (no type / quality switch, no indoor blend)
-void CustumFragmentAmbient(inout sPassData PassData, inout float3 colAmbient) {
+void CustumFragmentAmbient(inout sPassData PassData, inout rvkh3 colAmbient) {
 #ifdef RVK_MV_GBUFFER
-    rvk_gbN = float4(PassData.m_vecWorldNormal, 0.0);
+    rvk_gbN = float4((float3)PassData.m_vecWorldNormal, 0.0);
 #endif
     colAmbient = CalcAmbientLightComplex(PassData.m_vecWorldNormal);
 }
 #else
-void CustumFragmentAmbient(inout sPassData PassData, inout float3 colAmbient) {
+void CustumFragmentAmbient(inout sPassData PassData, inout rvkh3 colAmbient) {
 #ifdef RVK_MV_GBUFFER
-    rvk_gbN = float4(PassData.m_vecWorldNormal, 0.0);  // the normal-mapped world normal the ambient is evaluated with: the G-buffer's
+    rvk_gbN = float4((float3)PassData.m_vecWorldNormal, 0.0);  // the normal-mapped world normal the ambient is evaluated with: the G-buffer's
 #endif
 #if XFX_AMBIENTLIGHTTYPE == EAmbientLightType_None
-    colAmbient = float3(0.0, 0.0, 0.0);
+    colAmbient = rvkh3(0.0, 0.0, 0.0);
 #elif XFX_AMBIENTLIGHTTYPE == EAmbientLightType_Simple
     colAmbient = CalcAmbientLightSimple(PassData.m_vecWorldNormal);
 #else
@@ -273,46 +289,46 @@ void CustumFragmentAmbient(inout sPassData PassData, inout float3 colAmbient) {
 #endif
 
     // indoor stuff
-    colAmbient = lerp(g_IndoorAmbientColor.rgb, colAmbient, PassData.m_fVertexAmbientOcclusion);
+    colAmbient = lerp((rvkh3)g_IndoorAmbientColor.rgb, colAmbient, PassData.m_fVertexAmbientOcclusion);
 }
 
 #endif  // RVK_LEAFS
 
 #if RVK_LEAFS
 // ---- leaf lighting (ge_default_leafs.fx): front lambert + phong, back lighting with a view dependent term -----------------------
-void LeafShadingFront(inout sPassData PassData, sPassLight PassLight, inout float3 a_colDiffuse, inout float3 a_colSpecular) {
-    float Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
+void LeafShadingFront(inout sPassData PassData, sPassLight PassLight, inout rvkh3 a_colDiffuse, inout rvkh3 a_colSpecular) {
+    rvkh Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
 
 #if XFX_SPECULAR && XFX_QUALITY > XFX_QUALITY_LOW
-    float Specular = PhongSpecular(PassData, PassLight.m_vecLight);
-    a_colSpecular = PassLight.m_colSpecular * Specular;
+    rvkh Specular = (rvkh)PhongSpecular(PassData, (float3)PassLight.m_vecLight);
+    a_colSpecular = PassLight.m_colSpecular * (rvkh)Specular;
 #endif
 
     a_colDiffuse = Lamb;
 }
 
-void LeafShadingBack(inout sPassData PassData, sPassLight PassLight, inout float3 a_colDiffuse) {
-    float EDotL = saturate(dot(-PassLight.m_vecLight, PassData.m_vecWorldEye));
-    float PowEDotL = EDotL * EDotL;
+void LeafShadingBack(inout sPassData PassData, sPassLight PassLight, inout rvkh3 a_colDiffuse) {
+    rvkh EDotL = saturate(dot(-PassLight.m_vecLight, PassData.m_vecWorldEye));
+    rvkh PowEDotL = EDotL * EDotL;
     PowEDotL *= PowEDotL;
 
     // back diffuse half lambert
-    float LDotNBack = saturate(dot(PassLight.m_vecLight, -PassData.m_vecWorldNormal) * 0.6 + 0.4);
+    rvkh LDotNBack = saturate(dot(PassLight.m_vecLight, -PassData.m_vecWorldNormal) * (rvkh)0.6 + (rvkh)0.4);
 
-    float BackShading = lerp(PowEDotL, LDotNBack, g_ShaderData[0].w);
-    a_colDiffuse += BackShading * g_ShaderData[0].rgb;
+    rvkh BackShading = lerp(PowEDotL, LDotNBack, (rvkh)g_ShaderData[0].w);
+    a_colDiffuse += BackShading * (rvkh3)g_ShaderData[0].rgb;
 }
 
 void CustumFragmentLight(inout sPassData PassData, sPassLight PassLight) {
-    float3 colSpecular = float3(0.0, 0.0, 0.0);
-    float3 colDiffuse = float3(0.0, 0.0, 0.0);
+    rvkh3 colSpecular = float3(0.0, 0.0, 0.0);
+    rvkh3 colDiffuse = float3(0.0, 0.0, 0.0);
 
     LeafShadingFront(PassData, PassLight, colDiffuse, colSpecular);
 #if XFX_QUALITY > XFX_QUALITY_LOW
     LeafShadingBack(PassData, PassLight, colDiffuse);
 #endif
 
-    float Shadow = PassLight.m_fShadow * PassLight.m_fFallOff;
+    rvkh Shadow = PassLight.m_fShadow * PassLight.m_fFallOff;
     colSpecular *= Shadow;
     colDiffuse *= Shadow;
 
@@ -322,12 +338,12 @@ void CustumFragmentLight(inout sPassData PassData, sPassLight PassLight) {
 #else
 // ---- Phong lighting (ge_default_phong.fx) -------------------------------------------------------------------------------------
 void SimpleBrdfPhong(inout sPassData PassData, sPassLight PassLight) {
-    float Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
+    rvkh Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
     // shadows apply to lamb (wrap around lighting)
     Lamb *= PassLight.m_fShadow;
 
 #if XFX_SPECULAR && XFX_QUALITY > XFX_QUALITY_LOW
-    float Specular = PhongSpecular(PassData, PassLight.m_vecLight);
+    rvkh Specular = (rvkh)PhongSpecular(PassData, (float3)PassLight.m_vecLight);
     PassData.m_colAccSpecular += PassLight.m_colSpecular * Specular * PassLight.m_fShadow * PassLight.m_fFallOff;
 #endif
 
@@ -335,23 +351,23 @@ void SimpleBrdfPhong(inout sPassData PassData, sPassLight PassLight) {
 }
 
 void ComplexBrdfPhong(inout sPassData PassData, sPassLight PassLight) {
-    float Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
+    rvkh Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
 
     // self shadow term
-    float SelfShadow = 1.0;
+    rvkh SelfShadow = 1.0;
 #if XFX_QUALITY > XFX_QUALITY_MEDIUM
 #ifdef XFX_PS_NORMAL
-    SelfShadow = saturate(4.0 * dot(PassLight.m_vecLight, PassData.m_matTangentSpace[2]));
+    SelfShadow = saturate((rvkh)4.0 * dot(PassLight.m_vecLight, PassData.m_matTangentSpace[2]));
 #endif
 #endif
 
-    float Attenuation = PassLight.m_fFallOff * PassLight.m_fShadow * SelfShadow;
+    rvkh Attenuation = PassLight.m_fFallOff * PassLight.m_fShadow * SelfShadow;
 
 #if XFX_SPECULAR && XFX_QUALITY > XFX_QUALITY_LOW
-    float Specular = PhongSpecular(PassData, PassLight.m_vecLight);
-    float Fresnel = max(dot(PassData.m_vecWorldEye, PassData.m_vecWorldNormal), 0.00001);
-    Specular = saturate(Specular * Lamb / Fresnel);
-    PassData.m_colAccSpecular += PassLight.m_colSpecular * Specular * Attenuation;
+    float Specular = PhongSpecular(PassData, (float3)PassLight.m_vecLight);
+    float Fresnel = max(dot((float3)PassData.m_vecWorldEye, (float3)PassData.m_vecWorldNormal), 0.00001);
+    Specular = saturate(Specular * (float)Lamb / Fresnel);  // float: Fresnel can be tiny
+    PassData.m_colAccSpecular += PassLight.m_colSpecular * (rvkh)Specular * Attenuation;
 #endif
 
     PassData.m_colAccDiffuse += PassLight.m_colDiffuse * Lamb * Attenuation;
@@ -380,43 +396,47 @@ void CustumFragmentInitPass(inout sPassData PassData) {
 }
 
 void CustumFragmentFinish(inout sPassData PassData, inout float4 colFinal) {
-    colFinal = PassData.m_colDiffuseAndAlpha;
+    rvkh4 col = PassData.m_colDiffuseAndAlpha;
 
-    // gamma
+    // gamma (float: pow / sqrt of the accumulated light; the result is 0.45-power compressed, half holds it)
 #if XFX_QUALITY == XFX_QUALITY_HIGH
-    PassData.m_colAccDiffuse = powD3D(PassData.m_colAccDiffuse, 0.45);
+    PassData.m_colAccDiffuse = (rvkh3)powD3D((float3)PassData.m_colAccDiffuse, 0.45);
 #else
-    PassData.m_colAccDiffuse = sqrt(abs(PassData.m_colAccDiffuse));
+    PassData.m_colAccDiffuse = (rvkh3)sqrt(abs((float3)PassData.m_colAccDiffuse));
 #endif
 
 #if XFX_AMBIENTOCCLUSION
     PassData.m_colAccDiffuse *= PassData.m_fScreenSpaceAmbientOcclusion;
 #endif
 
-    colFinal.rgb *= PassData.m_colAccDiffuse;
+    col.rgb *= PassData.m_colAccDiffuse;
 
 #if XFX_SPECULAR
     PassData.m_colAccSpecular *= PassData.m_colSpecularMask;
-    colFinal.rgb += PassData.m_colAccSpecular;
+    col.rgb += PassData.m_colAccSpecular;
 #endif
 
-    colFinal.rgb += PassData.m_colSelfIllumination;
+    col.rgb += PassData.m_colSelfIllumination;
+    colFinal = (float4)col;
 }
 
 // ---- lights and passes (ge_default_ps.fx) -------------------------------------------------------------------------------------
 void AddAmbientLight(inout sPassData PassData) {
-    float3 AmbientColor = float3(0.0, 0.0, 0.0);
+    rvkh3 AmbientColor = rvkh3(0.0, 0.0, 0.0);
+#ifdef RVK_MV_AMBIENT
+    rvkMvAmbientNow();  // the GI probes / AO fill rvk_gi here, not at the top of the shader (registers)
+#endif
     CustumFragmentAmbient(PassData, AmbientColor);
     PassData.m_colAccDiffuse += AmbientColor;
 }
 
 void AddDirLight(inout sPassData PassData, float3 vecLight, float3 colDiffuse, float3 colSpecular) {
     sPassLight PassLight;
-    PassLight.m_vecLight = vecLight;
-    PassLight.m_colSpecular = colSpecular;
-    PassLight.m_colDiffuse = colDiffuse;
-    PassLight.m_fFallOff = 1.0;
-    PassLight.m_fShadow = 1.0;
+    PassLight.m_vecLight = (rvkh3)vecLight;
+    PassLight.m_colSpecular = (rvkh3)colSpecular;
+    PassLight.m_colDiffuse = (rvkh3)colDiffuse;
+    PassLight.m_fFallOff = (rvkh)1.0;
+    PassLight.m_fShadow = (rvkh)1.0;
     PassLight.m_iLightType = eLightType_DirLight;
 #if XFX_DIRLIGHTSHADOWS
     PassLight.m_fShadow = PassData.m_vecShadowMask.a;
@@ -426,19 +446,19 @@ void AddDirLight(inout sPassData PassData, float3 vecLight, float3 colDiffuse, f
 
 void AddPointLight(inout sPassData PassData, float4 vecLightPosAndRcpSqrRange, float3 colDiffuse, float3 colSpecular, float4 vecShadowMask) {
     sPassLight PassLight;
-    PassLight.m_vecLight = vecLightPosAndRcpSqrRange.xyz - PassData.m_vecWorldPos;
-    PassLight.m_fFallOff = 1.0 - saturate(dot(PassLight.m_vecLight, PassLight.m_vecLight) * vecLightPosAndRcpSqrRange.w);
-    PassLight.m_vecLight = nrmD3D(PassLight.m_vecLight);
+    const float3 lv = vecLightPosAndRcpSqrRange.xyz - PassData.m_vecWorldPos;  // float: world units (the square is far beyond half's range)
+    PassLight.m_fFallOff = (rvkh)(1.0 - saturate(dot(lv, lv) * vecLightPosAndRcpSqrRange.w));
+    PassLight.m_vecLight = (rvkh3)nrmD3D(lv);
     PassLight.m_iLightType = eLightType_PntLight;
 #if XFX_QUALITY > XFX_QUALITY_MEDIUM
-    PassLight.m_colSpecular = colSpecular;
+    PassLight.m_colSpecular = (rvkh3)colSpecular;
 #else
-    PassLight.m_colSpecular = float3(0.0, 0.0, 0.0);
+    PassLight.m_colSpecular = rvkh3(0.0, 0.0, 0.0);
 #endif
-    PassLight.m_colDiffuse = colDiffuse;
-    PassLight.m_fShadow = 1.0;
+    PassLight.m_colDiffuse = (rvkh3)colDiffuse;
+    PassLight.m_fShadow = (rvkh)1.0;
 #if XFX_PNTLIGHTSHADOWS
-    PassLight.m_fShadow = 1.0 - dot(vecShadowMask, PassData.m_vecShadowMask);
+    PassLight.m_fShadow = (rvkh)(1.0 - dot(vecShadowMask, (float4)PassData.m_vecShadowMask));
 #endif
     CustumFragmentLight(PassData, PassLight);
 }
@@ -452,18 +472,18 @@ void AddLightMap(inout sPassData PassData) {
     AmbientLightmap2.a = AmbientLightmap2.a * 2.0 - 1.0;
 
     float3 AmbientLightDir = float3(AmbientLightmap1.a, AmbientLightmap2.a, sqrtD3D(1.0 - AmbientLightmap1.a * AmbientLightmap1.a - AmbientLightmap2.a * AmbientLightmap2.a));
-    float AmbientFactor = saturate(dot(PassData.m_vecTangentNormal, AmbientLightDir));
+    float AmbientFactor = saturate(dot((float3)PassData.m_vecTangentNormal, AmbientLightDir));
     float3 AmbientLight = lerp(AmbientLightmap2, AmbientLightmap1, AmbientFactor).rgb * 4.0;
-    PassData.m_colAccDiffuse += AmbientLight;
+    PassData.m_colAccDiffuse += (rvkh3)AmbientLight;
 
 #if XFX_QUALITY > XFX_QUALITY_LOW
     // specular colour
-    float3 LightDir = AmbientLightDir.xxx * PassData.m_matTangentSpace[0];
-    LightDir += AmbientLightDir.yyy * PassData.m_matTangentSpace[1];
-    LightDir += AmbientLightDir.zzz * PassData.m_matTangentSpace[2];
+    float3 LightDir = AmbientLightDir.xxx * (float3)PassData.m_matTangentSpace[0];
+    LightDir += AmbientLightDir.yyy * (float3)PassData.m_matTangentSpace[1];
+    LightDir += AmbientLightDir.zzz * (float3)PassData.m_matTangentSpace[2];
 
     float Specular = PhongSpecular(PassData, LightDir);
-    PassData.m_colAccSpecular += AmbientLight * Specular;
+    PassData.m_colAccSpecular += (rvkh3)(AmbientLight * Specular);
 #endif
 }
 
@@ -477,30 +497,30 @@ sPassData InitPassData() {
     PassData.m_vecTex2 = vTex0.zw;
     PassData.m_vecTex3 = vTex1.zw;
 
-    PassData.m_colVertex = vColor0;
+    PassData.m_colVertex = (rvkh4)vColor0;
 
     // tangent space
-    PassData.m_matTangentSpace[0] = vTangent.xyz;
-    PassData.m_matTangentSpace[1] = vBinormal.xyz;
-    PassData.m_matTangentSpace[2] = vNormalAndAO.xyz;
+    PassData.m_matTangentSpace[0] = (rvkh3)vTangent.xyz;
+    PassData.m_matTangentSpace[1] = (rvkh3)vBinormal.xyz;
+    PassData.m_matTangentSpace[2] = (rvkh3)vNormalAndAO.xyz;
 
 #if XFX_DOUBLESIDED
     float vFace = rvk_front ? 1.0 : -1.0;
-    PassData.m_matTangentSpace[0] *= -vFace;
-    PassData.m_matTangentSpace[1] *= -vFace;
-    PassData.m_matTangentSpace[2] *= -vFace;
+    PassData.m_matTangentSpace[0] *= (rvkh)(-vFace);
+    PassData.m_matTangentSpace[1] *= (rvkh)(-vFace);
+    PassData.m_matTangentSpace[2] *= (rvkh)(-vFace);
 #endif
 
     // eye vector
     float3 vecWorldEye = g_CamPos - vPositionAndAlpha.xyz;
     PassData.m_fCamDistance = length(vecWorldEye);
-    PassData.m_vecWorldEye = nrmD3D(vecWorldEye);
+    PassData.m_vecWorldEye = (rvkh3)nrmD3D(vecWorldEye);
 
     PassData.m_vecTangentEye.x = dot(PassData.m_vecWorldEye, PassData.m_matTangentSpace[0]);
     PassData.m_vecTangentEye.y = dot(PassData.m_vecWorldEye, PassData.m_matTangentSpace[1]);
     PassData.m_vecTangentEye.z = dot(PassData.m_vecWorldEye, PassData.m_matTangentSpace[2]);
 
-    PassData.m_vecTangentNormal = float3(0.0, 0.0, 1.0);
+    PassData.m_vecTangentNormal = rvkh3(0.0, 0.0, 1.0);
     PassData.m_vecWorldNormal = PassData.m_matTangentSpace[2];
 
     // screen position
@@ -513,25 +533,25 @@ sPassData InitPassData() {
     PassData.m_fSrcDepth = vViewPos.w;
     PassData.m_fDestDepth = tex2D(smpDepthmap, PassData.m_vecScreenPos).r * g_FarDist;
 
-    PassData.m_fGlobalAlpha = vPositionAndAlpha.w;
+    PassData.m_fGlobalAlpha = (rvkh)vPositionAndAlpha.w;
 
-    PassData.m_vecWorldReflect = reflect(-PassData.m_vecWorldEye, PassData.m_vecWorldNormal);
+    PassData.m_vecWorldReflect = reflect(-(float3)PassData.m_vecWorldEye, (float3)PassData.m_vecWorldNormal);
     PassData.m_fFresnel = dot(PassData.m_vecWorldNormal, PassData.m_vecWorldEye);
 
-    PassData.m_vecShadowMask = tex2D(smpShadowMask, PassData.m_vecScreenPos);
+    PassData.m_vecShadowMask = (rvkh4)tex2D(smpShadowMask, PassData.m_vecScreenPos);
 
-    PassData.m_fVertexAmbientOcclusion = vNormalAndAO.w;
+    PassData.m_fVertexAmbientOcclusion = (rvkh)vNormalAndAO.w;
     PassData.m_fScreenSpaceAmbientOcclusion = PassData.m_vecShadowMask.r;
 
-    PassData.m_colDiffuseAndAlpha = float4(1.0, 1.0, 1.0, 1.0);
-    PassData.m_colSelfIllumination = float3(0.0, 0.0, 0.0);
-    PassData.m_colSpecularMask = float3(1.0, 1.0, 1.0);
+    PassData.m_colDiffuseAndAlpha = rvkh4(1.0, 1.0, 1.0, 1.0);
+    PassData.m_colSelfIllumination = rvkh3(0.0, 0.0, 0.0);
+    PassData.m_colSpecularMask = rvkh3(1.0, 1.0, 1.0);
     PassData.m_fSpecularPower = 1.0;
     PassData.m_vecDistortionOffset = float2(0.0, 0.0);
-    PassData.m_colLightEmission = float3(0.0, 0.0, 0.0);
+    PassData.m_colLightEmission = rvkh3(0.0, 0.0, 0.0);
 
-    PassData.m_colAccDiffuse = float3(0.0, 0.0, 0.0);
-    PassData.m_colAccSpecular = float3(0.0, 0.0, 0.0);
+    PassData.m_colAccDiffuse = rvkh3(0.0, 0.0, 0.0);
+    PassData.m_colAccSpecular = rvkh3(0.0, 0.0, 0.0);
 
     PassData.m_iLightCount = XFX_DIRLIGHT + XFX_PNTLIGHTCOUNT;
 
@@ -571,7 +591,7 @@ float4 PS_Default() {
     sPassData PassData = InitPassData();
 
 #if XFX_DISABLELIGHTING
-    PassData.m_colAccDiffuse = float3(1.0, 1.0, 1.0);
+    PassData.m_colAccDiffuse = rvkh3(1.0, 1.0, 1.0);
 #else
 #if XFX_AMBIENTLIGHT
     AddAmbientLight(PassData);
@@ -585,7 +605,10 @@ float4 PS_Default() {
     AddDirLight(PassData, g_DirLight_Direction.xyz, g_DirLight_Diffuse.rgb, g_DirLight_Specular.rgb);
 #endif
 
-    for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
+#ifdef RVK_MV_CLUSTER
+    rvkMvClusterNow();  // the light table's per-pixel registers, right before they are read
+#endif
+    [unroll] for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
         AddPointLight(PassData, g_PointLight_PosAndRcpRange(i), g_PointLight_Diffuse(i).rgb, g_PointLight_Specular(i).rgb, g_PointLight_ShadowMask(i));
     }
 #endif
@@ -599,9 +622,9 @@ float4 PS_Default() {
 
     // alpha blended: multiply with the global alpha, else use it directly
 #if XFX_ALPHABLEND || XFX_DISTORTION
-    FinalOutput.a *= PassData.m_fGlobalAlpha;
+    FinalOutput.a *= (float)PassData.m_fGlobalAlpha;
 #else
-    FinalOutput.a = PassData.m_fGlobalAlpha;
+    FinalOutput.a = (float)PassData.m_fGlobalAlpha;
 #endif
 
 #if XFX_MASKED && XFX_ST_BILLBOARDS
@@ -646,7 +669,7 @@ float4 PS_DefaultZPass() {
 #endif
 
 #if XFX_MASKED
-    Result.a = PassData.m_colDiffuseAndAlpha.a * PassData.m_fGlobalAlpha;
+    Result.a = (float)PassData.m_colDiffuseAndAlpha.a * (float)PassData.m_fGlobalAlpha;
     if (Result.a - g_MaskReference < 0.0) discard;
 #endif
 
@@ -683,9 +706,9 @@ RvkPsOut PSMain(RvkPsIn rvk_in) {
     RVK_LOAD_SHADER_DATA();
 #ifdef RVK_UBER_HOOKS
 #ifdef RVK_MV_VNORMAL
-    rvkMvPrologue(rvk_fragCoord, vNormalAndAO);
+    rvkMvBegin(rvk_fragCoord, vNormalAndAO);
 #else
-    rvkMvPrologue(rvk_fragCoord, float4(0.0, 0.0, 0.0, 0.0));
+    rvkMvBegin(rvk_fragCoord, float4(0.0, 0.0, 0.0, 0.0));
 #endif
 #endif
 #if XFX_PASS == XFX_PASS_DEFAULT
