@@ -539,7 +539,15 @@ bool selected(const char* name) {
     return only == nullptr || std::string(name).find(only) != std::string::npos;
 }
 
-void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros, const char* entry, const std::string& hooks, bool gbuffer, bool heavy) {
+// the Full-owned light table (enh/light_table, rvk_light_model.hlsli) with four lights of DIFFERENT colours in one cluster, for the cluster hooks: header 128 B, lights 64 B, one cluster
+// (count + indices); `physical` = lighting.style physical (params[5].y)
+struct LightTableSpec {
+    bool on = false;
+    bool physical = false;
+    float debugView = 0.0f;  // lighting.debug: 1 lights in the cluster, 2 table lights used by the slots (a colour out of rvk_clUsed)
+};
+
+void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros, const char* entry, const std::string& hooks, bool gbuffer, bool heavy, LightTableSpec table = {}) {
     rhi::Device& dev = h.dev;
     const int before = failures;
     const std::string label = std::string("ubershader draw (") + name + ")";
@@ -597,6 +605,52 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
     psc.set(24, 0.3f, 0.8f, 0.5f, 0.0f);  // the directional light's direction
     abi::FrameBlock fb{};
     fb.time[0] = 0.5f;
+    rhi::Buffer* bTable = nullptr;
+    if (table.on) {
+        // engine point lights (c25 + 4 i): slot 0 a lit engine light (kept), slots 1 and 2 dark (refilled from the table's best lights)
+        for (std::uint32_t r = 14; r <= 23; ++r) psc.set(r, 0.02f, 0.02f, 0.02f, 0.02f);  // ambient + the sun nearly off: the point lights dominate the picture
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            psc.set(25 + 4 * i, 0.4f - 0.2f * static_cast<float>(i), 0.3f, 0.9f - 0.5f * static_cast<float>(i), 0.05f);
+            const float c = i == 0 ? 20.0f : 0.0f;
+            psc.set(26 + 4 * i, c, 0.5f * c, 0.2f * c, 0.0f);
+            psc.set(27 + 4 * i, 0.0f, 0.0f, 0.0f, 0.0f);
+            psc.set(28 + 4 * i, 0.0f, 0.0f, 0.0f, 0.0f);
+        }
+        for (int k = 0; k < 16; ++k) fb.invViewProj[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+        fb.viewport[0] = fb.viewport[1] = static_cast<float>(kTarget);
+        fb.viewport[2] = fb.viewport[3] = 1.0f / static_cast<float>(kTarget);
+        fb.cameraPos[2] = -3.0f;
+        constexpr std::uint32_t kLights = 4;
+        std::vector<std::uint32_t> t(32 + kLights * 16 + 64, 0);  // header words, lights, one cluster
+        const auto f2u = [](float v) { std::uint32_t u; std::memcpy(&u, &v, 4); return u; };
+        t[0] = 1; t[1] = kLights;                      // a: frame stamp (frameInfo.x + 1), light count, no shadow image
+        t[4] = 1; t[5] = 1; t[6] = 1; t[7] = 63;       // grid: 1 x 1 x 1, 63 indices
+        t[8] = f2u(1.0f); t[9] = f2u(100.0f); t[10] = f2u(1.0f);
+        t[12] = 128; t[13] = 128 + kLights * 64;       // offsets: lights, clusters
+        const float colours[kLights][3] = {{1.0f, 0.1f, 0.1f}, {0.1f, 1.0f, 0.2f}, {0.2f, 0.3f, 1.0f}, {1.0f, 0.9f, 0.1f}};
+        const float pos[kLights][3] = {{12.0f, 3.0f, 5.0f}, {-12.0f, 4.0f, 6.0f}, {5.0f, 13.0f, 5.0f}, {3.0f, -12.0f, 9.0f}};
+        for (std::uint32_t l = 0; l < kLights; ++l) {
+            std::uint32_t* r = &t[32 + l * 16];
+            r[0] = f2u(pos[l][0]); r[1] = f2u(pos[l][1]); r[2] = f2u(pos[l][2]); r[3] = f2u(1.0f / (30.0f * 30.0f));  // 1 / R^2, R = 4
+            r[4] = f2u(20.0f * colours[l][0]); r[5] = f2u(20.0f * colours[l][1]); r[6] = f2u(20.0f * colours[l][2]); r[7] = f2u(4.0f);
+            r[8] = f2u(0.2f * colours[l][0]); r[9] = f2u(0.2f * colours[l][1]); r[10] = f2u(0.2f * colours[l][2]);
+        }
+        std::uint32_t* cl = &t[32 + kLights * 16];
+        cl[0] = kLights;
+        for (std::uint32_t l = 0; l < kLights; ++l) cl[1 + l] = l;
+        bTable = h.makeBuffer(t.data(), t.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "parity light table");
+        if (!bTable) {
+            check(false, label + ": light table");
+            return;
+        }
+        const std::uint64_t ref = refOf(*bTable);
+        std::uint32_t w[4] = {static_cast<std::uint32_t>(ref), static_cast<std::uint32_t>(ref >> 32), 0, 0};
+        std::memcpy(&fb.params[abi::kFrameParamLights][0], w, 16);
+        fb.params[abi::kFrameParamLights + 1][0] = 1.0f;                       // enabled
+        fb.params[abi::kFrameParamLights + 1][1] = table.physical ? 1.0f : 0.0f;  // style
+        fb.params[abi::kFrameParamLights + 1][2] = table.debugView;
+        fb.params[abi::kFrameParamLights + 1][3] = 0.7f;
+    }
     auto* bVs = h.makeBuffer(vsc.bytes.data(), vsc.bytes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "parity vs consts");
     auto* bPs = h.makeBuffer(psc.bytes.data(), psc.bytes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "parity ps consts");
     auto* bDraw = h.makeBuffer(&db, sizeof(db), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "parity draw block");
@@ -624,6 +678,12 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
         if (std::memcmp(&px[i], &px[i - 4], 3) != 0) ++distinct;
     }
     const std::uint8_t* centre = px.data() + (static_cast<std::size_t>(kTarget / 2) * kTarget + kTarget / 2) * 4;
+    {
+        double sum[3] = {0, 0, 0};
+        for (std::size_t i = 0; i < px.size(); i += 4) for (int c = 0; c < 3; ++c) sum[c] += px[i + c];
+        const double n = static_cast<double>(px.size() / 4);
+        std::printf("  %s: mean colour (%.1f, %.1f, %.1f)\n", label.c_str(), sum[0] / n, sum[1] / n, sum[2] / n);
+    }
     check(lit > 200, std::format("{}: {} lit pixels of {} (centre pixel ({}, {}, {}, {}))", label, lit, kTarget * kTarget, centre[0], centre[1], centre[2], centre[3]));
     check(distinct > 200, std::format("{}: only {} pixel changes along the rows (a flat picture)", label, distinct));
     crossCheck(dev, label.c_str(), toFloats(px.data(), px.size()), 4.0f, 0.004f);
@@ -1123,6 +1183,17 @@ int run(rhi::Device& dev) {
     testUberDraw(h, "diffuse * vertex colour", simpleRequest(), "PS_Default", {}, false, false);
     testUberDraw(h, "normal map, specular, lightmap, lights", heavyRequest(), "PS_Default", {}, false, true);
     testUberDraw(h, "gbuffer + gi hooks", heavyRequest(), "PS_Default", kHookDefines, true, true);
+    // the light table path (S-2b regression: D3D12 showed saturated wrong colours while Vulkan was right): three point-light slots, one kept engine light + two refilled from four table lights
+    {
+        shader::MacroList m = heavyRequest();
+        for (auto& e : m) {
+            if (e.first == "XFX_PNTLIGHTCOUNT") e.second = "3";
+        }
+        const std::string cl = std::string(kHookDefines) + "#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG 25\n#define RVK_MV_CL_COUNT 3\n#define RVK_MV_CL_PARAM 4\n";
+        testUberDraw(h, "light table, three slots", m, "PS_Default", cl, true, true, LightTableSpec{true, false});
+        testUberDraw(h, "light table, physical", m, "PS_Default", cl, true, true, LightTableSpec{true, true});
+        testUberDraw(h, "light table, slots view", m, "PS_Default", cl, true, true, LightTableSpec{true, false, 2.0f});
+    }
     testWaterDraw(h);
     testScene(h);
     testReferences(h);

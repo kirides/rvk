@@ -10,6 +10,12 @@
 // See ge_default.hlsli for the defines. With RVK_UBER_HOOKS the enhancement hooks (rvk_gi.hlsli, rvk_material_variant.hlsli) are part of
 // the shader; the RVK_MV_* defines select what they do (the same defines enh/material_variant.cpp sets for the translated shaders).
 
+#ifndef RVK_CL_EARLY
+#define RVK_CL_EARLY 0  // 1: the light table's cluster selection runs at the entry instead of right before the point-light loop
+#endif
+#ifndef RVK_GI_LATE
+#define RVK_GI_LATE 0  // 1: the ambient (GI / AO / screen probes) is read at the lit core's ambient term, 0: at the entry (the texture phase carries the packed result)
+#endif
 #include "rvk_draw.hlsli"
 #ifdef RVK_UBER_HOOKS
 #include "rvk_gi.hlsli"
@@ -593,6 +599,9 @@ float4 PS_Default() {
     PassData.m_colAccDiffuse = rvkh3(1.0, 1.0, 1.0);
 #else
 #if XFX_AMBIENTLIGHT
+#if defined(RVK_UBER_HOOKS) && defined(RVK_MV_AMBIENT) && RVK_GI_LATE
+    rvkMvAmbientNow();  // GI probes / AO / screen probes here (S-2b): the texture phase's registers are mostly dead, only the lit core's state is live
+#endif
     AddAmbientLight(PassData);
 #endif
 
@@ -604,10 +613,10 @@ float4 PS_Default() {
     AddDirLight(PassData, g_DirLight_Direction.xyz, g_DirLight_Diffuse.rgb, g_DirLight_Specular.rgb);
 #endif
 
-#ifdef RVK_MV_CLUSTER
-    rvkMvClusterNow();  // the light table's per-pixel registers, right before they are read
+#if defined(RVK_MV_CLUSTER) && !RVK_CL_EARLY
+    rvkMvClusterNow();  // the light table's per-pixel slots, right before they are read
 #endif
-    for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
+    [loop] for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
         AddPointLight(PassData, g_PointLight_PosAndRcpRange(i), g_PointLight_Diffuse(i).rgb, g_PointLight_Specular(i).rgb, g_PointLight_ShadowMask(i));
     }
 #endif
@@ -709,7 +718,10 @@ RvkPsOut PSMain(RvkPsIn rvk_in) {
 #else
     rvkMvBegin(rvk_fragCoord, float4(0.0, 0.0, 0.0, 0.0));
 #endif
-#ifdef RVK_MV_AMBIENT
+#if defined(RVK_MV_CLUSTER) && RVK_CL_EARLY
+    rvkMvClusterNow();  // the light table's slots: compact state (3 x (source, factor)), the selection runs where little else is live
+#endif
+#if defined(RVK_MV_AMBIENT) && !RVK_GI_LATE
     rvkMvAmbientNow();  // GI probes / AO first (only the position and normal live: the texture phase of the plain shader is the peak, its results are compact)
 #endif
 #endif

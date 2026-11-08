@@ -202,6 +202,116 @@ bool rvkGiLookupVolume(RvkGiVolume v, float3 P, float3 N, float3 V, out float4 r
     return false;
 }
 
+#ifndef RVK_GI_LOOP_W
+#define RVK_GI_LOOP_W [loop]
+#endif
+#ifndef RVK_GI_LOOP_A
+#define RVK_GI_LOOP_A [loop]
+#endif
+// ---- the lean lookup of the material pixel shaders (S-2b, frame-ownership.md 14.8): the same result as rvkGiLookupVolume with far fewer live registers ----
+// rvkGiLookupVolume sums 7 float4 per cascade (a[7], and b[7] for the border blend, + regs[7]: 84 live floats on top of the probe loads). Here the 8
+// probes' weights of a cascade are computed first (8 floats, the depth-moment fetches only), the normalising / blending factors are folded into them, and
+// the registers are accumulated once into ONE sum[7] (28 floats), a probe's 7 float4 read and added in turn.
+// the cascade's grid position of P: false = outside the grid (no lookup in this cascade)
+bool rvkGiCascadeGrid(RvkGiVolume v, uint c, float3 P, float3 N, float3 V, out float3 Pb, out int3 base, out float3 a, out float edge) {
+    RvkGiCascade cs = v.Get().cascade[c];
+    int3 dims = int3(v.Get().dims.xyz);
+    Pb = P + (N * v.Get().params.y + V * v.Get().params.z) * cs.spacing.x;
+    float3 local = Pb * cs.spacing.y - float3(cs.origin.xyz);
+    base = int3(floor(local));
+    a = local - float3(base);
+    float3 toEdge = min(local, float3(dims - 1) - local);
+    edge = min(toEdge.x, min(toEdge.y, toEdge.z));
+    return !(any(base < int3(0, 0, 0)) || any(base > dims - 2));
+}
+
+// the weights of the 8 probes of cascade c (rvkGiCascadeSample's, 0 = unusable probe); returns their sum
+float rvkGiCascadeWeights(RvkGiVolume v, uint c, float3 P, float3 N, float3 V, out float w8[8], out float edge) {
+    [unroll] for (int k = 0; k < 8; ++k) w8[k] = 0.0;
+    float3 Pb, a;
+    int3 base;
+    if (!rvkGiCascadeGrid(v, c, P, N, V, Pb, base, a, edge)) return 0.0;
+    RvkGiCascade cs = v.Get().cascade[c];
+    int3 dims = int3(v.Get().dims.xyz);
+    float s = cs.spacing.x;
+    uint2 probesAddr = v.Get().data.xy;
+    RvkAddr depth = rvkAddr(v.Get().data.zw);
+    uint first = c * v.Get().info.z;
+    float wsum = 0.0;
+    RVK_GI_LOOP_W for (int i = 0; i < 8; ++i) {
+        int3 o = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        int3 cell = cs.origin.xyz + base + o;
+        uint index = first + rvkGiSlot(dims, cell);
+        int4 key = rvkGiProbeAt(probesAddr, index).Get().key;
+        if (any(key.xyz != cell) || (key.w & int(RVK_GI_PROBE_VALID)) == 0 || (key.w & int(RVK_GI_PROBE_INSIDE)) != 0) continue;
+        float3 pp = float3(cell) * s;
+        float3 toProbe = pp - P;
+        float len = length(toProbe);
+        float3 dirToProbe = len > 1e-3 ? toProbe / len : N;
+        float w = (dot(dirToProbe, N) + 1.0) * 0.5;
+        w = w * w + 0.2;
+        float3 pb = Pb - pp;
+        float dist = length(pb);
+        float2 m = rvkGiDepthMoments(depth, index, dist > 1e-3 ? pb / dist : float3(0.0, 1.0, 0.0));
+        float dc = dist * cs.spacing.y;
+        if (dc > m.x) {
+            float variance = abs(m.y - m.x * m.x);
+            float t = dc - m.x;
+            float cheb = variance / max(variance + t * t, 1e-6);
+            w *= max(cheb * cheb * cheb, 0.0);
+        }
+        w = max(w, 1e-6);
+        if (w < 0.2) w *= w * w / 0.04;
+        float3 tri = lerp(1.0 - a, a, float3(o));
+        w *= tri.x * tri.y * tri.z;
+        w8[i] = w;
+        wsum += w;
+    }
+    return wsum;
+}
+
+// sum[k] += scale x the weighted registers of the probes of cascade c (the weights from rvkGiCascadeWeights)
+void rvkGiAccumulate(RvkGiVolume v, uint c, float3 P, float3 N, float3 V, float w8[8], float scale, inout float4 sum[7]) {
+    float3 Pb, a;
+    int3 base;
+    float edge;
+    rvkGiCascadeGrid(v, c, P, N, V, Pb, base, a, edge);
+    RvkGiCascade cs = v.Get().cascade[c];
+    int3 dims = int3(v.Get().dims.xyz);
+    uint2 probesAddr = v.Get().data.xy;
+    uint first = c * v.Get().info.z;
+    RVK_GI_LOOP_A for (int i = 0; i < 8; ++i) {
+        if (w8[i] <= 0.0) continue;
+        int3 o = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        RvkGiProbeRef probe = rvkGiProbeAt(probesAddr, first + rvkGiSlot(dims, cs.origin.xyz + base + o));
+        float ws = w8[i] * scale;
+        [unroll] for (int k = 0; k < 7; ++k) sum[k] += probe.Get().reg[k] * ws;
+    }
+}
+
+// = rvkGiLookupVolume (same cascade choice and blend; the weights are normalised before the sum instead of after: equal to float rounding)
+bool rvkGiLookupLean(RvkGiVolume v, float3 P, float3 N, float3 V, out float4 regs[7], out uint cascadeOut) {
+    [unroll] for (int k = 0; k < 7; ++k) regs[k] = float4(0.0, 0.0, 0.0, 0.0);
+    cascadeOut = 0xFFu;
+    uint n = min(v.Get().dims.w, RVK_GI_MAX_CASCADES);
+    for (uint c = 0u; c < n; ++c) {
+        float wA[8], edge;
+        float sA = rvkGiCascadeWeights(v, c, P, N, V, wA, edge);
+        if (sA <= 1e-5) continue;
+        float t = clamp(edge / max(v.Get().params.w, 1e-3), 0.0, 1.0);
+        float wB[8], edge2;
+        float sB = 0.0;
+        [unroll] for (int k = 0; k < 8; ++k) wB[k] = 0.0;
+        if (t < 1.0 && c + 1u < n) sB = rvkGiCascadeWeights(v, c + 1u, P, N, V, wB, edge2);
+        const bool blend = sB > 1e-5;
+        rvkGiAccumulate(v, c, P, N, V, wA, blend ? t / sA : 1.0 / sA, regs);
+        if (blend) rvkGiAccumulate(v, c + 1u, P, N, V, wB, (1.0 - t) / sB, regs);
+        cascadeOut = c;
+        return true;
+    }
+    return false;
+}
+
 // A cheap lookup for ray hits (the probes' own multi-bounce, the screen probes' hits): the finest cascade holding P, its 8
 // probes trilinear x valid only (no backface / visibility weights: a hit's second bounce tolerates leaks)
 bool rvkGiLookupFast(RvkGiVolume v, float3 P, out float4 regs[7]) {
