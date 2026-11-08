@@ -215,11 +215,12 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
     const bool giOk = rvkGiValid(f) && (f.frameInfo.y & RVK_FRAME_CAMERA_VALID) != 0u;
     float3 sgK, sgDg;
     const uint sgMode = giOk ? rvkMvSgiFactors(f, sgK, sgDg) : 0u;
-    if (!giOk || !rvkGiLookupLean(rvkGiVolume(f), P, n, V, regs, rvk_giCascade)) {
+    // (the volume reference is a real buffer whenever the load below may be hoisted above the giOk test: a zero pair is heap slot 0 = a texture on D3D12, GBV 2026-11-08)
+    RvkGiVolume v = rvkPtr<RvkGiVolumeData, 16>(giOk ? f.gi.xy : rvkPsWin(3u));
+    if (!giOk || !rvkGiLookupLean(v, P, n, V, regs, rvk_giCascade)) {
         rvkMvLoadEngineAmbient();
         return;
     }
-    RvkGiVolume v = rvkGiVolume(f);
 #ifdef RVK_MV_GBUFFER
     if (sgMode != 0u) {
         for (int c = 0; c < 3; ++c) {
@@ -343,7 +344,7 @@ static float rvk_clKeptState = 0.0;  // debug: 1 an engine light kept with a tab
 float rvkMvLightShadow(uint slot, uint size, uint sid) {
     int2 px = int2(rvk_mvFrag.xy);
     if (slot == 0u || sid == 0u || px.x >= int(size & 0xFFFFu) || px.y >= int(size >> 16)) return 1.0;
-    float4 e = rvkFetch2D(slot, px);
+    float4 e = rvkFetch2D(max(slot, 1u), px);
     float v = 1.0;
     [unroll] for (uint k = 0; k < RVK_LS_ENTRIES; ++k) {
         if (e[k] > 0.0 && uint(floor(e[k] + 0.0001)) == sid) v = floor(frac(e[k] + 0.0001) * 64.0) / 63.0;
@@ -361,7 +362,9 @@ float4 rvkClReg(uint slot, uint comp) {
         if (comp == 1u || comp == 2u) e.rgb *= rvk_clK[slot];
         return e;
     }
-    RvkAddr rec = rvkAddrAdd(rvk_clLb, (src - 1u) * RVK_LIGHT_BYTES);
+    // (a zero reference must never be read: the compiler may hoist this load above the `src == 0` return as a select, and a zero pair is heap slot 0 = a texture on D3D12;
+    // rvk_clLb is a real buffer from rvkMvCluster's first line, the index is clamped)
+    RvkAddr rec = rvkAddrAdd(rvk_clLb, (max(src, 1u) - 1u) * RVK_LIGHT_BYTES);
     if (comp == 0u) return rvkRawLoad<float4, 16>(rec);
     if (comp == 3u) return float4(0.0, 0.0, 0.0, 0.0);
     float4 c = rvkRawLoad<float4, 16>(rvkAddrAdd(rec, comp == 1u ? 16u : 32u));
@@ -369,16 +372,17 @@ float4 rvkClReg(uint slot, uint comp) {
 }
 
 void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
+    rvk_clLb = rvkAddr(rvkPsWin(3u));  // a valid buffer until the table is found (see rvkClReg)
     [unroll] for (uint k0 = 0; k0 < RVK_MV_CL_COUNT; ++k0) {
         rvk_clSrc[k0] = 0u;
         rvk_clK[k0] = 1.0;
     }
     uint2 ref = asuint(f.params[RVK_MV_CL_PARAM].xy);
     float4 ctl = f.params[RVK_MV_CL_PARAM + 1];  // x enabled, y style (0 original, 1 physical), z debug view
-    if ((ref.x | ref.y) == 0u || ctl.x < 0.5) return;
-    RvkAddr base = rvkAddr(ref);
+    const bool tableOk = (ref.x | ref.y) != 0u && ctl.x >= 0.5;
+    RvkAddr base = rvkAddr(tableOk ? ref : rvkPsWin(3u));  // (never the zero pair: the loads below may be hoisted above the test)
     uint4 h0 = rvkRawLoad<uint4, 16>(base);
-    if (h0.x != f.frameInfo.x + 1u) return;  // not built this frame (no main view yet, or the pass was skipped)
+    if (!tableOk || h0.x != f.frameInfo.x + 1u) return;  // no table / not built this frame (no main view yet, or the pass was skipped)
     rvk_clPhysical = ctl.y > 0.5;
     rvk_clDefRough = ctl.w;
     uint4 offs = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 48u));
@@ -492,12 +496,13 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
         if (pick != 0xFFFFFFFFu) {
             ++next;
             float k = 1.0;
+            const uint pk = min(pick, 0xFFFFu);  // (never an out-of-table record index, whatever a hoisted load does)
             if (ctl.y > 0.5) {
-                float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES));
+                float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pk * RVK_LIGHT_BYTES));
                 float3 lv = pr.xyz - P;
                 k = rvkLmPhysicalRatio(dot(lv, lv), pr.w);
             }
-            uint sid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES + 52u));
+            uint sid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, pk * RVK_LIGHT_BYTES + 52u));
             if (sid != 0u) {
                 float sv = rvkMvLightShadow(h0.z, h0.w, sid);
                 k *= sv;
