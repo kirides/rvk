@@ -28,6 +28,7 @@
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/owned_timers.h"
 #include "native/static_ops.h"
+#include "native/tree_rows.h"
 
 namespace rvk::native {
 
@@ -75,7 +76,6 @@ constexpr std::uint32_t kRampLen = 16384;           // instance positions per pa
 constexpr std::uint32_t kViewSlotTreeZ = 14, kViewSlotTreeSolid = 15;
 constexpr std::uint32_t kViewSlotTreeCascade0 = 8;  // F4-4: slots 8..11 (the view table's dynamic slots are not used by anything; every v2 slot must stay < 16)
 constexpr std::uint32_t kRowRegs = 4;               // c32 .. c35 per instance
-constexpr std::uint32_t kVsWindowFirstRows = 32;    // registers in front of row 0: c0 .. c30 (never read: window 2 starts at c31) and the c31 header
 
 inline gpuscene::ComposeParams paramsOfTpl(const orec::DrawRec& r) {
     gpuscene::ComposeParams p;
@@ -116,7 +116,7 @@ bool StaticOps::treeEnsureRamp() {
     void* p = vb->lock(0, kRampLen * 4, 0);
     if (p == nullptr) return false;
     auto* f = static_cast<float*>(p);
-    for (std::uint32_t i = 0; i < kRampLen; ++i) f[i] = static_cast<float>(i);
+    for (std::uint32_t i = 0; i < kRampLen; ++i) f[i] = tro::rampValue(i);  // (the LOCAL instance index: rows are laid out in chunks of 50, tree_rows.h)
     vb->unlock();
     tro_->ramp = std::move(vb);
     tro_->rampLen = kRampLen;
@@ -1122,20 +1122,23 @@ std::uint32_t StaticOps::treePass(bool solid) {
             order.resize(runs.size());
             for (std::uint32_t i = 0; i < order.size(); ++i) order[i] = i;
             std::stable_sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) { return runs[a].tpl->devBucket < runs[b].tpl->devBucket; });
-            rhi::RingAlloc rows = dev_.allocOwnedRing((static_cast<std::uint64_t>(kVsWindowFirstRows) + static_cast<std::uint64_t>(kRowRegs) * P) * 16, 16);
+            rhi::RingAlloc rows = dev_.allocOwnedRing(static_cast<std::uint64_t>(tro::chunkCount(P)) * tro::kChunkBytes, 16);
             if (rows.ptr != nullptr) {
                 auto* base = static_cast<std::uint8_t*>(rows.ptr);
-                std::memset(base, 0, static_cast<std::size_t>(kVsWindowFirstRows) * 16);
-                // c31: the header (the composed value of the first template that has one)
-                std::memcpy(base + 31 * 16, runs[order[0]].tpl->c31, 16);
+                // chunks of 50 positions (tree_rows.h): each = the c0 .. c31 prefix (zero, c31 = the header: the composed value of the first template that has one) + 50 rows
+                for (std::uint32_t k = 0; k < tro::chunkCount(P); ++k) {
+                    std::uint8_t* chunk = base + tro::chunkBase(k);
+                    std::memset(chunk, 0, static_cast<std::size_t>(tro::kChunkPrefixRegs) * 16);
+                    std::memcpy(chunk + 31 * 16, runs[order[0]].tpl->c31, 16);
+                }
                 std::uint32_t pos = 0;
                 T.items.clear();
                 T.recs.clear();
                 T.posRec.clear();
                 T.posRec.reserve(P);
                 bool ok = true;
-                // per-instance lighting in ONE draw: a DrawRecord per (template, lighting entry) and the ref list gives every position its own record index; an item (= one
-                // indirect command) is a template's whole run of positions
+                // per-instance lighting in ONE draw: a DrawRecord per (template, chunk, lighting entry) and the ref list gives every position its own record index; an item (= one
+                // indirect command) is the part of a template's run that lies in one chunk of 50 positions (its records' window 2 base is that chunk's)
                 struct EntSlot {
                     std::uint32_t entry = 0, gen = 0, rec = 0;
                 };
@@ -1150,12 +1153,8 @@ std::uint32_t StaticOps::treePass(bool solid) {
                         ok = false;
                         break;
                     }
-                    shader::abi::DrawRecord base0 = tab.record(slot);
-                    base0.vsWin[2] = rows.ref.bits;  // c[n] = base + 16 n: c32 = row 0 (the header holds c31)
-                    d3d9::Device::TreeItem item;
-                    item.cd = tpl.r.cd.get();
-                    item.bucket = tpl.devBucket;
-                    item.instances = static_cast<std::uint32_t>(run.idx.size());
+                    const shader::abi::DrawRecord base0 = tab.record(slot);
+                    const std::uint32_t runN = static_cast<std::uint32_t>(run.idx.size());
                     // the observers (the RT scene) see the run as they saw the composed batches: the tag of the op, the rows as registers, the template's windows
                     if (dev_.ownedTreeObserved(*tpl.r.cd) && tpl.r.persist.valid) {
                         if (!regsSaved) {
@@ -1175,19 +1174,33 @@ std::uint32_t StaticOps::treePass(bool solid) {
                         tag.materialName = tpl.r.tagMaterialName;
                         obsRows.clear();
                         for (const std::uint32_t i : run.idx) obsRows.insert(obsRows.end(), T.inst[i].row, T.inst[i].row + 16);
-                        W.observed += dev_.ownedTreeObserve(*tpl.r.cd, tpl.r.persist.ow, T.ramp.get(), obsRows.data(), item.instances);
+                        W.observed += dev_.ownedTreeObserve(*tpl.r.cd, tpl.r.persist.ow, T.ramp.get(), obsRows.data(), runN);
                     }
-                    ++entGen;
-                    std::uint32_t distinct = 0;
-                    std::uint32_t zRec = 0;
-                    if (!solid) {
-                        zRec = static_cast<std::uint32_t>(T.recs.size());
-                        T.recs.push_back(base0);
-                    }
-                    for (std::uint32_t q = 0; q < run.idx.size() && ok; ++q) {
+                    d3d9::Device::TreeItem item;
+                    item.cd = tpl.r.cd.get();
+                    item.bucket = tpl.devBucket;
+                    item.instances = 0;
+                    std::uint32_t chunk = ~0u, distinct = 0, zRec = 0;
+                    std::uint64_t chunkBits = 0;  // window 2's base of the item's chunk
+                    for (std::uint32_t q = 0; q < runN && ok; ++q) {
                         const std::uint32_t i = run.idx[q];
-                        std::memcpy(base + (static_cast<std::size_t>(kVsWindowFirstRows) + static_cast<std::size_t>(kRowRegs) * pos) * 16, T.inst[i].row, 64);
+                        if (tro::chunkOf(pos) != chunk) {
+                            if (item.instances != 0) T.items.push_back(item);
+                            item.instances = 0;
+                            chunk = tro::chunkOf(pos);
+                            chunkBits = rows.ref.plus(static_cast<std::int64_t>(tro::chunkBase(chunk))).bits;  // c[n] = base + 16 n: c32 = row 0 of the chunk (the prefix holds c31)
+                            ++entGen;
+                            distinct = 0;
+                            if (!solid) {
+                                shader::abi::DrawRecord r = base0;
+                                r.vsWin[2] = chunkBits;
+                                zRec = static_cast<std::uint32_t>(T.recs.size());
+                                T.recs.push_back(r);
+                            }
+                        }
+                        std::memcpy(base + tro::rowOffset(pos), T.inst[i].row, 64);
                         ++pos;
+                        ++item.instances;
                         if (!solid) {
                             T.posRec.push_back(zRec);
                             continue;
@@ -1201,6 +1214,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
                                 break;
                             }
                             shader::abi::DrawRecord r = base0;
+                            r.vsWin[2] = chunkBits;
                             r.psWin[3] = li.windowBase(entry).bits;
                             ents[at] = {entry, entGen, static_cast<std::uint32_t>(T.recs.size())};
                             T.recs.push_back(r);
@@ -1208,7 +1222,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
                         T.posRec.push_back(ents[at].rec);
                     }
                     if (!ok) break;
-                    T.items.push_back(item);
+                    if (item.instances != 0) T.items.push_back(item);
                     run.idx.clear();
                     tpl.passRun = 0;
                 }

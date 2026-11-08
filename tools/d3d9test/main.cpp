@@ -30,6 +30,7 @@
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/owned_compact.h"
 #include "gpuscene/view_table.h"
+#include "native/tree_rows.h"
 #include "rhi/d3d_formats.h"
 
 using namespace rvk;
@@ -2697,7 +2698,7 @@ add oC0, v0, c14
     ib->unlock();
     {
         float r[kRamp];
-        for (std::uint32_t i = 0; i < kRamp; ++i) r[i] = static_cast<float>(i);
+        for (std::uint32_t i = 0; i < kRamp; ++i) r[i] = rvk::native::tro::rampValue(i);  // (the game's ramp: the LOCAL instance index, identity for the first 50)
         std::memcpy(ramp->lock(0, 0, 0), r, sizeof(r));
         ramp->unlock();
     }
@@ -2980,6 +2981,80 @@ add oC0, v0, c14
             ++g_failures;
         }
         bad(ref, frame("ownedt_after_light_guards", {kInst}, false, 0, calls, flushed), "the draw after the lighting refusals");
+    }
+    {
+        // MORE THAN 50 POSITIONS (frame-ownership.md 7.46): the translated vertex shader's relative constant read (`rvk_cRel`) returns zero from c256 on, so rows laid out as
+        // c32 + 4 p for p >= 56 read zeros (50 .. 55: the material window's bytes) - in the game most trees of a pass vanished. The pass lays the rows out in chunks of 50 (own
+        // c31 prefix + 50 rows), the records of a chunk's positions carry window 2's base shifted by that chunk, the ramp holds `position mod 50`: 60 positions = chunks of
+        // 50 + 10, as one run of 60 and as runs of 30 + 30 (items cut at the chunk boundary). The reference = one normal draw per instance, 0 bytes may differ. (With the old
+        // layout, rampValue(p) = p, this fails: positions 56 .. 59 read zeros, 50 .. 55 the material window.)
+        constexpr std::uint32_t kBig = 60;
+        float big[kBig][8];
+        for (std::uint32_t p = 0; p < kBig; ++p) {
+            const float r[8] = {-0.95f + 0.145f * static_cast<float>(p % 13), -0.9f + 0.4f * static_cast<float>(p / 13), 0.0f, 0.0f, 0.2f + 0.1f * static_cast<float>(p % 7),
+                                0.9f - 0.2f * static_cast<float>(p % 5), 0.3f, 1.0f};
+            std::memcpy(big[p], r, sizeof(r));
+        }
+        begin();
+        for (std::uint32_t p = 0; p < kBig; ++p) {
+            dev.setVertexShaderConstantF(12, c12, 1);
+            dev.setVertexShaderConstantF(32, big[p], 2);
+            dev.setStreamSource(1, ramp.get(), 0, 4);
+            dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | 1);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        }
+        const Pixels bigRef = end("ownedt_bigref");
+        const auto bigFrame = [&](const char* name, const std::vector<std::uint32_t>& runs, std::uint64_t& bigCalls, bool& bigFlushed) {
+            using rvk::native::tro::chunkBase;
+            using rvk::native::tro::chunkCount;
+            using rvk::native::tro::chunkOf;
+            using rvk::native::tro::kChunkBytes;
+            using rvk::native::tro::kChunkPrefixRegs;
+            using rvk::native::tro::rowOffset;
+            begin();
+            dev.setSceneIssue(true);
+            rhi::RingAlloc ra = dev.allocOwnedRing(static_cast<std::uint64_t>(chunkCount(kBig)) * kChunkBytes, 16);
+            auto* base = static_cast<std::uint8_t*>(ra.ptr);
+            for (std::uint32_t k = 0; k < chunkCount(kBig); ++k) std::memset(base + chunkBase(k), 0, static_cast<std::size_t>(kChunkPrefixRegs) * 16);
+            std::vector<Device::TreeItem> items;
+            std::vector<shader::abi::DrawRecord> recs;
+            std::vector<std::uint32_t> posRec;
+            std::uint32_t pos = 0;
+            for (const std::uint32_t n : runs) {
+                Device::TreeItem it;
+                it.cd = &cd;
+                it.bucket = dev.ownedBucketKey(cd, viewSlot);
+                std::uint32_t chunk = ~0u, rec = 0;
+                for (std::uint32_t q = 0; q < n; ++q, ++pos) {
+                    if (chunkOf(pos) != chunk) {
+                        if (it.instances != 0) items.push_back(it);
+                        it.instances = 0;
+                        chunk = chunkOf(pos);
+                        shader::abi::DrawRecord r = tab.record(slot);
+                        r.vsWin[2] = ra.ref.plus(static_cast<std::int64_t>(chunkBase(chunk))).bits;
+                        r.psWin[3] = lightBase(0);
+                        rec = static_cast<std::uint32_t>(recs.size());
+                        recs.push_back(r);
+                    }
+                    std::memcpy(base + rowOffset(pos), big[pos], sizeof(big[0]));
+                    posRec.push_back(rec);
+                    ++it.instances;
+                }
+                if (it.instances != 0) items.push_back(it);
+            }
+            const auto s0 = dev.sceneStats();
+            bigFlushed = dev.ownedTreeFlush(items, recs, posRec, viewSlot, kBig);
+            bigCalls = dev.sceneStats().indirectCalls - s0.indirectCalls;
+            return end(name);
+        };
+        std::uint64_t bigCalls = 0;
+        bool bigFlushed = false;
+        bad(bigRef, bigFrame("ownedt_big", {30, 30}, bigCalls, bigFlushed), "60 positions in two chunks (runs of 30 / 30)");
+        if (!bigFlushed || bigCalls != 1) {
+            std::printf("  FAIL owned trees: 60 positions: flushed %d, %llu indirect calls (expected 1)\n", bigFlushed, static_cast<unsigned long long>(bigCalls));
+            ++g_failures;
+        }
+        bad(bigRef, bigFrame("ownedt_big_one", {kBig}, bigCalls, bigFlushed), "60 positions in one run");
     }
     std::printf("  owned trees: %llu flushes, %llu items, %llu instances, %llu indirect packets, %llu refused\n", static_cast<unsigned long long>(dev.treeFlushStats.flushes),
                 static_cast<unsigned long long>(dev.treeFlushStats.items), static_cast<unsigned long long>(dev.treeFlushStats.instances), static_cast<unsigned long long>(dev.treeFlushStats.packets),
