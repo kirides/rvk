@@ -24,6 +24,7 @@
 #include "gpuscene/bone_table.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/object_table.h"
+#include "hal/vulkan/hal_vulkan.h"
 #include "native/owned_timers.h"
 #include "native/static_ops.h"
 
@@ -167,6 +168,20 @@ int StaticOps::actorRead(const Op& op, ActorIn& in, bool weights) {
         }
     }
     return 0;
+}
+
+std::string StaticOps::actorDiffText(const Op& op, const orec::DrawRec& r) {
+    ActorIn in;
+    if (actorRead(op, in, true) != 0) return " [actor: unreadable]";
+    std::string t = std::format(" [actor: lod {} prim {} targets {} pick {} {} {} weights {} {} {}; visual streams", in.lod, in.primIndex, in.targets, in.pick[0], in.pick[1], in.pick[2], in.weights[0],
+                                in.weights[1], in.weights[2]);
+    if (const auto* hp = hal::vulkan::HalPrimitive::fromApi(ptr(in.visual, 0x10))) {
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            const auto v = hp->streamView(i);
+            t += std::format(" {}:[buf {} off {} stride {} freq {} on {}] record buf {}", i, static_cast<const void*>(v.buffer), v.offset, v.stride, v.freq, v.enabled, static_cast<const void*>(r.streams[i]));
+        }
+    }
+    return t + "]";
 }
 
 orec::Excl StaticOps::recExclusionActor(const Op& op) {

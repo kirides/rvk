@@ -2654,6 +2654,7 @@ void StaticOps::issue() {
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
         PacketEntry* pe = nullptr;
         bool stale = false;  // the retained packet is out of date: remade from this draw
+        bool held = false;   // an entry exists for the key (its description may differ from this draw's: pe stays null then)
         std::uint64_t pkey = 0;
         d3d9::Device::ReplayInputs rin;
         const bool cacheable = cacheOn && d.vertexBytes.empty() && d.inheritMask == 0 && d.indexed && d.cpuStream == 0;
@@ -2666,6 +2667,7 @@ void StaticOps::issue() {
             pkey = (reinterpret_cast<std::uintptr_t>(op_->raw.context) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(op_->raw.desc) * 0xC2B2AE3D27D4EB4Full) ^
                    (static_cast<std::uint64_t>(op_->list) << 56) ^ (static_cast<std::uint64_t>(k) << 48) ^ (static_cast<std::uint64_t>(g_ - groups_.data()) << 40) ^ viewKey;
             if (const auto it = packets_.find(pkey); it != packets_.end()) {
+                held = true;
                 if (packetSameDesc(d, *it->second.desc)) pe = &it->second;
                 else ++pktWindow_.changed;
             }
@@ -2770,7 +2772,12 @@ void StaticOps::issue() {
         if (capturing) {
             if (!dev_.endCapture()) {
                 ++pktWindow_.notBuilt;
-                if (pe != nullptr) packets_.erase(pkey);
+                // (also an entry of another description: left in place it would be the packet an op record is built from after this draw, with the vertex input of an
+                // earlier frame: an actor's morph stream offsets; frame-ownership.md 7.41 addendum)
+                if (sc::packetAfterCapture(false, held, pe != nullptr) == sc::PacketAfterCapture::Erase) {
+                    packets_.erase(pkey);
+                    if (pe == nullptr) ++pktWindow_.staleDropped;
+                }
             } else if (pe == nullptr) {
                 if (packets_.size() > 30000) packets_.clear();
                 PacketEntry& ne = packets_[pkey];
@@ -2898,10 +2905,10 @@ void StaticOps::report() {
             pktTotal_.built += w.built;
             pktTotal_.mismatches += w.mismatches;
             pktTotal_.verified += w.verified;
-            spdlog::info("native: packet cache (5 s): {} draws replayed, {} drawn fresh (replayed share {:.1f} %), of those {} refused at replay ({} remade), {} built, {} not capturable, {} descriptions changed; verify: {} checked, {} not valid, {} DIFFERING; "
+            spdlog::info("native: packet cache (5 s): {} draws replayed, {} drawn fresh (replayed share {:.1f} %), of those {} refused at replay ({} remade), {} built, {} not capturable ({} of them dropped a stale entry), {} descriptions changed; verify: {} checked, {} not valid, {} DIFFERING; "
                          "total replayed {}, verified {}, differing {}; {} entries",
                          w.replayed, w.fresh, w.replayed + w.fresh != 0 ? 100.0 * static_cast<double>(w.replayed) / static_cast<double>(w.replayed + w.fresh) : 0.0, w.refused, w.rebuilt,
-                         w.built, w.notBuilt, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches, packets_.size());
+                         w.built, w.notBuilt, w.staleDropped, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches, packets_.size());
             {
                 const auto share = [&](int i) { return pktGroup_[i][0] + pktGroup_[i][1] != 0 ? 100.0 * static_cast<double>(pktGroup_[i][0]) / static_cast<double>(pktGroup_[i][0] + pktGroup_[i][1]) : 0.0; };
                 spdlog::info("native: packet cache replayed share (5 s): static meshes {:.1f} % ({} / {}), trees {:.1f} % ({} / {}), shadow views {:.1f} % ({} / {})", share(0), pktGroup_[0][0],

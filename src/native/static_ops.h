@@ -851,6 +851,7 @@ private:
     // the actor instance's three strongest morph targets of this frame (memoised per instance and frame: stamps, records and the composition see ONE pick; F-INT 7.43)
     bool actorPick(const std::uint8_t* ai, const std::uint8_t* setup, std::uint32_t targets, float (&weights)[3], std::uint32_t (&pick)[3]);
     int actorRead(const Op& op, ActorIn& in, bool weights);  // 0 = ok, 1 = not composable, 2 = a template property set, 3 = the resource is not cached
+    std::string actorDiffText(const Op& op, const orec::DrawRec& r);  // the DIFFERING detail of an actor draw: lod, pick, the visual's streams, the record's
     orec::Excl recExclusionActor(const Op& op);
     bool recStampActor(const Op& op, orec::Stamp& st);
     // the bone image of an op from the engine's palette (frame id as the composition's): c31 weights, c32.w fade, the bone rows; false = a palette entry is unreadable
@@ -1034,7 +1035,7 @@ private:
     };
     std::unordered_map<std::uint64_t, PacketEntry> packets_;
     struct PacketStats {
-        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0, fresh = 0, rebuilt = 0;
+        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0, fresh = 0, rebuilt = 0, staleDropped = 0;
     } pktWindow_, pktTotal_;
     std::uint32_t pktMismatchLogged_ = 0;
     std::uint64_t pktWhyPrev_[12] = {}, pktNcPrev_[12] = {};  // the device's refusal counters at the last report (the window = the difference)

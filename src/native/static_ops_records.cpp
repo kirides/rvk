@@ -483,6 +483,37 @@ bool sameWin(const d3d9::OwnedWindows::Win& a, const d3d9::OwnedWindows::Win& b,
     }
     return false;
 }
+
+// the fields of two vertex inputs that differ (the DIFFERING detail of "vertex input": derived from the record vs the composed draw)
+std::string viDiffText(const rhi::VertexInputValues* a, const rhi::VertexInputValues* b) {
+    if (a == nullptr || b == nullptr) return " (no values)";
+    std::string t = " [derived vs composed:";
+    if (a->bufferCount != b->bufferCount) t += std::format(" bufferCount {} / {}", a->bufferCount, b->bufferCount);
+    if (a->dynamicLayout != b->dynamicLayout) t += std::format(" dynamicLayout {} / {}", a->dynamicLayout, b->dynamicLayout);
+    if (a->vertexShift != b->vertexShift) t += std::format(" vertexShift {} / {}", a->vertexShift, b->vertexShift);
+    if (a->bindingCount != b->bindingCount) t += std::format(" bindingCount {} / {}", a->bindingCount, b->bindingCount);
+    if (a->attributeCount != b->attributeCount) t += std::format(" attributeCount {} / {}", a->attributeCount, b->attributeCount);
+    const std::uint32_t n = std::min(a->bufferCount, b->bufferCount);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        if (a->buffers[i] != b->buffers[i]) t += std::format(" buffer[{}] {:#x} / {:#x}", i, a->buffers[i], b->buffers[i]);
+        if (a->offsets[i] != b->offsets[i]) t += std::format(" offset[{}] {} / {}", i, a->offsets[i], b->offsets[i]);
+    }
+    const std::uint32_t nb = std::min(a->bindingCount, b->bindingCount);
+    for (std::uint32_t i = 0; i < nb; ++i) {
+        if (a->bindings[i].stride != b->bindings[i].stride || a->bindings[i].perInstance != b->bindings[i].perInstance) {
+            t += std::format(" binding[{}] stride {} inst {} / stride {} inst {}", i, a->bindings[i].stride, a->bindings[i].perInstance, b->bindings[i].stride, b->bindings[i].perInstance);
+        }
+    }
+    const std::uint32_t na = std::min(a->attributeCount, b->attributeCount);
+    for (std::uint32_t i = 0; i < na; ++i) {
+        const auto& x = a->attributes[i];
+        const auto& y = b->attributes[i];
+        if (x.location != y.location || x.binding != y.binding || x.format != y.format || x.offset != y.offset) {
+            t += std::format(" attr[{}] loc {} bind {} fmt {} off {} / loc {} bind {} fmt {} off {}", i, x.location, x.binding, static_cast<int>(x.format), x.offset, y.location, y.binding, static_cast<int>(y.format), y.offset);
+        }
+    }
+    return t + "]";
+}
 }  // namespace
 
 void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey) {
@@ -568,7 +599,11 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     } else if (pv.valid) {
         ++w.compared;
         if (dv.pipeline != pv.pipeline) fail(orec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
-        if (dv.viHash != pv.viHash) fail(orec::Field::VertexInput, "vertex input");
+        if (dv.viHash != pv.viHash) {
+            std::string extra;
+            if (rec.actor && op_ != nullptr) extra = actorDiffText(*op_, r);
+            fail(orec::Field::VertexInput, std::format("vertex input{}{}", viDiffText(dv.vi, pv.vi), extra));
+        }
         if (dv.dynHash != pv.dynHash) fail(orec::Field::VertexInput, "dynamic state");
         if (dv.first != pv.first || dv.count != pv.count || dv.vertexOffset != pv.vertexOffset || dv.indexBuffer != pv.indexBuffer || dv.indexOffset != pv.indexOffset ||
             dv.index32 != pv.index32) {
@@ -732,7 +767,8 @@ void StaticOps::recEnd(const Op& op) {
         const sc::DrawDesc& d = *draws_[k];
         const std::uint64_t pkey = k < R.pkeys.size() ? R.pkeys[k] : 0;
         const auto pe = pkey != 0 ? packets_.find(pkey) : packets_.end();
-        if (pe == packets_.end() || !pe->second.cd.valid) {
+        // (the entry must be the packet of THIS draw: an entry of an earlier description - a morph pick that moved - would give the record the old vertex input)
+        if (pe == packets_.end() || !pe->second.cd.valid || !pe->second.desc || !packetSameDesc(d, *pe->second.desc)) {
             ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
             R.map.erase(R.key);
             R.active = false;

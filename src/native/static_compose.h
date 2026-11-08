@@ -212,6 +212,15 @@ struct MorphPick {
 MorphPick pickMorphTargets(std::span<const float> weights);
 // ... and each slot i sets the stream offset of stream i + 1: target x the LOD's vertex count (HRA +0x48 + 0x14 lod) x 0x10
 inline std::uint32_t morphStreamOffset(std::uint32_t target, std::uint32_t lodVertexCount) { return target * lodVertexCount << 4; }
+// The packet cache after a draw that was to be captured (frame-ownership.md 7.41 / 7.36 addendum "stale packet"): `held` = an entry exists for the draw's key (its
+// description may differ from this draw's: pe == null then), `captured` = the capture produced a retainable packet. A failed capture must drop ANY held entry: a
+// differing-description entry left in place is what an op record (and the owned draws made from it) would be built from, with the previous frame's vertex input
+// (an actor's morph stream offsets after its pick changed, while the pixel shader / pipeline was still compiling).
+enum class PacketAfterCapture : std::uint8_t { Nothing, Erase, Insert, Refresh };
+inline PacketAfterCapture packetAfterCapture(bool captured, bool held, bool descMatched) {
+    if (!captured) return held ? PacketAfterCapture::Erase : PacketAfterCapture::Nothing;
+    return held && descMatched ? PacketAfterCapture::Refresh : PacketAfterCapture::Insert;
+}
 // eCAnimation_HardRenderActor2::Render 0x4dd650: the actor LOD (ActorInstance +0x250, unsigned) clamped to 4; the primitive
 // index u16(first of the LOD (HRA +0x38 + 0x14 lod) + the op's primitive)
 inline std::uint32_t actorLod(std::uint32_t lod) { return lod < 4 ? lod & 0xffffu : 4u; }
