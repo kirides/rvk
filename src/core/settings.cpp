@@ -2582,7 +2582,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "Nothing exists while off. rvk.log `native: clusters (5 s)`.",
         .type = Type::Bool,
         .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (7.47: retained draws / records keep the index buffers they were made with: a run-time toggle cannot take effect)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeClusterCull = &reg.add({
@@ -2596,7 +2596,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "read the GPU's result back and compare it with the exact CPU test (false negatives must be 0). rvk.log `native: owned compaction (5 s)` + `cluster cull`.",
         .type = Type::Bool,
         .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (7.47: retained draws / records keep the index buffers they were made with: a run-time toggle cannot take effect)
         .needs = {{"native.clusters", "true", false, true}, {"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
@@ -2611,7 +2611,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "whole ranges. rvk.log `native: cluster cull (5 s)` (the [cascades] triangle counts).",
         .type = Type::Bool,
         .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (7.47: retained draws / records keep the index buffers they were made with: a run-time toggle cannot take effect)
         .needs = {{"native.cluster_cull", "true", false, true}, {"native.owned_shadows", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
@@ -2626,6 +2626,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 10,
         .min = 0,
         .max = 1000,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativePictureCheck = &reg.add({
+        .key = "native.picture_check",
+        .label = "Native frame: owned picture check",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Debug, Full (frame-ownership.md 7.47): at AfterOpaque of the main view a compute pass stores the opaque scene (colour + linear depth) of every composed frame (the "
+                       "native.owned_check frames) as a reference and compares each owned frame's with it (same camera, still scene: time frozen, no upscaling jitter) and each composed frame with the previous "
+                       "composed one (the noise floor). Two scene-size images + a few words exist only while it is on. rvk.log `native: owned picture check (5 s)`: differing pixels, the largest "
+                       "differences, the bounding box, a verdict (FAILED = owned differs beyond the control).",
+        .type = Type::Bool,
+        .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });

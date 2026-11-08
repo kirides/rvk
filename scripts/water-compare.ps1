@@ -44,6 +44,7 @@ param(
     [int]$Interval = 10
 )
 . "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
+. "$PSScriptRoot\lib\stage-state.ps1"
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -65,6 +66,10 @@ function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
     New-Item -ItemType Directory -Force $dir | Out-Null
     Get-ChildItem $shots -Filter "${tag}_*.png" -ErrorAction SilentlyContinue | Move-Item -Destination $dir -Force
     Copy-Item (Join-Path $GameDir 'bin\rvk\rvk.log') (Join-Path $dir 'rvk.log') -Force -ErrorAction SilentlyContinue
+    # frame-ownership.md 7.47: an owned-stage arm must really have run as it claims (Full only: the stages do not exist in Wrapper); a failed assertion stops the comparison
+    if ($Mode -eq 'full' -or ($settings -contains 'renderer.mode=full')) {
+        Assert-ArmStages -Log (Join-Path $dir 'rvk.log') -Settings $settings -Arm $tag
+    }
 }
 
 if ($EngineDir) { Copy-Item -Recurse (Join-Path $EngineDir 'eng') (Join-Path $out 'eng') }

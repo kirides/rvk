@@ -887,6 +887,9 @@ public:
     void setClusterCull(bool on) { clusterCull_ = on; }
     void setClusterCullShadows(bool on) { clusterCullShadows_ = on; }  // F3-2 (7.37): the sun cascades' owned flushes cull too (side planes only)
     bool clusterCullOn() const { return clusterCull_; }
+    // frame-ownership.md 7.47: whether the main view that began last runs owned (its ops left the lists; the frame tap sets it at each main view's start). The picture check reads it
+    void setMainViewOwned(bool owned) { mainViewOwned_ = owned; }
+    bool mainViewOwned() const { return mainViewOwned_; }
     // tests: the CPU twin of an object window's world rows (c33..c35) for the cull's check frames, in place of the object table's
     // check frames, at the present (OwnedCompact::flush): the exact per-cluster verdict from the CPU twins as they stand NOW = what the GPU reads
     void cullCheckFinish(gpuscene::OwnedCompact::CullItem& ci);
@@ -1688,6 +1691,7 @@ private:
     void clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives);
     bool clusters_ = false;
     bool clusterCull_ = false;
+    bool mainViewOwned_ = false;
     bool clusterCullShadows_ = false;
     std::function<bool(std::uint64_t, float*)> cullWorldRowsHook_;
     std::uint64_t clusterWait_ = 0;

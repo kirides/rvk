@@ -69,7 +69,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, picture;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -810,6 +810,136 @@ void testOwnedCompact(rhi::Device& dev, const Shaders& sh) {
     check(wrongCounts == 0, std::format("{} bucket count(s) differ", wrongCounts));
     check(wrongRecords == 0, std::format("{} of {} argument record(s) differ", wrongRecords, comparedRecords));
     check(got[0] == 0xABABABABu && got[kCountsBase / 4 - 1] == 0xABABABABu && got[kCountsBase / 4 + kFirstCount + kBuckets] == 0xABABABABu, "counts written outside the buckets' words");
+    report(dev, name, before);
+}
+
+// frame-ownership.md 7.47: shaders/debug/picture_check.comp.hlsl, the owned picture check's compute pass, on synthetic scene colour (RGBA16F) + depth (R32F) images: mode 0 stores a
+// reference, mode 1 compares another image pair with it. The second pair differs in 5 pixels' colour, 3 pixels' depth (one pixel both), plus two pixels inside the tolerances (no
+// difference); the counts, the largest differences and the bounding box read back must be exact; the same pair again must count nothing; a NaN pixel counts as a colour difference.
+void testPictureCheck(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "owned picture check compare (7.47)";
+    if (!sh.picture.ok) {
+        check(false, "picture check shader did not compile");
+        report(dev, name, before);
+        return;
+    }
+    constexpr std::uint32_t kW = 32, kH = 16;
+    constexpr VkImageUsageFlags kSampled = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    auto colA = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {kW, kH, 1}, 1, 1, kSampled, "rhi pc colour A"});
+    auto colB = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {kW, kH, 1}, 1, 1, kSampled, "rhi pc colour B"});
+    auto depA = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {kW, kH, 1}, 1, 1, kSampled, "rhi pc depth A"});
+    auto depB = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {kW, kH, 1}, 1, 1, kSampled, "rhi pc depth B"});
+    constexpr VkImageUsageFlags kStore = VK_IMAGE_USAGE_STORAGE_BIT;
+    auto refColor = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {kW, kH, 1}, 1, 1, kStore, "rhi pc ref colour"});
+    auto refDepth = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {kW, kH, 1}, 1, 1, kStore, "rhi pc ref depth"});
+    const std::uint32_t pitchC = rhi::bufferRowPitch(VK_FORMAT_R16G16B16A16_SFLOAT, kW), pitchD = rhi::bufferRowPitch(VK_FORMAT_R32_SFLOAT, kW);
+    constexpr std::uint64_t kOffA = 0, kOffB = 8192, kOffDA = 16384, kOffDB = 24576;
+    auto upload = dev.createBuffer({32768, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi pc upload"});
+    auto stats = dev.createBuffer({64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Device, "rhi pc stats"});
+    auto readback = dev.createBuffer({64, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi pc readback"});
+    auto pipeline = dev.createComputePipeline({sh.picture.shader(), "rhi picture check"});
+    if (!colA || !colB || !depA || !depB || !refColor || !refDepth || !upload || !stats || !readback || !pipeline) {
+        check(false, "picture check resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    // contents: colour (0.5, 0.5, 0.5) / depth 0.5 everywhere in A; B = A with the differences below
+    constexpr std::uint16_t kHalf05 = 0x3800, kHalf20 = 0x4000, kHalf1 = 0x3C00, kHalfNaN = 0x7E00;
+    constexpr float kDepth05 = 0.5f, kDepth07 = 0.7f;
+    auto* up = static_cast<std::uint8_t*>(upload->map());
+    std::memset(up, 0, 32768);
+    const auto putColour = [&](std::uint64_t base, std::uint32_t x, std::uint32_t y, std::uint16_t v) {
+        std::uint16_t px[4] = {v, v, v, kHalf1};
+        std::memcpy(up + base + static_cast<std::size_t>(y) * pitchC + x * 8, px, 8);
+    };
+    const auto putDepth = [&](std::uint64_t base, std::uint32_t x, std::uint32_t y, float v) { std::memcpy(up + base + static_cast<std::size_t>(y) * pitchD + x * 4, &v, 4); };
+    for (std::uint32_t y = 0; y < kH; ++y) {
+        for (std::uint32_t x = 0; x < kW; ++x) {
+            putColour(kOffA, x, y, kHalf05);
+            putColour(kOffB, x, y, kHalf05);
+            putDepth(kOffDA, x, y, kDepth05);
+            putDepth(kOffDB, x, y, kDepth05);
+        }
+    }
+    const std::array<std::array<std::uint32_t, 2>, 5> colourPx = {{{3, 2}, {10, 5}, {20, 7}, {31, 15}, {0, 0}}};
+    const std::array<std::array<std::uint32_t, 2>, 3> depthPx = {{{10, 5}, {25, 9}, {6, 12}}};
+    for (const auto& p : colourPx) putColour(kOffB, p[0], p[1], kHalf20);
+    for (const auto& p : depthPx) putDepth(kOffDB, p[0], p[1], kDepth07);
+    // inside the tolerances: colour 0.5 -> 0.5107 (half), depth 0.5 -> 0.5008
+    putColour(kOffB, 12, 12, 0x3818);
+    putDepth(kOffDB, 13, 13, 0.5008f);
+    struct Push {
+        std::uint32_t frame[2], passId, passFlags;
+        std::uint32_t colorTex, depthTex, width, height, mode;
+        float colorTol, depthTol;
+        std::uint32_t pad;
+        std::uint32_t stats[2], pad2[2];
+    };
+    static_assert(sizeof(Push) == 64);
+    const auto run = [&](rhi::Texture& color, rhi::Texture& depth, std::uint32_t mode, std::uint32_t(&out)[16]) {
+        Push push{};
+        push.colorTex = color.heapSampled();
+        push.depthTex = depth.heapSampled();
+        push.width = kW;
+        push.height = kH;
+        push.mode = mode;
+        push.colorTol = 0.04f;
+        push.depthTol = 0.004f;
+        const auto sr = stats->shaderRefRw(0);
+        push.stats[0] = sr[0];
+        push.stats[1] = sr[1];
+        dev.submitAndWait([&](rhi::CommandList& cl) {
+            cl.fillBuffer(*stats, 0, 64, 0);
+            cl.bufferBarrier(*stats, rhi::BufferAccess::ShaderWrite);
+            cl.transition(*refColor, VK_IMAGE_LAYOUT_GENERAL);
+            cl.transition(*refDepth, VK_IMAGE_LAYOUT_GENERAL);
+            cl.bindPipeline(*pipeline);
+            rhi::Texture* storage[] = {refColor.get(), refDepth.get()};
+            cl.setStorageTextures(storage);
+            cl.setPushConstants(&push, sizeof(push));
+            cl.dispatch((kW + 7) / 8, (kH + 7) / 8, 1);
+            cl.bufferBarrier(*stats, rhi::BufferAccess::ShaderRead);
+            cl.copyBuffer(*readback, 0, *stats, 0, 64);
+        });
+        readback->invalidate();
+        std::memcpy(out, readback->map(), 64);
+    };
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        for (rhi::Texture* t : {colA.get(), colB.get(), depA.get(), depB.get()}) cl.transition(*t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        cl.copyBufferToTexture(*colA, *upload, kOffA);
+        cl.copyBufferToTexture(*colB, *upload, kOffB);
+        cl.copyBufferToTexture(*depA, *upload, kOffDA);
+        cl.copyBufferToTexture(*depB, *upload, kOffDB);
+        for (rhi::Texture* t : {colA.get(), colB.get(), depA.get(), depB.get()}) cl.transition(*t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    std::uint32_t s[16] = {};
+    run(*colA, *depA, 0, s);   // store the reference
+    run(*colA, *depA, 1, s);   // the same pair: nothing differs
+    check(s[0] == 0 && s[1] == 0 && s[2] == 0, std::format("identical pair: {} / {} / {} differing (want 0)", s[0], s[1], s[2]));
+    run(*colB, *depB, 1, s);
+    check(s[0] == 5, std::format("colour differing {} (want 5)", s[0]));
+    check(s[1] == 3, std::format("depth differing {} (want 3)", s[1]));
+    check(s[2] == 7, std::format("pixels differing {} (want 7)", s[2]));
+    float maxC, maxD;
+    std::memcpy(&maxC, &s[3], 4);
+    std::memcpy(&maxD, &s[4], 4);
+    check(std::fabs(maxC - 1.5f / 2.05f) < 1e-3f, std::format("max colour {} (want {})", maxC, 1.5f / 2.05f));
+    check(std::fabs(maxD - 0.4f) < 2e-3f, std::format("max depth {} (want 0.4)", maxD));
+    check(s[5] == 31 && s[6] == 15 && 0xFFFFu - s[7] == 0 && 0xFFFFu - s[8] == 0, std::format("bounding box [{},{}..{},{}] (want [0,0..31,15])", 0xFFFFu - s[7], 0xFFFFu - s[8], s[5], s[6]));
+    // a NaN pixel (colour) counts as a colour difference with a huge value
+    {
+        auto* up2 = static_cast<std::uint8_t*>(upload->map());
+        std::uint16_t px[4] = {kHalfNaN, kHalfNaN, kHalfNaN, kHalf1};
+        std::memcpy(up2 + kOffB + static_cast<std::size_t>(9) * pitchC + 17 * 8, px, 8);
+        dev.submitAndWait([&](rhi::CommandList& cl) {
+            cl.transition(*colB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            cl.copyBufferToTexture(*colB, *upload, kOffB);
+            cl.transition(*colB, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+        run(*colB, *depB, 1, s);
+        check(s[0] == 6 && s[2] == 8, std::format("with a NaN pixel: colour {} (want 6), any {} (want 8)", s[0], s[2]));
+    }
     report(dev, name, before);
 }
 
@@ -1870,11 +2000,18 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
         std::printf("[%s] %s (RVK_ABI_ONLY)\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
         return failures == before;
     }
+    if (std::getenv("RVK_PICTURE_ONLY") != nullptr) {  // only the picture check's compute pass (a run under the D3D12 GPU-based validation)
+        testPictureCheck(*dev, sh);
+        check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
+        std::printf("[%s] %s (RVK_PICTURE_ONLY)\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
+        return failures == before;
+    }
     testTextures(*dev, sh);
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
     testIndirectPull(*dev, sh);
     testOwnedCompact(*dev, sh);
+    testPictureCheck(*dev, sh);
     testOwnedCull(*dev, sh);
     testSkin(*dev, sh);
     testRayQuery(*dev, sh);
@@ -1974,6 +2111,7 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_ind.vert.hlsl", "VSMain", "vs_6_6", sh.indVs);
     compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
     compileBoth("rt/rt_skin.comp.hlsl", "CSMain", "cs_6_6", sh.skin);
+    compileBoth("debug/picture_check.comp.hlsl", "CSMain", "cs_6_6", sh.picture);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
     compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);

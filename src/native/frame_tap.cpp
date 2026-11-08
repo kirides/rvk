@@ -598,6 +598,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     desc_.zPrepass = zPrepass != 0;
     // F2c-3: a main view with owned ops (not with the observe hooks: they check the lists against the requests)
     bool ownedFrame = kind == ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_ && statics_->ownedViewBegin(db, desc);
+    if (kind == ViewKind::Main) dev_.setMainViewOwned(ownedFrame);  // (frame-ownership.md 7.47: the picture check)
     // F3-1 (native.owned_shadows): a cascade's z list, the same machinery (op records keyed per cascade, view table slot 4 + cascade)
     if (kind == ViewKind::Cascade && statics_ != nullptr && staticsWanted_ && !observeWanted_) ownedFrame = statics_->ownedShadowViewBegin(db, kind, cascade);
     if (statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame, kind, cascade);  // F4-3 / F4-4: the tree ops' own frame kind

@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/settings.h"
 #include "shader/embedded.h"
 
 namespace rvk::native {
@@ -343,10 +344,17 @@ void OwnPost::readCompare(std::uint32_t slot) {
 }
 
 void OwnPost::report() {
-    if (mode_ == Mode::Off) return;
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ < 5.0) return;
     lastLog_ = now;
+    {
+        // frame-ownership.md 7.47: the state line the A/B scripts assert (setting vs what the code runs)
+        const settings::Setting* st = settings::renderer().nativeOwnPost;
+        const int want = st != nullptr ? static_cast<int>(st->asInt()) : 0;
+        const int have = static_cast<int>(mode_);
+        spdlog::info("native: own post state (5 s): {} (setting {}, code {}){}", mode_ == Mode::Off ? "inactive" : "active", want, have, want != have ? " INCONSISTENT" : "");
+    }
+    if (mode_ == Mode::Off) return;
     spdlog::info("native: own post (5 s): luminance kernel runs {}, refused {}; compare {} frames, differing {} (rel > 1e-5), max rel {:.3g}, mean rel {:.3g}", stats_.runs,
                  stats_.refused, stats_.compared, stats_.differing, stats_.maxRel, stats_.compared != 0 ? stats_.sumRel / static_cast<double>(stats_.compared) : 0.0);
     static constexpr const char* kNames[kGroupCount] = {"luminance", "bloom chain", "DoF middle"};

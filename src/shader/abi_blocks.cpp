@@ -10,6 +10,7 @@
 #include "enh/debug_view.h"
 #include "enh/gbuffer.h"
 #include "enh/gi.h"
+#include "enh/picture_check.h"
 #include "enh/light_table.h"
 #include "enh/material_rt.h"
 #include "enh/ocean.h"
@@ -80,6 +81,11 @@ END(BlitPush, Push, abi::BlitPush)
 BLOCK(DebugViewPush, Push, enh::DebugViewPush)
 PH F(uint, depthTex, 1) F(uint, width, 1) F(uint, height, 1) F(uint, srcTex, 1) F(uint, srcSampler, 1) F(uint, pad, 1)
 END(DebugViewPush, Push, enh::DebugViewPush)
+
+BLOCK(PictureCheckPush, Push, enh::PictureCheckPush)
+PH F(uint, colorTex, 1) F(uint, depthTex, 1) F(uint, width, 1) F(uint, height, 1) F(uint, mode, 1) F(float, colorTol, 1) F(float, depthTol, 1) F(uint, pad, 1)
+F(uint2, stats, 1) F(uint2, pad2, 1)
+END(PictureCheckPush, Push, enh::PictureCheckPush)
 
 BLOCK(FramegenPush, Push, abi::FramegenDebugPush)
 PH F(uint, srcTex, 1) F(uint, sampler0, 1) F(uint, mode, 1) F(uint, pad, 1) F(float, nearZ, 1) F(float, farZ, 1) F(float, pad1, 1) F(float, pad2, 1)
@@ -312,7 +318,7 @@ std::span<const Block> blocks() {
 #define REG(HL, KIND, CPPT) Block{#HL, #CPPT, Kind::KIND, static_cast<std::uint32_t>(sizeof(CPPT)), b_##HL::kF, std::size(b_##HL::kF)},
     static const Block kBlocks[] = {
         REG(RvkDrawPush, Push, abi::PushConstants) REG(RvkScenePush, Push, abi::ScenePush) REG(BlitPush, Push, abi::BlitPush)
-        REG(DebugViewPush, Push, enh::DebugViewPush) REG(FramegenPush, Push, abi::FramegenDebugPush) REG(GbufferPush, Push, enh::GbufferPush)
+        REG(DebugViewPush, Push, enh::DebugViewPush) REG(PictureCheckPush, Push, enh::PictureCheckPush) REG(FramegenPush, Push, abi::FramegenDebugPush) REG(GbufferPush, Push, enh::GbufferPush)
         REG(GiPush, Push, enh::GiPush) REG(LightingComposePush, Push, abi::LightingComposePush) REG(OwnedCompactPush, Push, abi::OwnedCompactPush)
         REG(LightClusterPush, Push, enh::LightClusterPush) REG(LightShadowPush, Push, enh::LightShadowPush) REG(MaterialRtPush, Push, enh::MaterialRtPush)
         REG(MaterialRtCompositePush, Push, enh::MaterialRtCompositePush) REG(PostLumPush, Push, native::PostLumPush) REG(PostBrightPush, Push, native::PostGroupPush)
