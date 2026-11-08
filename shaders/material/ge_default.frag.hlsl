@@ -165,7 +165,8 @@ void GetDiffuseMap(inout sPassData PassData) {
 
 void GetOpacityMap(inout sPassData PassData) {
 #ifdef XFX_PS_OPACITY
-    PassData.m_colDiffuseAndAlpha.a = (rvkh)((float)(XFX_PS_OPACITY));
+    const rvkh opacity = (rvkh)((float)(XFX_PS_OPACITY));
+    PassData.m_colDiffuseAndAlpha = rvkh4(PassData.m_colDiffuseAndAlpha.rgb, opacity);  // (a whole-vector write: a swizzle store into the half4 of the struct was miscompiled by DXC)
 #endif
 }
 
@@ -409,23 +410,21 @@ void CustumFragmentFinish(inout sPassData PassData, inout float4 colFinal) {
     PassData.m_colAccDiffuse *= PassData.m_fScreenSpaceAmbientOcclusion;
 #endif
 
-    col.rgb *= PassData.m_colAccDiffuse;
+    // (arithmetic on a half3 temporary: swizzle stores into a half4 changed the alpha in some shaders of the DXC build)
+    rvkh3 rgb = col.rgb * PassData.m_colAccDiffuse;
 
 #if XFX_SPECULAR
     PassData.m_colAccSpecular *= PassData.m_colSpecularMask;
-    col.rgb += PassData.m_colAccSpecular;
+    rgb += PassData.m_colAccSpecular;
 #endif
 
-    col.rgb += PassData.m_colSelfIllumination;
-    colFinal = (float4)col;
+    rgb += PassData.m_colSelfIllumination;
+    colFinal = float4((float3)rgb, (float)col.a);
 }
 
 // ---- lights and passes (ge_default_ps.fx) -------------------------------------------------------------------------------------
 void AddAmbientLight(inout sPassData PassData) {
     rvkh3 AmbientColor = rvkh3(0.0, 0.0, 0.0);
-#ifdef RVK_MV_AMBIENT
-    rvkMvAmbientNow();  // the GI probes / AO fill rvk_gi here, not at the top of the shader (registers)
-#endif
     CustumFragmentAmbient(PassData, AmbientColor);
     PassData.m_colAccDiffuse += AmbientColor;
 }
@@ -608,7 +607,7 @@ float4 PS_Default() {
 #ifdef RVK_MV_CLUSTER
     rvkMvClusterNow();  // the light table's per-pixel registers, right before they are read
 #endif
-    [unroll] for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
+    for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
         AddPointLight(PassData, g_PointLight_PosAndRcpRange(i), g_PointLight_Diffuse(i).rgb, g_PointLight_Specular(i).rgb, g_PointLight_ShadowMask(i));
     }
 #endif
@@ -709,6 +708,9 @@ RvkPsOut PSMain(RvkPsIn rvk_in) {
     rvkMvBegin(rvk_fragCoord, vNormalAndAO);
 #else
     rvkMvBegin(rvk_fragCoord, float4(0.0, 0.0, 0.0, 0.0));
+#endif
+#ifdef RVK_MV_AMBIENT
+    rvkMvAmbientNow();  // GI probes / AO first (only the position and normal live: the texture phase of the plain shader is the peak, its results are compact)
 #endif
 #endif
 #if XFX_PASS == XFX_PASS_DEFAULT

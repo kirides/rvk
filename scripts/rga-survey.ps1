@@ -26,7 +26,7 @@ $rows = $files | ForEach-Object -ThrottleLimit $Jobs -Parallel {
         $csv = Get-ChildItem $w -Filter '*_frag.csv' | Select-Object -First 1
         if ($csv) {
             $r = Import-Csv $csv.FullName | Select-Object -First 1
-            $tag = if ($f.Name -match '_t12_u[0-9a-f]{8}\.spv$') { ($f.Name -replace '^[0-9a-f]{16}_', '' -replace '_t12_u[0-9a-f]{8}\.spv$', '') } else { ($f.BaseName -replace '^.*_PS_Default(ZPass)?_','') }
+            $tag = if ($f.Name -match '_t12_u[0-9a-f]{8}h?\.spv$') { ($f.Name -replace '^[0-9a-f]{16}_', '' -replace '_t12_u[0-9a-f]{8}h?\.spv$', '') } else { ($f.BaseName -replace '^.*_PS_Default(ZPass)?_','') }
             [pscustomobject]@{ module = $f.Name; shader = $f.Name.Substring(0, 16); tag = $tag; bytes = $f.Length; vgprs = [int]$r.USED_VGPRs; sgprs = [int]$r.USED_SGPRs; vgpr_spills = [int]$r.VGPR_SPILLS; scratch = [int]$r.SCRATCH_MEM; isa_bytes = [int]$r.ISA_SIZE }
         } else {
             [pscustomobject]@{ module = $f.Name; shader = $f.Name.Substring(0, 16); tag = 'FAILED'; bytes = $f.Length; vgprs = -1; sgprs = -1; vgpr_spills = -1; scratch = -1; isa_bytes = -1 }
@@ -35,5 +35,6 @@ $rows = $files | ForEach-Object -ThrottleLimit $Jobs -Parallel {
 }
 $rows | Sort-Object tag, module | Export-Csv -NoTypeInformation $Out
 "{0} modules -> {1}" -f @($rows).Count, $Out
+
 
 
