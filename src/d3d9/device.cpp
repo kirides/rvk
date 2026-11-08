@@ -1494,6 +1494,18 @@ rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& tex
             dxil.resize(static_cast<std::size_t>(in.tellg()));
             in.seekg(0);
             in.read(reinterpret_cast<char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
+            // a cache file that a crash / power loss left zero-filled or cut short (NTFS commits the rename before the data: found 2026-11-08, 14 of 5,067 files all zero)
+            // reaches CreateGraphicsPipelineState as a blob the debug layer rejects ("Encoded Vertex Shader size doesn't match"; E_FAIL, the draws are skipped = unlit
+            // meshes): the DXBC container names its own size, which must be the file's
+            std::uint32_t declared = 0;
+            if (dxil.size() >= 32) std::memcpy(&declared, dxil.data() + 24, 4);
+            if (dxil.size() < 32 || std::memcmp(dxil.data(), "DXBC", 4) != 0 || declared != dxil.size()) {
+                spdlog::warn("d3d9: DXIL cache file {} is damaged ({} bytes, container size {}): recompiled", cacheFile.filename().string(), dxil.size(), declared);
+                dxil.clear();
+                in.close();
+                std::error_code ec;
+                std::filesystem::remove(cacheFile, ec);
+            }
         }
     }
     if (dxil.empty()) {

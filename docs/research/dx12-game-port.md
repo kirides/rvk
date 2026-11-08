@@ -222,6 +222,12 @@ vcpkg baseline moved to the user's clone (directx-dxc 1.9.2602.24, directx-heade
 by `package.ps1`; details, the proxy-DLL activation, the debugging features (DRED always on, device-removed report + minidump in `bin\rvk\dumps`, PIX events, debug-layer messages, `rvk_rhitest --device-lost`) and what the
 RX 7900 XTX does not offer (OMM, SER, cluster geometry: raytracing.md 9): hlsl-rhi.md 6d.
 
+### D3D12 defects of 2026-11-08 (light table, DXIL cache; frame-ownership.md 14.7b addendum)
+
+* **A raw-buffer load through a zero address pair is a heap slot 0 read on D3D12** (Vulkan: a null-ish device address that "happens to work" behind a branch). GBV: `SRV Dimension Expected: RawBuffer, SRV Dimension In Descriptor: Texture2D, Descriptor Heap Index: [0]`. The compiler hoists loads above the branch that guarded them: a reference that is zero for part of the pixels must be a real buffer at the load (initialise it, clamp the index), a guard `if (ref == 0) return` is not enough. Found in `rvkClReg` (the light table's record). `rvk_rhitest` cases "ubershader draw (light table ...)" run with `--validation` on both backends now catch it.
+* **A damaged DXIL cache file (zero-filled after an interrupted run) must not reach `CreateGraphicsPipelineState`**: E_FAIL + debug layer "Encoded ... Shader size doesn't match", the draws are skipped for the session. `Device::dxilModule` validates the `DXBC` container size now. Debug-layer messages (`-Validation` + `RVK_NO_GBV=1`) show it at once.
+* Open: D3D12 + `debug.ubershader` + `native.owned_actors`: skinned actors black / torn (lit with `owned_actors=false` and with the translated shaders).
+
 ## Next steps (written 2026-10-30, at the break; user order: "make dx12 work, do everything necessary, do not report back until it works")
 
 Done and committed: S1 = WP1 (2774402: every shader to signed DXIL, uint2-pair address ABI, parity tests, checker `rvk_shadertool dxil-check`; the helpers are `RvkRef` / `rvkPtr` / `rvkRw*`, not the `RVK_PTR_*` macros

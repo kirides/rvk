@@ -171,6 +171,23 @@ struct Harness {
         return textures.back()->heapSampled();
     }
 
+    // an RGBA16F texture w x h from `halves` (w * h * 4 half floats), sampled through the heap (Load, no sampler): its index (0 on failure)
+    std::uint32_t addTextureF16(std::uint32_t w, std::uint32_t h, const std::vector<std::uint16_t>& halves, const char* name) {
+        const std::uint32_t pitch = rhi::bufferRowPitch(VK_FORMAT_R16G16B16A16_SFLOAT, w);
+        auto staging = dev.createBuffer({static_cast<std::uint64_t>(pitch) * h, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, name});
+        auto tex = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {w, h, 1}, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, name});
+        if (!staging || !tex) return 0;
+        for (std::uint32_t y = 0; y < h; ++y) std::memcpy(static_cast<std::uint8_t*>(staging->map()) + static_cast<std::size_t>(y) * pitch, halves.data() + static_cast<std::size_t>(y) * w * 4, w * 8);
+        dev.submitAndWait([&](rhi::CommandList& cl) {
+            cl.transition(*tex, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            cl.copyBufferToTexture(*tex, *staging, 0);
+            cl.transition(*tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+        textures.push_back(std::move(tex));
+        buffers.push_back(std::move(staging));
+        return textures.back()->heapSampled();
+    }
+
     // a cube map of 6 faces of w x w RGBA8 texels (face f, texel x, y = c(f, x, y)): its heap index (a TextureCube view)
     template <typename F>
     std::uint32_t addCube(std::uint32_t w, F c, const char* name) {
@@ -453,14 +470,18 @@ dcl_texcoord7 o8
 dcl_color0 o9
 mov o0, v0
 mov o1, v1.xyxy
-mad o2, v1.yxyx, c1, c2
+mov r0, c2
+mad o2, v1.yxyx, c1, r0
 mov o3, c3
-mad o4, v0.xyxy, c4, c5
-mad o5, v1.xyxy, c6, c7
+mov r0, c5
+mad o4, v0.xyxy, c4, r0
+mov r0, c7
+mad o5, v1.xyxy, c6, r0
 mov o6, c8
 mov o7, c9
 mov o8, v1.yxyx
-mad o9, v1.xxyy, c10, c11
+mov r0, c11
+mad o9, v1.xxyy, c10, r0
 )";
 
 shader::MacroList simpleRequest() {
@@ -545,7 +566,10 @@ struct LightTableSpec {
     bool on = false;
     bool physical = false;
     float debugView = 0.0f;  // lighting.debug: 1 lights in the cluster, 2 table lights used by the slots (a colour out of rvk_clUsed)
+    bool shadows = false;    // ray-traced lamp shadows: the four lights get shadow ids 1..4 and the header names an RGBA16F image of (id + q / 64) entries (enh/light_table, rvkMvLightShadow)
 };
+
+std::uint16_t floatToHalf(float f);  // (below)
 
 void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros, const char* entry, const std::string& hooks, bool gbuffer, bool heavy, LightTableSpec table = {}) {
     rhi::Device& dev = h.dev;
@@ -623,7 +647,7 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
         constexpr std::uint32_t kLights = 4;
         std::vector<std::uint32_t> t(32 + kLights * 16 + 64, 0);  // header words, lights, one cluster
         const auto f2u = [](float v) { std::uint32_t u; std::memcpy(&u, &v, 4); return u; };
-        t[0] = 1; t[1] = kLights;                      // a: frame stamp (frameInfo.x + 1), light count, no shadow image
+        t[0] = 1; t[1] = kLights;                      // a: frame stamp (frameInfo.x + 1), light count, no shadow image (t[2] slot, t[3] size: below)
         t[4] = 1; t[5] = 1; t[6] = 1; t[7] = 63;       // grid: 1 x 1 x 1, 63 indices
         t[8] = f2u(1.0f); t[9] = f2u(100.0f); t[10] = f2u(1.0f);
         t[12] = 128; t[13] = 128 + kLights * 64;       // offsets: lights, clusters
@@ -633,7 +657,26 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
             std::uint32_t* r = &t[32 + l * 16];
             r[0] = f2u(pos[l][0]); r[1] = f2u(pos[l][1]); r[2] = f2u(pos[l][2]); r[3] = f2u(1.0f / (30.0f * 30.0f));  // 1 / R^2, R = 4
             r[4] = f2u(20.0f * colours[l][0]); r[5] = f2u(20.0f * colours[l][1]); r[6] = f2u(20.0f * colours[l][2]); r[7] = f2u(4.0f);
+            if (table.shadows) r[13] = l + 1;  // the shadow id
             r[8] = f2u(0.2f * colours[l][0]); r[9] = f2u(0.2f * colours[l][1]); r[10] = f2u(0.2f * colours[l][2]);
+        }
+        if (table.shadows) {
+            // entry k of a pixel = id + q / 64 (q = the visibility in 1/63 steps): lamp 1 shadowed on the left half, lamp 2 fading down the rows, lamp 3 lit, lamp 4 shadowed on the right half
+            std::vector<std::uint16_t> img(static_cast<std::size_t>(kTarget) * kTarget * 4, 0);
+            for (std::uint32_t y = 0; y < kTarget; ++y) {
+                for (std::uint32_t x = 0; x < kTarget; ++x) {
+                    if (std::getenv("RVK_DBGQ")) { const std::uint32_t qq = static_cast<std::uint32_t>(std::atoi(std::getenv("RVK_DBGQ"))); for (std::uint32_t k = 0; k < 4; ++k) img[(static_cast<std::size_t>(y) * kTarget + x) * 4 + k] = floatToHalf(static_cast<float>(k + 1) + static_cast<float>(qq) / 64.0f); continue; }
+                    const std::uint32_t q[4] = {x < kTarget / 2 ? 0u : 63u, y * 63u / (kTarget - 1), 63u, x < kTarget / 2 ? 63u : 0u};
+                    for (std::uint32_t k = 0; k < 4; ++k) img[(static_cast<std::size_t>(y) * kTarget + x) * 4 + k] = floatToHalf(static_cast<float>(k + 1) + static_cast<float>(q[k]) / 64.0f);
+                }
+            }
+            const std::uint32_t slot = h.addTextureF16(kTarget, kTarget, img, "parity lamp shadows");
+            if (slot == 0) {
+                check(false, label + ": shadow image");
+                return;
+            }
+            t[2] = slot;
+            t[3] = kTarget | (kTarget << 16);
         }
         std::uint32_t* cl = &t[32 + kLights * 16];
         cl[0] = kLights;
@@ -644,11 +687,11 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
             return;
         }
         const std::uint64_t ref = refOf(*bTable);
-        std::uint32_t w[4] = {static_cast<std::uint32_t>(ref), static_cast<std::uint32_t>(ref >> 32), 0, 0};
+        std::uint32_t w[4] = {static_cast<std::uint32_t>(ref), static_cast<std::uint32_t>(ref >> 32), f2u(table.shadows ? 0.6f : 0.0f), 0};  // z = lighting.light_shadow_baked
         std::memcpy(&fb.params[abi::kFrameParamLights][0], w, 16);
         fb.params[abi::kFrameParamLights + 1][0] = 1.0f;                       // enabled
         fb.params[abi::kFrameParamLights + 1][1] = table.physical ? 1.0f : 0.0f;  // style
-        fb.params[abi::kFrameParamLights + 1][2] = table.debugView;
+        fb.params[abi::kFrameParamLights + 1][2] = std::getenv("RVK_DBGVIEW") ? static_cast<float>(std::atoi(std::getenv("RVK_DBGVIEW"))) : table.debugView;
         fb.params[abi::kFrameParamLights + 1][3] = 0.7f;
     }
     auto* bVs = h.makeBuffer(vsc.bytes.data(), vsc.bytes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "parity vs consts");
@@ -685,7 +728,19 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
         std::printf("  %s: mean colour (%.1f, %.1f, %.1f)\n", label.c_str(), sum[0] / n, sum[1] / n, sum[2] / n);
     }
     check(lit > 200, std::format("{}: {} lit pixels of {} (centre pixel ({}, {}, {}, {}))", label, lit, kTarget * kTarget, centre[0], centre[1], centre[2], centre[3]));
-    check(distinct > 200, std::format("{}: only {} pixel changes along the rows (a flat picture)", label, distinct));
+    if (table.debugView == 0.0f) {
+        check(distinct > 200, std::format("{}: only {} pixel changes along the rows (a flat picture)", label, distinct));
+    } else {
+        // (the slots view paints one colour per pixel class: both table lights of the two refilled slots used = green everywhere in this setup)
+        check(centre[0] == 0 && centre[1] == 255 && centre[2] == 0, std::format("{}: slots view centre ({}, {}, {}), want green (two table lights used)", label, centre[0], centre[1], centre[2]));
+    }
+    if (table.shadows) {
+        // the shadowed picture must differ from the unshadowed one across the image (left vs right half, top vs bottom)
+        const auto at = [&](std::uint32_t x, std::uint32_t y, int c) { return static_cast<int>(px[(static_cast<std::size_t>(y) * kTarget + x) * 4 + c]); };
+        int diff = 0;
+        for (int c = 0; c < 3; ++c) diff += std::abs(at(8, 32, c) - at(56, 32, c)) + std::abs(at(32, 4, c) - at(32, 60, c));
+        check(diff > 12, std::format("{}: lamp shadows change nothing across the picture (difference sum {})", label, diff));
+    }
     crossCheck(dev, label.c_str(), toFloats(px.data(), px.size()), 4.0f, 0.004f);
     if (gbuffer) {
         // target 1: A2B10G10R10 (the octahedral normal + id), compared as raw 10-bit fields; target 2: motion RG16F
@@ -1193,6 +1248,14 @@ int run(rhi::Device& dev) {
         testUberDraw(h, "light table, three slots", m, "PS_Default", cl, true, true, LightTableSpec{true, false});
         testUberDraw(h, "light table, physical", m, "PS_Default", cl, true, true, LightTableSpec{true, true});
         testUberDraw(h, "light table, slots view", m, "PS_Default", cl, true, true, LightTableSpec{true, false, 2.0f});
+        // lamp shadows (D3D12 defect 2026-11-08): the light.shadow image with several coloured lamps read through the cluster path (refilled slots + the baked-light term)
+        // (a material without a normal map / tangent space: the lamps' colours reach the picture, the shadows change it)
+        shader::MacroList ms = simpleRequest();
+        for (auto& e : ms) {
+            if (e.first == "XFX_PNTLIGHTCOUNT") e.second = "3";
+        }
+        testUberDraw(h, "light table, lamp shadows", ms, "PS_Default", cl, true, true, LightTableSpec{true, false, 0.0f, true});
+        testUberDraw(h, "light table, lamp shadows, physical", ms, "PS_Default", cl, true, true, LightTableSpec{true, true, 0.0f, true});
     }
     testWaterDraw(h);
     testScene(h);
