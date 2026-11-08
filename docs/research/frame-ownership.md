@@ -2307,3 +2307,211 @@ indirect command**, so hidden clusters drop out without multiplying draws.
 | **F5-3** HiZ occlusion | same-frame two-phase HiZ from the main depth pre-pass (section 2's F5 row), per cluster and per small mesh | as F5-2 + pop-in bursts | depends on occlusion (old probe: 8-24 % hidden) |
 
 Only opaque / z / shadow-caster draws are clustered. Alpha-blended draws keep their engine order and their whole range.
+
+## 14. S plan: our own shaders for the owned frame, measured for a bandwidth-limited iGPU (2026-11-08, S-0: measurement + planning, no feature code)
+
+User direction (2026-11-07/08): Full owns the whole frame AND runs our own, optimized shaders; the target is a Radeon 680M (RDNA2, 12 CU, ~100 GB/s shared); the user
+tests on it only when everything is done. Owned draws exist for static meshes, cascades, trees, actors, vegetation and billboards, also under FSR / frame generation /
+GI / AO (7.21 - 7.45); they still run the **translated** engine shaders (D3D9 bytecode -> HLSL, scene ABI v2 variants). Keep the visual identity (sun flare, exposure,
+vivid colours; new lighting adds, never bland / PBR-realistic); Wrapper stays faithful; DXIL parity; no unread outputs.
+
+Setup: private copy `risen-test-vk-s0` (instance 43, lock `rvk-s0`); GPU timing in the shared copy with `RisenTest.exe`, vsync off, `-Perf`, `-PerfFrame` with
+`RVK_PERF_FRAMES=24` (24 frames averaged per pass), one run at a time. Everything on that the owned chain has: the `-All` list of 7.43 (`owned_*`, clusters, cull,
+`rt.table_entries`, `lighting.clustered` + `full_lit`), player defaults, savegame hold (`rvk_perfsave`, lod 2x) and rvkcompare spots jungle / pub_interior /
+harbour_docks, 1600x900. **Temporary counters** (not for main): branch `s0-census-temp` (2 commits on 7f4fcc8): `RVK_S0_CENSUS=1` (per owned flush: items, buckets,
+distinct VS+PS modules per view kind x draw kind, every 300 frames), `RVK_S0_STATS=1` (`VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR` on every graphics pipeline,
+`VK_KHR_pipeline_executable_properties`: VGPRs / SGPRs / scratch per stage, with the module names). Scripts and raw logs: `rvk-work/scratch/s0/` (`run.ps1`,
+`queue*.ps1`, `analyze_s0.py`, `vgpr_classes.py`, `perfpass.py`, `mdtable.py`, `merge_census.py`, `static_stats.py`, logs `c_*.log` census, `pf_*.log` GPU).
+
+**Limits, stated once.** (1) The only GPU here is an RX 7900 XTX (RDNA3, 1,536 VGPRs per SIMD lane): VGPR counts come from AMD's RDNA3 compile of the SPIR-V (the driver
+reports `sub 0`: wave size unknown); an RDNA2 compile (gfx1035 = the 680M) differs by roughly +-10 - 20 %, and RDNA2's register file is 1,024 per lane: the occupancy
+column below is a MODEL (waves per SIMD = min(16, 1024 / VGPRs rounded up to 8), wave32; a wave64 pixel shader halves it). **Radeon GPU Analyzer is not installed
+here**: S-2's first act is `rga -s vk-spv-offline -c gfx1035` on the dumped modules (real 680M register / ISA numbers, no hardware needed). (2) All 680M milliseconds are
+**extrapolations** from the XTX (the model of 7.22 item 4, front end x5 - 7, pixel ALU x15, bandwidth-bound x10; this section uses x6.5 / x15 / x10); read them as +- 2x. (3) Run-to-run
+noise of a pass is large: the same jungle hold gave a solid pass of 1.84 / 1.82 / 1.29 ms in three runs (content phase at the perf frame), so only differences > 30 % are
+claimed from single runs.
+
+### 14.1 Census
+
+**14.1.1 What a frame holds** (`hal: frame N draw kinds`, the frame with all views; "Shadow" = the cascades' share; draws = HAL draws, vegetation / trees are instance-level):
+
+| scene | Vegetation | SpeedTree | StaticMesh | Instanced mesh | Tree billboard | Skinned | Decals / particles / sky / refracted | Post + GUI + mask |
+|---|---|---|---|---|---|---|---|---|
+| savegame (hold) | 2,510 | 2,101 (1,282 main + 819 shadow) | 1,033 (640 + 393) | 133 | 52 | 54 | 23 / 3 / 4 / 5 | 19 + 7 + 9 |
+| jungle | 5,092 | 3,132 (2,258 + 874) | 1,051 (718 + 333) | 186 | 120 | 2 | 2 / 36 / 4 / 19 | 20 + 9 |
+| pub_interior | - | - | 33 | 20 | - | - | 0 / 6 / 0 / 1 | 20 + 9 |
+| harbour_docks | 646 | 63 | 242 (144 + 98) | 41 | 8 | 2 | 1 / 6 / 4 / 1 | 20 + 9 |
+
+Passes of a savegame frame: `DepthPrepass(2445) ShadowMask(7) Solid(2183) Refracted(5) Alpha(45) Post(19) Gui(7)` draws, three cascades behind them on the frames the
+sun shadows update (stride 2).
+
+**14.1.2 The owned flush (static meshes + skinned: `ownedFlush`), per frame, last two windows of 300 frames** (a "bucket" = one `DrawIndexedIndirectCount` command = one
+key of vertex input + dynamic state + scene pipeline + index buffer / offset; `items` = owned draws; "pipelines" = distinct VS + PS modules in the window):
+
+| scene | view | kind | items / frame | indirect commands / frame | items / command | pipelines | distinct command keys |
+|---|---|---|---|---|---|---|---|
+| savegame | main z | static | 480 | 82.1 | 5.85 | 4 | 87 |
+| savegame | main z | skinned | 13 | 3.8 | 3.50 | 3 | 4 |
+| savegame | main solid | static | 34 | 29.2 | 1.16 | 13 | 31 |
+| savegame | main solid | skinned | 7 | 4.7 | 1.40 | 5 | 5 |
+| savegame | cascades (1.4 flushes / frame) | static | 185 | 41.0 | 4.52 | 5 | 87 |
+| savegame | cascades | skinned | 9 | 2.3 | 3.83 | 3 | 5 |
+| jungle | main z | static | 457 | 129.2 | 3.53 | 4 | 137 |
+| jungle | main solid | static | 80 | 61.2 | 1.31 | 20 | 65 |
+| jungle | cascades | static | 156 | 59.6 | 2.62 | 4 | 127 |
+| pub_interior | main z / solid | static | 21 / 9 | 16.0 / 8.0 | 1.31 / 1.12 | 2 / 5 | 16 / 8 |
+| harbour_docks | main z | static | 77 | 25.8 | 3.00 | 3 | 29 |
+| harbour_docks | main solid | static | 25 | 20.5 | 1.22 | 15 | 23 |
+| harbour_docks | cascades | static | 43 | 10.6 | 4.09 | 2 | 24 |
+| savegame + FSR performance + frame generation + GI + AO | z / solid / cascades static | | 452 / 32 / 176 | 77.3 / 27.5 / 38.9 | 5.85 / 1.16 / 4.51 | 4 / 13 / 5 | 87 / 31 / 87 |
+
+Other owned kinds (savegame, one 5 s window, 300 main views = 240 owned; the persistent flushes of 7.32, 7.39, 7.40, 7.42): SpeedTrees main view 154 ops / owned
+frame, 1,282 instances in 130 items per pass (240 x 2 flushes); in the cascades 30 ops and 273 instances in 36 items per cascade view; vegetation 58 ops = 60 batches =
+58 indirect commands / owned frame carrying 2,510 instances (jungle 5,092); tree billboards 780 recordable ops per window = 3 per frame; actors: z 3,840 / solid 1,680 /
+cascades 2,562 ops per window, 100 % owned. `native: owned persistent` + `owned compaction`: 41.6 k buckets = 41.6 k indirect packets for 186 k items in 255 frames = **~163 indirect commands for
+~730 owned items per frame in the flush above (z + solid + cascades), plus the trees / vegetation flushes**.
+
+Findings: (a) **the pipeline count is not the problem**: the z and cascade passes already run 2 - 5 pipelines, the solid pass 5 - 20; 87 - 137 distinct command keys per
+scene are vertex layouts / index buffers of the engine's meshes, so a z pass issues 82 - 129 indirect commands for 4 pipelines (the command count = vertex input x index
+buffer, not shaders). (b) The solid pass owns only ~34 - 80 static items: its other draws are trees, vegetation, instanced, blended / no-z-write (7.43 table).
+
+**14.1.3 Shader classes.** The engine asks the pool for 453 shaders in town + jungle (`out/matsrc`, `tools/material_graph_census.py`; 208 in the savegame run): 59 VS_Default,
+31 VS_DefaultZPass, 308 PS_Default, 17 PS_DefaultZPass of `ge_default_phong.fx` + 24 of `ge_default_leafs.fx` + particles / sky dome. Savegame classes (PS / VS requests):
+static 110 / 19 (lit), 7 / 4 (z); skinned 9 / 2 + morphed 5 / 2 (lit), 1 / 4 + 2 (z); SpeedTree branch / frond 4 / 2 (lit), 1 / 2 (z); SpeedTree leaf (leafs.fx) 2 / 2, 1 / 4 (z);
+SpeedTree billboard 1 / 2 + 2 (z); vegetation 4 / 1 (lit) + 1 (z); instanced 2 VS; billboard 3 / 1; particles 3 / 3; sky 1 / 1. **Every material PS of the owned kinds is the
+same `PS_Default` ubershader text** (the trees' / grass' classes differ in the VS macros ST_* / VEGETATION and a few PS ones).
+How far one own ubershader with dynamic branches would merge (`merge_census.py`; counts of pool requests / pipelines = distinct keys; L0 = requests, L1 = all macros +
+normalised graph = today's translated pipelines, the 196 of 7.3; L2 = the light macros dynamic (7.3's owned shader, `DYN`); L3 = L2 + the material graph resolved at run
+time from the material record (only static macros split); L4 = + specular / compressed normal map / Fresnel / lighting type / fog / disable-lighting / tangent space /
+scene depth as record flags; L5 = + cut-out and two-sided as flags):
+
+| entry | requests | L0 | L1 | L2 | L3 | L4 | L5 |
+|---|---|---|---|---|---|---|---|
+| PS_Default (phong) | 308 | 302 | 116 | 43 | **15** | 11 | 11 |
+| PS_DefaultZPass | 17 | 11 | 11 | 11 | 9 | 6 | 6 |
+| VS_Default | 59 | 33 | 33 | 24 | 13 | 11 | 11 |
+| VS_DefaultZPass | 31 | 20 | 20 | 19 | 19 | 15 | 15 |
+| leafs (PS + VS, lit + z) | 24 | 18 | 18 | 18 | 18 | 18 | 18 |
+| particles / sky | 14 | 7 | 7 | 5 | 4 | 4 | 4 |
+| **sum** | 453 | 391 | 197 | 112 | 70 | 57 | 57 |
+
+(L3 needs the engine's expression graphs as data: 47 distinct normalised diffuse expressions, normal 16, specular 50, opacity 26, self-illumination 14, distortion 5 forms:
+a small "recipe" table of forms, not a general interpreter.) In the game the owned flush shows 4 + 3 pipelines in z, 13 + 5 in the solid pass, 5 + 3 in the cascades.
+
+**14.1.4 Registers / occupancy / instructions (the numbers that decide the iGPU).** Pipeline statistics of every graphics pipeline built in the run (RDNA3 compile;
+`vgpr_classes.py`; savegame, player defaults, Full with everything owned = `c_names`, translated without the chain = `u_trans`, `debug.ubershader` = `u_uber`):
+
+| module class | n | VGPR mean / median / p90 / max | model occupancy at the median (waves / SIMD, RDNA2 wave32) | scratch (spill) |
+|---|---|---|---|---|
+| PS_DefaultZPass plain / scene form | 9 / 11 | 10 / 15 | 16 | 0 |
+| **PS_Default plain translated** | 134 | 105 / 117 / 137 / 151 | 8 | 0 |
+| PS_Default scene form (owned) | 55 | 124 / 126 / 140 / 152 | 8 | 0 |
+| **PS_Default GI / pack / cluster variant (player defaults: derived gloss on every lit draw)** | 163 | **219 / 210 / 256 / 256** | **4** | 18 modules spill |
+| PS_Default `debug.ubershader` (the HLSL port, ge_default.frag.hlsl) | 152 | 124 / 135 / 144 / 152 | 7 | 0 |
+| leafs PS_Default plain / gi variant | 2 / 4 | 111 / 217 | 8 / 4 | 0 |
+| VS_DefaultZPass plain / scene form | 13 / 25 | 35 / 55 (max 88) | | 0 |
+| VS_Default plain / scene form | 29 / 22 | 34 / 55 (max 71) | | 0 |
+| all PS built (4 spots) | 412 | 147 mean, p90 250, max 256 | 4: 145, 7 - 9: 145, 16: 72 modules | 23 modules |
+
+PS_Default plain by feature (mean VGPR): compressed normal map 116 vs none 69, specular 117 vs none 86, lightmap 116 vs none 94, 3 point lights 112 vs 0 lights 62, opaque 119
+vs alpha-blended 96. Static facts of the engine's PS_Default (`static_stats.py`, D3D9 listing of the 239 captured shaders): 94 instructions mean (max 153), **5.1 texture
+fetches mean (max 11)**, 6.5 interpolant registers read of the 9 the VS always declares, **89 % of the ALU instructions carry `_pp` (partial precision)**; PS_DefaultZPass
+7 instructions, 0.8 fetches; leaf PS 104 instructions, 3 fetches, 92 % `_pp`. **The translator ignores `_pp` (everything runs in float32)** (`src/shader/hlsl.cpp`: no
+min16float / 16-bit types anywhere).
+
+Findings: (1) the owned scene form costs +19 PS and +21 VS VGPRs over the plain translated shaders (the record reads), and the HLSL port is +19 over the translation
+(a faithful port is not cheaper by itself); (2) **at the player defaults the lit pixel shader is the GI / pack variant at 219 VGPRs (model: 4 waves per SIMD on RDNA2, spills
+in 18 modules)**: the XTX is insensitive to it (jungle hold with `materials.derive_from_specular=false` = plain variants: solid pass 1.82 vs 1.84 ms, same scene state), the 680M
+will not be; (3) z / cascade shaders are tiny (PS 7 - 15, VS 15 - 17 VGPRs, scene form VS 55 for skinned: bone fetch).
+
+**14.1.5 GPU time per pass** (XTX, 1600x900, `-PerfFrame` 24-frame mean; passes are classified by target + draw count because the pass numbering shifts with the cascade stride;
+`perfpass.py`; ms; "post" = the engine's 1600x900 full-screen effect passes with <= 10 draws):
+
+| scene | main z | solid + alpha | cascades (per frame, stride 2) | post (1600x900) | water.rt | water.ocean | rt.scene + light.cluster + light.shadow | submission total |
+|---|---|---|---|---|---|---|---|---|
+| savegame (frame 6000) | 0.28 | 0.72 + 0.15 | 0.18 | 0.21 | 1.00 | 0.27 | 0.16 + 0.11 + - | 3.33 |
+| jungle (4200) | 0.40 | 1.84 | 0.54 | 0.25 | 1.03 | 0.28 | 0.16 + 0.13 + 0.08 | 5.03 |
+| pub_interior (4200) | 0.41 | 1.17 | 0.13 | 0.19 | 0.92 | 0.33 | 0.16 + 0.14 + 0.13 | 3.81 |
+| harbour_docks (4200) | 0.36 | 1.13 | 0.12 | 0.22 | 0.83 | 0.30 | 0.19 + 0.12 + 0.05 | 3.59 |
+
+Experiments on the jungle hold (single runs, noise +-20 - 30 %): 800x480 (27 % of the pixels): solid 1.50 (-18 %), z 0.30; FSR `performance` (25 %): solid 1.18 (-36 %), z 0.30,
+`upscale.fsr` 0.33 ms; `-NoChain` (translated, not owned): z 0.56, solid 1.50 (z -28 % with the chain: the 600 separate draws against ~80 indirect commands, one run). So on the XTX
+the solid pass is **~25 - 45 % pixel, the rest geometry / draw**; the pub (33 + 20 draws, 1.17 ms) is pixel-bound: an interior's lit pixels (normal map + specular + 3 lights) are
+the case for the pixel shader.
+
+**14.1.6 Bandwidth** [I: arithmetic from formats at 1600x900 = 1.44 M pixels, not measured traffic; the targets are in `names:` lines]: scene HDR RGBA16F 8 B, depth D24S8 4 B,
+depth map R32F 4 B (a colour export of the z pass: read by the shadow mask chain, SSAO, DoF, water, FSR prep), shadow mask A8R8G8B8, refraction copy RGBA16F, cascades 3 x 2048x2048
+DF24 (16.8 MB each), terrain shadow map 1024^2 G32R32F, G-buffer normal A2B10G10R10 + motion (4 B each, written only when read: already packed). Per frame: z ~17 MB (depth + R32F
+x ~1.5 overdraw), solid ~55 MB (colour 8 + depth 4 + mask 4 + ~15 B of texture traffic per pixel x 1.2), cascades ~50 - 70 MB when drawn (clear + write of 3 maps), **the post chain
+~275 MB** (12 full-resolution RGBA16F passes, read + write each), RT / water compute extra. ~430 MB per frame = 26 GB/s at 60 fps (13 GB/s at 30): inside the 680M's ~50 GB/s share
+with the CPU, so **the opaque passes are not bandwidth-bound; the post chain is** (275 MB / 50 GB/s ~ 5.5 ms; measured on the XTX 0.19 - 0.25 ms x ~10 - 19 = 2 - 4.7 ms: consistent).
+
+### 14.2 Findings that change the plan
+
+1. **`debug.ubershader` makes ownership impossible today** (`d3d9/draw.cpp:633` split constants off, `owned_persist.cpp:41` / `owned_submit.cpp:39` refuse, `scene_draws.cpp:121` "the
+   ubershader has no scene form"): the ported HLSL ubershader and the owned path have never run together. The shader text is ready (`RVK_SCENE_RECORD` branches in `ge_default.frag/vert.hlsl`,
+   `shader/uber.cpp:60` emits the define); what is missing is the wiring (variant slot + pipeline key + gates).
+2. The owned path's cost is **not pipeline switches** (2 - 20 per pass) but (a) the **lit pixel shader's registers** (105 plain / 124 scene / 219 GI-pack-cluster) and (b) the **geometry
+   volume** (2.1 - 2.4 M triangles per frame in z + solid + cascades, 74 % of the solid pass on the XTX) and (c) the post chain's bandwidth.
+3. The engine already marks 89 % of the pixel ALU `_pp`: half precision is the shader's own intent, not an approximation we invent.
+4. 196 translated pipelines (L1) need ~13 ms of driver compile each on first sight (~2.5 s of worker time, hitches on a new area): the merge ladder (112 / 70 / 57) is a loading /
+   cache win, not a frame-time win; with dynamic branches a merged shader allocates the MAX registers of its branches, so merging is capped by classes, not by macro count.
+
+### 14.3 Where a custom shader beats the translated one on the 680M, ranked
+
+Model [I]: 680M ms = XTX geometry-part x 6.5 + XTX pixel-part x 15 (post passes x 10); the solid pass's pixel share 35 % (savegame, jungle; range 25 - 48 %), 70 % in the pub.
+Baseline raster time on the 680M by that model (z + solid + cascades + post, no RT / water compute): savegame ~13 ms, jungle ~26 ms, pub ~20 ms (+- 2x). Gains are ms per frame at
+1600x900, 3 scenes savegame / jungle / pub:
+
+| rank | opportunity | why on the 680M (numbers) | expected gain (ms) | picture |
+|---|---|---|---|---|
+| 1 | **Lit pixel shader diet**: real `half` for the `_pp` ALU (RDNA2 packed 16-bit math: 2x rate and half the VGPRs for those values), one lit function with the cluster light loop instead of the 3-light unroll + separate GI / pack / cluster / G-buffer variant modules, dead `PassData` fields out, VGPR targets plain <= 96, lit + pack + cluster <= 128 (from 124 / 219) | pixel part of the solid pass = 4.6 / 9.7 / 12.3 ms; occupancy 4 -> 8 waves for the variant that is the default, 89 % of the ALU in half; 5 fetches per pixel stay (latency hiding is what the registers buy) | -1.2..-1.8 / -2.4..-3.9 / -3.1..-4.9 (25 - 40 % of the PS time) | identical within fp16 (tolerance gate) |
+| 2 | **Post chain on own shaders**: fuse bloom / DoF / tone map passes, R11G11B10 for intermediates, half-res where the engine's passes are | ~275 MB / frame, the one bandwidth-bound part: 12 full-res passes -> ~6, -40..-50 % bytes | -0.8..-1.1 / -1.0..-1.3 / -0.8..-1.0 | filter-for-filter port first, then fusion (DoF / bloom identity risk) |
+| 3 | **Trees / leaves / grass / billboards on own shaders**: 16-byte pulled vertices, wind in half, cheaper far-field PS, distance thinning (Full may change the picture slightly) | instanced geometry is ~60 - 70 % of the jungle's geometry (473 k of 949 k z triangles), ~50 % of the savegame's (268 k of 775 k) | -0.3..-0.5 / -0.8..-1.3 / 0 (15 - 25 % of the instanced geometry) | grass density / LOD pop must pass the nets / jungle A/B |
+| 4 | **z / cascade depth-only**: opaque casters without a pixel shader (the R32F depth map written by one full-screen copy when a consumer reads it), cut-outs with the same texkill threshold, PS-less early-Z | z + cascades = 3.0 / 6.1 / 3.6 ms on the 680M (front end + ROP); PS launch + 4 B export per fragment dropped, foliage overdraw | -0.2..-0.5 / -0.5..-0.9 / -0.3..-0.5 | identical (same triangles, same threshold) |
+| 5 | **Command collapse** (vertex pulling from `MeshArena` + one index buffer): indirect commands 163 -> ~25 (savegame), 250 -> ~30 (jungle); VS scene-record reads (+21 VGPR) become a leaner own VS | 1 - 3 us per small indirect draw on a one-shader-engine front end [I] | -0.14..-0.4 / -0.4..-0.7 / ~0 (plus ~0.1 CPU) | identical |
+| 6 | Shadow mask filter (post_SSM / enhanced mask 3 draws: 0.08 ms on the XTX = ~1.2 ms) in half with a cheaper kernel at the Low preset | pass is ALU on a full-res mask | -0.3..-0.5 each | PCF look must stay (shadows.md) |
+| 7 | Permutation merge (L3 / L4: 197 -> 57 - 70 pipelines), fewer interpolants (6.5 of 9 read; packed half normal / tangent) | GPU ~0 (registers = max of the branches); worker compile 2.5 s -> ~0.7 s, smaller caches, no hitches on a new area | ~0 per frame; loading / hitch win | identical |
+| - | not S, noted: cascade budget (map size 1024 - 2048, stride, range; F3-3 cached casters), RT tier off on iGPU (water.rt alone is 0.8 - 1.0 ms XTX = 12 - 15 ms), render scale | cascades 50 - 70 MB / drawn frame; RT passes are ALU | settings / presets | - |
+| - | rejected by the numbers: packed G-buffer writes (already A2B10G10R10 + RG16F, written only when read: < 0.05 ms), a custom z pre-pass vertex stream (z VS is 15 VGPRs; vertex bytes ~14 MB / frame) | | | |
+
+Sum of 1 - 6 on the model: savegame -2.7..-4.4 ms of ~13, jungle -5.3..-8.3 of ~26, pub -4.5..-6.9 of ~20 (a third of the raster time; the pixel shader alone a quarter): the first
+two items are about two thirds of it.
+
+### 14.4 Stage plan S-1 .. S-9 (Full only; each stage behind a Debug setting, `native.own_shaders` as the umbrella, default off until S-9)
+
+Rules for every stage: (1) the translated path stays as the per-draw fallback for any class an own shader does not cover and for devices without `shaderFloat16` / 16-bit ops
+(optional capability with a parity fallback to float), so Wrapper and unsupported hardware are unchanged; (2) both backends: `rvk_shadertool dxil-check embedded | corpus
+corpus --scene --uber` 0 failures, `rvk_rhitest` parity on Vulkan and D3D12 (DXC SM 6.6, `native 16-bit` needs SM 6.2 + the options-4 bit); (3) the owned checks stay at
+0: `DIFFERING`, `MISS`, `split_verify`, GPU-assisted validation first run (GPU safety rule); (4) no unread outputs: a stage may not add a target / output nobody reads;
+(5) picture gates in two tiers: **faithful** (EQUAL: `rvk_shadereq` 183 / 183 + leafs, bit-exact) for porting steps, **intentional** (tolerance + A/B pictures + the
+visual-identity check: luma / hue table of `tools/water_stats.py`, sun flare, exposure, colours on pub_interior / harbour_docks / jungle / monastery_hall) for optimizations.
+
+| stage | scope | gates | risk | expected gain |
+|---|---|---|---|---|
+| **S-1a** own PS on every owned draw (faithful platform) | wire the HLSL ubershader (`ge_default.frag.hlsl`) as the scene-form pixel shader of the owned path: a variant slot beside `SceneVs` / the GI / G-buffer slots, pipeline key, `uberTaken` accepted by `sceneDecide`, the `!ubershader_` refusals of `draw.cpp:633` / `owned_persist.cpp:41` / `owned_submit.cpp:39` replaced by "uber has a scene form", `uber.cpp` already defines `RVK_SCENE_RECORD`; covers the PS of static meshes, skinned, instanced, trees, vegetation, billboards, cascades (all `PS_Default` / `PS_DefaultZPass`: 175 of 208 requests, 84 %; leafs PS = S-1b) | `rvk_shadereq` / `ubershader_check.py` in scene form (183 / 183 EQUAL, 16 trials), `dxil-check corpus --scene --uber`, rhitest parity (ubershader draw in scene form, both backends), check frames DIFFERING 0, `-Validation` + GPU-AV, in-game A/B `native.own_shaders` toggled (7.44's method: toggle pairs vs same-state pairs), **VGPR not above the translated scene form (124) and `-PerfFrame` solid not worse** | wiring of three gates; the uber is +19 VGPR over the translation today (S-2 pays it back) | ~0 (platform); share of owned PS on own shaders 100 % |
+| **S-1b** own VS + leaf PS | `ge_default.vert.hlsl` (proven by `shader_equiv.py --vs`) as the scene VS for static / skinned / morph / SpeedTree / vegetation / billboard (macros ST_*, VEGETATION, BILLBOARD already in it), `ge_default_leafs` PS port (shader-permutations.md 11) | as S-1a + `shader_equiv.py --vs` 17 / 17 in scene form, tree checks of 7.39 / 7.40 / 7.42 (rows, counts, templates 0), nets spots | the tree flush's own templates / ramps (7.25) | ~0 |
+| **S-2** lit PS diet (picture-faithful within fp16) | **first: install Radeon GPU Analyzer, dump the modules, `rga -c gfx1035` = real 680M VGPR / occupancy / ISA**; then (a) real `half` in the port (DXC `-enable-16bit-types`, the source's `half` / `_pp` set; specular `pow`, fog, depth math stay float), (b) split ZPass / Default / cut-out entries so no dead code is compiled, (c) PassData slimmed, texture fetches deduplicated where the graph samples one image twice (47 diffuse graphs contain repeats), (d) packed half interpolants | `rvk_shadereq` tolerance mode (<= 2 / 255 on 99.9 % of 8-bit outputs, < 1 % pixels at 2), pictures A/B refcompare Full vs Full (noise-level), banding check on dark gradients (pub_interior, monastery_hall), rhitest parity with the tolerance, **VGPR targets from RGA (plain <= 96)** | fp16 banding / specular sparkle; the driver's handling of 16-bit on RDNA2 must be measured, not assumed | rank 1: -25..-40 % of the PS time on the 680M |
+| **S-3** one lit function | lighting in the own PS: ambient SH + sun (+ cascade term from the mask) + the cluster-table point lights (the `RVK_MV_CLUSTER` loop, `rvk_light_model.hlsli`) in half accumulators + lightmap + GI term + derived gloss (`kWordDerived`) computed once; the separate plain / gi / gbuf / cluster / scene modules (5 per shader today: 163 + 134 + 55 modules in the census) collapse into one per class | refcompare Full (own lighting) vs Full: spots equal to noise except the known by-design lamp-light difference (reference-compare.md 11.2); luma / hue table within 1 %; `gi-reference.ps1` quick re-measure; lamp shadows, RT shadows, material RT, FSR + G-buffer variants (7.44 gates) | the interaction of cluster lights, pack word, G-buffer MRT in one shader; VGPR = max of branches: flags only as scalar (per-draw uniform) branches | VGPR 219 -> <= 128 (occupancy 4 -> 8 on the model); with S-2 the rank-1 gain |
+| **S-4** classes + command collapse | (a) merge permutations to the L3 / L4 classes (z / cascade: static, skinned, morph x opaque / masked; lit: static / skinned / tree / leaf / vegetation x opaque / alpha) with record flags (light counts, normal map, specular, lightmap, cut-out as uniform branches), graph forms as a small recipe table; (b) vertex pulling from `MeshArena` (no vertex input state, one index buffer; D3D12 `SV_VertexID` base-vertex rule: `vertexOffset = 0`, absolute indices) | `bucket key clash` 0, rhitest `testIndirectPull`, pipelines per frame and compile time logged (`d3d9: pipelines built`), commands per frame (82 / 29 / 41 -> single digits per view), picture identical (same triangles), shadereq on every class | VGPR growth by merging: keep a class when max VGPR rises > 10 % | rank 5 (-0.14..-0.7 ms) + the loading win of rank 7 |
+| **S-5** vegetation / trees / billboards | own SpeedTree / grass / billboard VS + PS: 16-byte pulled vertices, half wind, far-field grass PS, distance thinning tied to `lod.view`; intentional picture change (small) | nets (`net8_*`), jungle / swamp A/B + motion bursts (upscaling.md 12 flicker), `rvk_rare` billboards, F7's 7.40 / 7.42 checks | pop-in of thinned grass (burst test), FSR flicker | rank 3 (jungle -0.8..-1.3) |
+| **S-6** depth-only z / cascades | PS-less opaque z in the cascades and the main pass; the R32F depth map by a copy only while a consumer reads it; cut-out variants keep the texkill threshold; cluster cull in the cascades if still off (F5 follow-up) | `shadow-compare.ps1` (engine vs enhanced cascades), the R32F consumers (FSR prep, SSAO / DoF, water, shadow mask chain) pixel-equal, `rvk_d3d9test` depth cases, no-stencil rule | the consumers of the depth map that read it mid-pass | rank 4 (-0.2..-0.9) |
+| **S-7** post chain on own shaders | the engine's effect filters (native post, engine-frame/README.md 15, `native/effect_ops_post.cpp`) re-written filter-for-filter in HLSL (EQUAL first), then fused (bloom + DoF + tone map) with R11G11B10 intermediates | per filter EQUAL (the post units' compare), then refcompare post spots, exposure / adaptation identical, sun flare / streaks unchanged | DoF / bloom identity (visual identity is exactly here), FSR / frame-generation input order | rank 2 (-0.8..-1.3) |
+| **S-8** shadow mask + iGPU preset | own mask filter in half, a "680M" quality preset (cascade size 1024 / 2048, stride, range, RT off, render scale) from the measured table | shadows.md A/B, `water-compare`-style spots, preset table in the overlay | settings audit (settings-audit.md) | rank 6 + the non-S rows |
+| **S-9** default on + the 680M day | `native.own_shaders` default on in Full (translated fallback kept), RGA numbers of the final modules, the user's 680M test with the preset; update PLAN.md / CLAUDE.md | all gates above green on Vulkan + D3D12, the soak of 7.43 (all settings on) with the own shaders | the real hardware differs from the model | the sum of 1 - 7 |
+
+Order: S-1a (platform, 0 gain, unblocks everything) -> S-2 + S-3 (the two thirds; start with RGA so the targets are real) -> S-1b -> S-4 -> S-5 / S-6 (independent) -> S-7 -> S-8 -> S-9.
+S-1a is first because it turns the owned path onto our own pixel shader for **all owned draw kinds at once** (every material PS of static, skinned, instanced, trees, vegetation and
+billboards is the same `PS_Default` text): up to ~4,500 of the 5,944 draws of a savegame frame (76 %: vegetation 2,510, trees 1,282, static 640, skinned 32, billboards 52) are owned, and the lit pixel shader is where the 680M's time is.
+
+### 14.5 Not measured / open
+
+1. No RDNA2 compile and no 680M run exist: the occupancy column and every 680M ms are models (install RGA first; the user's hardware test is the final check). Wave size of the
+   driver's pixel shaders (32 or 64) is unknown (`sub 0`): a wave64 compile halves every occupancy figure above.
+2. The solid pass's pixel / geometry split is bracketed (25 - 48 %) by two noisy resolution experiments; a per-draw-kind GPU timing (veg / trees vs static) was not taken (the cap
+   of the timestamps is the pass).
+3. The trees / vegetation / billboard flushes were not given VS / PS module census lines (only the static + skinned `ownedFlush`); their pipelines appear in the pipeline
+   statistics (412 PS modules) but are not attributed per flush.
+4. `materials.derive_from_specular` off vs on shows no XTX difference (1.82 vs 1.84 ms): the 219-VGPR variant's real cost is a 680M question (RGA).
+5. Fp16 on RDNA2 through DXC / SPIR-V (`RelaxedPrecision` vs native `float16_t`) and through DXIL min16float on D3D12 must be measured in S-2 (gain assumed 2x rate on packed ops).
+6. The cascade budget, F3-3 and the RT tier presets are not S items but are larger than ranks 4 - 7 on the 680M (cascades 50 - 70 MB / drawn frame, `water.rt` 12 - 15 ms by the model).
