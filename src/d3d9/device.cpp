@@ -1572,8 +1572,8 @@ rhi::ShaderModule Device::lodModule(Shader& vs) {
 }
 
 void Device::setBillboardFadeScale(float scale) {
+    if (scale != billboardFadeScale_) ++variantEpoch_;
     billboardFadeScale_ = scale;
-    ++variantEpoch_;
     setFrameParam(shader::abi::kFrameParamLod, {scale, 0.0f, 0.0f, 0.0f});
 }
 
@@ -1701,7 +1701,8 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
 // ---- thin G-buffer (enh/gbuffer) ----
 
 void Device::setGbuffer(const GbufferTargets& g) {
-    ++variantEpoch_;
+    // (F-VAR: the epoch moves when the G-buffer's state does, not at every call: the enhancement passes set it every frame, and a per-frame epoch made every owned record stale)
+    if (g.active != gbuf_.active || g.normal != gbuf_.normal || g.motion != gbuf_.motion || g.width != gbuf_.width || g.height != gbuf_.height) ++variantEpoch_;
     const bool was = gbuf_.active;
     const std::uint32_t wasAttachments = gbuf_.attachments();
     const bool hadNormal = gbuf_.normal != nullptr;

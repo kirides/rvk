@@ -791,7 +791,7 @@ void StaticOps::treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid) {
     bool amb = false;
     {
         const d3d9::Device::CachedDraw& cd = *r.cd;
-        if (cd.v.gate && cd.v.staticOk && r.illumSlot != gpuscene::kNoSlot) amb = ownedAmbientLit(r, p);
+        if (cd.v.needsAmbient() && r.illumSlot != gpuscene::kNoSlot) amb = ownedAmbientLit(r, p);
     }
     d3d9::OwnedWindows::Win objWin;
     objWin.kind = d3d9::OwnedWindows::Kind::Object;

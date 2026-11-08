@@ -8,12 +8,14 @@
 // one of its VkDrawIndexedIndirectCommand arguments (firstInstance = the record's index in the block = ref.x of the instance-rate ref stream).
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 
 #include "core/f2c4_measure.h"
 #include "d3d9/device.h"
 #include "d3d9/scene_hash.h"
+#include "gpuscene/lighting_images.h"
 
 namespace rvk::d3d9 {
 
@@ -291,6 +293,17 @@ void Device::currentPosFix(float out[4], float& jx, float& jy) {
     depthRemap(out[2], out[3]);
 }
 
+// F-VAR: why a derivation refused with 4 (variant): the first few are logged with the draw's variant record (diagnostics: which of the decisions moved)
+int Device::variantRefusal(int site, const CachedDraw& c) {
+    static std::atomic<int> logged{0}, calls{0};
+    if (calls.fetch_add(1) > 4000 && logged.load(std::memory_order_relaxed) < 24 && logged.fetch_add(1) < 24) {
+        spdlog::info("d3d9: owned variant refusal site {} kind {} phase {}/{}: gate {} wanted {} staticOk {} giOn {} (now {}) gbufGate {} (now {}) gbufStatic {} gbufWanted {} scopeGbuf {} scenePending {} biasFor {} (now {}) pack {}",
+                     site, draws::name(c.kind), scene::name(c.phase.view), scene::name(c.phase.pass), c.v.gate, c.v.wanted, c.v.staticOk, c.v.giOn, giDraws_.on, c.v.gbufGate, gbuf_.active,
+                     c.v.gbufStatic, c.v.gbufWanted, scopeGbuf_, c.v.scenePending, c.v.biasFor, geometryLodBias_, c.v.pack);
+    }
+    return 4;
+}
+
 // F2c-2: a record's draw as a SceneView, without the composition's results of this frame: the retained packet (`c`: the record's own copy) is validated
 // like replayBuild does against the record's own shaders / buffers / textures, the DrawBlock is derived from the record's textures, sampler states,
 // alpha test and pass-set c5 plus the per-frame inputs (viewport, jitter, depth remap, LOD bias)
@@ -300,22 +313,43 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
     if (phases_.current() != c.phase) return 2;
     if (!replayAllowed(c)) return 3;
     // the enhancement variant decision (replayBuild's, with the ambient test answered from the record's lighting instead of the device's registers)
-    if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_) || c.v.gbufGate != gbuf_.active || gbuf_.active ||
+    if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_) || c.v.gbufGate != gbuf_.active ||
         !c.v.sceneActive || c.v.scenePending) {
-        return 4;
+        return variantRefusal(1, c);
     }
-    if (c.v.gate && ((c.v.staticOk && in.ambientLit) != c.v.wanted)) return 4;
-    if (c.v.gate && c.v.wanted) {
+    // F-VAR (frame-ownership.md 7.44): the G-buffer's material pass (replayBuild's decision, the ambient test answered from the record's lighting): taken when the draw is eligible,
+    // lit and in the G-buffer's rendering scope, with the variant the draw was offered; the scope is the device's (replayOwned opened it before the derivation)
+    bool gbufTaken = false;
+    if (c.v.gbufGate) {
+        const auto& amb = c.ps->semantics[Semantic::AmbientLight];
+        const bool lit = amb.present() ? (amb.count >= 7 && in.ambientLit) : c.ps->semantics.has(ShaderSemantics::Material);
+        gbufTaken = c.v.gbufStatic && scopeGbuf_ && lit;
+        if (gbufTaken != c.v.gbufWanted) {
+            static std::atomic<int> n2{0};
+            if (n2.fetch_add(1) > 4000 && n2.load() < 4040) {
+                spdlog::info("d3d9: owned variant refusal 2 detail: ambient present {} count {} reg {} (semantic Material {}), in.ambientLit {}, needsAmbient {}, ps {:x}", amb.present(), amb.count, amb.reg,
+                             c.ps->semantics.has(ShaderSemantics::Material), in.ambientLit, c.v.needsAmbient(), c.ps->hash);
+            }
+            return variantRefusal(2, c);
+        }
+        if (gbufTaken) {
+            const std::size_t gi = static_cast<std::size_t>(gbufferSlot(false));
+            const rhi::ShaderModule now = c.ps->variantState[gi].load(std::memory_order_acquire) == 2 ? c.ps->variants[gi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+            if (now != c.v.fsAsked) return variantRefusal(3, c);
+        }
+    }
+    if (c.v.gate && !gbufTaken && ((c.v.staticOk && in.ambientLit) != c.v.wanted)) return variantRefusal(4, c);
+    if (c.v.gate && c.v.wanted && !gbufTaken) {
         // the variant the draw was offered (None while it was still being built): a module that exists now makes the draw take another pixel shader and pipeline (variant(): read only)
         const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
         const rhi::ShaderModule now = c.ps->variantState[vi].load(std::memory_order_acquire) == 2 ? c.ps->variants[vi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
-        if (now != c.v.fsAsked) return 4;
+        if (now != c.v.fsAsked) return variantRefusal(5, c);
     }
     {
         // (replayBuild's vertex module choice: the billboards' fade variant while lod.trees != 1)
         rhi::ShaderModule vsM = c.vs->module;
         if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f && c.vs->lodModule != rhi::ShaderModule::None) vsM = c.vs->lodModule;
-        if (c.v.vsUsed != vsM || c.v.biasFor != geometryLodBias_) return 4;
+        if (c.v.vsUsed != vsM || c.v.biasFor != geometryLodBias_) return variantRefusal(6, c);
     }
     CachedDraw::Env env{};
     env.vp = viewport_;
@@ -428,9 +462,18 @@ bool Device::ownedWindowsServed(std::uint32_t* stageOut, std::uint32_t* windowOu
 
 bool Device::ownedObserversOk() const {
     for (const DrawObserver* o : observers_) {
-        if (o->registersRead() == DrawObserver::Registers::All) return false;
+        const DrawObserver::Registers r = o->registersRead();
+        if (r == DrawObserver::Registers::All) return false;
+        if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return false;  // (no lighting entries: the registers would be stale)
     }
     return true;
+}
+
+bool Device::observersWantLighting() const {
+    for (const DrawObserver* o : observers_) {
+        if (o->registersRead() == DrawObserver::Registers::MaterialLighting) return true;
+    }
+    return false;
 }
 
 // the register images the windows hold (their CPU twins) into the register file, for the observers that read material constants of the draw (the RT scene's
@@ -440,6 +483,15 @@ void Device::loadOwnedRegisters(const OwnedWindows& ow) {
         const std::uint32_t* first = stage == 0 ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
         for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
             const OwnedWindows::Win& x = ow.w[stage][w];
+            if (x.kind == OwnedWindows::Kind::Lighting && x.image == nullptr && x.lightEntry != 0xffffffffu && observersWantLighting()) {
+                // F-VAR: the lighting window has no CPU twin (composed on the GPU); the observers that read the ambient / sun / point lights get one composed from the records
+                float L[24][4];
+                if (gpuscene::lightingimages().cpuImage(x.lightEntry, L)) {
+                    setPixelShaderConstantF(first[w], &L[0][0], 24);
+                    ++ownedReplayStats.registersLoaded;
+                }
+                continue;
+            }
             if (x.kind == OwnedWindows::Kind::None || x.image == nullptr || x.covered == 0) continue;
             if (stage == 0) setVertexShaderConstantF(first[w], x.image, x.covered);
             else setPixelShaderConstantF(first[w], x.image, x.covered);

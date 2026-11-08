@@ -38,7 +38,7 @@ std::uint64_t Device::ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok)
     const scene::Phase ph = phases_.current();
     h = hmix(h, static_cast<std::uint64_t>(ph.view) | static_cast<std::uint64_t>(ph.pass) << 8);
     h = hmix(h, variantEpoch_);
-    h = hmix(h, (giDraws_.on ? 1u : 0u) | (giDraws_.replaceLightmaps ? 2u : 0u) | (packProvider_ && !packBypass_ ? 4u : 0u) | (gbuf_.active ? 8u : 0u) | (gbufArmed_ ? 16u : 0u) | (alphaDither_ ? 32u : 0u));
+    h = hmix(h, (giDraws_.on ? 1u : 0u) | (giDraws_.replaceLightmaps ? 2u : 0u) | (packProvider_ && !packBypass_ ? 4u : 0u) | (gbuf_.active ? 8u : 0u) | (gbufArmed_ ? 16u : 0u) | (alphaDither_ ? 32u : 0u) | (gbufferScope() ? 64u : 0u));
     h = hmixF(hmixF(hmixF(hmixF(h, geometryLodBias_), cutoutThicken_), renderRatio_), billboardFadeScale_);
     h = hmix(h, reinterpret_cast<std::uintptr_t>(substituteFrom_));
     h = hmix(h, viewport_.x | static_cast<std::uint64_t>(viewport_.y) << 32);
@@ -54,7 +54,9 @@ std::uint64_t Device::ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok)
         float jx = 0.0f, jy = 0.0f, zs = 0.0f, zb = 0.0f;
         geometryJitter(jx, jy);
         depthRemap(zs, zb);
-        h = hmixF(hmixF(hmixF(hmixF(h, jx), jy), zs), zb);
+        // F-VAR (frame-ownership.md 7.44): only WHETHER the camera is jittered (the samplers' LOD bias), not the offset: the v2 shaders read posFix from the view block (written
+        // every pass, the record's DrawBlock holds zeros there), so a jitter that moves every frame must not make every record stale
+        h = hmixF(hmixF(hmix(h, (jx != 0.0f || jy != 0.0f) ? 0x7177u : 0u), zs), zb);
     }
     {
         // the sampler states the derivation does NOT take from the record (ADDRESSW, border colour, max anisotropy ...): the seven it owns are overwritten per draw
@@ -111,6 +113,11 @@ std::uint64_t Device::ownedDrawSig(const CachedDraw& c, const void* const* strea
         const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
         const rhi::ShaderModule now = c.ps->variantState[vi].load(std::memory_order_acquire) == 2 ? c.ps->variants[vi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
         h = hmix(h, static_cast<std::uint64_t>(now));
+    }
+    if (c.v.gbufGate && c.v.gbufWanted) {  // (F-VAR: the G-buffer variant the draw was offered, as the GI one)
+        const std::size_t gi = static_cast<std::size_t>(gbufferSlot(false));
+        const rhi::ShaderModule now = c.ps->variantState[gi].load(std::memory_order_acquire) == 2 ? c.ps->variants[gi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+        h = hmix(h, static_cast<std::uint64_t>(now) ^ 0x9e3779b9ull);
     }
     for (std::uint32_t i = 0; i < 4; ++i) {
         if (((c.streamMask >> i) & 1u) == 0) continue;

@@ -456,7 +456,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         p.holdsAll = r.lightHoldsAll;
         p.n = r.lightN;
         p.firstLight = r.lightFirst;
-        if (cd.v.gate && cd.v.staticOk && r.illumSlot != gpuscene::kNoSlot) {
+        if (cd.v.needsAmbient() && r.illumSlot != gpuscene::kNoSlot) {
             // the ambient test of the GI / pack variant decision, from the record's illumination (once per lighting state and frame)
             const auto& amb = cd.ps->semantics[d3d9::Semantic::AmbientLight];
             if (amb.present() && amb.count >= 7 && amb.reg >= 14 && amb.reg + 7 <= 14 + 24) {
@@ -509,6 +509,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
                 lw.kind = d3d9::OwnedWindows::Kind::Lighting;
                 lw.base = li.windowBase(entry);
                 lw.covered = gpuscene::kLightingRegs;
+                lw.lightEntry = entry;
             }
         }
         // the device state the draw is validated against: its shaders, the tag the observers / replacers / the pack's word look at
@@ -817,7 +818,7 @@ void StaticOps::setOwnedPersistent(bool on) {
 // the ambient test of the GI / pack variant decision of a draw, from its record's illumination (once per lighting state and pass)
 bool StaticOps::ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p) {
     const d3d9::Device::CachedDraw& cd = *r.cd;
-    if (!(cd.v.gate && cd.v.staticOk && r.illumSlot != gpuscene::kNoSlot)) return false;
+    if (!(cd.v.needsAmbient() && r.illumSlot != gpuscene::kNoSlot)) return false;
     const auto& amb = cd.ps->semantics[d3d9::Semantic::AmbientLight];
     if (!(amb.present() && amb.count >= 7 && amb.reg >= 14 && amb.reg + 7 <= 14 + 24)) return false;
     const std::uint64_t key = mix(mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight), amb.reg);
@@ -903,6 +904,7 @@ void StaticOps::ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindo
             lw.kind = d3d9::OwnedWindows::Kind::Lighting;
             lw.base = li.windowBase(entry);
             lw.covered = gpuscene::kLightingRegs;
+            lw.lightEntry = entry;
         }
     }
 }

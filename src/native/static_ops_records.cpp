@@ -516,7 +516,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     in.psC5[1] = mirror_.adminPs[5][1];
     in.psC5[2] = mirror_.adminPs[5][2];
     in.psC5[3] = r.maskSet ? r.maskValue : 0.0f;
-    if (r.cd->v.gate && r.cd->v.staticOk && r.illumSlot != gpuscene::kNoSlot) {
+    if (r.cd->v.needsAmbient() && r.illumSlot != gpuscene::kNoSlot) {
         // the ambient test of the GI / pack variant decision, from the record's illumination instead of the device's registers
         gpuscene::ComposeParams p;
         p.tableLit = r.lightTableLit;
@@ -629,6 +629,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
                 lw.kind = d3d9::OwnedWindows::Kind::Lighting;
                 lw.base = li.windowBase(entry);
                 lw.covered = gpuscene::kLightingRegs;
+                lw.lightEntry = entry;
             }
         }
         // view-level windows (VS 0 / 1, PS 0): the view block's slot is a per-view input; taken from the first draw of the view (and list), compared with the others

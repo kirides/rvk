@@ -81,6 +81,10 @@ public:
     // F2c-1: the same entry (created / kept alive like note's) without registers to check: for draws derived from records. kNoEntry: inactive / table full
     std::uint32_t entryFor(std::uint32_t illumSlot, const ComposeParams& p);
 
+    // F-VAR: the CPU image (c14 .. c37) of entry `e`, composed from the illumination table's records now (an observer of an owned draw that reads the lighting registers);
+    // false: not live / no record. Cached per (entry, frame).
+    bool cpuImage(std::uint32_t e, float out[24][4]);
+
     // once per present, after illumtable().flush (engine thread): entry uploads, idle sweep, the compose pass, the read-back check, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
 

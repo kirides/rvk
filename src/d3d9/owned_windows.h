@@ -23,6 +23,7 @@ struct OwnedWindows {
         std::uint32_t verifyMask = 0;     // bit i = register (window first + i) is one the draw composed (debug.split_verify compares only those)
         std::uint32_t ignoreMask = 0;     // bit i = register (window first + i) is not meaningful for the draw: left out of debug.split_verify's comparisons and diagnostic
         std::uint32_t wOnlyMask = 0;      // bit i = only the .w of register i is meaningful (the others are carry-over of the engine's register file): only .w is compared
+        std::uint32_t lightEntry = 0xffffffffu;  // Lighting windows: the lighting-images entry (F-VAR: a CPU image composed on demand for observers that read the lighting registers)
         const float* image = nullptr;     // CPU twin of the window's registers from its first one (debug.split_verify), `covered` float4s
     };
     Win w[2][shader::abi::kConstWindows];  // [stage 0 VS / 1 PS][window]

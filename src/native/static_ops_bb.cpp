@@ -366,7 +366,7 @@ void StaticOps::bbDeriveIn(const orec::DrawRec& r, d3d9::Device::DeriveIn& in) {
     in.psC5[1] = mirror_.adminPs[5][1];
     in.psC5[2] = mirror_.adminPs[5][2];
     in.psC5[3] = r.maskSet ? r.maskValue : 0.0f;
-    if (r.cd->v.gate && r.cd->v.staticOk && r.illumSlot != gpuscene::kNoSlot) {
+    if (r.cd->v.needsAmbient() && r.illumSlot != gpuscene::kNoSlot) {
         gpuscene::ComposeParams p;
         p.tableLit = r.lightTableLit;
         p.holdsAll = r.lightHoldsAll;
@@ -815,6 +815,7 @@ void StaticOps::bbWindowsFor(const bbrec::Record& rec, std::size_t k, d3d9::Owne
             lw.kind = d3d9::OwnedWindows::Kind::Lighting;
             lw.base = li.windowBase(entry);
             lw.covered = gpuscene::kLightingRegs;
+            lw.lightEntry = entry;
         }
     }
     float vs0[12][4];

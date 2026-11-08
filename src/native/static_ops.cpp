@@ -1345,6 +1345,7 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
                 lw.kind = d3d9::OwnedWindows::Kind::Lighting;
                 lw.base = li.windowBase(d.lightEntry);
                 lw.covered = gpuscene::kLightingRegs;
+                lw.lightEntry = d.lightEntry;
                 lw.verifyMask = 0;  // (no CPU twin: the GPU read-back of lighting_images compares the image with the drawn registers)
             } else {
                 lw.why = d3d9::OwnedWindows::WhyOther;

@@ -1338,6 +1338,48 @@ mov oC0, r0
                     static_cast<unsigned long long>(s1.records - s0.records), static_cast<unsigned long long>(dev.ownedReplayStats.drawnV2 - o0.drawnV2), kQuads);
         ++g_failures;
     }
+    // 1b. F-VAR (frame-ownership.md 7.44): camera jitter (upscaling) on the main view's geometry: the draws' posFix and the view slot's carry the jitter, the owned draws must equal the
+    // normally drawn jittered draws (the picture differs from the unjittered reference: the test is not vacuous)
+    {
+        Texture* hdr = dev.backBuffer()->texture();
+        dev.tagImage(hdr, scene::ImageRole::SceneHdr);
+        dev.setJitterSource([](std::uint64_t) { return std::array<float, 2>{0.37f, -0.21f}; });
+        dev.beginMainView();
+        float jx = 0.0f, jy = 0.0f;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.geometryJitter(jx, jy);
+        dev.phases().pop();
+        if (jx == 0.0f && jy == 0.0f) {
+            std::printf("  SKIP owned replay v2 jitter: the camera jitter did not reach the main view's geometry here\n");
+        } else {
+            begin();
+            setRegs(regs[0]);
+            for (std::uint32_t k = 0; k < kQuads; ++k) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+            const Pixels refJ = end("ownedv2_refjit");
+            std::uint32_t moved = 0;
+            for (std::size_t i = 0; i < ref1.bgra.size() && i < refJ.bgra.size(); ++i) moved += ref1.bgra[i] != refJ.bgra[i];
+            if (moved == 0) {
+                std::printf("  FAIL owned replay v2 jitter: the jitter did not change the normal draws\n");
+                ++g_failures;
+            }
+            dev.phases().push(scene::View::Main, scene::Pass::Solid);
+            fillSlot(3, regs[0], false);
+            dev.phases().pop();
+            const auto j0 = dev.ownedReplayStats;
+            same(refJ, run("ownedv2_jit", 3, 3, 0, "jittered"), "eight owned draws under camera jitter");
+            if (dev.ownedReplayStats.drawnV2 - j0.drawnV2 != kQuads) {
+                std::printf("  FAIL owned replay v2 jitter: %llu of %u draws were owned\n", static_cast<unsigned long long>(dev.ownedReplayStats.drawnV2 - j0.drawnV2), kQuads);
+                ++g_failures;
+            }
+            // a slot written without the jitter (the jitter moved after it was written): stale posFix, refused (19), nothing drawn
+            fillSlot(3, regs[0], false);
+            (void)run("ownedv2_jit_stale", 3, 3, 19, "jitter not in the slot");
+            std::printf("  owned replay v2 jitter: %u bytes moved by the jitter, owned draws equal\n", moved);
+        }
+        dev.setJitterSource(nullptr);
+        dev.tagImage(hdr, scene::ImageRole::None);
+        fillSlot(3, regs[0], false);
+    }
     // 2. two view slots: 3 for the first four quads, 9 for the last four: two calls, the second picture
     {
         const auto t0 = dev.sceneStats();

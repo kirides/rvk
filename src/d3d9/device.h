@@ -538,7 +538,9 @@ public:
     // F2c-3 (native.owned_static): what the observer reads of the draw's constant registers. An owned draw has no composed register file: `Material` = the
     // world rows (ReplaceQuery::objectRows) and the registers of the material / view / object windows (the device loads their CPU images before observe),
     // `All` (the default) = anything: owned draws are not made while such an observer is registered
-    enum class Registers : std::uint8_t { None, Material, All };
+    // `MaterialLighting` (F-VAR) = `Material` + the lighting registers c14..c37 of the draw's pass (Gi, material RT: the ambient / sun / point lights / indoor registers), composed on the
+    // CPU from the illumination table's records for the owned draw (LightingImages::cpuImage)
+    enum class Registers : std::uint8_t { None, Material, MaterialLighting, All };
     virtual Registers registersRead() const { return Registers::All; }
     // the buffer `id` got a new static GPU copy (a new generation: the old VkBuffer and its address are retired) or is
     // released (its GPU copy dies after the frame): anything built from it must be forgotten
@@ -1027,6 +1029,8 @@ public:
             bool gbufGate = false;   // the G-buffer was on
             bool gbufStatic = false; // gbufferEligible without its ambient test
             bool gbufWanted = false; // ... the G-buffer's material pass took the draw (eligible, lit, in the G-buffer's rendering scope)
+            // F-VAR: a decision of this draw's variant reads the ambient registers (the GI / pack gate, or the G-buffer's lit test): owned draws answer it from the record's lighting
+            bool needsAmbient() const { return (gate && staticOk) || (gbufGate && gbufStatic); }
             bool drawn = false;      // the draw uses the pack word (giDraw || the G-buffer write)
             bool giOn = false, replaceLightmaps = false, pack = false;
             bool staticOk = false;   // giEligible without its ambient-register test (phase, water, blend, outputs: fixed by the draw's description)
@@ -1208,7 +1212,9 @@ public:
     // dynamic state (by content), the index binding. Not the frame block (one per frame)
     std::uint64_t f2c4BucketKey(const CachedDraw& c) const;
     // every registered observer reads no more than an owned draw provides (DrawObserver::Registers)
+    int variantRefusal(int site, const CachedDraw& c);  // (deriveScene's code 4, logged)
     bool ownedObserversOk() const;
+    bool observersWantLighting() const;  // F-VAR: an observer reads the lighting registers (Registers::MaterialLighting)
     bool ownedReplayActive() const { return ownedReplay_; }
     // F4-3 (owned_trees.cpp, docs/research/frame-ownership.md 7.25): the SpeedTree draws of the main view as scene draws. `setSceneTrees`: a SpeedTree draw issued while a scene issue is
     // on gets its scene ABI v2 form (pipeline only; the composed draw itself is NOT turned into a scene packet: its instance count would be lost).
@@ -1357,16 +1363,24 @@ public:
     void regionEnd();
     // texture LOD bias added to the samplers of the draws the jitter applies to (FSR: log2(render / display) - 1, so the
     // temporal filter has the detail to accumulate); 0 = none
-    void setGeometryLodBias(float bias) { geometryLodBias_ = bias; ++variantEpoch_; }
+    void setGeometryLodBias(float bias) { if (bias != geometryLodBias_) ++variantEpoch_; geometryLodBias_ = bias; }
     // hashed alpha test on the jittered draws (upscale.alpha_dither: abi.h kAlphaHashed; docs/research/upscaling.md 17)
-    void setAlphaDither(bool on) { alphaDither_ = on; ++variantEpoch_; }
+    void setAlphaDither(bool on) { if (on != alphaDither_) ++variantEpoch_; alphaDither_ = on; }
     // cut-out strands of the jittered draws kept about a render pixel wide (upscale.cutout_thicken: abi.h kAlphaThicken, 0 = off;
     // docs/research/upscaling.md 19)
-    void setCutoutThicken(float strength) { cutoutThicken_ = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f : strength; ++variantEpoch_; }
+    void setCutoutThicken(float strength) {
+        const float v = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f : strength;
+        if (v != cutoutThicken_) ++variantEpoch_;
+        cutoutThicken_ = v;
+    }
     // Render scale (enh/upscale): while the engine renders the main view, engine/scene_hooks shrinks the main camera's screen
     // rect by this ratio (>= 1; 1 = off), so the scene target, depth map, viewports and masks are all that much smaller; the
     // rect's real size (the display / output size) is reported back through setDisplaySize
-    void setRenderRatio(float ratio) { renderRatio_ = ratio < 1.0f ? 1.0f : ratio; ++variantEpoch_; }
+    void setRenderRatio(float ratio) {
+        const float v = ratio < 1.0f ? 1.0f : ratio;
+        if (v != renderRatio_) ++variantEpoch_;
+        renderRatio_ = v;
+    }
     float renderRatio() const { return renderRatio_; }
     void setDisplaySize(std::uint32_t width, std::uint32_t height) { displaySize_ = {width, height}; }
     std::array<std::uint32_t, 2> displaySize() const { return displaySize_; }
@@ -1421,7 +1435,10 @@ public:
         bool on = false;
         bool replaceLightmaps = false;
     };
-    void setGiDraws(const GiDraws& g) { giDraws_ = g; ++variantEpoch_; }
+    void setGiDraws(const GiDraws& g) {
+        if (g.on != giDraws_.on || g.replaceLightmaps != giDraws_.replaceLightmaps) ++variantEpoch_;
+        giDraws_ = g;
+    }
     // ---- material pack (enh/material_pack, docs/research/material-pack.md) ----
     // With a provider set, the main view's lit material draws take the pixel shader's variant (like GI draws) and carry the provider's word for
     // their material in the DrawBlock (pad[1] = alpha.w; 0 = no entry: the variant leaves the pixels alone). `texture` (null: constants only)
@@ -1435,7 +1452,7 @@ public:
     // the pack's change stamp (any value change = a lookup may answer differently): a retained packet keeps its pack word while it and the map's slot are unchanged
     void setPackStamp(std::function<std::uint32_t()> f) { packStamp_ = std::move(f); }
     // test switch (materials.alternate): while set the pack's variants are not used at all (the engine's own shaders draw), as without a pack
-    void setPackBypass(bool on) { packBypass_ = on; ++variantEpoch_; }
+    void setPackBypass(bool on) { if (on != packBypass_) ++variantEpoch_; packBypass_ = on; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
     // ---- thin G-buffer (enh/gbuffer, docs/research/rtgi.md 10) ----
     // Extra colour attachments of the first main view's solid pass (scene HDR target only), only those a consumer reads (no unread

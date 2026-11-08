@@ -93,6 +93,18 @@ std::uint32_t LightingImages::entryFor(std::uint32_t illumSlot, const ComposePar
     return entryForLocked(illumSlot, p);
 }
 
+bool LightingImages::cpuImage(std::uint32_t e, float out[24][4]) {
+    std::uint32_t illum;
+    ComposeParams p;
+    {
+        std::lock_guard lock(mutex_);
+        if (!active_ || e >= entries_.size() || !entries_[e].live) return false;
+        illum = entries_[e].illum;
+        p = entries_[e].p;
+    }
+    return illumtable().compose(illum, p, out);  // (outside this table's lock: the illumination table has its own)
+}
+
 std::uint32_t LightingImages::entryForLocked(std::uint32_t illumSlot, const ComposeParams& p) {
     if (entries_.empty()) {
         entries_.resize(kCapacity);

@@ -11,6 +11,7 @@
 
 #include "d3d9/device.h"
 #include "d3d9/scene_hash.h"
+#include "gpuscene/lighting_images.h"
 
 namespace rvk::d3d9 {
 
@@ -35,7 +36,9 @@ bool Device::treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch
 // world rows + the material windows; anything else (a register reader, a capture wanter) keeps the trees composed
 bool Device::ownedTreeObserversOk() const {
     for (const DrawObserver* o : observers_) {
-        if (o->registersRead() == DrawObserver::Registers::All) return false;
+        const DrawObserver::Registers r = o->registersRead();
+        if (r == DrawObserver::Registers::All) return false;
+        if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return false;  // (F-VAR: the template's lighting window composes its CPU image for the observer)
         // (F4-4: the cascades' tree draws are served the same way, so an observer of those must accept owned trees too)
         if (o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::Solid}) ||
             o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass}) ||
