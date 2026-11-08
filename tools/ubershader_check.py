@@ -51,7 +51,7 @@ def defines(macros, entry, file='ge_default_phong.fx', scene=0):
     return out
 
 
-def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False, scene=0):
+def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False, scene=0, half=False, tol=None):
     h = entry['corpus']
     res = {'hash': entry['hash'], 'corpus': h, 'entry': entry['entry'], 'file': entry['file']}
     if entry['file'] not in ('ge_default_phong.fx', 'ge_default_leafs.fx') or entry['entry'] not in ('PS_Default', 'PS_DefaultZPass'):
@@ -68,12 +68,12 @@ def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False, scene=0):
         res['status'] = 'TRANSLATED-ERR'
         res['log'] = (r.stdout + r.stderr).strip()[:400]
         return res
-    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry'], entry['file'], scene))
+    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry'], entry['file'], scene) + (['--half'] if half else []))
     if r.returncode:
         res['status'] = 'PORT-ERR'
         res['log'] = (r.stdout + r.stderr).strip()[:600]
         return res
-    r = run([os.path.join(BIN, 'rvk_shadereq.exe'), '--vs', vs_spv, '--fs', a_spv, b_spv, '--trials', str(trials)] + (['--scene2'] if scene >= 2 else ['--scene'] if scene == 1 else []))
+    r = run([os.path.join(BIN, 'rvk_shadereq.exe'), '--vs', vs_spv, '--fs', a_spv, b_spv, '--trials', str(trials)] + (['--scene2'] if scene >= 2 else ['--scene'] if scene == 1 else []) + (['--tol', str(tol)] if tol is not None else []))
     tail = r.stdout.strip().splitlines()
     last = tail[-1] if tail else r.stderr.strip()[:300]
     res['status'] = 'EQUAL' if r.returncode == 0 and last.startswith('EQUAL') else 'DIFF'
@@ -93,6 +93,8 @@ def main():
     ap.add_argument('--corpus', default='')
     ap.add_argument('--scene', action='store_true', help='scene ABI v1 forms (RVK_SCENE_RECORD)')
     ap.add_argument('--scene2', action='store_true', help='scene ABI v2 forms (RVK_SCENE_RECORD + RVK_SCENE_VIEW)')
+    ap.add_argument('--half', action='store_true', help='build the ubershader with 16-bit types (RVK_HALF16): use with --tol')
+    ap.add_argument('--tol', type=float, default=None, help='relative tolerance |a - b| / (1 + max(|a|, |b|)) of rvk_shadereq (default 1e-4; the half build: see frame-ownership.md 14.7)')
     ap.add_argument('--jobs', type=int, default=6)
     ap.add_argument('--trials', type=int, default=16)
     ap.add_argument('--only', default='')
@@ -126,7 +128,7 @@ def main():
     t0 = time.time()
     results = []
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = [ex.submit(check, e, tmp, a.corpus, vs_spv, a.trials, a.keep, scene) for e in todo]
+        futs = [ex.submit(check, e, tmp, a.corpus, vs_spv, a.trials, a.keep, scene, a.half, a.tol) for e in todo]
         for i, f in enumerate(cf.as_completed(futs)):
             results.append(f.result())
             if (i + 1) % 25 == 0:

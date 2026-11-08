@@ -410,6 +410,7 @@ public:
         caps_.multiDrawIndirect = ctx_.features().multiDrawIndirect;
         caps_.drawIndirectFirstInstance = ctx_.features().drawIndirectFirstInstance;
         caps_.textureBlit = true;
+        caps_.shaderFloat16 = ctx_.features().shaderFloat16Int16;
         // ray queries need the acceleration structure array in the bindless set (descriptor binding update after bind)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         fillGameCaps();
@@ -429,6 +430,7 @@ public:
         caps_.multiDrawIndirect = ctx_.features().multiDrawIndirect;
         caps_.drawIndirectFirstInstance = ctx_.features().drawIndirectFirstInstance;
         caps_.textureBlit = true;
+        caps_.shaderFloat16 = ctx_.features().shaderFloat16Int16;
         // acceleration structures of the wrapped device: TLAS slots from the renderer's bindless set (shared with the RT scene)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         fillGameCaps();
@@ -456,6 +458,7 @@ public:
         caps_.multiDrawIndirect = ctx_.features().multiDrawIndirect;
         caps_.drawIndirectFirstInstance = ctx_.features().drawIndirectFirstInstance;
         caps_.textureBlit = true;
+        caps_.shaderFloat16 = ctx_.features().shaderFloat16Int16;
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         fillGameCaps();
         {

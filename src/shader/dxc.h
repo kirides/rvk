@@ -32,6 +32,7 @@ struct Request {
     Target target = Target::Spirv;
     int optLevel = 3;        // -O<n> (0..3) without debug info; generated shaders use 1: the driver compiles them again anyway
     bool cache = true;       // use the disk cache (generated shaders have their own: the device's SPIR-V cache keyed by the bytecode)
+    bool half16 = false;     // -enable-16bit-types: `half` / min16float are real 16-bit types (SPIR-V Float16, DXIL native 16-bit ops: needs shaderFloat16 / D3D12 Native16BitShaderOpsSupported); part of the cache key
     bool debugInfo = false;  // -Zi -Od + SPIR-V debug info (RenderDoc / PIX show names and source); part of the cache key
 };
 

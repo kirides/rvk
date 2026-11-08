@@ -1532,6 +1532,8 @@ public:
     // the plain ubershader module a draw of `ps` is offered now (None: off, no request, not built / not covered): read only; CachedDraw::Variant::uberAsked is its value at capture
     rhi::ShaderModule uberAskedNow(const Shader& ps) const;
     bool ubershader() const { return ubershader_.load(std::memory_order_relaxed); }
+    // the ubershader's lit core in real 16-bit arithmetic: the device has it (rhi::DeviceCaps::shaderFloat16) and RVK_UBER_HALF is not 0
+    bool uberHalf() const;
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
     rhi::ShaderModule variant(const ShaderRef& s, VariantSlot slot);
     // the owning pointer of a device shader (its entry in the shader cache), null for a shader that is not cached
@@ -1718,7 +1720,7 @@ private:
     void logTracedMaterial(draws::Kind kind, bool jittered);
     rhi::ShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (None when it fails to build)
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
-    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash);
+    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash, bool half16 = false);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
     void resetUberVariants();  // S-1a: debug.ubershader toggled at run time: every material pixel shader's variants are built again in the new form
     rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);

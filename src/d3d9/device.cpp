@@ -1475,7 +1475,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
 
 // The DX12 backend's shader module of generated HLSL: DXIL (SM 6.6) through DXC, cached next to the SPIR-V cache (`.dxo`), never SPIR-V
 rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile,
-                                     const std::string& label, std::uint64_t hash) {
+                                     const std::string& label, std::uint64_t hash, bool half16) {
     std::vector<std::uint8_t> dxil;
     std::filesystem::path cacheFile;
     if (char dump[MAX_PATH]; GetEnvironmentVariableA("RVK_DUMP_HLSL", dump, MAX_PATH) != 0) {  // diagnostics: the generated text of every module
@@ -1497,7 +1497,7 @@ rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& tex
         }
     }
     if (dxil.empty()) {
-        auto compiled = shader::compileHlslDxil(stage, text, name);
+        auto compiled = shader::compileHlslDxil(stage, text, name, half16);
         if (!compiled.ok()) {
             spdlog::error("d3d9: shader {:016x} does not compile to DXIL: {}", hash, compiled.log.substr(0, 1500));
             return rhi::ShaderModule::None;
@@ -1686,19 +1686,29 @@ void Device::resetUberVariants() {
     spdlog::info("d3d9: HLSL material shaders: {} pixel shaders' variants reset", all.size());
 }
 
+bool Device::uberHalf() const {
+    static const bool allowed = [] {
+        char v[8];
+        return GetEnvironmentVariableA("RVK_UBER_HALF", v, sizeof v) == 0 || v[0] != '0';
+    }();
+    return allowed && game_->caps().shaderFloat16;
+}
+
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
 // options.uberDefines); null when it does not build (the draw keeps the translated shader)
 rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
     const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines, options.sceneRecord, options.sceneView);
     if (glsl.empty()) return rhi::ShaderModule::None;
+    // S-2: the lit core in real half precision (ge_default.frag.hlsl `rvkh`) when the device has 16-bit arithmetic; float otherwise (RVK_UBER_HALF=0 forces it)
+    const bool half16 = uberHalf();
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
         options_.cacheDir.empty()
             ? std::filesystem::path()
             : options_.cacheDir / "spirv" /
-                  std::format("{:016x}_{}_u{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)));
+                  std::format("{:016x}_{}_u{:08x}{}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)), half16 ? "h" : "");
     if (options_.backend == rhi::Backend::D3D12) {
-        return dxilModule(shader::Stage::Pixel, glsl, "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash);
+        return dxilModule(shader::Stage::Pixel, glsl, "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16);
     }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
@@ -1709,7 +1719,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         }
     }
     if (spirv.empty()) {
-        auto compiled = shader::compileHlsl(shader::Stage::Pixel, glsl, "uber.hlsl");
+        auto compiled = shader::compileHlsl(shader::Stage::Pixel, glsl, "uber.hlsl", half16);
         if (!compiled.ok()) {
             if (ubershadersFailed_.fetch_add(1) < 12) {
                 spdlog::warn("d3d9: GLSL material shader of {:016x} ({} {} variant {}) does not compile: {}", s.hash, src.file, src.entry, tag,

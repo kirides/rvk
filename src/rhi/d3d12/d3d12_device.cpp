@@ -649,6 +649,8 @@ public:
             return false;
         }
         // inline ray queries (DXR tier 1.1) when asked for
+        D3D12_FEATURE_DATA_D3D12_OPTIONS4 o4{};
+        caps_.shaderFloat16 = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &o4, sizeof(o4))) && o4.Native16BitShaderOpsSupported;
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
         const bool o5ok = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)));
         dxr11_ = o5ok && o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;

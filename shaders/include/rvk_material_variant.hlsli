@@ -129,10 +129,22 @@ float rvkMvSgiTaps(uint img, uint img2, float myZ, out float4 ratio, out float3 
 }
 #endif
 // GI: the probes' irradiance as the draw's ambient (enh/gi)
+// the engine's own ambient registers (c15.. = g_AmbientLight, the indoor colour) into rvk_gi
+void rvkMvLoadEngineAmbient() {
+    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), uint(RVK_MV_AMB_REG + i) * 16u));  /* c14..c223 = window 3 (abi.h) */
+#ifdef RVK_MV_HAS_IND
+    rvk_gi[0] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), uint(RVK_MV_IND_REG) * 16u));
+#else
+    rvk_gi[0] = float4(0.0, 0.0, 0.0, 0.0);
+#endif
+}
+
 void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
-    if (!rvkGiValid(f) || (f.frameInfo.y & RVK_FRAME_CAMERA_VALID) == 0u) return;
     float4 regs[7];
-    if (!rvkGiLookup(f, P, n, V, regs, rvk_giCascade)) return;
+    if (!rvkGiValid(f) || (f.frameInfo.y & RVK_FRAME_CAMERA_VALID) == 0u || !rvkGiLookup(f, P, n, V, regs, rvk_giCascade)) {
+        rvkMvLoadEngineAmbient();
+        return;
+    }
     RvkGiVolume v = rvkGiVolume(f);
 #ifdef RVK_MV_GBUFFER
     // the screen probes (rtgi.md 11): this frame's per-surface correction of the DDGI irradiance (the registers are per
@@ -186,20 +198,25 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
     // the draw's own ambient beyond the outdoor sky (indoor colour, static lights; 0 for outdoor draws) stays on top:
     // engine = f x sky + static (static >= 0): f <= L0(engine) / L0(sky) per channel; that bound keeps the remainder's
     // average >= 0 and makes it 0 for outdoor draws (engine = sky)
-    float4 eng[7], sk[7];
-    for (int i = 0; i < 7; ++i) {
-        eng[i] = rvk_gi[1 + i];
-        sk[i] = v.Get().sky[i];
+    rvkMvLoadEngineAmbient();
+    // (the engine's registers and the frame's sky are read where they are used, not copied: 56 live VGPRs less)
+    float3 le, ls;
+    {
+        float4 eng[7], sk[7];
+        for (int i = 0; i < 7; ++i) {
+            eng[i] = rvk_gi[1 + i];
+            sk[i] = v.Get().sky[i];
+        }
+        le = max(rvkGiAverage(eng), float3(0.0, 0.0, 0.0));
+        ls = rvkGiAverage(sk);
     }
-    float3 le = max(rvkGiAverage(eng), float3(0.0, 0.0, 0.0));
-    float3 ls = rvkGiAverage(sk);
     float fk = 1.0;  // (GLSL: f)
     for (int c = 0; c < 3; ++c) {
         if (ls[c] > 1e-4) fk = min(fk, le[c] / ls[c]);
     }
     fk = clamp(fk, 0.0, 1.0);
     if ((v.Get().info.x & RVK_GI_FLAG_KEEP_STATIC) != 0u) {
-        for (int i = 0; i < 7; ++i) regs[i] += eng[i] - sk[i] * fk;
+        for (int i = 0; i < 7; ++i) regs[i] += rvk_gi[1 + i] - v.Get().sky[i] * fk;
     }
     // minimum ambient (rtgi.md 13, 18): the probe volume is dark where little light reaches (barrels / tables in the pub were
     // black: the engine's own indoor fill, a dim hemisphere there, is gone) while the engine lit them with it. The average is
@@ -436,18 +453,14 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
 }
 #endif
 
+// The prologue in three pieces (S-3, frame-ownership.md 14.7): the ubershader runs rvkMvBegin first and the two heavy ones where their results are
+// used (rvkMvAmbientNow right before the ambient term, rvkMvClusterNow right before the point lights), so the 32 + 48 registers of the GI /
+// cluster results are not live across the texture fetches and the normal map; the translated shaders (a prologue at the top of the entry) call
+// rvkMvPrologue = all three in the old order.
 // `fragCoord` = the pixel's SV_Position (HLSL has no gl_FragCoord outside the entry point)
-void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
+void rvkMvBegin(float4 fragCoord, float4 vertexNormal) {
     rvk_mvFrag = fragCoord;
     RvkFrame f = rvkLoadFrame(pc.frame);
-#ifdef RVK_MV_AMBIENT
-    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), uint(RVK_MV_AMB_REG + i) * 16u));  /* c14..c223 = window 3 (abi.h) */
-#ifdef RVK_MV_HAS_IND
-    rvk_gi[0] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), uint(RVK_MV_IND_REG) * 16u));
-#else
-    rvk_gi[0] = float4(0.0, 0.0, 0.0, 0.0);
-#endif
-#endif
     // the pixel's world position (hardware depth + the FrameBlock camera; D3D9 pixel centres) and geometric normal
     float2 uv = (fragCoord.xy - 0.5) * f.viewport.zw;
     // the depth was rasterised with the camera jitter (src/enh/upscale): the fragment is at the pixel's NDC - J (rvk_common.hlsli)
@@ -460,20 +473,35 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
     if (dot(n, V) < 0.0) n = -n;
     rvk_mvP = P;
     rvk_giN = n;
-#ifdef RVK_MV_CLUSTER
-    rvkMvCluster(f, P, n);
-#endif
 #ifdef RVK_MV_VNORMAL
     rvk_gbN = float4(vertexNormal.xyz, 0.0);
 #endif
 #ifdef RVK_MV_VNORMAL
     rvk_mvVao = clamp(vertexNormal.w, 0.0, 1.0);
 #endif
-#ifdef RVK_MV_AMBIENT
-    rvkMvGi(f, P, n, V);
-#ifdef RVK_MV_GBUFFER
-    rvkMvAo(f, P);
+}
+
+#ifdef RVK_MV_CLUSTER
+void rvkMvClusterNow() { rvkMvCluster(rvkLoadFrame(pc.frame), rvk_mvP, rvk_giN); }
 #endif
+
+#ifdef RVK_MV_AMBIENT
+void rvkMvAmbientNow() {
+    RvkFrame f = rvkLoadFrame(pc.frame);
+    rvkMvGi(f, rvk_mvP, rvk_giN, normalize(f.cameraPos.xyz - rvk_mvP));  // (loads the engine's registers into rvk_gi after the probe lookup: 32 VGPRs fewer live in it)
+#ifdef RVK_MV_GBUFFER
+    rvkMvAo(f, rvk_mvP);
+#endif
+}
+#endif
+
+void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
+    rvkMvBegin(fragCoord, vertexNormal);
+#ifdef RVK_MV_CLUSTER
+    rvkMvClusterNow();
+#endif
+#ifdef RVK_MV_AMBIENT
+    rvkMvAmbientNow();
 #endif
 }
 

@@ -396,6 +396,7 @@ std::vector<std::string> arguments(const Request& r) {
         // the sources carry [[vk::...]] attributes (locations, bindings, image formats, push constants): meaningless for DXIL, DXC ignores them
         a.push_back("-Wno-ignored-attributes");
     }
+    if (r.half16) a.insert(a.end(), {"-enable-16bit-types", "-D", "RVK_HALF16=1"});  // (the ubershader text picks real half types by this define)
     if (r.debugInfo) {
         a.insert(a.end(), {"-Zi", "-Od"});
         if (r.target == Target::Spirv) a.insert(a.end(), {"-fspv-debug=file", "-fspv-debug=source", "-fspv-debug=line"});
