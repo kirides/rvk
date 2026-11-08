@@ -2858,6 +2858,7 @@ void StaticOps::issue() {
 }
 
 void StaticOps::report() {
+    stagesReport();  // (first: the windows it reads are reset by the reports below)
     if (f2c::on()) f2c::report(dev_.stats().frames);
     if (verified_ < 0 && active()) {
         spdlog::info("native: static ops: idle (the engine checks failed)");

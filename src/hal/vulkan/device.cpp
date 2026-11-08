@@ -190,9 +190,23 @@ void HalDevice::applyStaticOps() {
                                        on(rs.nativeSceneOpsCompare),
                                        rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : static_cast<int>(kAllSceneOpGroups));
     engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
-    dev_.setClusters(on(rs.nativeClusters));  // F5-1: static meshes clustered (any mode: the draws are the D3D9 model's)
-    dev_.setClusterCull(on(rs.nativeClusterCull) && on(rs.nativeClusters));  // F5-2: the GPU cull of the owned draws of clustered meshes
-    dev_.setClusterCullShadows(on(rs.nativeClusterCullShadows) && on(rs.nativeClusterCull) && on(rs.nativeClusters) && on(rs.nativeOwnedShadows));  // F3-2: ... also in the sun cascades
+    // frame-ownership.md 7.47: native.clusters / cluster_cull / cluster_cull_shadows are RESTART settings: retained draws and op records keep the index buffers (the cluster arena's copies or
+    // the engine's) they were made with, so a run-time toggle could not take effect (the stage line showed `armed, nothing owned`). The session runs with the start values
+    const auto onStart = [](const settings::Setting* s) { return s != nullptr && s->startValue() != 0.0; };
+    for (const settings::Setting* s : {rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows}) {
+        if (s != nullptr && s->value() != s->startValue()) {
+            static std::unordered_map<const settings::Setting*, double> told;
+            const auto it = told.find(s);
+            if (it == told.end() || it->second != s->value()) {
+                told[s] = s->value();
+                spdlog::info("native: {} was changed to {} at run time: not applied, it takes effect at the next start (a restart setting: retained draws keep their index buffers); this session runs with {}",
+                             s->spec().key, s->value() != 0.0 ? "true" : "false", s->startValue() != 0.0 ? "true" : "false");
+            }
+        }
+    }
+    dev_.setClusters(onStart(rs.nativeClusters));  // F5-1: static meshes clustered (any mode: the draws are the D3D9 model's)
+    dev_.setClusterCull(onStart(rs.nativeClusterCull) && onStart(rs.nativeClusters));  // F5-2: the GPU cull of the owned draws of clustered meshes
+    dev_.setClusterCullShadows(onStart(rs.nativeClusterCullShadows) && onStart(rs.nativeClusterCull) && onStart(rs.nativeClusters) && on(rs.nativeOwnedShadows));  // F3-2: ... also in the sun cascades
     const bool takeOver = plan.staticTake;
     const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
@@ -349,6 +363,7 @@ HalDevice::~HalDevice() {
     if (settings::registry().dirty() && !options_.settingsFile.empty()) {
         settings::registry().save(options_.settingsFile);
     }
+    pictureCheck_.reset();
     debugView_.reset();  // removes its pass, retires its pipelines
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
@@ -529,6 +544,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         gpuscene::setWindowMasksWanted(rs.splitVerify->asBool());
         reg.onChange(*rs.splitVerify, [this](const settings::Setting& s) { dev_.setSplitVerify(s.asBool()); gpuscene::setWindowMasksWanted(s.asBool()); }, this);
     }
+    // frame-ownership.md 7.47: the owned picture check (Full; the pass is registered while the setting is on)
+    pictureCheck_ = std::make_unique<enh::PictureCheck>(dev_);
+    if (rs.nativePictureCheck != nullptr) {
+        const auto applyPicture = [this](const settings::Setting& s) { pictureCheck_->setEnabled(s.asBool() && renderMode() == RenderMode::Full); };
+        reg.onChange(*rs.nativePictureCheck, applyPicture, this);
+        if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, applyPicture, this);
+        applyPicture(*rs.nativePictureCheck);
+    }
     // enhancements (docs/research/injection.md): the debug injection view
     debugView_ = std::make_unique<enh::DebugView>(dev_);
     if (rs.injectView != nullptr) {
@@ -659,7 +682,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

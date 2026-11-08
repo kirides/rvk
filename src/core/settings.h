@@ -495,6 +495,7 @@ struct RendererSettings {
     Setting* nativeClusters = nullptr;         // native.clusters: static meshes of >= 1,024 triangles drawn from index copies in cluster order, with a GPU cluster table (frame-ownership.md 7.33, F5-1)
     Setting* nativeOwnedCheck = nullptr;       // native.owned_check: every N-th frame (and the one before it) runs the old path and compares
     Setting* nativeOwnedRecords = nullptr;     // native.owned_records: op records built from the static composition and compared with record-derived draws (frame-ownership.md 7.14)
+    Setting* nativePictureCheck = nullptr;  // native.picture_check: GPU compare of the owned main view's opaque picture with a composed frame's (frame-ownership.md 7.47)
     Setting* nativeOwnedTrees = nullptr;  // native.owned_trees: the main view's SpeedTree ops owned (frame-ownership.md 7.25, F4-2 / F4-3)
     Setting* nativeClusterCullShadows = nullptr;  // native.cluster_cull_shadows: the cull of the owned draws of clustered meshes in the sun cascades (frame-ownership.md 7.37, F3-2)
     Setting* nativeOwnedActors = nullptr;  // native.owned_actors: skinned actor ops owned (frame-ownership.md 7.40, F6-1)

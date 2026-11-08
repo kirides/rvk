@@ -162,6 +162,8 @@ add_library(rvk_core STATIC
     src/d3d9/target_names.cpp
     src/d3d9/target_names.h
     src/enh/debug_view.cpp
+    src/enh/picture_check.cpp
+    src/enh/picture_check.h
     src/enh/debug_view.h
     src/enh/gi.cpp
     src/enh/gi_reference.cpp
@@ -221,6 +223,7 @@ add_library(rvk_core STATIC
     src/native/bb_records.h
     src/native/static_ops_bb.cpp
     src/native/static_ops_trees_owned.cpp
+    src/native/static_ops_stages.cpp
     src/native/static_ops_veg_owned.cpp
     src/native/static_ops_nonop.cpp
     src/native/static_ops_fx.cpp
