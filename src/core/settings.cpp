@@ -2805,7 +2805,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "S-7 (docs/research/frame-ownership.md 14.8; Full, needs native.scene_ops with the post group): the engine's luminance chain (eight "
                        "draws: LogLuminance, DownSample x5, AdaptiveLiminance, the AvgLuminance copy) is one compute dispatch on our own shader that writes "
                        "the two 1x1 adapted-luminance images. On = the units are not drawn; compare = they are drawn and the kernel's result is checked "
-                       "against the engine's (rvk.log `native: own post`, `luminance differs` lines must stay 0). Off by default.",
+                       "against the engine's (rvk.log `native: own post`, `luminance differs` lines must stay 0). S-7b (14.8b): the bloom chain (BrightPass, GlowH, "
+                       "Streak, GlowVAddBloom2: three dispatches) and the DoF middle (BlurH, BlurV, NearCoc, SmallBlur: one dispatch) likewise; the small "
+                       "A8R8G8B8 images they write are RGBA8 storage images while On. Off by default.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"off", "on", "compare"},

@@ -1107,6 +1107,7 @@ void testOceanMips(Harness& h) {
 }
 
 #include "parity_post.inl"
+#include "parity_post2.inl"
 
 }  // namespace
 
@@ -1116,6 +1117,8 @@ int run(rhi::Device& dev) {
     testPipelines(dev);
     testOceanMips(h);
     testPostLum(h);
+    testPostBloom(h);
+    testPostDofMid(h);
     testTranslatedDraw(h);
     testUberDraw(h, "diffuse * vertex colour", simpleRequest(), "PS_Default", {}, false, false);
     testUberDraw(h, "normal map, specular, lightmap, lights", heavyRequest(), "PS_Default", {}, false, true);

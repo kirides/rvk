@@ -550,13 +550,16 @@ bool EffectOps::effectBegin(void* filterPtr) {
     }
     const Skip s = composeEffect(filter, technique, input0, target, screen);
     if (unit == Unit::Post) unitName_ = engine::readCString(filter + 0x10) + (unitName_.empty() ? std::string() : " " + unitName_);
-    // S-7: a unit of the scene graph's luminance chain (own_post on: composed in the engine's order)
-    const int lumIdx = unit == Unit::Post && s == Skip::None && drawCount_ == 1 && ownLumActive() && postGraph_.rfind("scene", 0) == 0 ? OwnPost::lumUnit(unitName_) : -1;
+    // S-7 / S-7b: a unit of one of the scene graph's groups (the luminance chain, the bloom chain, the DoF middle; own_post on: composed in the engine's order)
+    int grp = -1, grpIdx = -1;
+    if (unit == Unit::Post && s == Skip::None && drawCount_ == 1 && ownLumActive() && postGraph_.rfind("scene", 0) == 0) {
+        if (!OwnPost::groupUnit(unitName_, grp, grpIdx)) grp = grpIdx = -1;
+    }
     unitName_ = std::string(kUnitNames[static_cast<std::size_t>(unit)]) + (unitName_.empty() ? std::string() : " " + unitName_);
     stats_ = &window_[unitName_];
     ++stats_->counts.units;
     if (s != Skip::None) {
-        if (lumNext_ != 0) flushLum();  // the engine's own draws of this unit come now: the held ones first
+        if (grpOpen_ >= 0) flushLum();  // the engine's own draws of this unit come now: the held ones first
         ++stats_->skips[static_cast<std::size_t>(s)];
         drawCount_ = 0;
         unit_ = Unit::None;  // left to the engine
@@ -568,25 +571,35 @@ bool EffectOps::effectBegin(void* filterPtr) {
     taken_ = false;
     leanStats_ = &leanWindow_[unitName_];
     bool hold = false;
-    if (lumNext_ != 0 && lumIdx != lumNext_) flushLum();  // the group broke off
-    if (lumIdx >= 0 && lumIdx == lumNext_) {
+    if (grpOpen_ >= 0 && !(grp == grpOpen_ && grpIdx == grpNext_)) flushLum();  // the group broke off
+    if (grp >= 0 && ((grp == grpOpen_ && grpIdx == grpNext_) || (grpOpen_ < 0 && grpIdx == 0))) {
         const bool on = own_->mode() == OwnPost::Mode::On;
-        if (!lumRec_[static_cast<std::size_t>(lumIdx)]) lumRec_[static_cast<std::size_t>(lumIdx)] = std::make_unique<fxc::EffectDraw>();
-        *lumRec_[static_cast<std::size_t>(lumIdx)] = *draws_[0];
-        ++lumNext_;
-        if (on) ++lumHeld_;
+        if (grpOpen_ < 0) {
+            grpOpen_ = grp;
+            grpNext_ = 0;
+            grpHeld_ = 0;
+        }
+        auto& slot = grpRec_[static_cast<std::size_t>(grpIdx)];
+        if (!slot) slot = std::make_unique<fxc::EffectDraw>();
+        *slot = *draws_[0];
+        ++grpNext_;
+        if (on) ++grpHeld_;
         hold = on;
-        if (lumNext_ == kLumUnits) {
-            // the group is complete: the kernel (On: its result replaces the eight draws; Compare: it runs next to them, before the Copy overwrites the previous value)
-            std::array<const fxc::EffectDraw*, kLumUnits> rec{};
-            for (int k = 0; k < kLumUnits; ++k) rec[static_cast<std::size_t>(k)] = lumRec_[static_cast<std::size_t>(k)].get();
-            ++lumGroups_;
-            if (!own_->runLum(rec, on) && on) {
+        if (grpNext_ == OwnPost::groupSize(grp)) {
+            // the group is complete: the kernels (On: their result replaces the units' draws; Compare: they run next to them, before a luminance Copy overwrites
+            // the previous value, the intermediate images compared at once, the last unit's after its engine draw)
+            std::array<const fxc::EffectDraw*, kMaxGroupUnits> rec{};
+            for (int k = 0; k < grpNext_; ++k) rec[static_cast<std::size_t>(k)] = grpRec_[static_cast<std::size_t>(k)].get();
+            ++grpRuns_[static_cast<std::size_t>(grp)];
+            const bool ran = own_->runGroup(grp, rec, on);
+            if (!ran && on) {
                 flushLum();  // the units that were not drawn are drawn now, this one included
                 hold = true;
             }
-            lumNext_ = 0;
-            lumHeld_ = 0;
+            if (ran && !on) grpCompare_ = grp;
+            grpOpen_ = -1;
+            grpNext_ = 0;
+            grpHeld_ = 0;
         }
     }
     if (unitTake_) {
@@ -616,18 +629,19 @@ void EffectOps::setOwnPost(OwnPost::Mode mode) {
         spdlog::warn("native: own post: on needs the post chain taken over (native.scene_ops with group 32768): staying off");
         mode = OwnPost::Mode::Off;
     }
-    if (lumNext_ != 0) flushLum();
+    if (grpOpen_ >= 0) flushLum();
     own_->setMode(mode);
 }
 
 // the held units are drawn now, in order, as issue() would have (the device state saved and restored around them)
 void EffectOps::flushLum() {
-    const int n = lumNext_;
-    const int held = lumHeld_;
-    lumNext_ = 0;
-    lumHeld_ = 0;
+    const int n = grpNext_;
+    const int held = grpHeld_;
+    grpOpen_ = -1;
+    grpNext_ = 0;
+    grpHeld_ = 0;
     if (held == 0 || n == 0) return;
-    ++lumFlushes_;
+    ++grpFlushes_;
     captureDevice(*saved_);
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
@@ -635,7 +649,7 @@ void EffectOps::flushLum() {
     issuing_ = true;
     issueIndex_ = ~std::size_t{0};  // (ownDraw's compare has no composition for these)
     for (int k = 0; k < n; ++k) {
-        const fxc::EffectDraw& d = *lumRec_[static_cast<std::size_t>(k)];
+        const fxc::EffectDraw& d = *grpRec_[static_cast<std::size_t>(k)];
         applyDevice(d);
         if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
@@ -650,6 +664,11 @@ void EffectOps::effectEnd(void* filter) {
     if (unit_ != Unit::None && filter == unitFilter_) {
         if (afterPending_) checkAfter(false);
         finishUnit();
+        if (grpCompare_ >= 0) {
+            const int g = grpCompare_;
+            grpCompare_ = -1;
+            own_->finishCompare(g);  // S-7b: the last unit of a compared group has been drawn by the engine
+        }
     }
     if (filter == leftUnit_) leftUnit_ = nullptr;
 }
@@ -1041,7 +1060,7 @@ void EffectOps::finishUnit() {
 void EffectOps::copyBegin(void* filterPtr) {
     if (postDepth_ > 0 && !engine::scene::inSceneJob() && dev_.phases().view() == d3d9::scene::View::Post) {
         // N5.7: an eCImageFilterCopy of a post graph (Indicator, OverlayHit): its HAL copy stays the engine's
-        if (lumNext_ != 0) flushLum();
+        if (grpOpen_ >= 0) flushLum();
         if (postCopies_++ == 0) spdlog::info("native: post: a copy filter {} in the post chain (left to the engine)", filterPtr);
         return;
     }
