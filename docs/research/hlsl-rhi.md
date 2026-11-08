@@ -510,6 +510,42 @@ them (tolerance in the table), and where the CPU can compute the answer it is ch
 - The translated `[[vk::builtin("PointSize")]]` output, vertex fans, scaled vertex formats and the default texture per kind are D3D9-model matters (dx12-game-port.md).
 - Shader permutations are compiled twice by the checker; at run time only the active backend's target is built (`embedded::dxil`, `device.cpp` follows with the backend seam).
 
+### 9.7 The ABI probe: every block shared with C++, read back on both backends (2026-11-08)
+
+Why: a C++ struct and its HLSL twin disagreed several times on D3D12 only (the lamp-shadow push block, gpu-scene.md 9.12; the findings of dx12-game-port.md): Vulkan reads push
+constants / `RVK_REF` blocks at std430-like offsets, D3D12 root constants are an HLSL constant buffer (a vector never straddles 16 bytes, arrays / structs / `RVK_REF` members start
+on 16), D3D12 `ByteAddressBuffer.Load<T>` packs tightly. Vulkan-only offset tests (`abi_hlsl_*_layout_matches_cpp`) could not see the D3D12 side.
+
+**One field description per block** (`src/shader/abi_blocks.cpp`, API `abi_blocks.h`): `BLOCK(HlslName, Kind, CppType)`, then one entry per HLSL member in order: `F(type, name, count)` (the C++
+member of the same name), `FM(.., member)` (another member), `FO(.., offset)` (a slice of an array / `uint64` member), `PH` (the pass push header: frame pointer, passId, passFlags). The C++
+offset is an `offsetof()` of the production struct (a renamed member does not compile). Kinds: `Push` (`RVK_PUSH`), `Ptr` (`rvkPtr<T, 16>(pair).Get()` / `RVK_REF(T)`), `Raw` (`rvkRawLoad<T, A>` at
+constant offsets, no HLSL struct). 52 blocks: 28 push blocks (RvkDrawPush, RvkScenePush, BlitPush, every pass's push block incl. the owned compaction / lighting compose / light cluster / light
+shadow / post / ocean / water / RT / skin ones), 22 pointer blocks (RvkFrameData, RvkStageData, RvkDrawData, RvkDrawRecord, RvkViewBlock2, RvkRtRecordData / SegmentData, the GI volume header
+and pass parameters, the material RT / water RT / RT shadow / post parameter blocks, WaterBlock, ShadowBlock, RvkLight) and 3 raw records (RvkInstance, RvkMeshPart, cluster rows).
+The push structs that used to live in a .cpp (upscale / framegen prep, exposure, framegen debug, rt skin, lighting compose, owned compaction, the D3D12 blit) moved to `src/shader/pass_push.h`.
+Not in the registry (reasons in `exemptions()` / here): `RvkGiProbe` (GPU-written, int4 / float4 only), `RvkLightHeader` (written by `light_cluster.comp`, read with `rvkRawLoad<uint4, 16>` at
+constants), the illumination / material / lighting-image records (the engine's raw bytes at word offsets), `shaders/test/**` (test-local push blocks next to their own C++ twin); the production
+shaders bind no block as a root CBV (b8 space1 is used by the test shaders only).
+
+Three consumers:
+- **GPU probe** (`rvk_rhitest`, `tools/rhitest/abi_probe.cpp`, `shaders/test/abi_probe.hlsli`): `probeHlsl(block)` GENERATES a compute shader from the description (Push: `RVK_PUSH(ProbeBlock, pc)`; Ptr:
+  `rvkPtr<ProbeBlock, 16>(pc.ptr).Get()`; Raw: `rvkRawLoad` at the C++ offsets), reads every field and stores each raw word (`asuint`) into a storage image. The host fills the C++ struct
+  with `0xB0000000 | byte offset` per word, binds it exactly as production does (push constants of the C++ size / a buffer reference), dispatches on the backend (SPIR-V or DXIL of the same
+  text) and compares; a mismatch prints `Block.field[e].x: C++ has it at the word at byte A, the GPU read the word at byte B`. A header's frame pointer is checked by loading the frame
+  block it points to (pattern buffer): the dispatch is refused when the layout model says the pointer sits elsewhere (a garbage address would be a GPU fault). A built-in mutant (a push
+  block with a naively packed C++ twin: uint + uint2 + uint4 at 0 / 4 / 12) must NOT read back: it proves the probe detects what it exists for (misreads 4 of 7 words on Vulkan).
+- **Lint** (`rvk_tests`: `abi_blocks_hlsl_structs_match_their_descriptions`): every struct used as `RVK_PUSH(T, ..)`, `RVK_REF(T)`, `rvkPtr<T, ..>`, `ConstantBuffer<T>` in `shaders/**` (not `test/`)
+  must have a description (add the block, or an `exemptions()` entry with a reason), and every HLSL definition of a described struct (nested structs inlined, array sizes evaluated from
+  `static const uint` / `#define`) must put each 32-bit word where the description does on both backends (so an HLSL-only edit, a new member, or a reordering fails). `abi_blocks_lint_detects_...`
+  proves both failure modes (an undescribed struct; the old `uint2 table` before `uint4 tex` LightShadowPush layout).
+- **Models** (`rvk_tests`: `abi_blocks_descriptions_match_the_layout_models`): the C++ offsets of every block equal the Vulkan (std430) and D3D12 (constant buffer / `Load<T>`) layouts of the
+  description, the fields cover every byte of the C++ struct (padding included), a push block is <= 128 bytes, raw offsets keep the alignment `rvkRawLoad` promises.
+
+Result on main (2026-11-08): all 52 blocks read back exactly on Vulkan and D3D12 (4,248 words; `--validation` and `--sync-validation` clean, D3D12 GPU-based validation clean): no layout mismatch
+is left in the blocks listed above (the ones found earlier are fixed). What the probe does NOT cover: byte offsets hard-coded in HLSL helpers (`rvkLightClusterAt`, the illumination / material /
+mesh-part loaders): those are checked by their own parity tests. New block = new `BLOCK` entry (+ the C++ struct in a header the registry can include); a struct that is only a local
+variable of a .cpp has no twin the probe can offsetof.
+
 ## 10. The game seam (WP2a, 2026-10-30)
 `rhi::GameDevice : rhi::Device` (`src/rhi/game_device.h`; docs/research/dx12-game-port.md "Status") is what `d3d9::Device` holds: the Vulkan implementation is the wrapped `VkDeviceImpl` (`rhi::vulkan::wrapGame`). It adds the
 shader-visible address types of the RHI: `GpuRef` (one 64-bit value: Vulkan = device address, D3D12 = slot | offset << 32, `plus` by `refShift`), `GpuAddr` (reference + raw VA for builds), `RingAlloc`, and the opaque
