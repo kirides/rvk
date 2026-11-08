@@ -2296,6 +2296,11 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         bool has = false;
         for (const DynDraw& d : dyn_) has = has || (d.key == key && d.skin);
         ++(has ? iv_.solidWithSkin : iv_.solidNoSkin);
+        // (F-VAR2: the skinning pass has this frame's pose of the character, nothing reads its capture: no request, so an owned solid draw stays owned)
+        if (has && !characterMotion_ && !skinVerify_) {
+            ++iv_.solidCaptureSkipped;
+            return;
+        }
         if (!has && skinLogged_.size() < 12 && skinLogged_.insert(key).second) {
             std::uint32_t o = 0;
             spdlog::info("rt: skin: a solid-pass draw without a skinning job: entity {}, primitives {}, morph weights {:.3f} {:.3f} {:.3f}, eligible {}, maxIndex {}, jobs {}",
@@ -3251,9 +3256,9 @@ void RtScene::logStats(bool force) {
     }
     if (dynamic_) {
         spdlog::info("rt: scene: characters {} + animated SpeedTrees {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; "
-                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; characters: {} from this frame's pose ({} skinned by compute) / {} from the previous frame's (skinning pass: {} draws taken, {} not eligible; solid-pass draws {} with / {} without a job); capture variant needs vertexPipelineStoresAndAtomics: {})",
+                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; characters: {} from this frame's pose ({} skinned by compute) / {} from the previous frame's (skinning pass: {} draws taken, {} not eligible; solid-pass draws {} with / {} without a job, {} without a capture request); capture variant needs vertexPipelineStoresAndAtomics: {})",
                      iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
-                     iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, dev_.game().gameCaps().vertexStores ? "yes" : "no");
+                     iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, iv_.solidCaptureSkipped, dev_.game().gameCaps().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
     }
     if (iv_.holes > 0) {

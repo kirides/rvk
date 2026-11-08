@@ -34,11 +34,15 @@ std::uint64_t mix(std::uint64_t h, std::uint64_t v) {
 
 ObjectMotion::ObjectMotion(d3d9::Device& device, RtScene* scene) : dev_(device), rt_(scene) {}
 
-ObjectMotion::~ObjectMotion() { apply(false, false); }
+ObjectMotion::~ObjectMotion() {
+    rt_ = nullptr;
+    apply(false, false);
+}
 
 void ObjectMotion::apply(bool skinned, bool rigid) {
     skinned_ = skinned;
     rigid_ = rigid;
+    if (rt_ != nullptr) rt_->setCharacterMotion(skinned);  // (the RT scene's solid-pass capture of a character is the motion source: it is kept while this is on)
     const bool want = (skinned || rigid) && dev_.game().gameCaps().vertexStores;
     if (want == registered_) return;
     registered_ = want;

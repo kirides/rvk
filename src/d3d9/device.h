@@ -557,6 +557,9 @@ public:
     // query, the instance rows in the register file c32 + 4 i, the identity ramp as stream 1, the template's CPU window images loaded) instead of the engine-order draw
     // calls. It must not need a vertex capture for these draws (they are queued already): false while it would (the RT scene's animated trees)
     virtual bool ownedTreesOk() const { return false; }
+    // F-VAR2 (frame-ownership.md 7.45): an observer of the main view's vegetation (grass) draws that is served by Device::ownedVegObserve (one call per batch: the template's pixel
+    // windows with the batch's lighting entry loaded into the register file, instances = the batch's count); it must not need a vertex capture for these draws
+    virtual bool ownedVegOk() const { return false; }
     virtual void observeOwned(Device& device, const OwnedFrame& frame);
 };
 
@@ -1228,6 +1231,8 @@ public:
     bool ownedTreeObserversOk() const;
     // at least one observer wants this template's draws (kind / phase), so ownedTreeObserve is to be called for its runs
     bool ownedTreeObserved(const CachedDraw& c) const;
+    // F-VAR2: show the observers one owned vegetation batch (`ow` = the template's windows with the batch's lighting entry); returns the batches shown (0 or 1)
+    std::uint32_t ownedVegObserve(const CachedDraw& c, const OwnedWindows& ow, std::uint32_t instances);
     // the observers' turn for one run of owned tree instances (`rows` = 16 floats per instance = VS c32 + 4 i .. c35 + 4 i; chunks of the engine's batch size): returns the number of
     // instances shown; the caller has set the draw tag and saves / restores the register file (this loads the template's window images and the rows into it)
     std::uint32_t ownedTreeObserve(const CachedDraw& c, const OwnedWindows& ow, Buffer* ramp, const float* rows, std::uint32_t count);

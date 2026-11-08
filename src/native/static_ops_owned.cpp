@@ -826,11 +826,19 @@ bool StaticOps::ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeP
     if (hit != ownedAmbient_.end()) return hit->second;
     float L[24][4]{};
     bool lit = false;
-    if (gpuscene::illumtable().compose(r.illumSlot, p, L)) {
+    int cwhy = 0;
+    const bool composed = gpuscene::illumtable().compose(r.illumSlot, p, L, &cwhy);
+    if (composed) {
         for (std::int32_t i = 0; i < 7 && !lit; ++i) {
             const float* c = L[amb.reg - 14 + i];
             lit = c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f;
         }
+    }
+    static int ambLogged = 0;
+    if (!lit && cd.v.gbufWanted && ambLogged < 12) {
+        ++ambLogged;
+        spdlog::info("native: owned ambient test false for a G-buffer draw: illum slot {}, compose {} (why {}), params tableLit {} holdsAll {} n {} first {}, amb reg {}, L[amb] {:.3f} {:.3f} {:.3f} {:.3f}, ps {:x}", r.illumSlot,
+                     composed, cwhy, p.tableLit, p.holdsAll, p.n, p.firstLight, amb.reg, L[amb.reg - 14][0], L[amb.reg - 14][1], L[amb.reg - 14][2], L[amb.reg - 14][3], cd.ps->hash);
     }
     ownedAmbient_.emplace(key, lit);
     return lit;

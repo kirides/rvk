@@ -85,7 +85,7 @@ struct Pend {
 };
 
 struct Stats {
-    std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, batches = 0, instances = 0, items = 0, records = 0, flushes = 0, compViews = 0;
+    std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, batches = 0, instances = 0, items = 0, records = 0, observed = 0, flushes = 0, compViews = 0;
     std::uint64_t lateNoRec = 0, lateStamp = 0, lateView = 0, lateMaterial = 0, latePlan = 0, lateSpecial = 0, lateNoTemplate = 0, lateTemplate = 0, lateFlush = 0, lateRead = 0;
     std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0;
     std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, draw count, other
@@ -95,7 +95,7 @@ struct Stats {
     std::uint64_t nodeNs = 0, readNs = 0, planNs = 0, tplNs = 0, recNs = 0, flushNs = 0, sideNs = 0, takeNs = 0, passNs = 0;
     void add(const Stats& o) {
         views += o.views; ownedViews += o.ownedViews; opsSeen += o.opsSeen; opsTaken += o.opsTaken; opsDrawn += o.opsDrawn; opsLate += o.opsLate; batches += o.batches;
-        instances += o.instances; items += o.items; records += o.records; flushes += o.flushes; compViews += o.compViews;
+        instances += o.instances; items += o.items; records += o.records; observed += o.observed; flushes += o.flushes; compViews += o.compViews;
         lateNoRec += o.lateNoRec; lateStamp += o.lateStamp; lateView += o.lateView; lateMaterial += o.lateMaterial; latePlan += o.latePlan; lateSpecial += o.lateSpecial;
         lateNoTemplate += o.lateNoTemplate; lateTemplate += o.lateTemplate; lateFlush += o.lateFlush; lateRead += o.lateRead;
         built += o.built; replaced += o.replaced; notRetained += o.notRetained; badOps += o.badOps;

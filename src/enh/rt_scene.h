@@ -90,6 +90,10 @@ public:
     bool gpuSkinning() const { return skinWanted_ && skinReady_; }
     // the scene captures skinned draws right now (enh/object_motion leaves them to it)
     bool capturingCharacters() const { return active_ && dynamic_; }
+    // F-VAR2 (frame-ownership.md 7.45): the solid pass's capture of a character is only needed for the motion chain (enh/object_motion reads its previous positions) and as the
+    // fallback of a character without a skinning job; with the skinning pass on and no motion consumer a character that has a job this frame asks for no capture, so its solid
+    // draw can stay an owned draw
+    void setCharacterMotion(bool on) { characterMotion_ = on; }
     // Level of detail (docs/research/rt-lod.md; rt.lod_range / rt.lod_bias): beyond `rangeMetres` from the camera an instance of
     // a static mesh / SpeedTree branch BLAS is traced through a proxy of the same vertices with fewer triangles (index list from
     // meshoptimizer's simplifier on a worker thread, own BLAS; 1/2, 1/4, 1/8 of the triangles for bias 1..3). range 0 or bias 0
@@ -382,6 +386,7 @@ private:
     void destroySkin();
     std::vector<SkinJob> skinJobs_;
     std::unordered_set<std::uint64_t> skinLogged_;
+    bool characterMotion_ = false;
     bool skinWanted_ = false, skinVerify_ = false, skinReady_ = false, skinFailed_ = false, skinStarted_ = false;
     std::future<std::unique_ptr<rhi::Pipeline>> skinBuild_;  // (built on a worker: Device::createComputePipeline is thread-safe)
     std::unique_ptr<rhi::Pipeline> skinPipe_;
@@ -539,7 +544,7 @@ private:
     struct Interval {
         std::uint64_t holeFrames = 0, holes = 0;  // frames whose dynamic instances fell short of the count (TLAS built over fewer), and by how many
         std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
-        std::uint64_t solidWithSkin = 0, solidNoSkin = 0;
+        std::uint64_t solidWithSkin = 0, solidNoSkin = 0, solidCaptureSkipped = 0;
         std::uint64_t skinIneligible = 0, skinDraws = 0;  // skinned draws of the cascades / pre-pass the skinning pass could not take (morph targets, dynamic buffer) / took
         std::uint64_t charCurrent = 0, charPrevious = 0, charSkinned = 0;  // characters' BLAS refits: from this frame's capture / the previous frame's / of them by the skinning pass
         std::uint64_t capCurrent = 0, capPrevious = 0;  // captures a frame's BLAS refits used: this frame's (the cascades' views) / the previous frame's

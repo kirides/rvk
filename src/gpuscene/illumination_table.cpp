@@ -533,8 +533,16 @@ void IllumTable::flush(d3d9::Device& dev, bool verify) {
             ++stats_.idleFreed;
             ++stats_.freed;
         }
+        // (F-VAR2, frame-ownership.md 7.45: a light set that no hook touched for kSetIdleFrames (a static room's) is still the set of every live illumination that points at it: freeing it
+        // left those records with a dangling set, IllumTable::compose answered "no set" and the owned draws' ambient test went false, ~8 ops per view refused with `variant`)
+        std::vector<std::uint8_t> referenced(setUsed_, 0);
+        for (std::uint32_t s = 0; s < illumUsed_; ++s) {
+            if (illumKey_[s] == nullptr) continue;
+            const std::uint32_t set = illums_.shadow()[s].info[1];
+            if (set < setUsed_) referenced[set] = 1;
+        }
         for (std::uint32_t i = 0; i < setUsed_; ++i) {
-            if (setKey_[i] == nullptr || frame_ - setSeen_[i] < kSetIdleFrames) continue;
+            if (setKey_[i] == nullptr || frame_ - setSeen_[i] < kSetIdleFrames || referenced[i] != 0) continue;
             setKey_[i] = nullptr;
             std::memset(&sets_.shadow()[i], 0, sizeof(LightSetRecord));
             sets_.mark(i);

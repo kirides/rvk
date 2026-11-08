@@ -139,6 +139,7 @@ public:
     // d3d9::DrawObserver: the frame's light constants (P0)
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
     bool ownedTreesOk() const override { return true; }  // (F-VAR: tallies registers only, never asks for a capture)
+    bool ownedVegOk() const override { return true; }  // (F-VAR2: tallies registers only; the owned vegetation batches are shown through ownedVegObserve)
     Registers registersRead() const override { return Registers::MaterialLighting; }  // F-VAR: the ambient / sun / point-light / indoor registers (PS window 3, composed from the illumination table for an owned draw)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
 

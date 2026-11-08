@@ -51,9 +51,52 @@ bool Device::ownedTreeObserversOk() const {
 
 bool Device::ownedVegObserversOk() const {
     for (const DrawObserver* o : observers_) {
-        if (o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::Solid}) || o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass})) return false;
+        if (o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::Solid}) || o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass})) {
+            // (F-VAR2: an observer that reads the material / lighting registers only and never asks for a capture is shown each owned batch through ownedVegObserve)
+            if (!o->ownedVegOk()) return false;
+            const DrawObserver::Registers r = o->registersRead();
+            if (r == DrawObserver::Registers::All) return false;
+            if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return false;
+        }
     }
     return true;
+}
+
+std::uint32_t Device::ownedVegObserve(const CachedDraw& c, const OwnedWindows& ow, std::uint32_t instances) {
+    if (!c.valid || instances == 0) return 0;
+    struct Scope {
+        Device& d;
+        const OwnedWindows* savedOwned;
+        Scope(Device& dev, const OwnedWindows* o) : d(dev), savedOwned(dev.owned_) {
+            d.owned_ = o;
+            d.ownedReplay_ = true;
+        }
+        ~Scope() {
+            d.owned_ = savedOwned;
+            d.ownedReplay_ = false;
+        }
+    } scope(*this, &ow);
+    if (vertexShader() != c.vs) setVertexShaderRef(ShaderRef(const_cast<Shader*>(c.vs)));
+    if (pixelShader() != c.ps) setPixelShaderRef(ShaderRef(const_cast<Shader*>(c.ps)));
+    loadOwnedRegisters(ow);
+    ReplaceQuery q = c.query;
+    q.tag = &tag_;
+    q.textures = c.tex;
+    q.mainView = firings_.mainViews();
+    q.objectRows = nullptr;
+    q.instances = instances;
+    captureRequest_ = {};
+    captureRequestRw_ = {};
+    captureInstances_ = false;
+    const CoverQuery cq = coverOf(q);
+    for (std::size_t i = 0; i < observers_.size(); ++i) {
+        DrawObserver* o = observers_[i];
+        if (!o->observes(c.kind, c.phase)) continue;
+        if (o->coversDraw(cq)) continue;
+        o->observe(*this, q);
+    }
+    captureRequest_ = {};
+    return 1;
 }
 
 bool Device::ownedTreeObserved(const CachedDraw& c) const {

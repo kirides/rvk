@@ -662,8 +662,16 @@ std::uint32_t StaticOps::vegPass(bool solid) {
         cursor = get<std::uint32_t>(vadmin, 0x40);
         dev_.setSceneIssue(true);
     };
+    // (F-VAR2: the observers of the main view's vegetation, GI / material RT, are shown each owned batch with the lighting entry it was composed with)
+    static float savedVs[d3d9::kVsFloatConsts][4], savedPs[d3d9::kPsFloatConsts][4];
+    bool regsSaved = false;
     const auto restore = [&] {
         dev_.setSceneIssue(false);
+        if (regsSaved) {
+            dev_.setVertexShaderConstantF(0, savedVs[0], d3d9::kVsFloatConsts);
+            dev_.setPixelShaderConstantF(0, savedPs[0], d3d9::kPsFloatConsts);
+            regsSaved = false;
+        }
         tag = savedTag;
         dev_.setVertexShaderRef(vsSaved);
         dev_.setPixelShaderRef(psSaved);
@@ -1003,10 +1011,34 @@ std::uint32_t StaticOps::vegPass(bool solid) {
                 item.cd = tpl.r.cd.get();
                 item.bucket = tpl.devBucket;
                 recKeys.clear();
+                const bool observed = solid && tpl.r.persist.valid && dev_.ownedTreeObserved(*tpl.r.cd);
                 for (const auto& [p, b] : run.bat) {
                     const OpPlan& pl = plans[p];
                     const vro::Batch& bt = pl.batches[b];
                     const std::uint32_t entry = pl.entries[b];
+                    if (observed) {
+                        if (!regsSaved) {
+                            std::memcpy(savedVs, dev_.vsConstants(), sizeof(savedVs));
+                            std::memcpy(savedPs, dev_.psConstants(), sizeof(savedPs));
+                            regsSaved = true;
+                        }
+                        const Op& vop = ops[pl.opIndex];
+                        tag.source = d3d9::draws::Source::Vegetation;
+                        tag.context = vop.raw.context;
+                        tag.entity = vop.entity != nullptr ? vop.entity : ptr(vop.raw.context, 0x10);
+                        tag.opDesc = vop.raw.desc;
+                        tag.subMesh = tpl.r.tagSubMesh;
+                        tag.material = tpl.r.tagMaterial;
+                        tag.meshResource = tpl.r.tagMeshResource;
+                        tag.water = static_cast<d3d9::draws::Water>(tpl.r.tagWater);
+                        tag.materialName = tpl.r.tagMaterialName;
+                        d3d9::OwnedWindows vow = tpl.r.persist.ow;
+                        d3d9::OwnedWindows::Win& lw = vow.w[1][3];
+                        lw.kind = d3d9::OwnedWindows::Kind::Lighting;
+                        lw.image = nullptr;
+                        lw.lightEntry = entry;
+                        W.observed += dev_.ownedVegObserve(*tpl.r.cd, vow, bt.count);
+                    }
                     std::uint32_t rec = ~0u;
                     for (const RecKey& k : recKeys) {
                         if (k.plan == p && k.entry == entry) {
@@ -1100,11 +1132,11 @@ void StaticOps::vegReport() {
     V.tt.add(d);
     const double ms = 1e-6;
     spdlog::info("native: owned vegetation draws (5 s): views {} ({} owned, {} composed); ops: {} seen, {} taken, {} drawn, {} late (no record {}, stamp {}, view {}, material {}, plan {}, read {}, special {}, no template {}, template {} [rc 1 {} 2 {} 3 {}], flush {}); "
-                 "{} batches / {} instances in {} flushes ({} commands, {} records); records built {} replaced {} not retained {} bad {} (by reason: {} {} {} {} {} {} {} {}); "
+                 "{} batches / {} instances in {} flushes ({} commands, {} records, {} batches shown to observers); records built {} replaced {} not retained {} bad {} (by reason: {} {} {} {} {} {} {} {}); "
                  "templates derived {} reused {} refused {}; converted instances reused {} rebuilt {}; resources moved {}; check frames: {} ops {} batches, DIFFERING plan {} template {} registers {} converted {} count {}, MISS {} (of {}); "
                  "CPU ms: pass {:.2f} (nodes {:.2f} read {:.2f} plan {:.2f} flush {:.2f} side {:.2f}) record {:.2f}; total ops {} drawn {} late {}, DIFFERING {}",
                  q.views, q.ownedViews, q.compViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateRead, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.rcBy[1], q.rcBy[2], q.rcBy[3],
-                 q.lateFlush, q.batches, q.instances, q.flushes, q.items, q.records, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.badBy[7],
+                 q.lateFlush, q.batches, q.instances, q.flushes, q.items, q.records, q.observed, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.badBy[7],
                  d.derived, d.reused, d.refused, q.convReused, q.convRebuilt, q.moved, q.checkOps, q.checkBatches, q.checkPlanDiff, q.checkTplDiff, q.checkRegDiff, q.checkConvDiff, q.checkCountDiff, d.checkMiss, d.checkMissCompared,
                  static_cast<double>(q.passNs) * ms, static_cast<double>(q.nodeNs) * ms, static_cast<double>(q.readNs) * ms, static_cast<double>(q.planNs) * ms, static_cast<double>(q.flushNs) * ms, static_cast<double>(q.sideNs) * ms,
                  static_cast<double>(q.recNs) * ms, t.opsSeen, t.opsDrawn, t.opsLate,

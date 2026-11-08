@@ -363,7 +363,10 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
     float jx = 0.0f, jy = 0.0f;
     geometryJitter(jx, jy);
     const bool jit = jx != 0.0f || jy != 0.0f;
-    if (jit && (alphaDither_ || cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f) > 0.0f)) return 8;
+    // (F-VAR2: the thickened cut-out is constant per environment -- strength x render scale, in the env hash -- and goes into the block's alphaFunc like the plain path does;
+    // the hashed cut-out's noise phase changes every frame (bits 16..21 of the same word): a persistent record cannot hold it, such draws stay composed)
+    if (jit && alphaDither_) return 8;
+    const float thicken = jit ? cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f) : 0.0f;
     for (std::uint32_t i = 0; i < 4; ++i) {
         if (((c.streamMask >> i) & 1u) == 0) continue;
         if (in.streams[i] == nullptr) return 6;
@@ -407,6 +410,7 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
         currentPosFix(b.posFix, jx2, jy2);
     }
     b.alphaFunc = in.alphaFunc;
+    if (thicken > 0.0f) b.alphaFunc |= shader::abi::kAlphaThicken | (static_cast<std::uint32_t>(thicken * 255.0f + 0.5f) << 24);
     b.alphaRef = in.alphaRef;
     if (c.v.giDraw && giDraws_.on && giDraws_.replaceLightmaps) {
         for (const Semantic sem : {Semantic::LightMap1, Semantic::LightMap2}) {

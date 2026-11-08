@@ -1375,6 +1375,101 @@ mov oC0, r0
             fillSlot(3, regs[0], false);
             (void)run("ownedv2_jit_stale", 3, 3, 19, "jitter not in the slot");
             std::printf("  owned replay v2 jitter: %u bytes moved by the jitter, owned draws equal\n", moved);
+            // 1c. F-VAR2 (frame-ownership.md 7.45): upscale.cutout_thicken under jitter. The thickened cut-out is a flag word in the DrawBlock's alphaFunc (constant per environment);
+            // an owned draw must carry it like the normal draw does. Quads with an alpha gradient + a GREATER alpha test: the threshold drops where the alpha changes fast
+            {
+                std::vector<Vertex> v2 = verts;
+                for (std::uint32_t k = 0; k < kQuads; ++k) {
+                    for (std::uint32_t j = 0; j < 4; ++j) {
+                        Vertex& v = v2[4 * k + j];
+                        v.color = (v.color & 0x00FFFFFFu) | ((j & 1u) != 0 ? 0xFF000000u : 0x00000000u);
+                    }
+                }
+                auto vb2 = dev.createBuffer(static_cast<std::uint32_t>(v2.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+                std::memcpy(vb2->lock(0, 0, 0), v2.data(), v2.size() * sizeof(Vertex));
+                vb2->unlock();
+                const auto alphaTest = [&](bool on) {
+                    dev.setRenderState(RS_ALPHATESTENABLE, on ? 1 : 0);
+                    dev.setRenderState(RS_ALPHAFUNC, CMP_GREATER);
+                    dev.setRenderState(RS_ALPHAREF, 0x40);
+                };
+                const auto draws2 = [&](const char* name) {
+                    begin();
+                    dev.setStreamSource(0, vb2.get(), 0, sizeof(Vertex));
+                    alphaTest(true);
+                    setRegs(regs[0]);
+                    for (std::uint32_t k = 0; k < kQuads; ++k) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+                    const Pixels p = end(name);
+                    alphaTest(false);
+                    return p;
+                };
+                dev.setCutoutThicken(0.0f);
+                dev.setRenderRatio(1.0f);
+                const Pixels plain = draws2("ownedv2_thick_plain");
+                dev.setRenderRatio(2.0f);
+                dev.setCutoutThicken(1.0f);
+                const Pixels thick = draws2("ownedv2_thick_ref");
+                std::uint32_t changed = 0;
+                for (std::size_t i = 0; i < plain.bgra.size() && i < thick.bgra.size(); ++i) changed += plain.bgra[i] != thick.bgra[i];
+                if (changed == 0) {
+                    std::printf("  FAIL owned replay v2 thicken: the thickened cut-out did not change the normal draws\n");
+                    ++g_failures;
+                }
+                std::vector<Device::CachedDraw> cd2(kQuads);
+                bool ready2 = false;
+                for (int i = 0; i < 1200 && !ready2; ++i) {
+                    begin();
+                    dev.setStreamSource(0, vb2.get(), 0, sizeof(Vertex));
+                    alphaTest(true);
+                    setRegs(regs[0]);
+                    dev.setSceneIssue(true);
+                    for (std::uint32_t k = 0; k < kQuads; ++k) {
+                        dev.beginCapture(&cd2[k]);
+                        dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+                        dev.endCapture();
+                    }
+                    end("ownedv2_thick_capture");
+                    alphaTest(false);
+                    ready2 = true;
+                    for (const auto& c : cd2) ready2 = ready2 && c.valid && c.scenePipeline != GamePipeline::None && c.scenePipeline2 != GamePipeline::None;
+                    if (!ready2) Sleep(50);
+                }
+                if (!ready2) {
+                    std::printf("  FAIL owned replay v2 thicken: the draws never got their v2 pipelines\n");
+                    ++g_failures;
+                } else {
+                    dev.phases().push(scene::View::Main, scene::Pass::Solid);
+                    fillSlot(3, regs[0], false);
+                    dev.phases().pop();
+                    const auto t0 = dev.ownedReplayStats;
+                    begin();
+                    dev.setStreamSource(0, vb2.get(), 0, sizeof(Vertex));
+                    dev.setSceneIssue(true);
+                    const OwnedWindows ow = windowsOf(3);
+                    for (std::uint32_t k = 0; k < kQuads; ++k) {
+                        Device::DeriveIn in;
+                        in.streams[0] = vb2.get();
+                        in.strides[0] = sizeof(Vertex);
+                        in.indices = ib.get();
+                        in.alphaFunc = CMP_GREATER;
+                        in.alphaRef = static_cast<float>(0x40);
+                        std::memcpy(in.psC5, regs[0].ps5, sizeof(in.psC5));
+                        const int rc = dev.replayOwned(cd2[k], in, ow);
+                        if (rc != 0) {
+                            std::printf("  FAIL owned replay v2 thicken: quad %u returned %d\n", k, rc);
+                            ++g_failures;
+                        }
+                    }
+                    same(thick, end("ownedv2_thick_owned"), "eight owned draws with the thickened cut-out");
+                    if (dev.ownedReplayStats.drawnV2 - t0.drawnV2 != kQuads) {
+                        std::printf("  FAIL owned replay v2 thicken: %llu of %u draws were owned\n", static_cast<unsigned long long>(dev.ownedReplayStats.drawnV2 - t0.drawnV2), kQuads);
+                        ++g_failures;
+                    }
+                    std::printf("  owned replay v2 thicken: %u bytes moved by the thickened cut-out, owned draws equal\n", changed);
+                }
+                dev.setCutoutThicken(0.0f);
+                dev.setRenderRatio(1.0f);
+            }
         }
         dev.setJitterSource(nullptr);
         dev.tagImage(hdr, scene::ImageRole::None);
