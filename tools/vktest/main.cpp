@@ -556,7 +556,7 @@ int skinTest() {
         }
     }
     vk::rt::AddressBuffer vb[2], bb[2], out[2], table, mb[3];
-    bool ok = table.create(ctx, 16 + 128 * 2, kUse, true, 16, "test skin table");
+    bool ok = table.create(ctx, 16 + 64 * 2 + 48, kUse, true, 16, "test skin table");
     for (int k = 0; k < 3 && ok; ++k) {
         if (morphStride[k] == 0) continue;
         ok = mb[k].create(ctx, morphData[k].size(), kUse, true, 16, "test skin morph");
@@ -578,8 +578,8 @@ int skinTest() {
     t[0] = 2;
     std::uint32_t chunk = 0;
     for (int j = 0; j < 2; ++j) {
-        std::uint32_t* w = t + 4 + 32 * j;
-        std::memset(w, 0, 32 * sizeof(std::uint32_t));
+        std::uint32_t* w = t + 4 + 16 * j;
+        std::memset(w, 0, 16 * sizeof(std::uint32_t));
         const Layout& l = layouts[j];
         w[0] = static_cast<std::uint32_t>(vb[j].address);
         w[1] = static_cast<std::uint32_t>(vb[j].address >> 32);
@@ -594,15 +594,20 @@ int skinTest() {
         w[12] = l.pos | (l.bw << 8) | (l.bi << 16) | (l.tc << 24);
         w[13] = w[14] = w[15] = 0;
         if (j == 1) {
+            std::uint32_t* m = t + 4 + 16 * 2;  // (the morph block after the two jobs)
+            std::memset(m, 0, 48);
             for (int k = 0; k < 3; ++k) {
                 if (morphStride[k] == 0) continue;
                 w[9] |= 1u << k;
-                w[16 + 2 * k] = static_cast<std::uint32_t>(mb[k].address);
-                w[17 + 2 * k] = static_cast<std::uint32_t>(mb[k].address >> 32);
+                m[2 * k] = static_cast<std::uint32_t>(mb[k].address);
+                m[2 * k + 1] = static_cast<std::uint32_t>(mb[k].address >> 32);
             }
-            w[22] = morphStride[0] | (morphStride[1] << 8) | (morphStride[2] << 16);
-            w[23] = morphOff[0] | (morphOff[1] << 8) | (morphOff[2] << 16);
-            std::memcpy(&w[24], morphW, 12);
+            m[6] = morphStride[0] | (morphStride[1] << 8) | (morphStride[2] << 16);
+            m[7] = morphOff[0] | (morphOff[1] << 8) | (morphOff[2] << 16);
+            std::memcpy(&m[8], morphW, 12);
+            const VkDeviceAddress ma = table.address + 16 + 64 * 2;
+            w[13] = static_cast<std::uint32_t>(ma);
+            w[14] = static_cast<std::uint32_t>(ma >> 32);
         }
         chunk += (l.slots + 63) / 64;
     }

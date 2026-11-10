@@ -119,7 +119,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     // 14.13 (native.bone_motion): the draw takes the bone-motion forms: its previous positions come from the bone table's history, no capture
     // (14.15 b, native.rigid_motion: a static mesh's draw with the object table's history likewise)
-    if ((q.kind == Kind::Skinned || q.kind == Kind::StaticMesh) && dev.boneMotionCovered()) {
+    if ((q.kind == Kind::Skinned || isRigid(q.kind)) && dev.boneMotionCovered()) {
         ++boneDraws_;
         dev.noteCaptureAvoided(q.kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(q));
         return;
@@ -181,9 +181,10 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (isRigid(q.kind)) {
         // a rigid draw is captured while its placement changes (and a few frames after)
         std::uint64_t h = 1469598103934665603ull;
-        for (std::uint32_t r = 0; r < kRigidRegs; ++r) {
+        const bool old = d3d9::Device::nocapOld();  // (the hash before 14.15: c31..c37 of the register file)
+        for (std::uint32_t r = 0; r < (old ? 7u : kRigidRegs); ++r) {
             // (an owned draw's rows as the object table holds them: its register file is not loaded for every register)
-            const float* c = q.objectRows != nullptr ? q.objectRows + 4 * r : dev.vsConstant(kRigidFirstReg + r);
+            const float* c = old ? dev.vsConstant(31 + r) : q.objectRows != nullptr ? q.objectRows + 4 * r : dev.vsConstant(kRigidFirstReg + r);
             std::uint32_t bits[4];
             std::memcpy(bits, c, sizeof(bits));
             for (std::uint32_t b : bits) h = mix(h, b);

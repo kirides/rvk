@@ -2246,6 +2246,10 @@ bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeight
     }
     // (c31 is the morph weights only for a layout with morph streams: other skinned shaders leave it to whatever the register file holds)
     const bool morphLayout = morph[0] >= 0 || morph[1] >= 0 || morph[2] >= 0;
+    if (morphLayout && d3d9::Device::nocapOld() &&
+        (std::fabs(morphWeights[0]) > 1e-6f || std::fabs(morphWeights[1]) > 1e-6f || std::fabs(morphWeights[2]) > 1e-6f)) {
+        return false;  // (RVK_NOCAP_OLD: active morph targets kept the vertex shader capture)
+    }
     for (std::uint32_t k = 0; k < 3 && morphLayout; ++k) {
         const bool active = std::fabs(morphWeights[k]) > 1e-6f;
         if (morph[k] < 0) {
@@ -2644,7 +2648,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(skinJobs_.size(), 512));
     std::uint32_t chunks = 0;
     for (std::uint32_t i = 0; i < n; ++i) chunks += (skinJobs_[i].slots + 63) / 64;
-    const rhi::RingAlloc t = dev_.ring(16 + 128ull * n, 16);  // (8 uint4 per job: rt_skin.comp.hlsl)
+    const rhi::RingAlloc t = dev_.ring(16 + 64ull * n + 48ull * n, 16);  // (4 uint4 per job, then a 3-uint4 morph block per job: rt_skin.comp.hlsl)
     if (t.ptr == nullptr) {
         skinJobs_.clear();
         return;
@@ -2695,7 +2699,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     std::uint32_t chunk = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
         const SkinJob& j = skinJobs_[i];
-        std::uint32_t* w = jobs + 32ull * i;
+        std::uint32_t* w = jobs + 16ull * i;
         w[0] = j.vertices.low();
         w[1] = j.vertices.high();
         w[2] = j.bones.low();
@@ -2710,19 +2714,25 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         w[11] = j.ref.high();
         w[12] = j.offsets;
         w[13] = w[14] = w[15] = 0;
-        // 14.15 c: the morph targets (rt_skin.comp.hlsl job words 4 .. 6)
+        // 14.15 c: the morph targets (rt_skin.comp.hlsl: the job's morph block after the job table)
         w[9] = j.morphMask;
-        w[16] = j.morph[0].low();
-        w[17] = j.morph[0].high();
-        w[18] = j.morph[1].low();
-        w[19] = j.morph[1].high();
-        w[20] = j.morph[2].low();
-        w[21] = j.morph[2].high();
-        w[22] = j.morphStride[0] | (j.morphStride[1] << 8) | (j.morphStride[2] << 16);
-        w[23] = j.morphOff[0] | (j.morphOff[1] << 8) | (j.morphOff[2] << 16);
-        std::memcpy(&w[24], j.morphWeight, 3 * sizeof(float));
-        w[27] = 0;
-        w[28] = w[29] = w[30] = w[31] = 0;
+        if (j.morphMask != 0) {
+            const std::uint64_t at = 16 + 64ull * n + 48ull * i;
+            std::uint32_t* m = static_cast<std::uint32_t*>(t.ptr) + at / 4;
+            m[0] = j.morph[0].low();
+            m[1] = j.morph[0].high();
+            m[2] = j.morph[1].low();
+            m[3] = j.morph[1].high();
+            m[4] = j.morph[2].low();
+            m[5] = j.morph[2].high();
+            m[6] = j.morphStride[0] | (j.morphStride[1] << 8) | (j.morphStride[2] << 16);
+            m[7] = j.morphOff[0] | (j.morphOff[1] << 8) | (j.morphOff[2] << 16);
+            std::memcpy(&m[8], j.morphWeight, 3 * sizeof(float));
+            m[11] = 0;
+            const rhi::GpuRef mr = t.ref.plus(static_cast<std::int64_t>(at));
+            w[13] = mr.low();
+            w[14] = mr.high();
+        }
         chunk += (j.slots + 63) / 64;
         skinVerticesTotal_ += j.slots;
     }

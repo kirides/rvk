@@ -26,14 +26,13 @@ struct SkinErr {
     uint pad;
 };
 
-// job[8 j + 0] = (vertex 0's address lo, hi, bones lo, hi)
-// job[8 j + 1] = (output lo, hi, slots, vertex stride in bytes)
-// job[8 j + 2] = (first chunk, morph targets, reference capture lo, hi)   (the reference: a capture variant's output of the same draw)
-// job[8 j + 3] = (offsets: position | blend weight << 8 | blend indices << 16 | texcoord0 << 24, 0, 0, 0)
-// job[8 j + 4] = (morph target 1's vertex 0 lo, hi, target 2's lo, hi)         (14.15 c: POSITION1..3 F3 in streams 1..3, the heads')
-// job[8 j + 5] = (target 3's lo, hi, strides s1 | s2 << 8 | s3 << 16, position offsets o1 | o2 << 8 | o3 << 16)
-// job[8 j + 6] = (weights c31.x, .y, .z as float bits, 0); job[8 j + 2].y = the targets read (bit k = target k + 1)
-// job[8 j + 7] = reserved
+// job[4 j + 0] = (vertex 0's address lo, hi, bones lo, hi)
+// job[4 j + 1] = (output lo, hi, slots, vertex stride in bytes)
+// job[4 j + 2] = (first chunk, morph targets, reference capture lo, hi)   (the reference: a capture variant's output of the same draw)
+// job[4 j + 3] = (offsets: position | blend weight << 8 | blend indices << 16 | texcoord0 << 24, morph block lo, hi, 0)
+// 14.15 c, the morph targets (POSITION1..3 F3 in streams 1..3, the heads'): job[4 j + 2].y = the targets read (bit k = target k + 1), the morph block (3 uint4):
+//   m[0] = (target 1's vertex 0 lo, hi, target 2's lo, hi), m[1] = (target 3's lo, hi, strides s1 | s2 << 8 | s3 << 16, position offsets o1 | o2 << 8 | o3 << 16),
+//   m[2] = (weights c31.x, .y, .z as float bits, 0)
 //   position = v0 + d1 * w.x + d2 * w.y + d3 * w.z   (the VS: `mad r0.xyz, v8, c31.x, r0` in that order), then skinned
 static const uint BONE_COUNT = 66;  // c33 .. c230: 3 b + 3 <= 199 constants after c32
 
@@ -51,18 +50,19 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     uint lo = 0u, hi = jobs;
     while (hi - lo > 1u) {
         uint mid = (lo + hi) >> 1;
-        if (jobWord(table, 8u * mid + 2u).x <= g) lo = mid; else hi = mid;
+        if (jobWord(table, 4u * mid + 2u).x <= g) lo = mid; else hi = mid;
     }
-    uint4 j0 = jobWord(table, 8u * lo), j1 = jobWord(table, 8u * lo + 1u), j2 = jobWord(table, 8u * lo + 2u), j3 = jobWord(table, 8u * lo + 3u);
+    uint4 j0 = jobWord(table, 4u * lo), j1 = jobWord(table, 4u * lo + 1u), j2 = jobWord(table, 4u * lo + 2u), j3 = jobWord(table, 4u * lo + 3u);
     uint slot = (g - j2.x) * 64u + lid.x;
     uint slots = j1.z;
     if (slot >= slots) return;
     RvkAddr v = rvkAddrAdd(rvkAddr(j0.xy), slot * j1.w);
     uint oPos = j3.x & 0xFFu, oBw = (j3.x >> 8) & 0xFFu, oBi = (j3.x >> 16) & 0xFFu, oTc = (j3.x >> 24) & 0xFFu;
     float4 p = float4(vfloat(v, oPos), vfloat(v, oPos + 4u), vfloat(v, oPos + 8u), 1.0);
-    if (j2.y != 0u) {
+    if (j2.y != 0u && any(j3.yz != uint2(0u, 0u))) {
         // the morph targets (14.15 c), in the vertex shader's order
-        uint4 j4 = jobWord(table, 8u * lo + 4u), j5 = jobWord(table, 8u * lo + 5u), j6 = jobWord(table, 8u * lo + 6u);
+        RvkAddr mb = rvkAddr(j3.yz);
+        uint4 j4 = rvkRawLoad<uint4, 16>(mb), j5 = rvkRawLoad<uint4, 16>(rvkAddrAdd(mb, 16u)), j6 = rvkRawLoad<uint4, 16>(rvkAddrAdd(mb, 32u));
         [unroll] for (uint k = 0u; k < 3u; ++k) {
             if ((j2.y >> k & 1u) == 0u) continue;
             uint2 base = k == 0u ? j4.xy : k == 1u ? j4.zw : j5.xy;

@@ -981,7 +981,7 @@ public:
     // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
     bool boneMotionDraw() const { return obsBone_; }
     // ... or will be once its forms are built (14.15: while they compile the draw keeps the plain form, its motion that frame is the camera's: no capture as fallback)
-    bool boneMotionCovered() const { return obsBone_ || obsBonePending_; }
+    bool boneMotionCovered() const { return obsBone_ || (obsBonePending_ && !nocapOld()); }
     // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
     // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
     void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
@@ -993,7 +993,7 @@ public:
     std::uint32_t boneCompareBit() const;
     struct BoneMotionStats {
         std::uint64_t predicted = 0, chosen = 0, chosen2 = 0, chosenPull = 0, pending = 0, noHistory = 0, records = 0, recordsNoPrev = 0, compareDraws = 0;
-        std::uint64_t rigidPredicted = 0, rigidNoWindow = 0, rigidNoHistory = 0, rigidPending = 0;  // 14.15 b
+        std::uint64_t rigidPredicted = 0, rigidNoWindow = 0, rigidNoHistory = 0, rigidPending = 0, pushPredicted = 0, pushDrawn = 0;  // 14.15 b
         std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
         float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
         float winPx = 0.0f, winWorld = 0.0f, winMotionBone = 0.0f, winMotionCapture = 0.0f, winRerun = 0.0f;
@@ -1679,6 +1679,9 @@ public:
     enum class CaptureKind : std::uint8_t { Static, Instanced, Skinned, Morph, SpeedTree, Vegetation, Billboard, Other, Count };
     enum class CaptureSite : std::uint8_t { Composed, Retained, Owned, Count };
     static CaptureKind captureKindOf(const ReplaceQuery& q);
+    // `-Environment 'RVK_NOCAP_OLD=1'` (14.15 A/B): the capture requests as before 14.15 (object motion's rigid hash over c31..c37, no morph targets in the skinning pass,
+    // a capture while the bone forms build)
+    static bool nocapOld();
     void requestVertexCapture(const rhi::RingAlloc& buffer, bool instances = false, CaptureBy by = CaptureBy::Other, CaptureKind kind = CaptureKind::Other) {
         captureRequest_ = buffer.ref;
         captureRequestRw_ = buffer.rw();
@@ -2156,6 +2159,7 @@ private:
     bool sceneBone_ = false;        // sceneDecide chose the bone-motion forms for the draw being prepared
     bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)
     bool obsBonePending_ = false;   // ... would be, its forms are still being built (boneMotionCovered)
+    rhi::GpuRef bonePushPrev_;      // 14.15 b: the draw being prepared takes the bone-motion PUSH form (an instanced-mesh op): its object record's history base
     CaptureSite obsSite_ = CaptureSite::Composed;  // the path showing the observers the draw (capture census)
     struct CaptureCensus {
         std::uint64_t n[static_cast<std::size_t>(CaptureBy::Count)][static_cast<std::size_t>(CaptureKind::Count)][static_cast<std::size_t>(CaptureSite::Count)] = {};

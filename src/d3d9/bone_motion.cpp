@@ -17,6 +17,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <windows.h>
+
 #include "d3d9/device.h"
 #include "gpuscene/bone_table.h"
 #include "gpuscene/object_table.h"
@@ -163,6 +165,14 @@ void Device::setBoneMotion(int mode) {
     spdlog::info("native: bone motion {}", mode == 1 ? "on (the skinned solid draws' motion from the bone table's history)" : mode == 2 ? "compare (captures + GPU compare)" : "off");
 }
 
+bool Device::nocapOld() {
+    static const bool v = [] {
+        char e[8];
+        return GetEnvironmentVariableA("RVK_NOCAP_OLD", e, sizeof e) > 0 && e[0] == '1';
+    }();
+    return v;
+}
+
 Device::CaptureKind Device::captureKindOf(const ReplaceQuery& q) {
     switch (q.kind) {
         case draws::Kind::StaticMesh: return CaptureKind::Static;
@@ -275,9 +285,10 @@ rhi::GpuRef Device::historyOf(rhi::GpuRef base) const {
 bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
     if (boneMode_ != 1 || phase.view != scene::View::Main || phase.pass != scene::Pass::Solid) return false;
     const bool skinned = kind == draws::Kind::Skinned;
-    const bool rigid = kind == draws::Kind::StaticMesh && rigidMotionOn();  // 14.15 b
+    const bool rigid = (kind == draws::Kind::StaticMesh || kind == draws::Kind::InstancedMesh) && rigidMotionOn();  // 14.15 b
     if (!skinned && !rigid) return false;
-    if (!sceneActive() || !gbuf_.active || gbuf_.motion == nullptr || owned_ == nullptr || vs_.get() == nullptr) return false;
+    const bool push = kind == draws::Kind::InstancedMesh;  // (no scene form for the kind: the push form, prevVs in the push block)
+    if ((!push && !sceneActive()) || !gbuf_.active || gbuf_.motion == nullptr || owned_ == nullptr || vs_.get() == nullptr) return false;
     // (the forms' validity word is chosen per shader (boneVsOptions): a palette-indexing shader reads a bone image's c231, any other an object record's c36; a shader
     // whose addressing does not match its window's table never takes the forms: an object record read at c231 would leave the record, GPU safety)
     if (vs_->reflection.relativeConstants != skinned) {
@@ -299,6 +310,18 @@ bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
             ++boneStats.rigidNoHistory;
             return false;
         }
+    }
+    if (push) {
+        const rhi::ShaderModule vsB = variant(vs_, VariantSlot::BoneVs);
+        const rhi::ShaderModule psM = ps_.get() != nullptr ? variant(ps_, gbufferSlot(true)) : rhi::ShaderModule::None;
+        if (vsB == rhi::ShaderModule::None || psM == rhi::ShaderModule::None) {
+            ++boneStats.rigidPending;
+            obsBonePending_ = true;
+            return false;
+        }
+        bonePushPrev_ = gpuscene::objecttable().prevOf(owned_->w[0][2].base);
+        ++boneStats.pushPredicted;
+        return true;
     }
     if (!boneFormsReady()) {
         ++(skinned ? boneStats.pending : boneStats.rigidPending);
@@ -355,9 +378,10 @@ void Device::boneMotionFrame() {
                      s.predicted - p.predicted, s.pending - p.pending, s.noHistory - p.noHistory, s.chosen - p.chosen, s.chosen2 - p.chosen2, s.chosenPull - p.chosenPull,
                      s.records - p.records, s.recordsNoPrev - p.recordsNoPrev, bonePipes_.size());
         if (rigidMode_) {
-            spdlog::info("native: rigid motion (5 s): {}; static solid draws predicted {} (no object window {}, no history {}, forms pending {})",
+            spdlog::info("native: rigid motion (5 s): {}; static solid draws predicted {} (no object window {}, no history {}, forms pending {}); instanced-mesh draws "
+                         "with the push form predicted {}, drawn {}",
                          rigidMotionOn() ? "on" : "waiting for upscale.object_motion=all", s.rigidPredicted - p.rigidPredicted, s.rigidNoWindow - p.rigidNoWindow,
-                         s.rigidNoHistory - p.rigidNoHistory, s.rigidPending - p.rigidPending);
+                         s.rigidNoHistory - p.rigidNoHistory, s.rigidPending - p.rigidPending, s.pushPredicted - p.pushPredicted, s.pushDrawn - p.pushDrawn);
         }
     } else {
         spdlog::info("native: bone motion compare (5 s): {} capture draws with a bone image; vertices compared {}, max error {:.5f} px / {:.6f} units, {} above 0.01 px, {} without a previous capture; largest motion seen: bone path {:.4f}, captures {:.4f} units; second run on this frame's image vs the first: {:.6f} units",
