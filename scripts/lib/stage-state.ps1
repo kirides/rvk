@@ -39,6 +39,54 @@ function Get-StageWindows([string]$Log) {
     return , $windows
 }
 
+# the stage states of each perf window of a log (scripts/perf-ab.ps1, `perf window <frames> <tag>`, docs/research/performance.md 33): the HAL closes its
+# stats interval right before a window and right after it, so the `native: stages (5 s)` line between `perf: window <tag> closing` and `perf: window <tag> end`
+# covers exactly the window's frames. Returns objects { Tag, Stages (name -> state; empty when the mode has no stage line), Line }.
+function Get-PerfWindowStages([string]$Log) {
+    $out = @()
+    $tag = $null
+    $stages = $null
+    foreach ($line in [System.IO.File]::ReadLines($Log)) {
+        if ($line -match 'perf: window (\S+) closing at frame') { $tag = $Matches[1]; $stages = [ordered]@{}; continue }
+        if ($null -eq $tag) { continue }
+        if ($line -match 'native: stages \(5 s\):\s*(.*)$') {
+            foreach ($m in [regex]::Matches($Matches[1], '(\w+)=((?:active|inactive|INCONSISTENT)\((?:[^()]|\([^()]*\))*\))')) { $stages[$m.Groups[1].Value] = $m.Groups[2].Value }
+            continue
+        }
+        if ($line -match "perf: window $([regex]::Escape($tag)) end at frame") {
+            $out += [pscustomobject]@{ Tag = $tag; Stages = $stages }
+            $tag = $null
+        }
+    }
+    return , $out
+}
+
+# Asserts one perf window's stage states against the arm's 'key=value' settings (the rules of Assert-ArmStages for a single window: a key claimed on must
+# be active or armed, one claimed off inactive, no stage INCONSISTENT). Settings without a stage name are not checked. Throws on a failure.
+function Assert-WindowStages($Window, [string[]]$Settings, [string]$Arm = '', [switch]$Quiet, [switch]$AllowIdle) {
+    $failures = @()
+    foreach ($k in $Window.Stages.Keys) { if ($Window.Stages[$k] -like 'INCONSISTENT*') { $failures += "stage $k is $($Window.Stages[$k])" } }
+    foreach ($s in $Settings) {
+        $kv = $s -split '=', 2
+        if ($kv.Count -ne 2 -or -not $script:StageOfSetting.Contains($kv[0])) { continue }
+        $stage = $script:StageOfSetting[$kv[0]]
+        if ($Window.Stages.Count -eq 0) { $failures += "no 'native: stages' line inside window $($Window.Tag) (Full mode reports it)"; continue }
+        $state = if ($Window.Stages.Contains($stage)) { $Window.Stages[$stage] } else { '(missing)' }
+        $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on', 'compare')
+        # (stricter than Assert-ArmStages: a window lies inside one arm after its settle frames, so an arm claimed on must have ACTED in it;
+        # `inactive(armed, nothing owned in the window)` = the toggle armed the code but nothing ran through it, e.g. native.vertex_pull switched on
+        # at run time: no record is rebuilt pulled; -AllowIdle accepts it for stages that legitimately have nothing in view)
+        if ($want -and $state -notlike 'active*' -and -not ($AllowIdle -and $state -like 'inactive(armed*')) { $failures += "window $($Window.Tag) claims $($kv[0])=on but $stage=$state" }
+        if (-not $want -and $state -like 'active*') { $failures += "window $($Window.Tag) claims $($kv[0])=off but $stage=$state" }
+    }
+    if ($failures.Count -gt 0) {
+        $msg = "STAGE STATE ASSERTION FAILED ($Arm): " + ($failures -join '; ')
+        if (-not $Quiet) { Write-Host $msg -ForegroundColor Red }
+        throw $msg
+    }
+    if (-not $Quiet) { Write-Host "stage states of window '$($Window.Tag)' match its claims" -ForegroundColor Green }
+}
+
 function Get-OwnPostWindows([string]$Log) {
     $out = @()
     foreach ($line in (Select-String -Path $Log -Pattern 'native: own post state \(5 s\): (\w+) \(setting (\d+), code (\d+)\)(.*)')) {

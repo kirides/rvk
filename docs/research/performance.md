@@ -875,3 +875,47 @@ Savegame `Risen_Save_0005`, recipe of 7.24, interleaved before (main de4e0a7) / 
 | Wrapper | 5.42 (5.13 / 5.70) | 4.93 (4.74 / 5.12) | -0.5 (same noise) |
 
 `-CpuProfile` Full (one run each, share of the thread): ntdll 5.13 -> 2.49 % (`RtlAllocateHeap` 1.68 + 0.18 -> 0.77, `RtlFreeHeap` 0.88 -> 0.19: about -0.17 ms), `MaterialPack::adopt` mutex unlock (0.8 %) and `lower` string work (0.36 %) gone from the sites, `lights::collect` 0.52 -> 0.36 %, `LightTable::record` 0.39 -> 0.48 % (sort), `lightKnown` 0.62 -> 0.92 % (binary search instead of hash: slightly worse, 27 searches per tree instance), `safeLoad8` 2.62 -> 2.36 %. Net measured by the profile ~ -0.2 ms; the larger Wrapper delta is mostly noise. Logs / scripts: `rvk-work/scratch/cpuclean/`.
+
+
+## 34. Faster iterations: parallel offline shader checks, in-run A/B perf windows (2026-11-10)
+
+Measured cost of the last four feature agents: 35 - 100 min per feature waiting for game runs (a perf run ~90 s: world at ~20 s, a ~70 s hold; 12+ separate runs = 3 runs x 2 arms x 2 scenes), 33 min of offline shader checks in one feature.
+
+**Offline checks** (`rvk_shadertool`, 16 hardware threads, 14 jobs by default; reports byte-identical before / after apart from the elapsed seconds; stderr banner `rvk_shadertool <cmd>, N jobs by default (tracy: on|off)`):
+
+| check | before | after |
+|---|---|---|
+| `corpus corpus` (2,483 shaders, was serial) | 260 s | 26 s |
+| `corpus corpus --gi` (was serial) | 793 s | 81 s |
+| `dxil-check corpus corpus` (already parallel) | 40 - 83 s (machine load) | 42 s |
+| `dxil-check uber census_jungle + census_town` (3,441 items) | 306 s | 225 s (memo: 271 items repeat an earlier request) |
+| the same, repeated with `--cache <dir>` (nothing changed) | 306 s | **4 s** |
+| `dxil-check embedded` | 14 s | 13 s |
+
+`corpus` now runs translate + DXC + spirv-val per shader on the pool (one `SpirvTools` per item; results land in a slot per file, the report walks them in sorted order: output independent of `-j`). `dxil-check` compiles identical requests once per run (key = file name + DXC arguments + two 64-bit hashes of the text; `--no-memo` off) and both take `--cache <dir>` (dxc's disk cache, each hit validated against every include's text like the renderer's cache; failed compiles are not cached). `-j N` / `-jN` / `--jobs N` everywhere. `tools/ubershader_check.py` / `tools/vs_equiv.py` were already parallel (ThreadPoolExecutor over the requests, `--jobs`): unchanged.
+
+**In-run A/B** (`scripts/perf-ab.ps1`, `tools/perf_ab.py`, `src/core/perf_window.*`): one game session per scene, the arms alternate inside it, each arm measured in a tagged **perf window**:
+- overlay command `perf window <frames> <tag>` (needs `-Perf`): the next `<frames>` recorded frames have their GPU passes timed (the `-PerfFrame` path) and aggregated by pass key (the label without its running number and draw count: `1600x900, 1 colour (100), depth 130` = the main z passes); `perf: window <tag> gpu: N frames timed (of M), main mean ...` + `perf: window <tag> pass mean X ms sd S n K draws D | <key>` once the window's results are back;
+- the HAL closes its 5 s stats interval right before the window's first and right after its last frame (no 5 s cut inside a window), so the `perf:` CPU line, `native: stages (5 s)` and every other interval report between `perf: window <tag> closing at frame F` and `perf: window <tag> end at frame F` cover exactly the window;
+- schedule anchors (overlay `[debug] commands`): `load<k>+N:` = N presents after the k-th loading screen ended (`hold` = rvk_perfsave: k = 2, the savegame's load), `freeze+N:` = N presents after the app state first showed the time freeze (rvkcompare spots); `quit` terminates the process after the last window (no idle hold; perf-ab waits until d3d9.dll is free before the next session);
+- per arm: toggle `set <key> <value>` at t, window at t + Settle (240) for Window (240) frames, next toggle 4 frames after the window's end (a toggle in the present that closes a window showed in its stage line: the first run flagged `INCONSISTENT(setting off, code on)`);
+- per-window stage check (`Get-PerfWindowStages` / `Assert-WindowStages`, `scripts/lib/stage-state.ps1`): stricter than `Assert-ArmStages`: an arm claimed on must be `active` in its window (`-AllowIdle` accepts `armed, nothing owned`).
+- `Flag::Restart` settings (read from `src/core/settings.cpp`) and `-Restart` fall back to one short session per arm and pair (window right after the anchor, then quit).
+
+**Finding: `native.vertex_pull` is not run-time toggleable.** Switched on with `set native.vertex_pull true` mid-run, its stage line says `inactive(armed, nothing owned in the window)`: 0 items pulled (the persistent records are not rebuilt in the pulled form). Every A/B of it needs a restart (`-Restart`); S-4's numbers (frame-ownership.md 14.12) were start-time arms and are not affected.
+
+Validation (private copy `risen-test-vk-iter`, instance 58; player defaults + every owned stage + `debug.ubershader`, as S-4; `RisenTest.exe`, vsync off, uncapped):
+
+| A/B | sessions | wall time | main z (`1600x900 c100`) A -> B | cascades A -> B | GPU frame A -> B |
+|---|---|---|---|---|---|
+| `native.owned_trees` in-run, hold | 1 | 60 s | 0.214 +- 0.007 -> 0.226 +- 0.006 | 0.144 +- 0.008 -> 0.167 +- 0.005 (z 3.5) | 2.36 -> 2.47 |
+| `native.owned_trees` in-run, jungle | 1 | 73 s | 0.425 +- 0.086 -> 0.426 +- 0.008 | 0.262 -> 0.239 | 3.92 +- 0.84 -> 3.51 +- 0.03 |
+| `native.vertex_pull` `-Restart` (lead 300), hold | 6 | 190 s | 0.333 +- 0.008 -> 0.329 +- 0.006 | 0.244 -> 0.249 | 3.64 -> 3.59 |
+| `native.vertex_pull` `-Restart` (lead 300), jungle | 6 | 280 s | 0.547 +- 0.064 -> 0.570 +- 0.084 | 0.314 -> 0.329 | 4.69 +- 0.62 -> 4.79 +- 0.66 |
+| `native.vertex_pull` `-Restart` (lead 1800), hold | 6 | 346 s | 0.334 +- 0.005 -> 0.345 +- 0.012 | 0.251 -> 0.255 | 3.62 -> 3.68 |
+| `native.vertex_pull` `-Restart` (lead 1800), jungle | 6 | 505 s | 0.615 +- 0.036 -> 0.714 +- 0.129 (one B session under machine load: CPU 22 +- 20 ms) | 0.342 -> 0.399 | 5.25 -> 5.92 |
+| S-4 (old way: 12 runs of 90 - 110 s, `-PerfFrame` 24 frames) | 12 | ~21 min | jungle 0.610 -> 0.586, hold 0.333 -> 0.324 | | |
+
+(+- = sd over the 3 windows of an arm.) Two in-run sessions = 131 s for 2 scenes x 3 pairs, against ~21 min for the same design in separate runs (S-4, scratch/s4 timestamps 18:37 - 18:58); the restart fallback = 490 s (lead 300) / 850 s (lead 1800, two sessions slowed by other load on the machine) for 12 sessions, no 70 s hold. **The spread decides**: inside one session the main z sd is 0.006 - 0.008 ms (one jungle A window an outlier: 0.84 ms sd on the frame); between launches it is 0.04 - 0.13 ms at the jungle (GPU clock state, streaming, other agents' load per launch): neither restart series reproduces S-4's jungle main z -0.024 ms (+0.023 +- 0.07, +0.10 +- 0.13), the hold's +-0.01 is inside the noise as in S-4. An in-run A/B resolves 0.02 ms; for restart settings repeat pairs or accept ~0.05 ms. Default leads: 600 frames in-run, 1800 with `-Restart`. Logs: `rvk-work/scratch/iter/pab_trees2`, `pab_pull2`, `pab_pull3`, `pab_smoke`.
+
+**`rvk_rhitest --validation` on D3D12 (time-boxed investigation).** Not our leak: the binary was RVK_TRACY=OFF (banner `rvk_rhitest <exe> (tracy: off)`, `build\CMakeCache.txt RVK_TRACY:BOOL=OFF`); in non-game mode the D3D12 device frees every resource at once (`retire` runs immediately when `gameMode_` is off) and `submitAndWait` reuses one allocator / list. With GBV the run sat at 0.55 GB private bytes through every case up to "texture ops" (~5 min, mostly the abi probe's slow instrumented dispatches), then grew 0.57 -> 7.6 -> 10.5 GB within 4 s. `RVK_ABI_ONLY=1 RVK_RHITEST_PROGRESS=1` (new: one line per abi-probe block and step with the private bytes) pinned it: the process's own bytes were 0.32 GB at the start of the `RvkStageData` dispatch (the largest block: one load per word into the probe image), and the growth to 12 GB happened inside that one `submitAndWait`: the debug layer's GPU-based validation instrumenting / tracking that shader. So `rvk_rhitest --validation` now means, on D3D12, **the debug layer without GPU-based validation** (rhitest sets `RVK_NO_GBV=1` for its devices; banner `validation: ... D3D12 debug layer without GPU-based validation (--gbv adds it)`), and **`--gbv`** is the full one (use it with `RVK_ABI_ONLY` / `RVK_PICTURE_ONLY` / `RVK_PARITY_ONLY` for focused runs). Full `rvk_rhitest --d3d12 --validation`: PASS in 97 s, peak 0.47 GB (was: > 10 GB, never finished); both backends `--validation` PASS in 134 s; `rvk_d3d9test --validation` PASS on Vulkan and D3D12 (0 validation errors).
