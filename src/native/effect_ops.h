@@ -180,6 +180,21 @@ private:
     d3d9::Surface* cmpScratch_ = nullptr;
     d3d9::Surface* cmpTarget_ = nullptr;
     std::string unitTechName_;  // the composed unit's technique name
+    // ---- S-7d (frame-ownership.md 14.18): every composed effect draw on the effect ports (shaders/post/fx; OwnPost::fxPort) ----
+    // one composed draw with the device state already applied (applyDevice(d)): On = drawn with the ports of its vertex / pixel shader (the composed state's
+    // shaders are set back after it, so the O3 "after" prediction stays the engine's); counted per unit kind
+    void drawComposed(const fxc::EffectDraw& d);
+    int fxKind() const;
+    // Compare: the unit's composed draws with the ports into a scratch copy of the target, now (before the engine's draws: the stencil they read is the one
+    // the engine's draws see; single draws read it without writing it, the PSSM sequence writes it back to the 0 it found); compared at finishUnit
+    void fxCompareBegin();
+    void finishFxCompare();
+    std::unique_ptr<fxc::EffectDraw> portPatched_;  // the draw as drawComposed issues it (the own-draw compare's composition)
+    bool portActive_ = false;
+    d3d9::Surface* fxCmpScratch_ = nullptr;
+    d3d9::Surface* fxCmpTarget_ = nullptr;
+    const char* fxCmpName_ = nullptr;
+    std::uint64_t fxCmpSkipped_ = 0;
 
     // ---- N5.7 post chain (effect_ops_post.cpp) ----
     bool verifyPost();

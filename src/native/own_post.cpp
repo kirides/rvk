@@ -98,6 +98,7 @@ OwnPost::~OwnPost() {
         if (t) dev_.release(std::move(t));
     }
     readback_.reset();
+    destroyFxPorts();
 }
 
 void OwnPost::setMode(Mode m) {
@@ -139,7 +140,10 @@ void OwnPost::setMode(Mode m) {
             }
         }
     }
-    if (m != Mode::Off) buildPorts();
+    if (m != Mode::Off) {
+        buildPorts();
+        buildFxPorts();  // S-7d
+    }
     spdlog::info("native: own post: {}", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
 }
 
@@ -363,6 +367,7 @@ void OwnPost::report() {
         spdlog::info("native: own post state (5 s): {} (setting {}, code {}){}", mode_ == Mode::Off ? "inactive" : "active", want, have, want != have ? " INCONSISTENT" : "");
     }
     if (mode_ == Mode::Off) return;
+    reportFx();
     spdlog::info("native: own post (5 s): luminance kernel runs {}, refused {}; compare {} frames, differing {} (rel > 1e-5), max rel {:.3g}, mean rel {:.3g}", stats_.runs,
                  stats_.refused, stats_.compared, stats_.differing, stats_.maxRel, stats_.compared != 0 ? stats_.sumRel / static_cast<double>(stats_.compared) : 0.0);
     static constexpr const char* kNames[kGroupCount] = {"luminance", "bloom chain", "DoF middle", "single units (S-7c)"};

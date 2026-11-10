@@ -204,6 +204,7 @@ bool EffectOps::packedVisual(void* maskPtr, void* mapPtr, bool ok) {
     engineDraws_ = 0;
     taken_ = false;
     leanStats_ = &leanWindow_[unitName_];
+    fxCompareBegin();  // S-7d (Compare): the pass on the ports into a scratch copy of the mask, before the engine's loop
     if (unitTake_) {
         predictAfter(false);
         if (leanUnit()) {
@@ -275,7 +276,7 @@ void EffectOps::issuePssm() {
         d.streams[0].offset = 0;
         applyDevice(d);
         issueIndex_ = k;
-        dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
+        drawComposed(d);
         ++stats_->issuedDraws;
         d.streams[0] = engineStream;
     }
