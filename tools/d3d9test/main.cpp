@@ -396,6 +396,34 @@ void testNoStencilDepth(Fixture& f) {
     f.dev.release(std::move(ds));
 }
 
+// S-6 (native.depth_z): a pass without colour attachment (a NULL colour target + the depth buffer: the sun cascades) draws a pixel shader that only writes colour without any pixel
+// shader; the depth it writes is the same: a full-screen quad behind it (drawn into the back buffer, same depth buffer) shows only where nothing was drawn
+void testDepthOnlyPass(Fixture& f) {
+    TextureDesc nd;
+    nd.width = nd.height = 64;
+    nd.format = rhi::d3dfmt::NULLFMT;
+    nd.usage = USAGE_RENDERTARGET;
+    nd.pool = POOL_DEFAULT;
+    auto nullRt = f.dev.createTexture(nd);
+    f.reset();
+    f.dev.setDepthZ(Device::DepthZ::PsLess);
+    (void)f.dev.takeDepthZStats();
+    f.dev.setRenderTarget(0, nullRt->surface(0, 0));
+    f.draw(quad(-1, -1, 0, 1, 0.3f, 0xFFFF0000));  // the left half: depth only, no colour
+    f.dev.setRenderTarget(0, f.dev.backBuffer());
+    f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFF00FF00));  // everything, farther: hidden where the first quad wrote depth
+    const Pixels p = capture(f.dev, "depth_only_pass");
+    expect("depth-only pass: depth written (the farther quad is hidden)", p, 10, 10, 0x000000);
+    expect("depth-only pass: elsewhere the farther quad shows", p, 50, 10, 0x00FF00);
+    const Device::DepthZStats st = f.dev.takeDepthZStats();
+    if (st.psDropped != 1 || st.psKept != 0) {
+        std::printf("  FAIL depth-only pass: pixel shaders left out %llu (kept %llu), expected 1 (0)\n", static_cast<unsigned long long>(st.psDropped), static_cast<unsigned long long>(st.psKept));
+        ++g_failures;
+    }
+    f.dev.setDepthZ(Device::DepthZ::Off);
+    f.dev.release(std::move(nullRt));
+}
+
 void testDxt1(Fixture& f) {
     // one DXT1 block per 4x4: colour0 = pure red (0xF800), colour1 = pure blue (0x001F), all indices 0 -> red
     TextureDesc d;
@@ -4055,7 +4083,7 @@ int main(int argc, char** argv) {
     const std::pair<const char*, std::function<void(Fixture&)>> cases[] = {
         {"clear", testClear},         {"raster rules", testRasterRules}, {"cull", testCull},
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
-        {"stencil", testStencil}, {"scope clear", testScopeClear}, {"no-stencil depth", testNoStencilDepth},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
+        {"stencil", testStencil}, {"scope clear", testScopeClear}, {"no-stencil depth", testNoStencilDepth}, {"depth-only pass without a pixel shader (S-6)", testDepthOnlyPass},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
         {"instancing", testInstancing}, {"retained instance stream (F7-1)", testRetainedInstanceStream}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},

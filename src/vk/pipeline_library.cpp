@@ -204,6 +204,7 @@ void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBit
 
 VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
     RVK_ZONE("vk::PipelineCache::link");
+    if (d.fs == rhi::ShaderModule::None) return VK_NULL_HANDLE;  // (no fragment shader: built whole)
     VkPipeline libs[4]{};
     {
         // vertex input interface per topology class, fragment output per attachment formats (few of each)

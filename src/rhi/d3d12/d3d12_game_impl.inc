@@ -520,7 +520,7 @@ GamePipeline D3D12DeviceImpl::findPipeline(const PipelineDesc& desc) {
 
 GamePipeline D3D12DeviceImpl::resolvePipeline(const PipelineDesc& desc, bool* created) {
     if (created != nullptr) *created = false;
-    if (desc.vs == ShaderModule::None || desc.fs == ShaderModule::None) return GamePipeline::None;
+    if (desc.vs == ShaderModule::None) return GamePipeline::None;  // (no pixel shader is valid: the colour-less z passes, native.depth_z / S-6)
     {
         const std::shared_lock lock(entryMutex_);
         const auto it = entryIndex_.find(desc);
@@ -565,12 +565,12 @@ D3D12_STENCIL_OP toStencilOp(std::uint32_t o) {
 ComPtr<ID3D12PipelineState> D3D12DeviceImpl::buildPso(const PsoEntry& e, const RasterKey& k) {
     const PipelineDesc& d = e.desc;
     const auto vs = moduleBlob(d.vs);
-    const auto ps = moduleBlob(d.fs);
-    if (!vs || !ps) return nullptr;
+    const auto ps = d.fs != ShaderModule::None ? moduleBlob(d.fs) : nullptr;
+    if (!vs || (d.fs != ShaderModule::None && !ps)) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = rootSignature_.Get();
     pd.VS = {vs->dxil.data(), vs->dxil.size()};
-    pd.PS = {ps->dxil.data(), ps->dxil.size()};
+    if (ps) pd.PS = {ps->dxil.data(), ps->dxil.size()};
     pd.SampleMask = 0xFFFFFFFFu;
     pd.SampleDesc = {1, 0};
     pd.PrimitiveTopologyType = toTopologyType(d.topology);
@@ -631,7 +631,7 @@ ComPtr<ID3D12PipelineState> D3D12DeviceImpl::buildPso(const PsoEntry& e, const R
     ++psoBuilt_;
     if (FAILED(hr)) {
         checkRemoved(hr, "CreateGraphicsPipelineState");
-        spdlog::error("d3d12: CreateGraphicsPipelineState ({} / {}) failed (0x{:08x})", vs->name, ps->name, static_cast<unsigned>(hr));
+        spdlog::error("d3d12: CreateGraphicsPipelineState ({} / {}) failed (0x{:08x})", vs->name, ps ? ps->name : std::string("-"), static_cast<unsigned>(hr));
         return nullptr;
     }
     return pso;

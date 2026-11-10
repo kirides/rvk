@@ -173,6 +173,8 @@ add_library(rvk_core STATIC
     src/enh/debug_view.cpp
     src/enh/picture_check.cpp
     src/enh/picture_check.h
+    src/enh/depth_z.cpp
+    src/enh/depth_z.h
     src/enh/debug_view.h
     src/enh/gi.cpp
     src/enh/gi_reference.cpp

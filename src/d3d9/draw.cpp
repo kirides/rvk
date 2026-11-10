@@ -73,6 +73,22 @@ bool Device::beginRendering(const ScopeClear* clear) {
             continue;
         }
         Texture* t = s->texture();
+        if (i == 0 && depthZ_ == DepthZ::Main && t->role() == scene::ImageRole::DepthMap && phases_.view() == scene::View::Main) {
+            // S-6: the main view's z pre-pass without its R32F colour attachment: DepthZ derives the map from the hardware depth at AfterDepthPrepass
+            // (the same size, float depth, reversed: else the engine's attachment stays)
+            const rhi::Texture* dsT = ds_ != nullptr && !ds_->texture()->isNull() && ds_->texture()->isDepth() ? &ds_->texture()->rhi() : nullptr;
+            const VkFormat df = dsT != nullptr ? dsT->desc().format : VK_FORMAT_UNDEFINED;
+            if (dsT != nullptr && (df == VK_FORMAT_D32_SFLOAT || df == VK_FORMAT_D32_SFLOAT_S8_UINT) && reverseZ_ && ds_->width() >= s->width() &&
+                ds_->height() >= s->height() && s->level() == 0 && s->face() == 0) {
+                targetWidth_ = std::min(targetWidth_, s->width());
+                targetHeight_ = std::min(targetHeight_, s->height());
+                ++depthZStats_.scopesDropped;
+                ++depthZActs_;
+                depthMapDropped_ = true;
+                continue;
+            }
+            ++depthZStats_.scopesRefused;
+        }
         t->lastUseFrame_ = frameValue();
         rhi::RenderingInfo::Attachment& a = ri.color[colorCount_];
         a.texture = &t->rhi();
@@ -120,8 +136,8 @@ bool Device::beginRendering(const ScopeClear* clear) {
         }
         ri.stencil = stencilFormat_ != VK_FORMAT_UNDEFINED;
         // D3D9 lets the depth buffer be larger than the render target
-        targetWidth_ = colorCount_ > 0 ? targetWidth_ : ds_->width();
-        targetHeight_ = colorCount_ > 0 ? targetHeight_ : ds_->height();
+        targetWidth_ = colorCount_ > 0 || targetWidth_ != UINT32_MAX ? targetWidth_ : ds_->width();  // (S-6: a dropped depth map keeps its own size)
+        targetHeight_ = colorCount_ > 0 || targetHeight_ != UINT32_MAX ? targetHeight_ : ds_->height();
     }
     if (colorCount_ == 0 && depthFormat_ == VK_FORMAT_UNDEFINED) {
         // a NULL colour target without a depth buffer: nothing to render into
@@ -1303,6 +1319,23 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
     }
     cv.uberAsked = uberBase;
+    // S-6 (native.depth_z): a draw into a scope without colour attachment (the cascades' maps, the main z pass without its depth map) whose pixel shader has no other effect than
+    // colour (no texkill, no depth write, the alpha test state off) needs no pixel shader: the pipeline is built without one (early-Z, no PS launch)
+    psDropped_ = false;
+    const rhi::ShaderModule fsBeforeDrop = pd.fs;
+    if (depthZ_ != DepthZ::Off && colorCount_ == 0 && depthFormat_ != VK_FORMAT_UNDEFINED && !replaced && tint == 0 && !gbufWrite_) {
+        const shader::Reflection& rf = ps_->reflection;
+        if (!rf.discards && !rf.writesDepth && rs_[RS_ALPHATESTENABLE] == 0) {
+            pd.fs = rhi::ShaderModule::None;
+            psDropped_ = true;
+            ++depthZStats_.psDropped;
+            ++depthZActs_;
+            if (phase.view == scene::View::Main) ++depthZStats_.psDroppedMain;
+        } else {
+            ++depthZStats_.psKept;
+            if (phase.view == scene::View::Main) ++depthZStats_.psKeptMain;
+        }
+    }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     GamePipeline pipeline = GamePipeline::None;
     if (lastPipelineValid_ && sameDesc(pd, lastPipelineDesc_)) {
@@ -1491,7 +1524,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // F2b-1: the main view's static draws issued by the static ops may be drawn as scene draws (scene_draws.cpp); submitPacket makes the packet
     if (sceneActive()) {
-        sceneDecide(pd, giDraw, captureDraw, uberBase != rhi::ShaderModule::None && pd.fs == uberBase, kind, phase, !replaced && tint == 0 && customVertices_ == 0 && geom.indexed && !geom.userPointer);
+        sceneDecide(pd, giDraw, captureDraw, uberBase != rhi::ShaderModule::None && fsBeforeDrop == uberBase, kind, phase, !replaced && tint == 0 && customVertices_ == 0 && geom.indexed && !geom.userPointer,
+                    fsBeforeDrop);
     }
     ++stats_.draws;
     ++stats_.totalDraws;
@@ -2024,6 +2058,14 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
 // ---- reversed infinite depth (docs/research/reverse-z.md) ----------------------------------------------------------------
 
 void Device::setReverseZ(bool on) { reverseZ_ = on; }
+
+void Device::setDepthZ(DepthZ mode) {
+    if (depthZ_ == mode) return;
+    endRendering();  // (the open scope was begun under the old mode)
+    depthZ_ = mode;
+    invalidateRecordingState();
+    ++variantEpoch_;
+}
 
 float Device::reverseDepthK() const {
     const scene::CameraBlock* cam = camera_.valid ? &camera_ : lastCamera_.valid ? &lastCamera_ : nullptr;

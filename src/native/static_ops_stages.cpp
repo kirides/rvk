@@ -50,6 +50,12 @@ void StaticOps::stagesReport() {
     line += stage("owned_vegetation_ops", settingOn(rs.nativeOwnedVegetationOps), ownedVegOps_, vegViews, std::format("{} owned views", vegViews));
     line += stage("clusters", startOn(rs.nativeClusters), gpuscene::clusterstore().active(), gpuscene::clusterstore().active() ? 1 : 0, "store active");
     line += stage("cluster_cull", startOn(rs.nativeClusterCull), dev_.clusterCullOn(), cullJobs, std::format("{} jobs with the cull", cullJobs));
+    // S-6: depth-only z passes (native.depth_z; acted = main z scopes without the depth map attachment + pixel shaders left out in the window)
+    static std::uint64_t lastDepthZ = 0;
+    const std::uint64_t dz = dev_.depthZActs() - lastDepthZ;
+    lastDepthZ = dev_.depthZActs();
+    const bool dzSetting = rs.nativeDepthZ != nullptr && rs.nativeDepthZ->asInt() != 0;
+    line += stage("depth_z", dzSetting, dev_.depthZ() != d3d9::Device::DepthZ::Off, dz, std::format("{} z scopes / pixel shaders without colour output", dz));
     // S-1a: the HLSL ubershader (debug.ubershader; the owned-shader line holds the per-kind counts)
     const bool uberSetting = settingOn(rs.ubershader), uberCode = dev_.ubershader();
     line += std::format(" ubershader={}", uberCode == uberSetting ? (uberCode ? "active(HLSL material shaders)" : "inactive(setting off)") : "INCONSISTENT(setting vs code)");
