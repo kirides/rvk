@@ -326,7 +326,9 @@ VkPipeline PipelineCache::build(const PipelineDesc& d) {
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vkModule(d.vs), "main", nullptr};
-    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, vkModule(d.fs), "main", nullptr};
+    // (a description without a fragment shader: the colour-less z passes whose pixel shader only wrote colour, native.depth_z / S-6)
+    const bool hasFs = d.fs != rhi::ShaderModule::None;
+    if (hasFs) stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, vkModule(d.fs), "main", nullptr};
 
     VkVertexInputBindingDescription bindings[kMaxVertexBindings]{};
     VkVertexInputAttributeDescription attrs[kMaxVertexAttributes]{};
@@ -372,7 +374,7 @@ VkPipeline PipelineCache::build(const PipelineDesc& d) {
     ri.stencilAttachmentFormat = d.stencilFormat;
 
     VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
-    ci.stageCount = 2;
+    ci.stageCount = hasFs ? 2 : 1;
     ci.pStages = stages;
     ci.pVertexInputState = &vi;
     ci.pInputAssemblyState = &ia;

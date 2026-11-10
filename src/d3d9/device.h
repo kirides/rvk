@@ -951,6 +951,32 @@ public:
     // of the main camera), the depth tests and the bias are flipped, the clear value mapped. Applies from the next clear.
     void setReverseZ(bool on);
     bool reverseZ() const { return reverseZ_; }
+    // S-6 (native.depth_z, frame-ownership.md 14.10): `PsLess` = colour-less passes' draws whose pixel shader only writes colour get no pixel shader; `Main` = the main
+    // view's z pre-pass also loses its R32F depth-map attachment (the DepthZ pass derives the map from the hardware depth at AfterDepthPrepass: armed only while that
+    // pass can run). Applied at the next rendering scope
+    enum class DepthZ : std::uint8_t { Off, PsLess, Main };
+    void setDepthZ(DepthZ mode);
+    DepthZ depthZ() const { return depthZ_; }
+    // counters of the last 5 s window for the rvk.log line (render thread)
+    struct DepthZStats {
+        std::uint64_t scopesDropped = 0;     // main z scopes begun without the depth map attachment
+        std::uint64_t scopesRefused = 0;     // ... where the conditions did not hold (the engine's colour attachment stays)
+        std::uint64_t psDropped = 0;         // draws whose pixel shader was left out
+        std::uint64_t psKept = 0;            // colour-less draws that kept it (texkill / depth write / alpha test)
+        std::uint64_t psDroppedMain = 0, psKeptMain = 0;  // ... of them in the main view's z pass (the rest: the shadow views)
+    };
+    // the main view's z pass ran without its depth map attachment (set by the scope, consumed by the DepthZ pass at AfterDepthPrepass: true = the map must be derived)
+    bool takeDepthMapDropped() {
+        const bool d = depthMapDropped_;
+        depthMapDropped_ = false;
+        return d;
+    }
+    std::uint64_t depthZActs() const { return depthZActs_; }  // cumulative: scopes without the attachment + pixel shaders left out (native: stages line)
+    DepthZStats takeDepthZStats() {
+        DepthZStats s = depthZStats_;
+        depthZStats_ = {};
+        return s;
+    }
     // k of the mapping above (the main camera's, as the FrameBlock holds it)
     float reverseDepthK() const;
     // the depth buffer bound now holds reversed depth
@@ -1990,7 +2016,8 @@ private:
     bool sceneActive() const { return sceneIssue_ && sceneDrawsOn_ && sceneAvail_; }
     bool sceneShadows_ = false;
     bool sceneActors_ = false;
-    void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk);
+    void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk,
+                     rhi::ShaderModule fsBeforeDrop);
     // false: an address the scene shader reads is null, the packet stays a normal one. `viewSlot` >= 0: a scene ABI v2 packet (the record carries no view windows, c5w =
     // the bits of the pixel c5.w; the packet's ref stream carries the slot)
     bool toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t viewSlot = -1, std::uint32_t c5w = 0);
@@ -2085,6 +2112,11 @@ private:
     bool splitConstants_ = true;  // debug.split_constants
     bool splitVerify_ = false;    // debug.split_verify
     bool reverseZ_ = true;  // debug.reverse_z
+    DepthZ depthZ_ = DepthZ::Off;  // native.depth_z (S-6)
+    DepthZStats depthZStats_;
+    std::uint64_t depthZActs_ = 0;
+    bool depthMapDropped_ = false;
+    bool psDropped_ = false;  // S-6: the draw being prepared leaves its pixel shader out (scene_draws.cpp reads it)
     mutable float reverseK_ = 0.99f;  // the last k computed from a valid camera
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)
     std::array<std::uint32_t, kSamplerCount> samplerSlotCache_{};

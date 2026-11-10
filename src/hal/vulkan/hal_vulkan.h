@@ -20,6 +20,7 @@
 #include "d3d9/ffshader.h"
 #include "enh/debug_view.h"
 #include "enh/picture_check.h"
+#include "enh/depth_z.h"
 #include "enh/framegen.h"
 #include "enh/gbuffer.h"
 #include "enh/material_pack.h"
@@ -600,6 +601,7 @@ private:
     bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)
     HWND__* window_ = nullptr;  // the game window (start parameters)
     std::unique_ptr<overlay::Overlay> overlay_;
+    std::unique_ptr<enh::DepthZ> depthZ_;  // native.depth_z (S-6, frame-ownership.md 14.10)
     std::unique_ptr<enh::PictureCheck> pictureCheck_;  // native.picture_check (frame-ownership.md 7.47)
     std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)

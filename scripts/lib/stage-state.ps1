@@ -21,6 +21,7 @@ $script:StageOfSetting = [ordered]@{
     'native.clusters'              = 'clusters'
     'native.cluster_cull'          = 'cluster_cull'
     'debug.ubershader'             = 'ubershader'
+    'native.depth_z'               = 'depth_z'
 }
 
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)
@@ -64,7 +65,7 @@ function Assert-ArmStages([string]$Log, [string[]]$Settings, [string]$Arm = "", 
             $kv = $s -split '=', 2
             if ($kv.Count -ne 2 -or -not $script:StageOfSetting.Contains($kv[0])) { continue }
             $stage = $script:StageOfSetting[$kv[0]]
-            $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on')
+            $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on', 'compare')
             $anyActive = $false; $everActive = $false
             foreach ($w in $considered) { if ($w.Contains($stage) -and $w[$stage] -like 'active*') { $anyActive = $true } }
             $lastState = if ($last.Contains($stage)) { $last[$stage] } else { '(missing)' }

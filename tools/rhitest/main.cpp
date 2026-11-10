@@ -69,7 +69,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, picture;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -939,6 +939,184 @@ void testPictureCheck(rhi::Device& dev, const Shaders& sh) {
         });
         run(*colB, *depB, 1, s);
         check(s[0] == 6 && s[2] == 8, std::format("with a NaN pixel: colour {} (want 6), any {} (want 8)", s[0], s[2]));
+    }
+    report(dev, name, before);
+}
+
+// S-6 (frame-ownership.md 14.10): shaders/depth/depth_z.frag.hlsl derives the engine's linear depth map from the hardware depth. Two triangles at known view depths are drawn the way the
+// main view's z pre-pass is under reverse-z (test/depth_z_scene.*): once the old way (R32F colour target = view z / far, cleared 1, + depth) and once colour-less (depth only, a pixel
+// shader without outputs); the hardware depth of each is turned into a map by the derive pass and must equal the old pass's map (relative error, sky = 1 on both). With both backends
+// in one process, the second backend's map must agree with the first's.
+std::vector<float> g_depthZFirst;  // the derived map of the first backend that ran (the cross-backend check)
+
+void testDepthZ(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "depth map derived from the hardware depth (S-6)";
+    if (!sh.dzVs.ok || !sh.dzPsOld.ok || !sh.dzPsNone.ok || !sh.dzFs.ok || !sh.dzDerive.ok) {
+        check(false, "depth_z shaders did not compile");
+        report(dev, name, before);
+        return;
+    }
+    constexpr std::uint32_t kW = 96, kH = 64;
+    constexpr float kFarPlane = 1000.0f, kNearPlane = 10.0f;
+    const auto make = [&](VkFormat f, VkImageUsageFlags u, const char* n) { return dev.createTexture({VK_IMAGE_TYPE_2D, f, {kW, kH, 1}, 1, 1, u, n}); };
+    auto depthA = make(VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, "rhi dz depth A");
+    auto depthB = make(VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, "rhi dz depth B");
+    constexpr VkImageUsageFlags kMapUse = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    auto mapOld = make(VK_FORMAT_R32_SFLOAT, kMapUse, "rhi dz map old");
+    auto mapA = make(VK_FORMAT_R32_SFLOAT, kMapUse, "rhi dz map A");
+    auto mapB = make(VK_FORMAT_R32_SFLOAT, kMapUse, "rhi dz map B");
+    const std::uint32_t pitch = rhi::bufferRowPitch(VK_FORMAT_R32_SFLOAT, kW);
+    const std::uint64_t bytes = static_cast<std::uint64_t>(pitch) * kH;
+    auto readOld = dev.createBuffer({bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi dz read old"});
+    auto readA = dev.createBuffer({bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi dz read A"});
+    auto readB = dev.createBuffer({bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi dz read B"});
+    auto frameBlock = dev.createBuffer({sizeof(shader::abi::FrameBlock), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi dz frame block"});
+    if (!depthA || !depthB || !mapOld || !mapA || !mapB || !readOld || !readA || !readB || !frameBlock) {
+        check(false, "depth_z resource creation");
+        report(dev, name, before);
+        return;
+    }
+    auto* fb = static_cast<shader::abi::FrameBlock*>(frameBlock->map());
+    std::memset(fb, 0, sizeof(*fb));
+    fb->frameInfo[1] = shader::abi::kFrameReverseZ;
+    fb->depthParams[0] = kNearPlane;
+    fb->depthParams[1] = 5000.0f;
+    fb->depthParams[2] = kFarPlane;
+    fb->depthParams[3] = 1.0f / kFarPlane;
+    fb->cameraPos[3] = kFarPlane;
+
+    rhi::GraphicsPipelineDesc g;
+    g.vs = sh.dzVs.shader();
+    g.depthFormat = VK_FORMAT_D32_SFLOAT;
+    g.depthTest = true;
+    g.depthWrite = true;
+    g.depthOp = VK_COMPARE_OP_GREATER_OR_EQUAL;  // reversed
+    g.ps = sh.dzPsOld.shader();
+    g.colorFormats[0] = VK_FORMAT_R32_SFLOAT;
+    g.name = "rhi dz old z pass";
+    auto oldPass = dev.createGraphicsPipeline(g);
+    g.ps = sh.dzPsNone.shader();
+    g.colorFormats[0] = VK_FORMAT_UNDEFINED;
+    g.name = "rhi dz depth only";
+    auto depthOnly = dev.createGraphicsPipeline(g);
+    rhi::GraphicsPipelineDesc d;
+    d.vs = sh.dzFs.shader();
+    d.ps = sh.dzDerive.shader();
+    d.colorFormats[0] = VK_FORMAT_R32_SFLOAT;
+    d.name = "rhi dz derive";
+    auto derive = dev.createGraphicsPipeline(d);
+    if (!oldPass || !depthOnly || !derive) {
+        check(false, "depth_z pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    struct Push {
+        std::uint32_t frame[2], passId, passFlags;
+        std::uint32_t depthTex, mapTex, width, height;
+        std::uint32_t stats[2], pad[2];
+    };
+    static_assert(sizeof(Push) == 48);
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        const auto zPass = [&](rhi::Texture& depth, rhi::Texture* map, rhi::Pipeline& pipe) {
+            cl.transition(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            rhi::RenderingInfo ri;
+            ri.depth.texture = &depth;
+            ri.depth.load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            ri.depth.store = VK_ATTACHMENT_STORE_OP_STORE;
+            ri.depthClear = {0.0f, 0};  // reversed: infinity
+            ri.stencil = false;
+            if (map != nullptr) {
+                cl.transition(*map, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                ri.color[0].texture = map;
+                ri.color[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+                ri.color[0].clear.float32[0] = 1.0f;  // the engine clears the depth map white
+                ri.colorCount = 1;
+            }
+            ri.width = kW;
+            ri.height = kH;
+            cl.beginRendering(ri);
+            cl.bindPipeline(pipe);
+            cl.draw(6, 1, 0, 0);
+            cl.endRendering();
+        };
+        const auto deriveInto = [&](rhi::Texture& depth, rhi::Texture& map) {
+            cl.transition(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+            cl.transition(map, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            rhi::RenderingInfo ri;
+            ri.color[0].texture = &map;
+            ri.color[0].load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+            ri.colorCount = 1;
+            ri.width = kW;
+            ri.height = kH;
+            Push push{};
+            const auto ref = frameBlock->shaderRef(0);
+            push.frame[0] = ref[0];
+            push.frame[1] = ref[1];
+            push.passId = 1;
+            push.depthTex = depth.heapSampled();
+            push.width = kW;
+            push.height = kH;
+            cl.beginRendering(ri);
+            cl.bindPipeline(*derive);
+            cl.setPushConstants(&push, sizeof(push));
+            cl.draw(3, 1, 0, 0);
+            cl.endRendering();
+        };
+        zPass(*depthA, mapOld.get(), *oldPass);  // the engine's z pass: colour + depth
+        zPass(*depthB, nullptr, *depthOnly);     // the colour-less pass: depth only
+        deriveInto(*depthA, *mapA);
+        deriveInto(*depthB, *mapB);
+        for (auto [t, b] : {std::pair<rhi::Texture*, rhi::Buffer*>{mapOld.get(), readOld.get()}, {mapA.get(), readA.get()}, {mapB.get(), readB.get()}}) {
+            cl.transition(*t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cl.copyTextureToBuffer(*b, 0, *t);
+        }
+    });
+    readOld->invalidate();
+    readA->invalidate();
+    readB->invalidate();
+    const auto* po = static_cast<const std::uint8_t*>(readOld->map());
+    const auto* pa = static_cast<const std::uint8_t*>(readA->map());
+    const auto* pb = static_cast<const std::uint8_t*>(readB->map());
+    std::uint32_t geometry = 0, sky = 0, skyBad = 0, bad = 0, ab = 0;
+    double worst = 0.0;
+    std::vector<float> derived(static_cast<std::size_t>(kW) * kH);
+    for (std::uint32_t y = 0; y < kH; ++y) {
+        for (std::uint32_t x = 0; x < kW; ++x) {
+            float o, a, b;
+            std::memcpy(&o, po + static_cast<std::size_t>(y) * pitch + x * 4, 4);
+            std::memcpy(&a, pa + static_cast<std::size_t>(y) * pitch + x * 4, 4);
+            std::memcpy(&b, pb + static_cast<std::size_t>(y) * pitch + x * 4, 4);
+            derived[static_cast<std::size_t>(y) * kW + x] = a;
+            if (std::memcmp(&a, &b, 4) != 0) ++ab;
+            if (o >= 0.9999f) {
+                ++sky;
+                if (a != 1.0f) ++skyBad;  // the clear value: exactly 1
+            } else {
+                ++geometry;
+                const double rel = std::fabs(static_cast<double>(a) - o) / std::max(static_cast<double>(std::min(a, o)), 1e-6);
+                worst = std::max(worst, rel);
+                if (rel > 2e-5) ++bad;
+            }
+        }
+    }
+    std::printf("  depth_z: %u geometry pixels, %u sky pixels; derived vs the z pass: worst relative error %.3e, %u over 2e-5; sky not 1: %u; depth-only vs colour pass: %u pixels differ\n",
+                geometry, sky, worst, bad, skyBad, ab);
+    check(geometry > 800 && sky > 800, std::format("the scene covers {} geometry / {} sky pixels (want > 800 of each)", geometry, sky));
+    check(bad == 0, std::format("{} pixel(s) of the derived map differ from the z pass's by more than 2e-5 (worst {:.3e})", bad, worst));
+    check(skyBad == 0, std::format("{} sky pixel(s) are not exactly 1", skyBad));
+    check(ab == 0, std::format("{} pixel(s) differ between the depth of the colour pass and of the depth-only pass", ab));
+    if (g_depthZFirst.empty()) {
+        g_depthZFirst = derived;
+    } else {
+        std::uint32_t offBy = 0;
+        for (std::size_t i = 0; i < derived.size(); ++i) {
+            if (std::fabs(derived[i] - g_depthZFirst[i]) > 1e-4f * std::max(std::min(derived[i], g_depthZFirst[i]), 1e-6f)) ++offBy;
+        }
+        std::printf("  depth_z: %u of %zu pixels differ by more than 1e-4 between the two backends\n", offBy, derived.size());
+        check(offBy * 200 < derived.size(), std::format("{} pixels differ between the backends (want < 0.5 %)", offBy));
     }
     report(dev, name, before);
 }
@@ -2012,6 +2190,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testIndirectPull(*dev, sh);
     testOwnedCompact(*dev, sh);
     testPictureCheck(*dev, sh);
+    testDepthZ(*dev, sh);
     testOwnedCull(*dev, sh);
     testSkin(*dev, sh);
     testRayQuery(*dev, sh);
@@ -2112,6 +2291,11 @@ int main(int argc, char** argv) {
     compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
     compileBoth("rt/rt_skin.comp.hlsl", "CSMain", "cs_6_6", sh.skin);
     compileBoth("debug/picture_check.comp.hlsl", "CSMain", "cs_6_6", sh.picture);
+    compileBoth("test/depth_z_scene.vert.hlsl", "VSMain", "vs_6_6", sh.dzVs);
+    compileBoth("test/depth_z_scene.frag.hlsl", "PSMain", "ps_6_6", sh.dzPsOld);
+    compileBoth("test/depth_z_scene.frag.hlsl", "PSDepthOnly", "ps_6_6", sh.dzPsNone);
+    compileBoth("debug/fullscreen_rhi.vert.hlsl", "VSMain", "vs_6_6", sh.dzFs);
+    compileBoth("depth/depth_z.frag.hlsl", "PSMain", "ps_6_6", sh.dzDerive);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
     compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);

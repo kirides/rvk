@@ -364,6 +364,7 @@ HalDevice::~HalDevice() {
         settings::registry().save(options_.settingsFile);
     }
     pictureCheck_.reset();
+    depthZ_.reset();
     debugView_.reset();  // removes its pass, retires its pipelines
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
@@ -572,6 +573,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.nativePictureCheck, applyPicture, this);
         if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, applyPicture, this);
         applyPicture(*rs.nativePictureCheck);
+    }
+    // S-6 (frame-ownership.md 14.10): depth-only z passes (Full)
+    depthZ_ = std::make_unique<enh::DepthZ>(dev_);
+    if (rs.nativeDepthZ != nullptr) {
+        const auto applyDepthZ = [this](const settings::Setting& s) {
+            const int v = renderMode() == RenderMode::Full ? s.asInt() : 0;
+            depthZ_->setMode(v == 1 ? enh::DepthZ::Mode::On : v == 2 ? enh::DepthZ::Mode::Compare : enh::DepthZ::Mode::Off);
+        };
+        reg.onChange(*rs.nativeDepthZ, applyDepthZ, this);
+        if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, applyDepthZ, this);
+        applyDepthZ(*rs.nativeDepthZ);
     }
     // enhancements (docs/research/injection.md): the debug injection view
     debugView_ = std::make_unique<enh::DebugView>(dev_);

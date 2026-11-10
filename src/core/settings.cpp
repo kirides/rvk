@@ -2824,6 +2824,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeDepthZ = &reg.add({
+        .key = "native.depth_z",
+        .label = "Native frame: depth-only z passes",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "S-6 (docs/research/frame-ownership.md 14.10; Full): colour-less z passes (the sun cascades) draw opaque casters without a pixel shader (theirs only wrote colour that no "
+                       "attachment takes), and the main view's z pre-pass loses its R32F colour attachment: the linear depth map (view depth / engine far, cleared to 1) is derived once from the "
+                       "hardware depth at AfterDepthPrepass by a full-screen pass (needs reverse-z and a float depth buffer). Cut-out draws keep their texkill pixel shader. Compare = the engine "
+                       "still writes the depth map and a compute pass checks the derivation against it (rvk.log `native: depth_z compare`: differing pixels, the largest relative error). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the engine's depth map"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnPost = &reg.add({
         .key = "native.own_post",
         .label = "Native frame: post chain on own shaders",

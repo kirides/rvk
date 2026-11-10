@@ -89,7 +89,8 @@ bool Device::ensureSceneRefV2(std::uint32_t slot) {
 
 // what prepareDraw decides for an eligible draw (the main view's static mesh z / solid draws issued by the static ops): the pipeline of its scene form
 // when its scene shaders and that pipeline exist, else None (the draw goes the normal way; the missing pieces are requested in the background)
-void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk) {
+void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk,
+                         rhi::ShaderModule fsBeforeDrop) {
     if (capture_ != nullptr) {
         lastVariant_.sceneActive = true;
         lastVariant_.scenePending = false;
@@ -123,7 +124,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     // capture / motion variants, the tint view and the ubershader have no scene form
     VariantSlot base = VariantSlot::Base;
     // (S-1a: a draw the plain ubershader took (uberTaken) gets the plain scene form, built from the ubershader too: Device::variantWorker)
-    if (captureDraw || (!gbufWrite_ && !giDraw && pd.fs != ps_->module && !uberTaken)) {
+    if (captureDraw || (!gbufWrite_ && !giDraw && fsBeforeDrop != ps_->module && !uberTaken)) {
         ++sceneStats_.fbVariantKind;
         if (captureDraw && probe_ != nullptr) probe_->capture = true;
         return;
@@ -136,8 +137,9 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         return;
     }
     const rhi::ShaderModule vsM = v2only ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
-    const rhi::ShaderModule fsM = v2only ? rhi::ShaderModule::None : variant(ps_, sceneFs);
-    if (!v2only && (vsM == rhi::ShaderModule::None || fsM == rhi::ShaderModule::None)) {
+    // (S-6: a draw that left its pixel shader out needs no scene form of it)
+    const rhi::ShaderModule fsM = v2only || psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneFs);
+    if (!v2only && (vsM == rhi::ShaderModule::None || (fsM == rhi::ShaderModule::None && !psDropped_))) {
         const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
         if (failed) {
             ++sceneStats_.fbVariantFailed;
@@ -183,8 +185,8 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
     if (sceneV2_ && (kind == draws::Kind::StaticMesh || v2only || actor)) {
         const rhi::ShaderModule vs2 = variant(vs_, VariantSlot::SceneVs2);
-        const rhi::ShaderModule fs2 = variant(ps_, sceneView2Of(sceneFs));
-        if (vs2 == rhi::ShaderModule::None || fs2 == rhi::ShaderModule::None) {
+        const rhi::ShaderModule fs2 = psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneView2Of(sceneFs));
+        if (vs2 == rhi::ShaderModule::None || (fs2 == rhi::ShaderModule::None && !psDropped_)) {
             const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs2)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneView2Of(sceneFs))].load() == 3;
             if (!failed) {
                 ++sceneStats_.fbVariantPending;

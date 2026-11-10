@@ -8,6 +8,7 @@
 #include <set>
 
 #include "enh/debug_view.h"
+#include "enh/depth_z.h"
 #include "enh/gbuffer.h"
 #include "enh/gi.h"
 #include "enh/picture_check.h"
@@ -81,6 +82,10 @@ END(BlitPush, Push, abi::BlitPush)
 BLOCK(DebugViewPush, Push, enh::DebugViewPush)
 PH F(uint, depthTex, 1) F(uint, width, 1) F(uint, height, 1) F(uint, srcTex, 1) F(uint, srcSampler, 1) F(uint, pad, 1)
 END(DebugViewPush, Push, enh::DebugViewPush)
+
+BLOCK(DepthZPush, Push, enh::DepthZPush)
+PH F(uint, depthTex, 1) F(uint, mapTex, 1) F(uint, width, 1) F(uint, height, 1) F(uint2, stats, 1) F(uint2, pad, 1)
+END(DepthZPush, Push, enh::DepthZPush)
 
 BLOCK(PictureCheckPush, Push, enh::PictureCheckPush)
 PH F(uint, colorTex, 1) F(uint, depthTex, 1) F(uint, width, 1) F(uint, height, 1) F(uint, mode, 1) F(float, colorTol, 1) F(float, depthTol, 1) F(uint, pad, 1)
@@ -318,7 +323,7 @@ std::span<const Block> blocks() {
 #define REG(HL, KIND, CPPT) Block{#HL, #CPPT, Kind::KIND, static_cast<std::uint32_t>(sizeof(CPPT)), b_##HL::kF, std::size(b_##HL::kF)},
     static const Block kBlocks[] = {
         REG(RvkDrawPush, Push, abi::PushConstants) REG(RvkScenePush, Push, abi::ScenePush) REG(BlitPush, Push, abi::BlitPush)
-        REG(DebugViewPush, Push, enh::DebugViewPush) REG(PictureCheckPush, Push, enh::PictureCheckPush) REG(FramegenPush, Push, abi::FramegenDebugPush) REG(GbufferPush, Push, enh::GbufferPush)
+        REG(DebugViewPush, Push, enh::DebugViewPush) REG(PictureCheckPush, Push, enh::PictureCheckPush) REG(DepthZPush, Push, enh::DepthZPush) REG(FramegenPush, Push, abi::FramegenDebugPush) REG(GbufferPush, Push, enh::GbufferPush)
         REG(GiPush, Push, enh::GiPush) REG(LightingComposePush, Push, abi::LightingComposePush) REG(OwnedCompactPush, Push, abi::OwnedCompactPush)
         REG(LightClusterPush, Push, enh::LightClusterPush) REG(LightShadowPush, Push, enh::LightShadowPush) REG(MaterialRtPush, Push, enh::MaterialRtPush)
         REG(MaterialRtCompositePush, Push, enh::MaterialRtCompositePush) REG(PostLumPush, Push, native::PostLumPush) REG(PostBrightPush, Push, native::PostGroupPush)
