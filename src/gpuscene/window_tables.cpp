@@ -20,6 +20,11 @@ WindowTables& windowtables() {
     return t;
 }
 
+void WindowTables::releaseGpu() {
+    views_.release();
+    created_ = gpuFailed_ = false;
+}
+
 bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4], std::uint32_t vs1Composed, const float (*vs0)[4], const float (*ps0)[4]) {
     using d3d9::OwnedWindows;
     ow.w[0][0] = OwnedWindows::Win{};

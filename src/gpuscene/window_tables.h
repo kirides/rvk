@@ -43,6 +43,7 @@ public:
 
     // once per present (before the upload list is closed): uploads the frame's view blocks, restarts the cursor, the 5 s log
     void flush(d3d9::Device& dev);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffer goes before the device
 
 private:
     void report(d3d9::Device& dev);

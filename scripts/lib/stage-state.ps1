@@ -23,6 +23,7 @@ $script:StageOfSetting = [ordered]@{
     'debug.ubershader'             = 'ubershader'
     'native.depth_z'               = 'depth_z'
     'native.vertex_pull'           = 'vertex_pull'
+    'native.own_foliage'           = 'own_foliage'
     'native.bone_motion'           = 'bone_motion'
 }
 

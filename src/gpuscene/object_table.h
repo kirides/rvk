@@ -70,6 +70,7 @@ public:
 
     // once per present (engine thread, before the frame's draws are submitted): the scene table's drain, upload, read-back, 5 s log
     void flush(d3d9::Device& dev);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffer goes before the device
 
     bool ready() const { return table_.ready(); }
     ObjectStats& mutableStats() { return stats_; }  // (StaticOps::setOwnedFor counts its pre-checks: instanced draws, window 1 offers / composed-differs, non-candidates)

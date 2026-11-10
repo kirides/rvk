@@ -831,6 +831,57 @@ TEST(grass_batches_follow_vegetation_render) {
     CHECK(x == -1.0f / 4000.0f && y == 5000.0f / 4000.0f);
 }
 
+// S-5 grass thinning (frame-ownership.md 14.14): near blades untouched, the kept share falls with distance, shrinking is gradual, the decision is a pure function
+// of the instance and the snapped camera (two passes / ops thin the same blade the same way), lod.view moves the start
+TEST(native_grass_thinning) {
+    const float cam[3] = {1234.0f, 50.0f, -777.0f};
+    const sc::GrassThin t = sc::grassThinParams(cam, 4000.0f, 1.0f, false);
+    CHECK(t.on && t.start == 4000.0f * sc::kGrassThinStart && t.end == 4000.0f);
+    const float cam2[3] = {1234.0f + 30.0f, 50.0f + 20.0f, -777.0f - 10.0f};  // (inside the same snap cell)
+    CHECK(sc::grassThinParams(cam2, 4000.0f, 1.0f, false) == t);
+    CHECK(sc::grassThinParams(cam, 4000.0f, 2.0f, false).start == 4000.0f * 2.0f * sc::kGrassThinStart);
+    CHECK(!sc::grassThinParams(cam, 0.0f, 1.0f, false).on);
+    // instances on a line away from the camera, scale 1
+    constexpr std::size_t N = 4000;
+    std::vector<std::uint8_t> a(N * sc::kGrassInstanceSize), b;
+    for (std::size_t k = 0; k < N; ++k) {
+        std::uint8_t* e = a.data() + k * sc::kGrassInstanceSize;
+        const float p[3] = {t.cam[0] + static_cast<float>(k) * 1.1f, t.cam[1], t.cam[2] + static_cast<float>(k % 7)};
+        const float s[2] = {1.0f, 1.0f};
+        std::memcpy(e, p, 12);
+        std::memcpy(e + 0x20, s, 8);
+    }
+    b = a;
+    std::uint32_t removed = 0;
+    const std::uint32_t changed = sc::grassThin(b.data(), N, t, &removed);
+    std::size_t nearChanged = 0, farKept = 0, farN = 0, partial = 0;
+    for (std::size_t k = 0; k < N; ++k) {
+        float s[2];
+        std::memcpy(s, b.data() + k * sc::kGrassInstanceSize + 0x20, 8);
+        const float d = static_cast<float>(k) * 1.1f;
+        if (d < t.start - 10.0f && s[0] != 1.0f) ++nearChanged;
+        if (d > t.end - 300.0f) {
+            ++farN;
+            if (s[0] > 0.0f) ++farKept;
+        }
+        if (s[0] > 0.0f && s[0] < 1.0f) ++partial;
+        CHECK(s[0] == s[1] && s[0] >= 0.0f && s[0] <= 1.0f);
+        CHECK(std::memcmp(a.data() + k * sc::kGrassInstanceSize, b.data() + k * sc::kGrassInstanceSize, 0x20) == 0);  // (only the scale moves)
+    }
+    CHECK(nearChanged == 0 && changed > 0 && removed > 0 && removed < changed + 1 && partial > 0);
+    const double keptFar = static_cast<double>(farKept) / static_cast<double>(farN);
+    CHECK(keptFar > 0.2 && keptFar < 0.55);
+    // the same bytes thinned again from a fresh copy: bit-identical (z op and solid op of one context)
+    std::vector<std::uint8_t> c = a;
+    sc::grassThin(c.data(), N, t);
+    CHECK(c == b);
+    // the measurement mode removes every blade
+    std::vector<std::uint8_t> d = a;
+    std::uint32_t gone = 0;
+    sc::grassThin(d.data(), N, sc::grassThinParams(cam, 4000.0f, 1.0f, true), &gone);
+    CHECK(gone == N);
+}
+
 TEST(native_attribution_tree_and_grass_zero_draws) {
     Op op;
     op.kind = OpKind::SpeedTree;

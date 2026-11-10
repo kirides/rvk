@@ -774,6 +774,11 @@ void Device::destroy() {
     }
     passes_ = inject::Registry{};
     markersOn_ = false;
+    // the device's own lazily made backend buffers (native.bone_motion = compare, native.scene_draws_check): before the backend goes. As members they were
+    // destroyed in ~Device after it (a leaked VkBuffer at vkDestroyDevice, then the buffer's destructor read the freed backend: an access violation at exit)
+    boneCmp_.reset();
+    sceneCheck_.buffer.reset();
+    sceneCheck_.busy = false;
     game_.reset();  // the backend: the present thread and the swapchain, the frame ring, the heaps, every API object
     created_ = false;
 }

@@ -2855,6 +2855,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnFoliage = &reg.add({
+        .key = "native.own_foliage",
+        .label = "Native frame: own foliage (grass thinning)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "S-5 (docs/research/frame-ownership.md 14.14; Full): the grass's distance thinning tied to lod.view: beyond 35 % x lod.view of the grass range the share of "
+                       "blades kept falls to 35 % at the range's end, each blade shrinking to nothing over a short band (no pop). Applied to our converted instance bytes on every "
+                       "path (composed, composed late, owned), so the z pre-pass and the colour pass draw the same blades bit for bit. An intentional, small picture change. "
+                       "rvk.log `native: own foliage (5 s)`. Off by default.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeBoneMotion = &reg.add({
         .key = "native.bone_motion",
         .label = "Native frame: bone-history motion",

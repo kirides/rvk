@@ -871,6 +871,56 @@ void grassInstance(const std::uint8_t* entry, bool wind, bool lift, std::uint8_t
     std::memcpy(out + 0x28, lift ? &lifted : &zero, 4);
 }
 
+GrassThin grassThinParams(const float camPos[3], float gridEnd, float lodView, bool all) {
+    GrassThin t;
+    if (!(gridEnd > 0.0f) || !(gridEnd < 1.0e6f)) return t;
+    t.on = true;
+    t.all = all;
+    for (int i = 0; i < 3; ++i) t.cam[i] = std::floor(camPos[i] / kGrassThinSnap) * kGrassThinSnap + 0.5f * kGrassThinSnap;
+    const float f = std::clamp(kGrassThinStart * (lodView > 0.0f ? lodView : 1.0f), 0.2f, 0.9f);
+    t.end = gridEnd;
+    t.start = gridEnd * f;
+    return t;
+}
+
+std::uint32_t grassThin(std::uint8_t* inst, std::size_t count, const GrassThin& t, std::uint32_t* removed) {
+    if (!t.on) return 0;
+    std::uint32_t changed = 0, gone = 0;
+    const float range = t.end - t.start;
+    for (std::size_t k = 0; k < count; ++k) {
+        std::uint8_t* e = inst + k * kGrassInstanceSize;
+        float s = 0.0f;
+        if (!t.all) {
+            float p[3];
+            std::memcpy(p, e, 12);
+            const float dx = p[0] - t.cam[0], dy = p[1] - t.cam[1], dz = p[2] - t.cam[2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (!(d > t.start)) continue;  // (near field, and NaN: unchanged)
+            const float u = std::min(1.0f, (d - t.start) / range);
+            const float keep = 1.0f - (1.0f - kGrassThinKeepFar) * u;
+            // the instance's hash in [0, 1): its position bits (the same instance hashes the same in every op / pass / frame)
+            std::uint32_t b[3];
+            std::memcpy(b, e, 12);
+            std::uint32_t h = b[0] * 0x9E3779B1u ^ (b[1] + 0x7F4A7C15u) * 0x85EBCA77u ^ (b[2] + 0x165667B1u) * 0xC2B2AE3Du;
+            h ^= h >> 15;
+            h *= 0x2C1B3C6Du;
+            h ^= h >> 12;
+            const float hv = static_cast<float>(h >> 8) * (1.0f / 16777216.0f);
+            if (hv <= keep - kGrassThinBand) continue;
+            s = hv >= keep ? 0.0f : (keep - hv) / kGrassThinBand;
+        }
+        float sc[2];
+        std::memcpy(sc, e + 0x20, 8);
+        sc[0] *= s;
+        sc[1] *= s;
+        std::memcpy(e + 0x20, sc, 8);
+        ++changed;
+        if (s == 0.0f) ++gone;
+    }
+    if (removed != nullptr) *removed += gone;
+    return changed;
+}
+
 void vegetationAlpha(float start, float end, std::uint8_t maskRef, float& x, float& y) {
     // single precision throughout (movss / subss / divss in the engine): DAT_1809f1698 1.0, DAT_1809f1560 1/256, DAT_1809f1854 -1.0
     const float r = (end - start) / (1.0f - static_cast<float>(maskRef) * (1.0f / 256.0f));

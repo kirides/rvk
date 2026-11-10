@@ -162,6 +162,14 @@ public:
     // source instance bytes are unchanged: an exact compare), so the grass draws no longer carry CPU bytes, become packet-cache replayable and are not converted / uploaded again
     void setOwnedVegetation(bool on);
     bool ownedVegetationOn() const { return ownedVeg_; }
+    // native.own_foliage (frame-ownership.md 14.14, S-5): grass distance thinning tied to lod.view (sc::grassThin on every converted instance stream of the main view's grass:
+    // composed, composed late and owned alike, so the z / colour pair stays bit-identical)
+    void setOwnFoliage(bool on);
+    bool ownFoliageOn() const { return ownFoliage_; }
+    struct FoliageStats {
+        std::uint64_t ops = 0, instances = 0, changed = 0, removed = 0;
+    };
+    const FoliageStats& foliageTotal() const { return foliageTotal_; }
     // native.owned_vegetation_ops (frame-ownership.md 7.42, F7-2; static_ops_veg_owned.cpp): the main view's vegetation z / solid ops retained as templates per (type, pass, sun) bucket,
     // compared on the check frames, taken out of the lists on the other frames and drawn at the pass (one record per op x lighting entry, the converted instance bytes of all
     // ops in one ring block, one indirect command per bucket). Needs owned_persistent, scene ABI v2, lighting images, table lighting.
@@ -1164,6 +1172,7 @@ private:
         std::unique_ptr<d3d9::Buffer> buf;       // the converted instances (dynamic buffer, DISCARD-rewritten when the source changed)
         std::uint32_t cap = 0;
         bool wind = false, lift = false;
+        sc::GrassThin thin;                      // S-5: the thinning the buffer's bytes were made with
         std::uint64_t lastFrame = 0;
     };
     struct VegStats {
@@ -1172,7 +1181,13 @@ private:
     bool ownedVeg_ = false;
     std::map<std::tuple<const void*, std::uint32_t, std::uint32_t>, VegRet> vegRet_;
     std::vector<std::uint8_t> vegRaw_;
-    VegRet* vegRetain(const Op& op, std::uint32_t total, bool wind, bool lift);
+    VegRet* vegRetain(const Op& op, std::uint32_t total, bool wind, bool lift, const sc::GrassThin& thin);
+    // S-5 (native.own_foliage)
+    bool ownFoliage_ = false;
+    FoliageStats foliageW_, foliageTotal_;
+    sc::GrassThin grassThinOf(float gridEnd) const;  // off unless own_foliage acts in this view (main view, no engine compare)
+    void foliageCount(const sc::GrassThin& t, std::size_t instances, std::uint32_t changed, std::uint32_t removed);
+    void foliageReport();
     std::uint32_t ownInstCursor_ = 0;
     std::uint64_t ownInstFrame_ = ~0ull;
     std::vector<std::uint32_t> ownOffset_;  // per issued draw: its instance data's offset in ownInstVb_

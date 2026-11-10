@@ -737,6 +737,7 @@ std::uint32_t StaticOps::vegPass(bool solid) {
         std::vector<std::uint32_t> entries;   // per batch: the lighting entry (solid)
         std::vector<tro::Tpl*> tpls;          // per batch
         float ax = 0, ay = 0;
+        sc::GrassThin thin;  // S-5 (native.own_foliage): as the composition of the op would thin it
         std::uint32_t cursorAfter = 0;
     };
     static thread_local std::vector<OpPlan> plans;
@@ -936,6 +937,7 @@ std::uint32_t StaticOps::vegPass(bool solid) {
         {
             U8* grid = ptr(ps, 0x90);
             sc::vegetationAlpha(get<float>(grid, 0x50), get<float>(grid, 0x54), maskRefOf(shader), pl.ax, pl.ay);
+            pl.thin = grassThinOf(get<float>(grid, 0x54));
         }
         cursor = cursorAfter;
         if (pl.batches.empty()) {
@@ -1062,6 +1064,11 @@ std::uint32_t StaticOps::vegPass(bool solid) {
                         break;
                     }
                     std::memcpy(V.inst.data() + static_cast<std::size_t>(pos) * sc::kGrassInstanceSize, pl.rec->conv.data() + srcAt, n);
+                    if (pl.thin.on) {
+                        std::uint32_t removed = 0;
+                        const std::uint32_t changed = sc::grassThin(V.inst.data() + static_cast<std::size_t>(pos) * sc::kGrassInstanceSize, bt.count, pl.thin, &removed);
+                        foliageCount(pl.thin, bt.count, changed, removed);
+                    }
                     for (std::uint32_t q = 0; q < bt.count; ++q) V.posRec.push_back(rec);
                     pos += bt.count;
                     item.instances += bt.count;

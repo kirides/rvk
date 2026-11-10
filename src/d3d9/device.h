@@ -1399,6 +1399,9 @@ public:
     bool treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;
     struct TreeFlushStats {
         std::uint64_t flushes = 0, items = 0, instances = 0, packets = 0, refused = 0, commands = 0, records = 0;
+        // S-5 measurement (frame-ownership.md 14.14): per kind (0 trees, 1 grass) the flushes, the indirect calls made, and the calls a pulled form would need at best
+        // (distinct vertex shader x pixel shader x dynamic state x index binding per flush: the vertex input out of the key, items sorted)
+        std::uint64_t kindFlushes[2] = {}, kindCalls[2] = {}, kindPullKeys[2] = {}, kindItems[2] = {};
     } treeFlushStats;
     // F4-1 (owned_submit.cpp, docs/research/frame-ownership.md 7.17): a record's draw submitted with nothing composed: derived block + the caller's persistent windows, as a scene draw.
     // `dryRun` = every check, nothing submitted (the caller checks a whole op before it submits any of its draws). Anything but Submitted: nothing was drawn.
