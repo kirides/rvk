@@ -64,6 +64,8 @@ Each milestone ends verified (in the game where it touches the engine) and commi
 
 ### Open
 
+* F (queued, user decision 2026-11-10): after every draw of the frame is owned (no engine-composed calls, no fallbacks in Full), re-evaluate a **load-time Full data layout**: Full chosen at start-up, its own mesh store with only what its shaders read, packed attributes / quantized positions, split position stream for z + cascades (frame-ownership.md 14.4b; needs the 680M captures; ends the in-run Wrapper <-> Full switch).
+
 * M2: SM 1.x (unused by the game), GPU-level semantic checks of the translator, D3D9 `0 * inf = 0` emulation if needed.
 * M4: depth bias on D32F not exact (unused by the shadow pass); D16 / D24 depth compare only if a reference machine needs it; point lights use R16F cube maps as on D3D9/AMD.
 * M5: window modes on different-size / scaled multi-monitor setups; exclusive fullscreen on 360 Hz desktops, NVIDIA / Intel, HDR, secondary monitor.

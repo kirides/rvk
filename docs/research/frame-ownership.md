@@ -2593,6 +2593,26 @@ Order: S-1a (platform, 0 gain, unblocks everything) -> S-2 + S-3 (the two thirds
 S-1a is first because it turns the owned path onto our own pixel shader for **all owned draw kinds at once** (every material PS of static, skinned, instanced, trees, vegetation and
 billboards is the same `PS_Default` text): up to ~4,500 of the 5,944 draws of a savegame frame (76 %: vegetation 2,510, trees 1,282, static 640, skinned 32, billboards 52) are owned, and the lit pixel shader is where the 680M's time is.
 
+### 14.4b Roadmap after full ownership: a load-time Full data layout (user decision 2026-11-10, queued, not started)
+
+End state (user): **Full makes no engine-composed calls and has no fallbacks**: every draw of the frame is owned (collected, skinned, culled, drawn by us with our own
+shaders). Once that holds, the vertex data no longer has to serve the engine's draws, the composed forms or the input assembler, and Full can own its mesh layout:
+
+1. **Load-time choice.** The render mode becomes a start-up choice for the data layout: Full builds its own mesh store when meshes load and keeps only what its own shaders read
+   (no second copy of data nobody reads: the no-unread-outputs rule, performance.md 32). Today Wrapper <-> Full switch at the next frame boundary (`renderer.mode` `restartGroups = {0, 1, 1}`,
+   `HalDevice::applyStaticOps`; the F10 A/B and the `-Commands 'N: set renderer.mode full'` test arms use it): a load-time layout makes Full a restart choice like Original,
+   so in-run Wrapper / Full A/B has to move to two runs (or keep the switch in Debug builds only). Decide when this starts.
+2. **Pack what is possible.** With no composed draw of the same geometry left, the bit-identical-position constraint (shader-permutations.md 12: the z-equal colour pass
+   against another form) is gone, so positions may be quantized (cluster-relative 16-bit, the F5 clusters' boxes) as long as every pass of a geometry uses the same decode;
+   normals / tangents as 16-bit octahedral pairs, UVs as half where the range allows, colours 8-bit. The RT scene's BLAS builds must then read the same decoded positions
+   (or a float copy kept only while the RT tier is on).
+3. **Split position / attribute streams** for the depth-only passes (main z + cascades fetch ~18 of ~26 MB per frame as positions alone, S-4 measurement 14.12).
+   The exact float32 position-only stream (no picture change) may come earlier, after bone-history motion (14.13), if the 680M capture shows the z / cascade passes
+   vertex-fetch bound.
+
+Re-evaluate the whole item with the user's 680M RGP captures (Vulkan + D3D12) once the owned path covers every draw; until then attribute packing is parked (solid pass:
+~4 - 5 MB / frame saving, ~0.05 ms on the model, plus a second mesh copy in shared RAM while composed draws still need the original).
+
 ### 14.5 Not measured / open
 
 1. No RDNA2 compile and no 680M run exist: the occupancy column and every 680M ms are models (install RGA first; the user's hardware test is the final check). Wave size of the
