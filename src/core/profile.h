@@ -55,3 +55,13 @@ struct DynamicZone {
 #define RVK_PLOT(name, value) ((void)0)
 
 #endif
+
+namespace rvk::prof {
+// whether this binary carries the Tracy client (RVK_TRACY=ON): the tools print it in their banner (a client without a profiler buffers every zone in memory)
+inline constexpr bool kTracy =
+#if defined(TRACY_ENABLE)
+    true;
+#else
+    false;
+#endif
+}  // namespace rvk::prof

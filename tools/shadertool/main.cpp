@@ -12,6 +12,8 @@
 //                                                                gets the ABI headers; dxc -I <out>/include -E VSMain|PSMain compiles each file
 //   rvk_shadertool dxil-check embedded [--filter S] | corpus <dir> [--tint|--scene|--scene2|--fillers|--gi|--gbuf|--gbuf-motion|--capture] | uber <jsonl>... [--limit N]
 //                                                                SPIR-V + signed DXIL (SM 6.6) per shader; see docs/research/hlsl-rhi.md "DXIL parity (S1)"
+//   corpus and dxil-check run their per-shader work on hardware threads - 2 (-j N / --jobs N; the report is in the sorted file order, independent
+//   of N); dxil-check compiles identical requests once per run (--no-memo: each item) and takes --cache <dir> (dxc's disk cache across runs)
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
 //   rvk_shadertool evalcheck <dir>                               the CPU evaluator (shader/sm_eval.h) on every SM 3.0 shader of a
 //                                                                corpus: failures by reason, pixel shaders sampling s9, slices
@@ -21,6 +23,10 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
+#include <future>
+#include <mutex>
+#include <unordered_map>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -37,6 +43,7 @@
 
 #include <spirv-tools/libspirv.hpp>
 
+#include "core/profile.h"
 #include "d3d9/device.h"
 #include "d3d9/semantics.h"
 #include "enh/gi.h"
@@ -62,6 +69,9 @@ std::vector<std::uint32_t> readTokens(const fs::path& p) {
     std::memcpy(tokens.data(), bytes.data(), tokens.size() * 4);
     return tokens;
 }
+
+// --cache <dir> (corpus, dxil-check): dxc's disk cache, so the next run compiles only requests whose text / includes / arguments changed
+bool g_diskCache = false;
 
 struct Outcome {
     std::string stage;  // "decode", "hlsl", "compile", "validate", "" = ok
@@ -95,7 +105,7 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
     r.entry = vs ? "VSMain" : "PSMain";
     r.profile = vs ? "vs_6_6" : "ps_6_6";
     r.optLevel = std::getenv("RVK_DXC_OPT") != nullptr ? std::atoi(std::getenv("RVK_DXC_OPT")) : 1;  // as shader::compileHlsl (the renderer)
-    r.cache = false;
+    r.cache = g_diskCache;
     const auto c = rvk::shader::dxc::compile(r);
     if (!c.ok()) {
         o.stage = "compile";
@@ -114,9 +124,46 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
 // a variant's options for one shader (null = the plain options)
 using VariantFn = bool (*)(const rvk::d3d9::Shader&, TranslateOptions&);
 
-int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const TranslateOptions& baseOptions, VariantFn variant) {
+// The per-shader work of corpus / dxil-check runs on a pool of threads (hardware threads - 2; `--jobs N` / `-j N`). Every item writes its own slot of a
+// result vector, the report walks the slots in the sorted file order afterwards: the output does not depend on the job count.
+template <typename Fn>
+void parallelFor(std::size_t n, int jobs, Fn&& fn) {
+    std::atomic<std::size_t> next{0};
+    const int count = std::max(1, std::min(jobs, static_cast<int>(std::max<std::size_t>(n, 1))));
+    if (count == 1) {
+        for (std::size_t i = 0; i < n; ++i) fn(i);
+        return;
+    }
+    std::vector<std::thread> pool;
+    for (int t = 0; t < count; ++t) {
+        pool.emplace_back([&] {
+            for (std::size_t i; (i = next.fetch_add(1)) < n;) fn(i);
+        });
+    }
+    for (auto& t : pool) t.join();
+}
+
+int defaultJobs() {
+    const unsigned hw = std::thread::hardware_concurrency();
+    return static_cast<int>(hw > 2 ? hw - 2 : 1u);
+}
+
+// `--jobs N` / `-j N` / `-jN` at argv[i] (advances i past a separate value); false when argv[i] is not a job count option
+bool jobsArg(int argc, char** argv, int& i, int& jobs) {
+    const std::string a = argv[i];
+    if ((a == "--jobs" || a == "-j") && i + 1 < argc) {
+        jobs = std::max(1, std::atoi(argv[++i]));
+        return true;
+    }
+    if (a.size() > 2 && a.starts_with("-j") && std::isdigit(static_cast<unsigned char>(a[2]))) {
+        jobs = std::max(1, std::atoi(a.c_str() + 2));
+        return true;
+    }
+    return false;
+}
+
+int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const TranslateOptions& baseOptions, VariantFn variant, int jobs) {
     int skipped = 0;
-    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
     std::map<std::string, int> ok, failed;
     std::map<std::string, int> failuresByMessage;
     int printed = 0;
@@ -130,9 +177,14 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Tra
         }
     }
     std::ranges::sort(files);
-    for (const auto& f : files) {
-        const std::string kind = f.filename().string().substr(0, f.filename().string().find('_'));
-        const std::vector<std::uint32_t> tokens = readTokens(f);
+    // translate + compile + validate in parallel (one SpirvTools per item: its message consumer is per call); the report below runs in file order
+    struct Slot {
+        bool skip = false;
+        Outcome o;
+    };
+    std::vector<Slot> slots(files.size());
+    parallelFor(files.size(), jobs, [&](std::size_t i) {
+        const std::vector<std::uint32_t> tokens = readTokens(files[i]);
         TranslateOptions options = baseOptions;
         if (variant != nullptr) {
             // the shader as the device sees it: stage, reflection, CTAB semantics
@@ -143,11 +195,25 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Tra
             sh.reflection = plain.reflection;
             if (dec.ok() && plain.ok()) sh.semantics = rvk::d3d9::shaderSemantics(tokens, plain.reflection);
             if (!dec.ok() || !plain.ok() || !variant(sh, options)) {
-                ++skipped;
-                continue;
+                slots[i].skip = true;
+                return;
             }
         }
-        const Outcome o = translate(tokens, tools, options);
+        spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+        slots[i].o = translate(tokens, tools, options);
+        if (slots[i].o.stage.empty() || out.empty()) {
+            slots[i].o.disasm.clear();  // (the texts are only written for failures with --out)
+            slots[i].o.glsl.clear();
+        }
+    });
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        const fs::path& f = files[i];
+        const std::string kind = f.filename().string().substr(0, f.filename().string().find('_'));
+        if (slots[i].skip) {
+            ++skipped;
+            continue;
+        }
+        const Outcome& o = slots[i].o;
         intBool += o.intBool ? 1 : 0;
         if (o.stage.empty()) {
             ++ok[kind];
@@ -429,14 +495,22 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string cmd = argv[1];
+    std::fprintf(stderr, "rvk_shadertool %s, %d jobs by default (tracy: %s)\n", cmd.c_str(), defaultJobs(), rvk::prof::kTracy ? "on" : "off");
     if (cmd == "corpus") {
         fs::path out;
         int maxErrors = 20;
         TranslateOptions options;
         VariantFn variant = nullptr;
+        int jobs = defaultJobs();
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--cluster") { rvk::enh::setClusterVariants(true); continue; }
+            if (jobsArg(argc, argv, i, jobs)) continue;
+            if (a == "--cache" && i + 1 < argc) {
+                rvk::shader::dxc::setCacheDirectory(argv[++i]);
+                g_diskCache = true;
+                continue;
+            }
             if (a == "--pbr") {
                 rvk::enh::setPbrVariants(true);  // the material pack code inside every variant (enh/material_pack.h)
             } else if (a == "--gi") {
@@ -486,7 +560,7 @@ int main(int argc, char** argv) {
                 maxErrors = std::atoi(argv[++i]);
             }
         }
-        return cmdCorpus(argv[2], out, maxErrors, options, variant);
+        return cmdCorpus(argv[2], out, maxErrors, options, variant, jobs);
     }
     if (cmd == "export") {
         if (argc < 4) {

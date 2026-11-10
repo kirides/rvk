@@ -1,6 +1,9 @@
 // rvk_rhitest: the slim RHI (src/rhi/rhi.h) on both backends with the same code and the same HLSL (docs/research/hlsl-rhi.md 5, 6).
 //
-//   rvk_rhitest [--vulkan] [--d3d12] [--validation | --sync-validation]
+//   rvk_rhitest [--vulkan] [--d3d12] [--validation | --sync-validation] [--gbv]
+//     --validation on D3D12 = the debug layer WITHOUT GPU-based validation; --gbv adds it (2026-11-10, performance.md 34: under GBV the abi probe's
+//     largest block (RvkStageData, one load per word) grew the process past 12 GB inside one dispatch, GBV's own instrumentation: our memory stayed
+//     at 0.3 GB; use --gbv with RVK_ABI_ONLY / RVK_PICTURE_ONLY / RVK_PARITY_ONLY for focused GBV runs)
 //   rvk_rhitest --fsr | --fg [loader dll] [--validation]   FidelityFX on the D3D12 backend (tools/rhitest/ffx.cpp), nothing else
 //
 // Per backend: a compute pass that reads a constant buffer (b8), a bindless texture + sampler (indices in the constant buffer), a RVK_REF block
@@ -41,6 +44,7 @@
 
 #include "core/cluster_cull.h"
 #include "core/crash_dump.h"
+#include "core/profile.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/dxc.h"
@@ -2407,7 +2411,12 @@ bool runDeviceLost(bool validation) {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    bool vulkan = false, d3d12 = false, validation = false, fsr = false, fg = false, deviceLost = false;
+    {
+        wchar_t exe[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::printf("rvk_rhitest %ls (tracy: %s)\n", exe, prof::kTracy ? "on" : "off");
+    }
+    bool vulkan = false, d3d12 = false, validation = false, fsr = false, fg = false, deviceLost = false, gbv = false;
     std::string ffxDll;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -2419,7 +2428,12 @@ int main(int argc, char** argv) {
         else if (a == "--validation") validation = true;
         else if (a == "--sync-validation") validation = g_syncValidation = true;
         else if (a == "--device-lost") deviceLost = true;
+        else if (a == "--gbv") gbv = validation = true;
     }
+    // the D3D12 device reads RVK_NO_GBV when its debug layer is on (rhi/d3d12): without --gbv the layer runs without GPU-based validation
+    if (validation && !gbv) SetEnvironmentVariableA("RVK_NO_GBV", "1");
+    if (validation) std::printf("validation: Vulkan layer%s; D3D12 debug layer %s\n", g_syncValidation ? " + synchronization" : "",
+                                gbv ? "+ GPU-based validation (--gbv)" : "without GPU-based validation (--gbv adds it)");
     if (deviceLost) {
         runDeviceLost(validation);
         std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);

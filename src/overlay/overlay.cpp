@@ -19,7 +19,9 @@
 #include <imgui_impl_win32.h>
 #include <spdlog/spdlog.h>
 
+#include "core/perf_window.h"
 #include "core/settings.h"
+#include "engine/menu_state.h"
 #include "overlay/keys.h"
 #include "engine/window_mode.h"
 
@@ -132,13 +134,34 @@ bool Overlay::init(d3d9::Device& device, HWND__* window, const Options& options)
     for (const auto& c : options.commands) {
         const auto colon = c.find(':');
         std::uint64_t frame = 0;
-        const std::string_view head = trim(std::string_view(c).substr(0, colon));
+        std::uint32_t load = 0;
+        std::string_view head = trim(std::string_view(c).substr(0, colon));
+        // "load<k>+<n>": n presents after the k-th loading screen ended (k = 1 when left out): a schedule relative to the world of a savegame load
+        // (scripts/perf-ab.ps1), whatever the loading screens' frame counts were
+        // "freeze+<n>": n presents after the game time was first frozen (rvkcompare's spots: risen.debug.time_freeze)
+        bool headOk = true;
+        if (head.starts_with("freeze+")) {
+            head.remove_prefix(7);
+            load = kFreeze;
+        } else if (head.starts_with("load")) {
+            head.remove_prefix(4);
+            load = 1;
+            const auto plus = head.find('+');
+            if (plus == std::string_view::npos) headOk = false;
+            else {
+                if (plus > 0) {
+                    const auto [pk, ek] = std::from_chars(head.data(), head.data() + plus, load);
+                    headOk = ek == std::errc() && pk == head.data() + plus && load > 0;
+                }
+                head.remove_prefix(plus + 1);
+            }
+        }
         const auto [p, ec] = std::from_chars(head.data(), head.data() + head.size(), frame);
-        if (colon == std::string::npos || ec != std::errc() || p != head.data() + head.size() || frame == 0) {
-            spdlog::warn("overlay: [debug] commands: '{}' is not \"<frame>: <command>\"", c);
+        if (colon == std::string::npos || !headOk || ec != std::errc() || p != head.data() + head.size() || (frame == 0 && load == 0)) {
+            spdlog::warn("overlay: [debug] commands: '{}' is not \"<frame>: <command>\", \"load<k>+<n>: <command>\" or \"freeze+<n>: <command>\"", c);
             continue;
         }
-        commands_.push_back({frame, std::string(trim(std::string_view(c).substr(colon + 1)))});
+        commands_.push_back({frame, std::string(trim(std::string_view(c).substr(colon + 1))), load});
     }
 
     IMGUI_CHECKVERSION();
@@ -316,8 +339,28 @@ void Overlay::onPresent(std::uint64_t frame) {
     historyPos_ = (historyPos_ + 1) % kHistory;
     historyCount_ = std::min(historyCount_ + 1, kHistory);
     keyPoster_.tick(window_, frame);  // releases of "key" chords first (a press stays down for at least one frame)
+    // anchored commands ("load<k>+<n>"): the ends of the loading screens, while any waits (the menu state query costs a few microseconds)
+    if (std::ranges::any_of(commands_, [](const Command& c) { return c.load != 0; })) {
+        const engine::menu::Status ms = engine::menu::query();
+        const engine::menu::State st = ms.state;
+        if (freezeAt_ == 0 && (ms.appState & 8u) != 0) {
+            freezeAt_ = frame;
+            spdlog::info("overlay: [debug] commands: time freeze first seen at present {}", frame);
+        }
+        if (st == engine::menu::State::Loading) sawLoading_ = true;
+        else if (st == engine::menu::State::Game && sawLoading_) {
+            sawLoading_ = false;
+            loadEnds_.push_back(frame);
+            spdlog::info("overlay: [debug] commands: loading screen {} ended at present {}", loadEnds_.size(), frame);
+        }
+    }
+    const auto due = [&](const Command& c) {
+        if (c.load == 0) return c.frame <= frame;
+        if (c.load == kFreeze) return freezeAt_ != 0 && freezeAt_ + c.frame <= frame;
+        return loadEnds_.size() >= c.load && loadEnds_[c.load - 1] + c.frame <= frame;
+    };
     for (auto it = commands_.begin(); it != commands_.end();) {
-        if (it->frame <= frame) {
+        if (due(*it)) {
             std::string out;
             const bool ok = runCommand(it->text, &out);
             spdlog::info("overlay: [debug] command at frame {}: '{}' -> {}{}", frame, it->text, ok ? "" : "FAILED: ", out);
@@ -379,6 +422,21 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         if (w[2] != "cpu" && w[2] != "gpu") return fail("debug compact cpu|gpu");
         gpuscene::ownedcompact().setForceCpu(w[2] == "cpu");
         return ok(std::format("owned draws: arguments by the {}", w[2]));
+    }
+    if (w[0] == "quit" && w.size() == 1) {
+        // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs
+        spdlog::info("overlay: [debug] command quit: terminating the process");
+        spdlog::default_logger()->flush();
+        TerminateProcess(GetCurrentProcess(), 0);
+        return ok("quit");
+    }
+    if (w[0] == "perf" && w.size() == 4 && w[1] == "window") {
+        // a tagged GPU pass / CPU measurement window of <frames> frames from the next recorded frame (core/perf_window.h; needs [debug] perf)
+        std::uint32_t frames = 0;
+        std::from_chars(w[2].data(), w[2].data() + w[2].size(), frames);
+        std::string why;
+        const bool armed = perfwin::arm(frames, w[3], &why);
+        return armed ? ok(why) : fail(why);
     }
     if (w[0] == "materials" && w.size() == 2 && w[1] == "reload") {
         // the material pack folders are read again (docs/research/material-pack.md)

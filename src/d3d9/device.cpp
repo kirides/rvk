@@ -1,6 +1,7 @@
 // d3d9::Device: creation, frames, resources, state setters, clears, copies. Draw preparation is in draw.cpp.
 
 #include "d3d9/device.h"
+#include "core/perf_window.h"
 #include "core/profile.h"
 #include "core/stall_sampler.h"
 #include "shader/uber.h"
@@ -795,7 +796,9 @@ void Device::beginFrame() {
             ++perf_.gpuSubmits;
             perf_.gpuMs += r.mainMs;
             perf_.gpuUploadMs += r.uploadMs;
-            if (!r.segments.empty()) {
+            std::vector<perfwin::Segment> windowSegs;  // (a perf window's frame: aggregated by core/perf_window, not logged per frame)
+            for (const auto& seg : r.segments) windowSegs.push_back({seg.label, seg.ms});
+            if (!r.segments.empty() && !perfwin::gpuFrame(gpuDetailFrame_[slot], r.mainMs, r.uploadMs, windowSegs)) {
                 spdlog::info("perf: GPU passes of frame {} (one submission: {:.3f} ms main, {:.3f} ms uploads)", gpuDetailFrame_[slot],
                              r.mainMs, r.uploadMs);
                 for (const auto& seg : r.segments) {
@@ -810,7 +813,8 @@ void Device::beginFrame() {
             const DWORD n = GetEnvironmentVariableA("RVK_PERF_FRAMES", e, sizeof e);
             return n > 0 && n < sizeof e ? std::max<std::uint64_t>(std::strtoull(e, nullptr, 10), 1) : 1;
         }();
-        const bool details = options_.perfFrame != 0 && stats_.frames + 1 >= options_.perfFrame && stats_.frames + 1 < options_.perfFrame + perfSpan;
+        const bool inWindow = perfwin::beginFrame(stats_.frames + 1);  // `perf window <frames> <tag>` (core/perf_window.h)
+        const bool details = inWindow || (options_.perfFrame != 0 && stats_.frames + 1 >= options_.perfFrame && stats_.frames + 1 < options_.perfFrame + perfSpan);
         gpuDetailFrame_[slot] = details ? stats_.frames + 1 : 0;
         game_->timestampStart(slot, details);
         game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main, "begin");
