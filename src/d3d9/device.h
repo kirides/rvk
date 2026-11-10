@@ -283,7 +283,7 @@ private:
     bool texcoord4_ = false;
 };
 
-inline constexpr std::size_t kVariantSlots = 22;  // VariantSlot::Count
+inline constexpr std::size_t kVariantSlots = 30;  // VariantSlot::Count
 
 class Shader {
 public:
@@ -374,19 +374,45 @@ enum class VariantSlot : std::uint8_t {
     // S-4 (native.vertex_pull, frame-ownership.md 14.12): the scene ABI v2 vertex shader in its pulled form (TranslateOptions::pullVertices: inputs from the draw's
     // VertexFetch block, no vertex input but the ref stream). Not a "+7" form: Device::variantWorker treats it by name
     SceneVsPull = 21,
+    // bone-history motion (native.bone_motion, frame-ownership.md 14.13): BoneVs = the provider slot of the skinned vertex shaders' bone-motion variant (the translated program run a
+    // second time with the previous frame's bone image of the bone table: its world position -> rvk_prevWorld, location 15); never drawn as such, only its scene forms. The
+    // G-buffer motion pixel variants (GbufferMotion / GbufferMotionM) get scene forms too. v1 forms 23..25, their v2 forms 26..28 (= v1 + 3), the v2 vertex shader's pulled form 29
+    BoneVs = 22,
+    SceneVsBone = 23,
+    SceneGbufferMotion = 24,
+    SceneGbufferMotionM = 25,
+    SceneVsBone2 = 26,
+    SceneGbufferMotion2 = 27,
+    SceneGbufferMotionM2 = 28,
+    SceneVsBonePull = 29,
     Count
 };
 static_assert(static_cast<std::size_t>(VariantSlot::Count) == kVariantSlots, "Shader::variants / variantState sizes");
 // the slot a scene form is built from (its provider's options + sceneRecord); Count = none (SceneVs / ScenePs: sceneRecord alone)
-inline bool isSceneView(VariantSlot s) { return s >= VariantSlot::SceneVs2; }
-inline VariantSlot sceneView2Of(VariantSlot v1) { return static_cast<VariantSlot>(static_cast<std::uint8_t>(v1) + 7); }  // SceneVs..SceneGbufferA -> the v2 form
+// a scene form (built by Device::variantWorker from its base slot's provider + sceneRecord); BoneVs is a provider slot only
+inline bool isSceneSlot(VariantSlot s) { return s >= VariantSlot::SceneVs && s != VariantSlot::BoneVs; }
+inline bool isBoneScene(VariantSlot s) { return s >= VariantSlot::SceneVsBone && s < VariantSlot::Count; }
+inline bool isSceneView(VariantSlot s) { return isBoneScene(s) ? s >= VariantSlot::SceneVsBone2 : s >= VariantSlot::SceneVs2 && s <= VariantSlot::SceneVsPull; }
+// SceneVs..SceneGbufferA -> the v2 form (+7); SceneVsBone..SceneGbufferMotionM -> theirs (+3)
+inline VariantSlot sceneView2Of(VariantSlot v1) {
+    return static_cast<VariantSlot>(static_cast<std::uint8_t>(v1) + (isBoneScene(v1) ? 3 : 7));
+}
+// the v1 form of a v2 (or pulled) form
+inline VariantSlot sceneView1Of(VariantSlot s) {
+    if (s == VariantSlot::SceneVsPull) return VariantSlot::SceneVs;
+    if (s == VariantSlot::SceneVsBonePull) return VariantSlot::SceneVsBone;
+    if (!isSceneView(s)) return s;
+    return static_cast<VariantSlot>(static_cast<std::uint8_t>(s) - (isBoneScene(s) ? 3 : 7));
+}
 inline VariantSlot sceneBaseSlot(VariantSlot s) {
-    if (isSceneView(s)) s = static_cast<VariantSlot>(static_cast<std::uint8_t>(s) - 7);
-    switch (s) {
+    switch (sceneView1Of(s)) {
     case VariantSlot::SceneGi: return VariantSlot::Gi;
     case VariantSlot::SceneGbuffer: return VariantSlot::Gbuffer;
     case VariantSlot::SceneGbufferM: return VariantSlot::GbufferM;
     case VariantSlot::SceneGbufferA: return VariantSlot::GbufferA;
+    case VariantSlot::SceneVsBone: return VariantSlot::BoneVs;
+    case VariantSlot::SceneGbufferMotion: return VariantSlot::GbufferMotion;
+    case VariantSlot::SceneGbufferMotionM: return VariantSlot::GbufferMotionM;
     default: return VariantSlot::Count;
     }
 }
@@ -398,6 +424,8 @@ inline VariantSlot sceneSlotOf(VariantSlot base) {
     case VariantSlot::Gbuffer: return VariantSlot::SceneGbuffer;
     case VariantSlot::GbufferM: return VariantSlot::SceneGbufferM;
     case VariantSlot::GbufferA: return VariantSlot::SceneGbufferA;
+    case VariantSlot::GbufferMotion: return VariantSlot::SceneGbufferMotion;  // (native.bone_motion's skinned draws only: Device::sceneDecide)
+    case VariantSlot::GbufferMotionM: return VariantSlot::SceneGbufferMotionM;
     default: return VariantSlot::Count;
     }
 }
@@ -941,6 +969,27 @@ public:
     void setSceneShadows(bool on) { if (on != sceneShadows_) ++variantEpoch_; sceneShadows_ = on; }
     // F6-1 (frame-ownership.md 7.40, native.owned_actors): the skinned actors' z / solid draws of the main view and z draws of the cascades get their scene forms too
     void setSceneActors(bool on) { if (on != sceneActors_) ++variantEpoch_; sceneActors_ = on; }
+    // ---- bone-history motion (native.bone_motion = off | on | compare, frame-ownership.md 14.13; d3d9/bone_motion.cpp). On: a skinned main-view solid draw whose VS window 2 is
+    // a bone table image with history is drawn with the bone-motion forms (its vertex shader runs the translated program a second time on the previous frame's image: the previous
+    // world position for the G-buffer's motion), so object motion / the RT scene need no vertex capture of it and its owned form stays owned. Compare: the captures as before and
+    // the capture vertex shader also runs the bone path and compares (rvk.log `native: bone motion compare (5 s)`)
+    void setBoneMotion(int mode);
+    int boneMotion() const { return boneMode_; }
+    // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
+    bool boneMotionDraw() const { return obsBone_; }
+    // compare mode: the bit the capture header carries for a main solid skinned draw whose window 2 is a bone image with history (0 = none / not compare mode)
+    std::uint32_t boneCompareBit() const;
+    struct BoneMotionStats {
+        std::uint64_t predicted = 0, chosen = 0, chosen2 = 0, chosenPull = 0, pending = 0, noHistory = 0, records = 0, recordsNoPrev = 0, compareDraws = 0;
+        std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
+        float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
+        float winPx = 0.0f, winWorld = 0.0f;
+    } boneStats;
+    static bool boneVsOptions(const Shader& s, shader::TranslateOptions& o);  // the BoneVs provider (vertex shaders)
+    static void boneCompareText(shader::TranslateOptions& o);  // compare mode: added to the capture variant's text (enh/rt_scene captureOptions)
+    static bool boneCompareOn();
+    static void boneCompareForce(bool on);  // tools (rvk_shadertool --capture-bone): the compare text without a device
+    static const char* captureTag() { return boneCompareOn() ? "cap6c" : "cap6"; }  // the capture variant's cache tag (its text changes in compare mode)
     void setSceneVeg(bool on) { if (on != sceneVeg_) ++variantEpoch_; sceneVeg_ = on; }  // F7-2: the grass draws' scene ABI v2 form
     void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
@@ -1067,6 +1116,7 @@ public:
         // S-4 (native.vertex_pull): the pulled form's pipeline (scenePipeline2's pixel shader + the SceneVsPull vertex shader, the ref stream as the only vertex input)
         // and the draw's VertexFetch block (valid = kVertexFetchValid when every input can be pulled); None / invalid = the draw keeps its vertex input
         GamePipeline scenePipelinePull = GamePipeline::None;
+        bool boneMotion = false;  // 14.13 (native.bone_motion): the scene forms above are the bone-motion forms (the record's prevVs = the bone window's history image)
         shader::abi::VertexFetch pull{};
         rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;  // vsModule: the one drawn with (the engine's, or the billboards' fade variant); fsModule: the engine's
         // the enhancement variant decision of prepareDraw and what it was derived from (retained-signals.md 13): replayBuild re-derives the cheap inputs
@@ -2070,6 +2120,23 @@ private:
     GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
     GamePipeline scenePipe2_ = GamePipeline::None;  // ... its scene ABI v2 form (retained draws only)
     GamePipeline scenePipePull_ = GamePipeline::None;  // ... and its pulled form (S-4)
+    // ---- bone-history motion (native.bone_motion, frame-ownership.md 14.13; d3d9/bone_motion.cpp)
+    int boneMode_ = 0;              // 0 off, 1 on (the skinned solid draws' motion from the bone table's history), 2 compare (captures as before + a GPU compare)
+    bool sceneBone_ = false;        // sceneDecide chose the bone-motion forms for the draw being prepared
+    bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)
+    std::unordered_set<std::uint64_t> bonePipes_;  // the scene pipelines (v1, v2, pulled) of the bone-motion forms: toScenePacket gives their records the history base
+    bool bonePipe(GamePipeline p) const { return boneMode_ == 1 && !bonePipes_.empty() && bonePipes_.contains(static_cast<std::uint64_t>(p)); }
+    bool boneFormsReady();          // the current shaders' bone-motion forms (v1 + v2 VS, the motion PS's scene forms) exist (requested when not)
+    bool bonePredict(draws::Kind kind, const scene::Phase& phase);  // prepareDraw, before the observers: the draw will take the bone-motion forms
+    bool boneOfCached(const CachedDraw& c) const { return c.boneMotion && boneMode_ == 1 && gbuf_.active && gbuf_.motion != nullptr; }
+    std::unique_ptr<rhi::Buffer> boneCmp_;  // compare mode: kBoneCmpSlots x 16 bytes the capture vertex shaders accumulate into (Readback)
+    std::uint64_t boneCmpFrame_ = 0;
+    double boneLog_ = -1e9;
+    BoneMotionStats boneLast_;
+public:
+    // once per present (gpuscene::BoneTable::flush): compare mode's readback + the next frame's compare slot (frame param kFrameParamBoneMotion), the 5 s line
+    void boneMotionFrame();
+private:
     void computePullFetch(const PipelineDesc& pd, const std::uint32_t* streamBinding, std::uint32_t nullBinding);
     // S-4: variant modules shared by their text (Device::moduleTextKey; variantModule / uberModule)
     struct ModuleTextKey {

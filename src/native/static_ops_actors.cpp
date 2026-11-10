@@ -342,6 +342,7 @@ StaticOps::Skip StaticOps::composeActorImpl(const Op& op) {
     // the morph targets (HRA +0xa8 != 0): the three strongest weights of the instance's setup (+0x1d0, 0xc-byte entries) ->
     // c31.xyz, and the stream offsets of streams 1..3 (the morph VB) = target x the LOD's vertex count x 0x10
     float weights[3] = {0.0f, 0.0f, 0.0f};
+    std::uint32_t pickOf[3] = {};  // (14.13: the bone history's tag)
     const std::uint32_t targets = get<std::uint32_t>(hra, 0xa8);
     if (targets != 0) {
         if (targets > kMaxMorphTargets) return Skip::Unreadable;
@@ -351,6 +352,7 @@ StaticOps::Skip StaticOps::composeActorImpl(const Op& op) {
         // (the pick of this frame, shared with the stamps / records / owned draws: ONE pick per actor instance and frame whatever order the views read it in; F-INT 7.43)
         std::uint32_t pickT[3] = {};
         if (!actorPick(ai, setup, targets, weights, pickT)) return Skip::Unreadable;
+        std::memcpy(pickOf, pickT, sizeof(pickOf));
         const std::uint32_t lodVertices = get<std::uint32_t>(hra, 0x48 + 0x14 * static_cast<std::size_t>(lod));
         for (std::uint32_t i = 0; i < 3; ++i) {
             if (g.streams[i + 1].buffer != nullptr) g.streams[i + 1].offset = sc::morphStreamOffset(pickT[i], lodVertices);
@@ -366,6 +368,7 @@ StaticOps::Skip StaticOps::composeActorImpl(const Op& op) {
     writeAlpha(0, fade);
     std::memcpy(actorCur_.weights, weights, 12);
     actorCur_.fade = fade;
+    actorCur_.histTag = actorHistTag(hra, lod, pickOf);
     // RenderPrimitive: start index +0, primitives +4, min vertex +8, vertices +0xc into the record (the rest as created)
     g.startIndex = get<std::uint32_t>(prim, 0);
     g.primCount = get<std::uint32_t>(prim, 4);

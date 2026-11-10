@@ -62,6 +62,16 @@ void StaticOps::stagesReport() {
     lastPull = dev_.vertexPullActs();
     line += stage("vertex_pull", settingOn(rs.nativeVertexPull), dev_.vertexPull(), vp, std::format("{} items pulled", vp));
     vertexPullReport();
+    // 14.13: bone-history motion (native.bone_motion, restart; acted = skinned solid draws drawn with the bone-motion forms, composed + owned records, in the window)
+    {
+        static std::uint64_t last = 0;
+        const d3d9::Device::BoneMotionStats& b = dev_.boneStats;
+        const std::uint64_t acted = b.chosen + b.records + b.compareDraws;
+        const std::uint64_t a = acted - last;
+        last = acted;
+        const bool boneSetting = rs.nativeBoneMotion != nullptr && rs.nativeBoneMotion->startValue() != 0.0;
+        line += stage("bone_motion", boneSetting, dev_.boneMotion() != 0, a, std::format("{} skinned solid draws / records", a));
+    }
     // S-1a: the HLSL ubershader (debug.ubershader; the owned-shader line holds the per-kind counts)
     const bool uberSetting = settingOn(rs.ubershader), uberCode = dev_.ubershader();
     line += std::format(" ubershader={}", uberCode == uberSetting ? (uberCode ? "active(HLSL material shaders)" : "inactive(setting off)") : "INCONSISTENT(setting vs code)");

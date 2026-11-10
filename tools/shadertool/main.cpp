@@ -449,7 +449,8 @@ int main(int argc, char** argv) {
                 variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
                     return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::GbufferMotion, o);
                 };
-            } else if (a == "--capture") {
+            } else if (a == "--capture" || a == "--capture-bone") {
+                if (a == "--capture-bone") rvk::d3d9::Device::boneCompareForce(true);  // (14.13: native.bone_motion=compare's capture text)
                 variant = &rvk::enh::RtScene::captureOptions;
             } else if (a == "--hlsl") {
                 // (always HLSL now; the flag is kept for old command lines)
@@ -462,6 +463,17 @@ int main(int argc, char** argv) {
                     o.sceneRecord = o.sceneView = o.pullVertices = true;
                     return true;
                 };
+            } else if (a == "--bone" || a == "--bone-pull") {
+                // 14.13 (native.bone_motion): the vertex shaders' bone-motion forms (with --scene / --scene2: SceneVsBone / SceneVsBone2; --bone-pull: the pulled v2 form)
+                if (a == "--bone-pull") {
+                    variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
+                        if (!rvk::d3d9::Device::boneVsOptions(sh, o)) return false;
+                        o.sceneRecord = o.sceneView = o.pullVertices = true;
+                        return true;
+                    };
+                } else {
+                    variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::d3d9::Device::boneVsOptions(sh, o); };
+                }
             } else if (a == "--scene") {
                 options.sceneRecord = true;  // scene variants: the draw's data from a DrawRecord (frame-ownership.md 7.10)
             } else if (a == "--fillers") {

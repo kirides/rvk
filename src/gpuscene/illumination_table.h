@@ -56,6 +56,9 @@ public:
     void flush(d3d9::Device& dev, bool verify, std::uint32_t used);
     // collects finished read-backs
     void collect(rhi::GameDevice& game, const char* name);
+    // zeroes the whole device buffer in the frame's upload list (a table whose read-back covers slots that were never written: their CPU shadow is zero). Call it in the
+    // flush that created the buffer, before any upload of it (the uploads go out with the next flush)
+    void zero(d3d9::Device& dev);
     // drops the device buffer, the read-back buffers and the dirty list (tests; the CPU shadow stays)
     void release();
     const TableStats& stats() const { return stats_; }

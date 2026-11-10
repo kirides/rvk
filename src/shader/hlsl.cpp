@@ -860,6 +860,7 @@ private:
         // the ABI declarations (push constants, the pointers, the bindless heap): shaders/include/rvk_draw.hlsli
         if (scene()) h += "#define RVK_SCENE_RECORD 1\n";  // (the push block becomes a ScenePush, the draw's data comes from a DrawRecord)
         if (opt_.sceneView) h += "#define RVK_SCENE_VIEW 1\n";    // (ABI v2: the view's windows / posFix / c5.xyz come from the view table)
+        h += opt_.defines;
         h += "#include \"rvk_draw.hlsli\"\n\n";
         if (opt_.pullVertices) h += "#include \"rvk_pull.hlsli\"\n\n";  // (S-4: after the ABI header; uberTranslatedPart keeps it inside rvkTr's text)
         return h;
@@ -1150,7 +1151,9 @@ private:
             // results without it, other drivers need not (DXVK decorates the position Invariant for the same reason)
             m += std::format("    precise float4 rvk_pos = {};\n", pos);
             if (!opt_.epilogue.empty()) {
-                m += opt_.epilogue;
+                std::string ep = opt_.epilogue;  // (`$pos`: the position output register, TranslateOptions::epilogue)
+                for (std::size_t at = ep.find("$pos"); at != std::string::npos; at = ep.find("$pos", at + pos.size())) ep.replace(at, 4, pos);
+                m += ep;
                 m += "\n";
             }
             // the half-pixel fix, then the reversed depth remap (abi.h posFix: xy fix, zw z' = z (1 + zw.x) + zw.y w; 0 = none)

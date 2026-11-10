@@ -48,7 +48,7 @@ void ObjectMotion::apply(bool skinned, bool rigid) {
     registered_ = want;
     if (want) {
         // the same capture variant as the RT scene's (its SPIR-V cache tag too)
-        dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap6", RtScene::captureOptions});
+        dev_.setVariantProvider(d3d9::VariantSlot::Capture, {d3d9::Device::captureTag(), RtScene::captureOptions});
         dev_.addDrawObserver(this);
         spdlog::info("enh: object motion: on (skinned {}, moving rigid draws {})", skinned ? "yes" : "no", rigid ? "yes" : "no");
     } else {
@@ -112,6 +112,11 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             spdlog::info("enh: object motion: skinned draws seen {} (not triangle lists {}, no buffers {}, instanced {}, ring-copied {})", diagSkin_,
                          diagSkinType_, diagSkinNoBuf_, diagSkinInst_, diagSkinRing_);
         }
+    }
+    // 14.13 (native.bone_motion): the draw takes the bone-motion forms: its previous positions come from the bone table's history, no capture
+    if (q.kind == Kind::Skinned && dev.boneMotionDraw()) {
+        ++boneDraws_;
+        return;
     }
     if (q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
         q.indexBuffer->ringCopied() || q.vertexBuffer->ringCopied()) {
@@ -217,6 +222,12 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions)
     std::uint32_t header[4] = {slots, 0, 0, 0};
+    if (q.kind == Kind::Skinned) {
+        // native.bone_motion=compare: the capture vertex shader also runs the bone path on this draw's bone image and compares (bit 30 of the slots)
+        const std::uint32_t bit = dev.boneCompareBit();
+        header[0] |= bit;
+        if (bit != 0) ++dev.boneStats.compareDraws;
+    }
     if (!s.last.null() && s.lastFrame + 1 == frame) {
         header[1] = s.last.low();
         header[2] = s.last.high();
@@ -233,8 +244,8 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const double now = dev.secondsSinceCreate();
     if (now - lastLog_ > 10.0) {
         lastLog_ = now;
-        spdlog::info("enh: object motion: {} captures so far ({} rigid draws seen moving), {} tracked draws", captures_, rigidMoving_,
-                     states_.size());
+        spdlog::info("enh: object motion: {} captures so far ({} rigid draws seen moving), {} tracked draws, {} skinned draws without a capture (bone-history motion)", captures_,
+                     rigidMoving_, states_.size(), boneDraws_);
     }
 }
 

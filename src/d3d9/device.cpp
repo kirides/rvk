@@ -1962,7 +1962,7 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     s->variantState[i].store(1, std::memory_order_release);
     {
         const std::lock_guard lock(variantMutex_);
-        const bool scene = slot >= VariantSlot::SceneVs;
+        const bool scene = isSceneSlot(slot);
         const VariantSlot baseSlot = scene ? sceneBaseSlot(slot) : slot;
         if (baseSlot != VariantSlot::Count && !variantProviders_[static_cast<std::size_t>(baseSlot)].options) {
             s->variantState[i].store(3);
@@ -1997,18 +1997,18 @@ void Device::variantWorker() {
             variantJobs_.pop_front();
             ++variantBusy_;
             provider = variantProviders_[static_cast<std::size_t>(job.slot)];
-            if (job.slot >= VariantSlot::SceneVs) {
+            if (isSceneSlot(job.slot)) {
                 // a scene form (7.11): the base slot's provider + sceneRecord (SceneVs / ScenePs: no base options)
                 const VariantSlot b = sceneBaseSlot(job.slot);
                 VariantProvider base;
                 if (b != VariantSlot::Count) base = variantProviders_[static_cast<std::size_t>(b)];
                 // (scene ABI v2: the same forms with the view table, slot = v1 slot + 7: frame-ownership.md 7.19)
                 const bool view = isSceneView(job.slot);
-                // (S-4: SceneVsPull = the v2 vertex shader's pulled form, not a "+7" slot)
-                const bool pull = job.slot == VariantSlot::SceneVsPull;
-                const VariantSlot v1 = pull ? VariantSlot::SceneVs : view ? static_cast<VariantSlot>(static_cast<std::uint8_t>(job.slot) - 7) : job.slot;
+                // (S-4: SceneVsPull = the v2 vertex shader's pulled form, not a "+7" slot; 14.13: the bone-motion forms' v2 are "+3", SceneVsBonePull the pulled one)
+                const bool pull = job.slot == VariantSlot::SceneVsPull || job.slot == VariantSlot::SceneVsBonePull;
+                const VariantSlot v1 = sceneView1Of(job.slot);
                 const bool lodVs = v1 == VariantSlot::SceneVsLod;
-                const bool pixel = v1 != VariantSlot::SceneVs && !lodVs;
+                const bool pixel = v1 != VariantSlot::SceneVs && v1 != VariantSlot::SceneVsBone && !lodVs;
                 provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "") +
                                (pull ? std::format("p{:08x}", shader::hlslPullHash()) : "");
                 const bool uberOn = ubershader_.load(std::memory_order_relaxed);

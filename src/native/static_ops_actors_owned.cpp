@@ -323,7 +323,7 @@ void StaticOps::actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Wi
     key.wrapper = actorCur_.wrapper;
     key.prim = actorCur_.prim;
     key.fadeBits = std::bit_cast<std::uint32_t>(actorCur_.fade);
-    if (gpuscene::bonetable().serve(key, regs, 2 + 3 * actorCur_.bones, out) == gpuscene::BoneWhy::Served) {
+    if (gpuscene::bonetable().serve(key, regs, 2 + 3 * actorCur_.bones, out, actorCur_.histTag) == gpuscene::BoneWhy::Served) {
         served = true;
         ++actorCur_.offered;
         ++actorW_.offeredDraws;
@@ -359,7 +359,7 @@ bool StaticOps::ownedActorWindow(const Op& op, const orec::OpRecord& rec, d3d9::
     static thread_local float regs[gpuscene::kBoneRegs][4];
     std::uint32_t count = 0;
     if (!actorImage(op, in, regs, count) || count != 2 + 3 * rec.actorBones) return false;
-    if (bt.serve(key, regs, count, out) != gpuscene::BoneWhy::Served) return false;
+    if (bt.serve(key, regs, count, out, actorHistTag(in.hra, in.lod, in.pick)) != gpuscene::BoneWhy::Served) return false;
     ++actorW_.imageBuilds;
     actorW_.imageNs += nsOf(t0, tnow());
     return true;
