@@ -165,7 +165,7 @@ drawn through the RHI's ImGui backend, so Vulkan and D3D12 look the same. Escape
 
 ### 2.9 Master quality ("Graphics Quality")
 
-One table, `settings::graphicsPresets()` (core/settings.cpp): Original, Low, Medium, High, Ultra; "Custom" is shown when
+One table, `settings::graphicsPresets()` (core/settings.cpp): Original, Low, Medium, High, Ultra, Integrated ("igpu", 2026-11-10, frame-ownership.md 14.11: RT reflections off, Gerstner ocean, 1024 maps / 60 m, draw distances 1.5x, FSR quality; offered on integrated GPUs; chosen by itself on the first run there for every setting still at its default: `applyIntegratedDefaults`, hidden `system.igpu_preset_done`; `-Environment 'RVK_FAKE_INTEGRATED=1'` tests it); "Custom" is shown when
 `matchPreset` finds none (any manual change of a member). Each preset writes the water / sea / sun shadow knobs named in the
 table plus the RT cost knobs of `rtPresets()` (rt.lod_*, memory budget, shadows.rt_quality / range, rt.reflections, gi.quality /
 screen, materials.rt_reflections / range): Low = rt low, Medium + High = rt medium, Ultra = rt high; a key a preset names itself

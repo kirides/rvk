@@ -15,6 +15,7 @@ capability report is set and on every change of the setting and stores it (`caps
 `caps::lowBandwidth(item)` where they create their images. rvk.log: `vulkan: low bandwidth: on (auto: integrated GPU)` /
 `off (set by the player)`. The overlay's combo shows "Auto (on: integrated GPU)" (`overlay_ui.cpp`).
 Images are transients keyed by description, so a change re-creates them; histories are invalidated where needed.
+`-Environment 'RVK_FAKE_INTEGRATED=1'` makes the device count as integrated (auto = on, plus the Integrated graphics preset's first-run defaults, overlay.md 2.9 / frame-ownership.md 14.11).
 Developer knob: `-Environment 'RVK_LOWBW_OFF=<mask>'` leaves single items out (1 AO, 2 screen probes, 8 material RT, 16 water RT) for bisecting pictures.
 
 ## Items (bytes at 1920x1080 = 2.07 M pixels; estimates from the formats, not measured traffic)

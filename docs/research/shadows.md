@@ -111,6 +111,7 @@ A `d3d9::DrawReplacer` for the main view's ShadowMask pass (the device now holds
   own mask leave lit, section 5); the cascades blended over the last `cascade_blend` of each
   cascade's depth range (when the next map covers the pixel); the last cascade faded over its last `fade` (0.35); times the
   engine's terrain term, exactly as SSM.
+* Filter cost (S-8, frame-ownership.md 14.11): the 3x3 / 4x4 grids are one separable weighted pass over the touched texels by 2x2 gathers (4 / 4-9 gathers instead of 9 / 16; the receiver plane at the texel), the 2x2 Low filter keeps the per-tap form; the depth cross is 2 gathers; only the reachable cascades are computed; terrain fetch skipped at shadow 0; the RT term skips the cascades where it covers the pixel. RGA gfx1035 77 -> 67 VGPRs; no GPU change on the XTX (0.05 ms at 1600x900), picture unchanged.
 * Filter width: `softness` texels between taps in the nearest cascade; the coarser cascades take fewer texels
   (`texelWorld[0] / texelWorld[i]`, at least half a texel), so their edges do not grow into metre-wide blobs.
 * Engine side ("auto" with the enhanced mask): 4096² maps, 100 m range, split factor 0.4 -> splits 1 / 1347 / 2945 /
