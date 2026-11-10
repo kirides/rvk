@@ -31,9 +31,9 @@ std::string errorKey(const std::string& line) {
     return k.substr(0, 150);
 }
 
-Both compileBoth(rvk::shader::dxc::Request r, spvtools::SpirvTools& tools, bool checkRootSignature = true) {
+Both compileBothUncached(rvk::shader::dxc::Request r, spvtools::SpirvTools& tools, bool checkRootSignature) {
     Both b;
-    r.cache = false;
+    r.cache = g_diskCache;
     r.target = rvk::shader::dxc::Target::Spirv;
     const auto sp = rvk::shader::dxc::compile(r);
     if (!sp.ok()) {
@@ -62,22 +62,62 @@ Both compileBoth(rvk::shader::dxc::Request r, spvtools::SpirvTools& tools, bool 
     return b;
 }
 
-template <typename Fn>
-void parallelFor(std::size_t n, int jobs, Fn&& fn) {
-    std::atomic<std::size_t> next{0};
-    std::vector<std::thread> pool;
-    const int count = std::max(1, jobs);
-    for (int t = 0; t < count; ++t) {
-        pool.emplace_back([&] {
-            for (std::size_t i; (i = next.fetch_add(1)) < n;) fn(i);
-        });
+// Identical requests compile once per run (the census files of `uber` overlap, two variant forms can produce the same text): the key is the
+// whole request (file name, text, DXC arguments, the root signature check) as two independent 64-bit hashes; every item still gets its own
+// result, so totals and labels are those of the unmemoised run. `--no-memo` turns it off.
+struct CompileMemo {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_future<Both>> results;
+    std::atomic<std::uint64_t> hits{0}, misses{0};
+};
+CompileMemo g_memo;
+bool g_memoOn = true;
+
+std::uint64_t memoHash(std::string_view s, std::uint64_t h) {
+    for (const unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ull;
     }
-    for (auto& t : pool) t.join();
+    return h;
 }
 
-int defaultJobs() {
-    const unsigned hw = std::thread::hardware_concurrency();
-    return static_cast<int>(hw > 2 ? hw - 2 : 1u);
+Both compileBoth(rvk::shader::dxc::Request r, spvtools::SpirvTools& tools, bool checkRootSignature = true) {
+    if (!g_memoOn) return compileBothUncached(std::move(r), tools, checkRootSignature);
+    std::string key = r.file;
+    key += '\x1f';
+    for (const std::string& a : rvk::shader::dxc::arguments(r)) {
+        key += a;
+        key += '\x1f';
+    }
+    key += checkRootSignature ? '1' : '0';
+    key += std::format("|{:016x}{:016x}|{}", memoHash(r.source, 14695981039346656037ull), memoHash(r.source, 0x9e3779b97f4a7c15ull), r.source.size());
+    std::promise<Both> promise;
+    std::shared_future<Both> future;
+    bool owner = false;
+    {
+        const std::lock_guard lock(g_memo.mutex);
+        auto [it, inserted] = g_memo.results.try_emplace(key);
+        if (inserted) {
+            it->second = promise.get_future().share();
+            owner = true;
+        }
+        future = it->second;
+    }
+    if (!owner) {
+        ++g_memo.hits;
+        return future.get();
+    }
+    ++g_memo.misses;
+    promise.set_value(compileBothUncached(std::move(r), tools, checkRootSignature));
+    return future.get();
+}
+
+// the memo's line under a report: how many items reused another's compile
+void printMemo() {
+    if (g_memoOn && g_memo.hits > 0) {
+        std::fprintf(stderr, "(%llu of %llu items had the request of an earlier item: compiled once)\n", static_cast<unsigned long long>(g_memo.hits.load()),
+                    static_cast<unsigned long long>(g_memo.hits.load() + g_memo.misses.load()));
+    }
 }
 
 // Shaders that compile to DXIL but cannot be used with the fixed root signature, and why (documented exceptions, docs/research/hlsl-rhi.md "DXIL parity (S1)"):
@@ -202,6 +242,7 @@ int cmdDxilEmbedded(int argc, char** argv) {
         items[i].family = j.family;
         items[i].r = compileBoth(r, tools, !rootSignatureExemption(items[i].label));
     });
+    printMemo();
     return reportDxil(items, 200, quiet);
 }
 
@@ -262,6 +303,7 @@ int cmdDxilCorpus(const fs::path& dir, int jobs, int maxErrors, const TranslateO
         if (skip[i]) ++skipped;
         else kept.push_back(std::move(items[i]));
     }
+    printMemo();
     const int rc = reportDxil(kept, maxErrors, true);
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("\n%zu shaders in %.1f s (%d without the variant: skipped)\n", kept.size(), secs, skipped);
@@ -431,6 +473,7 @@ int cmdDxilUber(int argc, char** argv) {
         it.r = compileBoth(r, tools);
     });
     std::printf("%zu captured requests x %zu variants + %zu vertex shaders x %zu forms\n", reqs.size(), kN, vsReqs.size(), kVsN);
+    printMemo();
     return reportDxil(items, maxErrors, true);
 }
 
@@ -534,6 +577,30 @@ int cmdUberSpv(int argc, char** argv) {
 
 int cmdDxilCheck(int argc, char** argv) {
     const std::string what = argv[2];
+    // shared options (any position): -j N / -jN (= --jobs N), --no-memo, --cache <dir> (dxc's disk cache: unchanged requests are not compiled again in
+    // the next run; a hit is validated against the text of every include, like the renderer's cache). Consumed here: the commands below never see them.
+    static std::vector<std::string> owned;  // (the -jN values)
+    static std::vector<char*> args;
+    owned.reserve(static_cast<std::size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (i >= 3 && a == "--no-memo") { g_memoOn = false; continue; }
+        if (i >= 3 && a == "--cache" && i + 1 < argc) {
+            rvk::shader::dxc::setCacheDirectory(argv[++i]);
+            g_diskCache = true;
+            continue;
+        }
+        if (i >= 3 && a == "-j" && i + 1 < argc) { args.push_back(const_cast<char*>("--jobs")); args.push_back(argv[++i]); continue; }
+        if (i >= 3 && a.size() > 2 && a.starts_with("-j") && std::isdigit(static_cast<unsigned char>(a[2]))) {
+            owned.push_back(a.substr(2));
+            args.push_back(const_cast<char*>("--jobs"));
+            args.push_back(owned.back().data());
+            continue;
+        }
+        args.push_back(argv[i]);
+    }
+    argc = static_cast<int>(args.size());
+    argv = args.data();
     if (what == "embedded") return cmdDxilEmbedded(argc, argv);
     if (what == "uber") return cmdDxilUber(argc, argv);
     if (what == "uber-spv") return cmdUberSpv(argc, argv);

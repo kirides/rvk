@@ -45,6 +45,7 @@
 #include "engine/memread.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
+#include "core/perf_window.h"
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
@@ -1925,7 +1926,12 @@ bEResult HalDevice::SaveBackbufferToFile(char* const a0) {
 void HalDevice::logFrameStats() {
     const auto& s = dev_.stats();
     const auto now = std::chrono::steady_clock::now();
-    if (s.frames == 1 || now - lastStatsTime_ >= std::chrono::seconds(5)) {
+    // perf windows (core/perf_window.h, `perf window <frames> <tag>`): the stats interval closes right before a window's first frame and right after its
+    // last, so the interval reports between the window's begin / end markers cover exactly its frames
+    std::string windowTag;
+    const perfwin::Edge edge = perfwin::afterPresent(s.frames, &windowTag);
+    if (edge == perfwin::Edge::End) spdlog::info("perf: window {} closing at frame {}", windowTag, s.frames);
+    if (s.frames == 1 || edge != perfwin::Edge::None || (!perfwin::running() && now - lastStatsTime_ >= std::chrono::seconds(5))) {  // (no 5 s cut inside a window)
         const double secs = std::chrono::duration<double>(now - lastStatsTime_).count();
         const double frames = std::max(1.0, static_cast<double>(s.frames - lastStatsFrame_));
         spdlog::info("hal: {:.1f} fps, {} draws in the last frame; presents {}, acquire failures {}, suboptimal {}; avg acquire "
@@ -1951,6 +1957,8 @@ void HalDevice::logFrameStats() {
                      static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0), s.scopeClears, s.stencilPlaneDraws,
                      s.stencilNoPlaneDraws);
     }
+    if (edge == perfwin::Edge::Begin) spdlog::info("perf: window {} begin at frame {}", windowTag, s.frames + 1);
+    if (edge == perfwin::Edge::End) spdlog::info("perf: window {} end at frame {}", windowTag, s.frames);
 }
 
 // frame generation: the rates and the pacing of the last stats interval (the gap statistics come from the sampler thread of [debug] perf)
