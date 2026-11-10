@@ -621,16 +621,22 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             fromStream = true;
         }
     }
-    if (!fromStream && speedTree && dev.ownedReplayActive()) {
-        // F4-5: an owned tree run (Device::ownedTreeObserve) binds our identity ramp as the instance stream (no CPU copy to read back): instance i = row i by construction
+    if (!fromStream && speedTree && treeWind_ != 0) {
+        // F4-5: the trees' instance stream is an identity ramp in every draw (the engine's 256-float one or ours, StaticOps::treeEnsureRamp; `instance stream check`
+        // logs it), but an owned tree run (Device::ownedTreeObserve) and a packet-cache replay of a composed tree draw (no capture variant asked: replayable now) show
+        // the observers a stream that cannot be read back: instance i = row i by construction
         for (std::uint32_t i = 0; i < n; ++i) index[i] = static_cast<float>(i);
         fromStream = true;
+        ++tw_.rampAssumed;
     }
     TreeBatch treeBatch;
     const bool treeBatchOk = speedTree && animated_ && fromStream && q.phase.view == View::Main && q.phase.pass == Pass::Solid;
     for (std::uint32_t i = 0; i < n; ++i) {
         const float v = fromStream ? index[i] : static_cast<float>(i);
-        if (fromStream && v != static_cast<float>(i)) ++indexDeviations_;
+        if (fromStream && v != static_cast<float>(i)) {
+            ++indexDeviations_;
+            if (speedTree) ++tw_.rampMismatch;
+        }
         if (!std::isfinite(v) || v < 0.0f || v > 64.0f) continue;
         const std::uint32_t reg = kInstanceDataBase + static_cast<std::uint32_t>(std::floor(4.0f * v + 0.5f)) + 1;
         if (reg + 2 >= kInstanceDataEnd) continue;
@@ -3554,9 +3560,9 @@ void RtScene::logStats(bool force) {
                               tw_.windRegisterStale);
         }
         spdlog::info("rt: tree wind (5 s): {}, {} tree instances by compute ({} from owned runs, {} from composed draws), {} vertices, {} dispatches, captures requested {}, "
-                     "declarations refused {}, ring full {}, dropped {}{}",
+                     "declarations refused {}, ring full {}, dropped {}; tree batches with the identity instance stream assumed {} (readable but not 0, 1, 2, ...: {}){}",
                      treeWind_ == 0 ? "off" : treeWindReady_ ? (treeWind_ == 2 ? "compare" : "on") : "on (pipeline pending)", tw_.jobs, tw_.owned, tw_.composed, tw_.vertices,
-                     tw_.dispatches, iv_.treeCaptured, tw_.refused, tw_.ringFull, tw_.dropped, cmp);
+                     tw_.dispatches, iv_.treeCaptured, tw_.refused, tw_.ringFull, tw_.dropped, tw_.rampAssumed, tw_.rampMismatch, cmp);
         tw_ = {};
     }
     if (iv_.holes > 0) {
