@@ -189,7 +189,7 @@ struct VertexFetch {
     std::uint32_t stride[4];   // 32: per stream the vertex stride in bytes (a multiple of 4)
     std::int32_t baseVertex;   // 48: the D3D9 base vertex index (the draw's vertexOffset minus the arena binding's shift)
     std::uint32_t valid;       // 52: kVertexFetchValid when the block was written for a pulled draw (0 = none: the draw is never pulled)
-    std::uint32_t pad[2];      // 56
+    std::uint32_t pad[2];      // 56: (pad[0]: CPU statistics, bytes fetched per vertex | those of POSITION0 << 16; no shader reads it)
     std::uint32_t attr[16];    // 64: per input register v0..v15 (offset | stream << 12 | format << 16), 0 = not declared
 };
 static_assert(sizeof(VertexFetch) == kVertexFetchSize);

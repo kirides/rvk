@@ -37,8 +37,7 @@ struct VsOut {
 };
 
 void put(uint vid, uint k, float4 ia) {
-    const RvkAddr fetch = rvkAddr(pc.fetch);
-    const float4 pulled = rvkPullAttr(fetch, k, vid);
+    const float4 pulled = rvkPullAttr(rvkPullBegin(rvkAddr(pc.fetch), vid), k);
     const RvkAddr o = rvkAddr(pc.dst);
     rvkRwStore<uint4, 16>(rvkAddrAdd(o, (vid * 26u + k) * 16u), asuint(ia));
     rvkRwStore<uint4, 16>(rvkAddrAdd(o, (vid * 26u + 13u + k) * 16u), asuint(pulled));

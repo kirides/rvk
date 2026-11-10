@@ -616,6 +616,10 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
             }
             pulledOf[i] = 1;
             ++pulledN;
+            const std::uint64_t idx = c.packet.count, per = fs[items[i].slot].pad[0];
+            vertexPullStats_.indices[viewKindP] += idx;
+            vertexPullStats_.vtxBytes[viewKindP] += idx * (per & 0xffffu);
+            vertexPullStats_.posBytes[viewKindP] += idx * (per >> 16);
         }
     }
     // buckets in the order they first appear; the items keep their order inside a bucket (the engine's order)

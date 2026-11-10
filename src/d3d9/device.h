@@ -1277,6 +1277,8 @@ public:
         // per view kind (0 main z, 1 main solid, 2 other, 3 cascades): flushes, items, items pulled, buckets (= indirect commands), buckets of pulled items
         std::uint64_t flushes[4] = {}, items[4] = {}, pulled[4] = {}, buckets[4] = {}, pulledBuckets[4] = {};
         std::uint64_t pipelines[4] = {}, indexBindings[4] = {};  // distinct per flush, summed
+        // pulled items: indices drawn (= vertex shader invocations before the post-transform reuse, before the cluster cull) and the bytes they fetch (all inputs / POSITION0)
+        std::uint64_t indices[4] = {}, vtxBytes[4] = {}, posBytes[4] = {};
         // why an owned item was not pulled: no pulled pipeline (the draw's form / pending), no fetch block in its slot
         std::uint64_t noPipeline = 0, noFetch = 0;
         // prepareDraw: draws of the scene v2 path whose inputs could / could not be pulled (format, per-instance / user-pointer stream, no arena address, alignment)

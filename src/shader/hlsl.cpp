@@ -1194,9 +1194,9 @@ private:
         std::string m = "\nstruct RvkVsPullIn {\n    uint rvk_vertexId : SV_VertexID;\n    uint rvk_instanceId : SV_InstanceID;\n";
         m += std::format("    [[vk::location({})]] uint2 rvk_sceneRef : ATTR{};\n}};\n", abi::kSceneRefLocation, abi::kSceneRefLocation);
         m += "RvkVsIn rvkPullInputs(RvkVsPullIn p) {\n    RvkVsIn r = (RvkVsIn)0;\n    r.rvk_vertexId = p.rvk_vertexId;\n    r.rvk_instanceId = p.rvk_instanceId;\n"
-             "    r.rvk_sceneRef = p.rvk_sceneRef;\n    const RvkAddr blk = rvkPullBlock(p.rvk_sceneRef);\n";
+             "    r.rvk_sceneRef = p.rvk_sceneRef;\n    const RvkPullCtx ctx = rvkPullBegin(rvkPullBlock(p.rvk_sceneRef), p.rvk_vertexId);\n";
         for (const auto& d : p_.inputs) {
-            if (d.reg.type == RegType::Input) m += std::format("    r.v{} = rvkPullAttr(blk, {}u, p.rvk_vertexId);\n", d.reg.index, d.reg.index);
+            if (d.reg.type == RegType::Input) m += std::format("    r.v{} = rvkPullAttr(ctx, {}u);\n", d.reg.index, d.reg.index);
         }
         m += "    return r;\n}\nRvkVsOut VSMain(RvkVsPullIn rvk_pin) { return rvkVsMain(rvkPullInputs(rvk_pin)); }\n";
         return m;

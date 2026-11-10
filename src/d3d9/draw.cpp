@@ -478,6 +478,13 @@ void Device::computePullFetch(const PipelineDesc& pd, const std::uint32_t* strea
         default: return refuse(0);
         }
         f.attr[at.location] = at.offset | s << shader::abi::kPullAttrStreamShift | static_cast<std::uint32_t>(fmt) << shader::abi::kPullAttrFormatShift;
+        // (pad[0], CPU statistics only, no shader reads it: the bytes one vertex fetches, and those of POSITION0: native: vertex pull's bytes per pass)
+        static constexpr std::uint32_t kBytes[14] = {0, 4, 8, 12, 16, 4, 4, 4, 4, 8, 4, 8, 4, 8};
+        const std::uint32_t bytes = kBytes[static_cast<std::uint32_t>(fmt)];
+        f.pad[0] += bytes;
+        for (const auto& in : vs_->reflection.vertexInputs) {
+            if (in.location == at.location && in.usage == shader::Usage::Position && in.usageIndex == 0) f.pad[0] += bytes << 16;
+        }
     }
     f.valid = shader::abi::kVertexFetchValid;
     pullFetch_ = f;

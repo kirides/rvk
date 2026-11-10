@@ -86,6 +86,11 @@ void StaticOps::vertexPullReport() {
         views += std::format(" [{}: {} flushes, {:.1f} items / flush, {:.1f} pulled, {:.1f} indirect commands / flush ({:.1f} of them pulled; {:.1f} distinct pipelines, {:.1f} index bindings)]",
                              kKind[k], s.flushes[k], static_cast<double>(s.items[k]) / f, static_cast<double>(s.pulled[k]) / f, static_cast<double>(s.buckets[k]) / f,
                              static_cast<double>(s.pulledBuckets[k]) / f, static_cast<double>(s.pipelines[k]) / f, static_cast<double>(s.indexBindings[k]) / f);
+        if (s.indices[k] != 0) {
+            views.pop_back();
+            views += std::format("; pulled: {:.0f} k indices / flush, {:.2f} MB fetched / flush ({:.1f} B per index, POSITION0 {:.2f} MB)]", static_cast<double>(s.indices[k]) / f / 1e3,
+                                 static_cast<double>(s.vtxBytes[k]) / f / 1e6, static_cast<double>(s.vtxBytes[k]) / static_cast<double>(s.indices[k]), static_cast<double>(s.posBytes[k]) / f / 1e6);
+        }
     }
     spdlog::info("native: vertex pull (5 s): {}{}; items not pulled: no pulled pipeline {}, no fetch block {}; draw layouts pullable {}, refused (format {}, instance / user-pointer stream {}, "
                  "no arena address {}, alignment {}, stream > 3 {}); pulled pipelines pending {}; variant modules (run): {} built, {} requests shared a module of the same text",

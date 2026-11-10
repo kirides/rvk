@@ -40,16 +40,35 @@ float rvkPullSnorm16(uint c) {
     return max(q, -1.0);
 }
 
-// input register `reg` (0..15) of vertex `vid` (SV_VertexID: the index value; the command's vertexOffset is 0) of the draw whose fetch block is `blk`
-float4 rvkPullAttr(RvkAddr blk, uint reg, uint vid) {
-    const uint w = rvkRawLoad<uint, 4>(rvkAddrAdd(blk, RVK_FETCH_ATTR + reg * 4u));
+// the fetch block's header + attribute words of one vertex, loaded once (7 x 16-byte loads: the block is 128-byte aligned in its table) instead of per input
+struct RvkPullCtx {
+    uint4 ref01, ref23, stride;
+    uint4 attr[4];
+    uint vtx;  // SV_VertexID + the base vertex
+};
+// vertex `vid` (SV_VertexID: the index value; the command's vertexOffset is 0) of the draw whose fetch block is `blk`
+RvkPullCtx rvkPullBegin(RvkAddr blk, uint vid) {
+    RvkPullCtx c;
+    c.ref01 = rvkRawLoad<uint4, 16>(blk);
+    c.ref23 = rvkRawLoad<uint4, 16>(rvkAddrAdd(blk, 16u));
+    c.stride = rvkRawLoad<uint4, 16>(rvkAddrAdd(blk, RVK_FETCH_STRIDE));
+    const uint4 meta = rvkRawLoad<uint4, 16>(rvkAddrAdd(blk, RVK_FETCH_BASE));
+    [unroll] for (uint i = 0u; i < 4u; ++i) c.attr[i] = rvkRawLoad<uint4, 16>(rvkAddrAdd(blk, RVK_FETCH_ATTR + i * 16u));
+    c.vtx = uint(int(vid) + asint(meta.x));
+    return c;
+}
+
+// input register `reg` (0..15, a constant at every call) of the vertex of `c`: ONE load of the attribute's bytes (dword / x2 / x3 / x4 by format, 4-byte aligned: the
+// arena's strides and offsets are; RDNA's global loads take that alignment for the wide forms)
+float4 rvkPullAttr(RvkPullCtx c, uint reg) {
+    const uint4 aw = c.attr[reg >> 2];
+    const uint w = (reg & 3u) == 0u ? aw.x : (reg & 3u) == 1u ? aw.y : (reg & 3u) == 2u ? aw.z : aw.w;
     const uint fmt = (w >> 16) & 0xffu;
     if (fmt == 0u) return float4(0.0, 0.0, 0.0, 1.0);
     const uint s = (w >> 12) & 3u;
-    const uint2 ref = rvkRawLoad<uint2, 8>(rvkAddrAdd(blk, s * 8u));
-    const uint stride = rvkRawLoad<uint, 4>(rvkAddrAdd(blk, RVK_FETCH_STRIDE + s * 4u));
-    const int base = asint(rvkRawLoad<uint, 4>(rvkAddrAdd(blk, RVK_FETCH_BASE)));
-    const RvkAddr a = rvkAddrAdd(rvkAddr(ref), uint(int(vid) + base) * stride + (w & 0xfffu));
+    const uint2 ref = s == 0u ? c.ref01.xy : s == 1u ? c.ref01.zw : s == 2u ? c.ref23.xy : c.ref23.zw;
+    const uint stride = s == 0u ? c.stride.x : s == 1u ? c.stride.y : s == 2u ? c.stride.z : c.stride.w;
+    const RvkAddr a = rvkAddrAdd(rvkAddr(ref), c.vtx * stride + (w & 0xfffu));
     float4 v = float4(0.0, 0.0, 0.0, 1.0);
     switch (fmt) {
     case 1u: v.x = asfloat(rvkRawLoad<uint, 4>(a)); break;
