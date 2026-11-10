@@ -342,7 +342,12 @@ bool Device::create(const DeviceOptions& options) {
     if (!options.offscreen && !pres().create(options.window, options.width, options.height, options.vsync)) {
         return false;
     }
-    if (options.perf) {
+    // (`-Environment 'RVK_HANG_WATCHDOG=1'`: the same watchdog without [debug] perf, for hangs that need vsync / the frame pacing)
+    static const bool hangWatch = [] {
+        char e[8];
+        return GetEnvironmentVariableA("RVK_HANG_WATCHDOG", e, sizeof e) > 0 && e[0] == '1';
+    }();
+    if (options.perf || hangWatch) {
         // [debug] perf: a frame that does not come within 8 s logs every thread's stack (a deadlock between the render thread, the
         // present thread and AMD's frame generation threads)
         diag::startHangWatchdog(8.0, [](void* d) { return static_cast<Device*>(d)->stats_.frames; }, this);
