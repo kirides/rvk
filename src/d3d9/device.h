@@ -980,16 +980,24 @@ public:
     int boneMotion() const { return boneMode_; }
     // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
     bool boneMotionDraw() const { return obsBone_; }
+    // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
+    // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
+    void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
+    void setRigidMotionWanted(bool on) { if (on != rigidWanted_) ++variantEpoch_; rigidWanted_ = on; }
+    bool rigidMotionOn() const { return rigidMode_ && rigidWanted_ && boneMode_ == 1; }
+    // the history window base of a VS window 2 base (the bone table's or the object table's; null = none)
+    rhi::GpuRef historyOf(rhi::GpuRef base) const;
     // compare mode: the bit the capture header carries for a main solid skinned draw whose window 2 is a bone image with history (0 = none / not compare mode)
     std::uint32_t boneCompareBit() const;
     struct BoneMotionStats {
         std::uint64_t predicted = 0, chosen = 0, chosen2 = 0, chosenPull = 0, pending = 0, noHistory = 0, records = 0, recordsNoPrev = 0, compareDraws = 0;
+        std::uint64_t rigidPredicted = 0, rigidNoWindow = 0, rigidNoHistory = 0, rigidPending = 0;  // 14.15 b
         std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
         float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
         float winPx = 0.0f, winWorld = 0.0f, winMotionBone = 0.0f, winMotionCapture = 0.0f, winRerun = 0.0f;
     } boneStats;
     static bool boneVsOptions(const Shader& s, shader::TranslateOptions& o);  // the BoneVs provider (vertex shaders)
-    static void boneCompareText(shader::TranslateOptions& o);  // compare mode: added to the capture variant's text (enh/rt_scene captureOptions)
+    static void boneCompareText(shader::TranslateOptions& o, const Shader& s);  // compare mode: added to the capture variant's text (enh/rt_scene captureOptions)
     static bool boneCompareOn();
     static void boneCompareForce(bool on);  // tools (rvk_shadertool --capture-bone): the compare text without a device
     static const char* captureTag() { return boneCompareOn() ? "cap6c8" : "cap6"; }  // the capture variant's cache tag (its text changes in compare mode)
@@ -2141,6 +2149,7 @@ private:
     GamePipeline scenePipe2_ = GamePipeline::None;  // ... its scene ABI v2 form (retained draws only)
     GamePipeline scenePipePull_ = GamePipeline::None;  // ... and its pulled form (S-4)
     // ---- bone-history motion (native.bone_motion, frame-ownership.md 14.13; d3d9/bone_motion.cpp)
+    bool rigidMode_ = false, rigidWanted_ = false;  // 14.15 b
     int boneMode_ = 0;              // 0 off, 1 on (the skinned solid draws' motion from the bone table's history), 2 compare (captures as before + a GPU compare)
     bool sceneBone_ = false;        // sceneDecide chose the bone-motion forms for the draw being prepared
     bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)

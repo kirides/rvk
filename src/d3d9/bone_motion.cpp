@@ -19,6 +19,7 @@
 
 #include "d3d9/device.h"
 #include "gpuscene/bone_table.h"
+#include "gpuscene/object_table.h"
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
@@ -38,8 +39,9 @@ const char* kBoneEpilogue =
     "        const uint2 rvk_bmRef = rvkDrawPrevVs();\n"
     "        const bool rvk_bmHas = any(rvk_bmRef != uint2(0u, 0u));\n"
     "        const uint2 rvk_bmPrev = rvk_bmHas ? rvk_bmRef : rvkVsWin(2u);  // (never the zero pair: a load hoisted above the test stays in a live buffer)\n"
-    "        const float4 rvk_bmOk = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bmPrev), 231u * 16u));\n"
-    "        if (rvk_bmHas && rvk_bmOk.x == 1.0) {\n"
+    "        // (the validity word, RVK_BM_VALID: a bone image's c231.x = 1; a rigid draw's object history record (14.15 b): its info.w (c36.w) = 1)\n"
+    "        const bool rvk_bmOk = RVK_BM_VALID(rvk_bmPrev);\n"
+    "        if (rvk_bmHas && rvk_bmOk) {\n"
     "            rvk_vsw2Ov = rvk_bmPrev;\n"
     "            rvk_resetRegs();\n"
     "            rvk_main();\n"
@@ -59,6 +61,9 @@ std::atomic<bool> g_compare{false};
 bool Device::boneVsOptions(const Shader& s, shader::TranslateOptions& o) {
     if (s.stage != shader::Stage::Vertex) return false;
     o.defines += "#define RVK_BONE_PREV 1\n";
+    // (the validity word: a skinned shader (relative addressing into its palette) reads a bone image, c231.x; a rigid one an object record, c36.w = info.w; 14.15 b)
+    o.defines += s.reflection.relativeConstants ? "#define RVK_BM_VALID(b) (rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(b), 231u * 16u)).x == 1.0)\n"
+                                                : "#define RVK_BM_VALID(b) (rvkRawLoad<uint4, 16>(rvkAddrAdd(rvkAddr(b), 36u * 16u)).w == 1u)\n";
     o.rerunnable = true;
     o.extraOutputs += std::format("    [[vk::location({})]] float4 rvk_prevWorld : VARY{};", kPrevWorldLocation, kPrevWorldLocation);
     o.epilogue += kBoneEpilogue;
@@ -67,7 +72,7 @@ bool Device::boneVsOptions(const Shader& s, shader::TranslateOptions& o) {
 
 // compare mode: appended to the capture variant (enh/rt_scene captureOptions, push form: pc.prevVs = the capture, pc.vsw2 = the bone image). The capture's previous world
 // position (rvk_prevWorld, from the previous frame's capture) against the bone path's (the image at the history delta, when its c231.x = 1)
-void Device::boneCompareText(shader::TranslateOptions& o) {
+void Device::boneCompareText(shader::TranslateOptions& o, const Shader& s) {
     if (!g_compare.load(std::memory_order_relaxed)) return;
     // (the header's slot count keeps bit 30 out of it)
     for (std::size_t at = o.epilogue.find("0x7FFFFFFFu"); at != std::string::npos; at = o.epilogue.find("0x7FFFFFFFu", at)) o.epilogue.replace(at, 11, "0x3FFFFFFFu");
@@ -84,8 +89,8 @@ void Device::boneCompareText(shader::TranslateOptions& o) {
         "            const bool rvk_bcOn = (rvk_bcInfo.x & 0x40000000u) != 0u && any(rvk_bcBuf != uint2(0u, 0u)) && rvk_bcF.params[{}].z == 1.0;\n"
         "            const uint2 rvk_bcCur = rvkVsWin(2u);\n"
         "            const uint2 rvk_bcPrev = rvk_bcOn ? rvkPairAdd(rvk_bcCur, {}u) : rvk_bcCur;  // (the bone table's history delta; the current image when off)\n"
-        "            const float4 rvk_bcOk = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bcPrev), 231u * 16u));\n"
-        "            if (rvk_bcOn && rvk_bcOk.x == 1.0) {{\n"
+        "            const bool rvk_bcOk = {};\n"
+        "            if (rvk_bcOn && rvk_bcOk) {{\n"
         "                const RvkAddr rvk_bcE = rvkAddr(rvk_bcOn ? rvk_bcBuf : rvk_bcAddr);\n"
         "                if (rvk_out.rvk_prevWorld.w == 1.0) {{\n"
         "                    // (every run's clip position precise, back to the world through the inverse view-projection: what the capture variant does)\n"
@@ -131,7 +136,11 @@ void Device::boneCompareText(shader::TranslateOptions& o) {
         "            }}\n"
         "        }}\n"
         "    }}",
-        shader::abi::kFrameParamBoneMotion, shader::abi::kFrameParamBoneMotion, shader::abi::kFrameParamBoneMotion, gpuscene::BoneTable::kHistoryDelta);
+        shader::abi::kFrameParamBoneMotion, shader::abi::kFrameParamBoneMotion, shader::abi::kFrameParamBoneMotion,
+        // (14.15 b: a rigid shader's window 2 is an object record: the object table's history delta and validity word)
+        s.reflection.relativeConstants ? gpuscene::BoneTable::kHistoryDelta : gpuscene::ObjectTable::kHistoryDelta,
+        s.reflection.relativeConstants ? "rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bcPrev), 231u * 16u)).x == 1.0"
+                                       : "rvkRawLoad<uint4, 16>(rvkAddrAdd(rvkAddr(rvk_bcPrev), 36u * 16u)).w == 1u");
 }
 
 void Device::setBoneMotion(int mode) {
@@ -140,7 +149,7 @@ void Device::setBoneMotion(int mode) {
     boneMode_ = mode;
     ++variantEpoch_;
     g_compare.store(mode == 2, std::memory_order_relaxed);
-    if (mode == 1) setVariantProvider(VariantSlot::BoneVs, {"bmot5", boneVsOptions});
+    if (mode == 1) setVariantProvider(VariantSlot::BoneVs, {"bmot6", boneVsOptions});
     if (mode == 2) {
         // the capture variant (registered by enh/object_motion / enh/rt_scene) gets the compare text under its own cache tag
         VariantProvider cap;
@@ -233,11 +242,15 @@ bool Device::boneCompareOn() { return g_compare.load(std::memory_order_relaxed);
 void Device::boneCompareForce(bool on) { g_compare.store(on, std::memory_order_relaxed); }
 
 std::uint32_t Device::boneCompareBit() const {
-    if (boneMode_ != 2 || owned_ == nullptr || owned_->w[0][2].kind != OwnedWindows::Kind::Bones) return 0;
+    if (boneMode_ != 2 || owned_ == nullptr) return 0;
+    const OwnedWindows::Kind w2 = owned_->w[0][2].kind;
+    if (w2 != OwnedWindows::Kind::Bones && !(w2 == OwnedWindows::Kind::Object && rigidMode_)) return 0;  // (14.15 b: a rigid draw's object record too)
+    // (the compare text's validity word / delta follow the shader's addressing: it must match the window's table, as in bonePredict)
+    if (vs_.get() == nullptr || vs_->reflection.relativeConstants != (w2 == OwnedWindows::Kind::Bones)) return 0;
     if (options_.backend != rhi::Backend::Vulkan) return 0;  // (the Readback buffer is reached by address on Vulkan only)
     const scene::Phase ph = phases_.current();
     if (ph.view != scene::View::Main || ph.pass != scene::Pass::Solid) return 0;
-    return gpuscene::bonetable().prevOf(owned_->w[0][2].base).null() ? 0 : kCompareBit;
+    return historyOf(owned_->w[0][2].base).null() ? 0 : kCompareBit;
 }
 
 bool Device::boneFormsReady() {
@@ -253,18 +266,45 @@ bool Device::boneFormsReady() {
     return a != rhi::ShaderModule::None && b != rhi::ShaderModule::None && (!v2 || (c != rhi::ShaderModule::None && d != rhi::ShaderModule::None));
 }
 
+rhi::GpuRef Device::historyOf(rhi::GpuRef base) const {
+    const rhi::GpuRef b = gpuscene::bonetable().prevOf(base);
+    if (!b.null() || !rigidMode_) return b;
+    return gpuscene::objecttable().prevOf(base);
+}
+
 bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
-    if (boneMode_ != 1 || kind != draws::Kind::Skinned || phase.view != scene::View::Main || phase.pass != scene::Pass::Solid) return false;
-    if (!sceneActive() || !sceneActors_ || !gbuf_.active || gbuf_.motion == nullptr || owned_ == nullptr || owned_->w[0][2].kind != OwnedWindows::Kind::Bones) return false;
-    if (gpuscene::bonetable().prevOf(owned_->w[0][2].base).null()) {
-        ++boneStats.noHistory;
+    if (boneMode_ != 1 || phase.view != scene::View::Main || phase.pass != scene::Pass::Solid) return false;
+    const bool skinned = kind == draws::Kind::Skinned;
+    const bool rigid = kind == draws::Kind::StaticMesh && rigidMotionOn();  // 14.15 b
+    if (!skinned && !rigid) return false;
+    if (!sceneActive() || !gbuf_.active || gbuf_.motion == nullptr || owned_ == nullptr || vs_.get() == nullptr) return false;
+    // (the forms' validity word is chosen per shader (boneVsOptions): a palette-indexing shader reads a bone image's c231, any other an object record's c36; a shader
+    // whose addressing does not match its window's table never takes the forms: an object record read at c231 would leave the record, GPU safety)
+    if (vs_->reflection.relativeConstants != skinned) {
+        if (rigid) ++boneStats.rigidNoWindow;
         return false;
+    }
+    if (skinned) {
+        if (!sceneActors_ || owned_->w[0][2].kind != OwnedWindows::Kind::Bones) return false;
+        if (gpuscene::bonetable().prevOf(owned_->w[0][2].base).null()) {
+            ++boneStats.noHistory;
+            return false;
+        }
+    } else {
+        if (owned_->w[0][2].kind != OwnedWindows::Kind::Object) {
+            ++boneStats.rigidNoWindow;
+            return false;
+        }
+        if (gpuscene::objecttable().prevOf(owned_->w[0][2].base).null()) {
+            ++boneStats.rigidNoHistory;
+            return false;
+        }
     }
     if (!boneFormsReady()) {
-        ++boneStats.pending;
+        ++(skinned ? boneStats.pending : boneStats.rigidPending);
         return false;
     }
-    ++boneStats.predicted;
+    ++(skinned ? boneStats.predicted : boneStats.rigidPredicted);
     return true;
 }
 
@@ -313,6 +353,11 @@ void Device::boneMotionFrame() {
                      "owned records with a history base {} (without {}), {} bone-motion pipelines",
                      s.predicted - p.predicted, s.pending - p.pending, s.noHistory - p.noHistory, s.chosen - p.chosen, s.chosen2 - p.chosen2, s.chosenPull - p.chosenPull,
                      s.records - p.records, s.recordsNoPrev - p.recordsNoPrev, bonePipes_.size());
+        if (rigidMode_) {
+            spdlog::info("native: rigid motion (5 s): {}; static solid draws predicted {} (no object window {}, no history {}, forms pending {})",
+                         rigidMotionOn() ? "on" : "waiting for upscale.object_motion=all", s.rigidPredicted - p.rigidPredicted, s.rigidNoWindow - p.rigidNoWindow,
+                         s.rigidNoHistory - p.rigidNoHistory, s.rigidPending - p.rigidPending);
+        }
     } else {
         spdlog::info("native: bone motion compare (5 s): {} capture draws with a bone image; vertices compared {}, max error {:.5f} px / {:.6f} units, {} above 0.01 px, {} without a previous capture; largest motion seen: bone path {:.4f}, captures {:.4f} units; second run on this frame's image vs the first: {:.6f} units",
                      s.compareDraws - p.compareDraws, s.compared - p.compared, s.winPx, s.winWorld, s.compareOver - p.compareOver, s.compareMiss - p.compareMiss, s.winMotionBone, s.winMotionCapture, s.winRerun);

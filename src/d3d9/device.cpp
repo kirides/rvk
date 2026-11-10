@@ -2047,7 +2047,10 @@ void Device::variantWorker() {
                     // S-1b: the plain scene vertex shader of a request the vertex port covers (the fade variant stays translated)
                     if (!pixel && !hasBase && uberOn && uberVertexOptions(sh, o) && lodVs) o.uberDefines = std::format("#define RVK_LOD_FADE {}\n", shader::abi::kFrameParamLod);
                     // 14.15 a: the bone-motion vertex forms of a request the port covers are the port's bone form (RVK_UBER_BONE_PREV; RVK_UBER_BONE_TR=1 keeps them translated)
-                    if (!pixel && hasBase && boneVs && uberOn && !uberBoneTranslated() && uberVertexOptions(sh, o)) o.uberDefines += "#define RVK_UBER_BONE_PREV 1\n";
+                    if (!pixel && hasBase && boneVs && uberOn && !uberBoneTranslated() && uberVertexOptions(sh, o)) {
+                        o.uberDefines += "#define RVK_UBER_BONE_PREV 1\n";
+                        if (!sh.reflection.relativeConstants) o.uberDefines += "#define RVK_UBER_BONE_OBJ 1\n";  // (14.15 b: a rigid draw's object record history)
+                    }
                     if (lodVs) {  // (the translated fallback of an ubershader build that failed needs it too)
                         o.inputOverrides.push_back({shader::Usage::BlendWeight, 1,
                                                     std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});

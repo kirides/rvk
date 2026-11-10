@@ -27,7 +27,9 @@
 #include "d3d9/fvf.h"
 #include "enh/rt_scene.h"
 #include "gpuscene/bone_table.h"
+#include "engine/scene_table.h"
 #include "gpuscene/cluster_table.h"
+#include "gpuscene/object_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/owned_compact.h"
 #include "gpuscene/view_table.h"
@@ -4446,18 +4448,21 @@ void testBoneMotion(Fixture& f) {
         bt.setHistory(false);
         return;
     }
-    // ---- the compare mode's capture vertex shader
+    // ---- the compare mode's capture vertex shader (the palette read relative, as the game's skinned shaders do: the bone forms' validity word follows the shader's
+    // addressing, 14.15 b)
     static const char* kVsBone = R"(
 vs_3_0
+def c5, 0, 0, 0, 0
 dcl_position v0
 dcl_color v1
 dcl_texcoord v2
 dcl_position o0
 dcl_color o1
 dcl_texcoord o2
-dp4 o0.x, v0, c33
-dp4 o0.y, v0, c34
-dp4 o0.z, v0, c35
+mova a0.x, c5.x
+dp4 o0.x, v0, c33[a0.x]
+dp4 o0.y, v0, c34[a0.x]
+dp4 o0.z, v0, c35[a0.x]
 mov o0.w, v0.w
 mov o1, v1
 mov o2, v2
@@ -4552,6 +4557,195 @@ mov o2, v2
     bt.setHistory(false);
 }
 
+// 14.15 b: rigid-object history motion. The object table's history records (CPU twin: changed slot = last frame's record, valid; still = the record itself; a new
+// record / a jump = invalid; prevOf guards), then the compare mode's capture vertex shader on a rigid shader (no relative addressing: the object record's validity
+// word c36.w and the object table's history delta) against the capture chain, identity camera: 0 difference; negative control: the capture of two frames ago.
+void testRigidMotion(Fixture& f) {
+    Device& dev = f.dev;
+    gpuscene::ObjectTable& ot = gpuscene::objecttable();
+    ot.setHistory(true);
+    ot.setActive(true);
+    for (int i = 0; i < 3 && !ot.ready(); ++i) ot.flush(dev);
+    if (!ot.ready() || !ot.history()) {
+        std::printf("  FAIL rigid motion: the object table with history was not created\n");
+        ++g_failures;
+        ot.setActive(false);
+        return;
+    }
+    alignas(16) static unsigned char entity[0x100];
+    std::memset(entity, 0, sizeof(entity));
+    const auto matrix = [](float tx, float s, float m[16]) {
+        const float r[16] = {s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1, 0, tx, 0, 0, 1};  // (row-vector convention: the translation in the last row)
+        std::memcpy(m, r, sizeof(r));
+    };
+    float mA[16], mB[16], mJ[16];
+    matrix(0.0f, 0.5f, mA);
+    matrix(0.1f, 0.25f, mB);
+    matrix(900.0f, 0.25f, mJ);
+    std::memcpy(entity + 0x60, mA, sizeof(mA));
+    engine::scenetable::testCacheIn(entity);
+    const std::uint32_t slot = engine::scenetable::find(entity);
+    const auto serve = [&](const float m[16], d3d9::OwnedWindows::Win& w) {
+        float composed[gpuscene::kObjectRegs][4] = {};
+        gpuscene::objectWorldRows(m, reinterpret_cast<float(*)[4]>(composed[2]));
+        return ot.serve(entity, composed, 0x1Cu, w) == gpuscene::ObjectWhy::Served;
+    };
+    const auto histRows = [&](const float m[16]) {
+        const gpuscene::ObjectRecord* h = ot.historyRecord(slot);
+        float rows[3][4];
+        gpuscene::objectWorldRows(m, rows);
+        return h != nullptr && std::memcmp(h->regs[2], rows, sizeof(rows)) == 0;
+    };
+    const auto histValid = [&] {
+        const gpuscene::ObjectRecord* h = ot.historyRecord(slot);
+        return h != nullptr && h->info[3] == 1u;
+    };
+    {
+        d3d9::OwnedWindows::Win w;
+        bool ok = slot != UINT32_MAX && serve(mA, w);
+        ot.flush(dev);
+        ok = ok && !histValid();  // a new record: no history
+        const rhi::GpuRef base = w.base;
+        ok = ok && !ot.prevOf(base).null() && ot.prevOf(base.plus(16)).null() && ot.prevOf(rhi::GpuRef{}).null();
+        ok = ok && serve(mA, w);
+        ot.flush(dev);
+        ok = ok && histValid() && histRows(mA);  // still: history = the record
+        engine::scenetable::testMove(entity, mB);
+        ok = ok && serve(mB, w);
+        ot.flush(dev);
+        ok = ok && histValid() && histRows(mA);  // moved: history = last frame's record
+        ok = ok && serve(mB, w);
+        ot.flush(dev);
+        ok = ok && histValid() && histRows(mB);  // settled
+        const std::uint64_t jumps = ot.historyStats().invalidJump;
+        engine::scenetable::testMove(entity, mJ);
+        ok = ok && serve(mJ, w);
+        ot.flush(dev);
+        ok = ok && !histValid() && ot.historyStats().invalidJump == jumps + 1;  // a jump: invalid
+        ok = ok && serve(mJ, w);
+        ot.flush(dev);
+        ok = ok && histValid() && histRows(mJ);
+        if (!ok) {
+            const auto& h = ot.historyStats();
+            std::printf("  FAIL rigid motion: history (slot %u, changed %llu valid %llu new %llu jump %llu settled %llu)\n", slot, static_cast<unsigned long long>(h.changed),
+                        static_cast<unsigned long long>(h.valid), static_cast<unsigned long long>(h.invalidNew), static_cast<unsigned long long>(h.invalidJump),
+                        static_cast<unsigned long long>(h.settled));
+            ++g_failures;
+        }
+    }
+    if (g_backend != rhi::Backend::Vulkan || !dev.game().gameCaps().vertexStores) {
+        std::printf("  (rigid motion: the compare part is Vulkan only / needs vertex stores: skipped)\n");
+        engine::scenetable::testCacheOut(entity);
+        ot.setActive(false);
+        return;
+    }
+    static const char* kVsRigid = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_position o0
+dcl_color o1
+dcl_texcoord o2
+dp4 o0.x, v0, c33
+dp4 o0.y, v0, c34
+dp4 o0.z, v0, c35
+mov o0.w, v0.w
+mov o1, v1
+mov o2, v2
+)";
+    const auto vs = shaderFrom(dev, kVsRigid);
+    if (!vs) {
+        std::printf("  FAIL rigid motion: shader\n");
+        ++g_failures;
+        return;
+    }
+    dev.setBoneMotion(2);
+    dev.setRigidMotion(true);
+    dev.setVariantProvider(VariantSlot::Capture, {Device::captureTag(), enh::RtScene::captureOptions});
+    BoneCaptureObserver obs;
+    dev.addDrawObserver(&obs);
+    const Vertex verts[4] = {{-0.5f, 0.5f, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {0.5f, 0.5f, 0.5f, 1, 0xFFFFFFFF, 1, 0}, {-0.5f, -0.5f, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {0.5f, -0.5f, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(sizeof(verts), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts, sizeof(verts));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    scene::CameraInput cam;
+    cam.view = cam.projection = cam.viewProjection = cam.inverseView = scene::Mat4::identity();
+    cam.engineFar = 1000.0f;
+    rhi::RingAlloc caps[3];
+    const auto frame = [&](int k, bool stale) {
+        f.reset();
+        dev.setMainCamera(cam);
+        dev.setVertexShader(vs);
+        const float junk[4] = {0.9f, 0.9f, 0.9f, 0.9f};
+        for (std::uint32_t r = 31; r < 36; ++r) dev.setVertexShaderConstantF(r, junk, 1);
+        const float* m = (k & 1) == 0 ? mA : mB;
+        engine::scenetable::testMove(entity, m);
+        d3d9::OwnedWindows::Win w;
+        serve(m, w);
+        OwnedWindows ow;
+        ow.w[0][2] = w;
+        dev.setOwnedWindows(&ow);
+        caps[2] = caps[1];
+        caps[1] = caps[0];
+        caps[0] = dev.game().allocCapture(16 + 4 * 32, 16);
+        if (caps[0].ptr != nullptr) std::memset(caps[0].ptr, 0, 16 + 4 * 32);
+        obs.want = true;
+        obs.cur = caps[0];
+        obs.prev = stale ? caps[2] : caps[1];
+        dev.drawTag() = {};
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        dev.phases().pop();
+        dev.setOwnedWindows(nullptr);
+        ot.flush(dev);
+        dev.boneMotionFrame();
+        dev.present();
+    };
+    const auto run = [&](bool stale, int frames) {
+        // (the compare slots are read kFramesInFlight + 2 frames late: the previous case's last results drain first)
+        for (int k = 0; k < 8; ++k) frame(k, stale);
+        const d3d9::Device::BoneMotionStats s0 = dev.boneStats;
+        dev.boneStats.maxPx = dev.boneStats.maxWorld = 0.0f;
+        for (int k = 0; k < frames; ++k) {
+            frame(k, stale);
+            if (dev.boneStats.compared - s0.compared >= 40) break;
+            if (k > 8 && dev.boneStats.compared == s0.compared) Sleep(5);
+        }
+        for (int k = 0; k < 6; ++k) frame(k, stale);
+        d3d9::Device::BoneMotionStats d = dev.boneStats;
+        d.compared -= s0.compared;
+        return d;
+    };
+    const d3d9::Device::BoneMotionStats good = run(false, 600);
+    std::printf("  rigid motion compare: %llu vertices compared, max %.6f px / %.6f units\n", static_cast<unsigned long long>(good.compared), good.maxPx, good.maxWorld);
+    if (good.compared == 0 || good.maxWorld != 0.0f || good.maxPx != 0.0f || obs.bit == 0) {
+        std::printf("  FAIL rigid motion: the capture chain and the object history disagree (or nothing was compared; header bit %08x)\n", obs.bit);
+        ++g_failures;
+    }
+    const d3d9::Device::BoneMotionStats bad = run(true, 60);
+    std::printf("  rigid motion compare, negative control: %llu compared, max %.6f units\n", static_cast<unsigned long long>(bad.compared), bad.maxWorld);
+    if (bad.compared == 0 || bad.maxWorld < 0.01f) {
+        std::printf("  FAIL rigid motion: the negative control shows no difference\n");
+        ++g_failures;
+    }
+    obs.want = false;
+    dev.removeDrawObserver(&obs);
+    dev.setBoneMotion(0);
+    dev.setRigidMotion(false);
+    dev.setVariantProvider(VariantSlot::Capture, {});
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+    engine::scenetable::testCacheOut(entity);
+    ot.setActive(false);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool validation = true, syncValidation = false;
@@ -4606,7 +4800,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"bone motion (14.13)", testBoneMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

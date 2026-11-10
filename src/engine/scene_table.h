@@ -58,4 +58,9 @@ std::uint32_t drainFreed(const std::function<void(std::uint32_t)>& fn);
 // Verification of one op's entity against the table (counts; logs the first mismatches). `entity` = op context +0x10.
 void checkEntity(const void* entity);
 
+// test hooks (rvk_d3d9test, 14.15 b): the cache-in / cache-out / matrix signals of a fake entity (its world matrix at +0x60, flags at +0x28, as the engine's)
+void testCacheIn(const void* entity);
+void testCacheOut(const void* entity);
+void testMove(const void* entity, const float world[16]);
+
 }  // namespace rvk::engine::scenetable

@@ -809,8 +809,13 @@ float4 rvkUberBonePrev(float4 trWorld) {
     const uint2 ref = rvkDrawPrevVs();
     const bool has = any(ref != uint2(0u, 0u));
     const uint2 prev = has ? ref : rvkVsWin(2u);  // (never the zero pair: a load hoisted above the test stays in a live buffer)
-    const float4 ok = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(prev), 231u * 16u));
-    if (has && ok.x == 1.0 && trWorld.w == 1.0) {
+#ifdef RVK_UBER_BONE_OBJ
+    // (a rigid draw's object record: the history record's info.w (c36.w) = 1 when valid, 14.15 b)
+    const bool valid = rvkRawLoad<uint4, 16>(rvkAddrAdd(rvkAddr(prev), 36u * 16u)).w == 1u;
+#else
+    const bool valid = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(prev), 231u * 16u)).x == 1.0;
+#endif
+    if (has && valid && trWorld.w == 1.0) {
         float3 w0 = float3(0.0, 0.0, 0.0), w1 = float3(0.0, 0.0, 0.0);
         [loop] for (uint k = 0u; k < 2u; ++k) {
             rvk_vsw2Ov = k == 0u ? uint2(0u, 0u) : prev;

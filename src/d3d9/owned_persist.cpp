@@ -232,7 +232,7 @@ int Device::ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWind
     r.prevVs = 0;
     // 14.13 (native.bone_motion): the bone-motion form reads the previous frame's bone image of its window 2 (the history base; 0 = no motion of its own)
     if (c.boneMotion && bonePipe(c.scenePipeline2)) {
-        r.prevVs = gpuscene::bonetable().prevOf(rhi::GpuRef{r.vsWin[2]}).bits;
+        r.prevVs = historyOf(rhi::GpuRef{r.vsWin[2]}).bits;  // (14.15 b: a rigid draw's object record history too)
         ++(r.prevVs != 0 ? boneStats.records : boneStats.recordsNoPrev);
     }
     r.drawId = 0;  // (no shader of the corpus / the variants reads it)

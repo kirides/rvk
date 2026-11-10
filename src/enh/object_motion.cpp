@@ -46,6 +46,7 @@ void ObjectMotion::apply(bool skinned, bool rigid) {
     skinned_ = skinned;
     rigid_ = rigid;
     if (rt_ != nullptr) rt_->setCharacterMotion(skinned);  // (the RT scene's solid-pass capture of a character is the motion source: it is kept while this is on)
+    dev_.setRigidMotionWanted(rigid);  // (14.15 b: the static meshes' history forms only while moving rigid draws are asked for)
     const bool want = (skinned || rigid) && dev_.game().gameCaps().vertexStores;
     if (want == registered_) return;
     registered_ = want;
@@ -117,9 +118,10 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         }
     }
     // 14.13 (native.bone_motion): the draw takes the bone-motion forms: its previous positions come from the bone table's history, no capture
-    if (q.kind == Kind::Skinned && dev.boneMotionDraw()) {
+    // (14.15 b, native.rigid_motion: a static mesh's draw with the object table's history likewise)
+    if ((q.kind == Kind::Skinned || q.kind == Kind::StaticMesh) && dev.boneMotionDraw()) {
         ++boneDraws_;
-        dev.noteCaptureAvoided(d3d9::Device::CaptureBy::MotionSkinned, d3d9::Device::captureKindOf(q));
+        dev.noteCaptureAvoided(q.kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(q));
         return;
     }
     if (q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
@@ -227,7 +229,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions)
     std::uint32_t header[4] = {slots, 0, 0, 0};
-    if (q.kind == Kind::Skinned) {
+    {  // (14.15 b: rigid draws too)
         // native.bone_motion=compare: the capture vertex shader also runs the bone path on this draw's bone image and compares (bit 30 of the slots)
         const std::uint32_t bit = dev.boneCompareBit();
         header[0] |= bit;

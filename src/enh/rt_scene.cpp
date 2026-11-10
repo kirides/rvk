@@ -2089,7 +2089,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "        }}\n"
         "    }}",
         tc);
-    d3d9::Device::boneCompareText(o);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
+    d3d9::Device::boneCompareText(o, s);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
     return true;
 }
 

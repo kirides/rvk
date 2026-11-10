@@ -132,8 +132,10 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     }
     // 14.13 (native.bone_motion): a skinned main solid draw whose bone window has a history takes the bone-motion forms (the vertex shader's second run on the previous
     // bone image -> the G-buffer motion variant's previous position); the observers were told so (obsBone_: no capture)
-    const bool bone = actor && obsBone_ && boneMode_ == 1 && phase.pass == scene::Pass::Solid && gbufWrite_ && gbuf_.motion != nullptr && owned_ != nullptr &&
-                      owned_->w[0][2].kind == OwnedWindows::Kind::Bones && !lodVs;
+    // (14.15 b, native.rigid_motion: a static mesh's solid draw whose window 2 is an object record with a history takes the same forms)
+    const bool bone = obsBone_ && boneMode_ == 1 && phase.pass == scene::Pass::Solid && gbufWrite_ && gbuf_.motion != nullptr && owned_ != nullptr && !lodVs &&
+                      ((actor && owned_->w[0][2].kind == OwnedWindows::Kind::Bones) ||
+                       (rigidMotionOn() && kind == draws::Kind::StaticMesh && owned_->w[0][2].kind == OwnedWindows::Kind::Object));
     if (gbufWrite_) base = gbufferSlot(bone);
     else if (giDraw) base = VariantSlot::Gi;
     const VariantSlot sceneFs = sceneSlotOf(base);
@@ -332,7 +334,7 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t vi
     r.draw = p.push.draw;
     r.prevVs = p.push.prevVsConsts;
     // 14.13: a bone-motion form reads the previous frame's bone image (only a VS window 2 base the bone table handed out has one; else 0 = no motion of its own)
-    if (bonePipe(pipeline)) r.prevVs = gpuscene::bonetable().prevOf(rhi::GpuRef{p.push.vsWin[2]}).bits;
+    if (bonePipe(pipeline)) r.prevVs = historyOf(rhi::GpuRef{p.push.vsWin[2]}).bits;  // (14.15 b: or the object table's history of a rigid draw's record)
     r.drawId = p.push.drawId;
     r.flags = p.push.flags;
     if (v2) {
