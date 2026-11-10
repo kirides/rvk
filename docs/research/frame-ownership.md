@@ -2934,3 +2934,205 @@ Reading: **the jungle main z pass is 0.024 ms faster in every run** (0.610 -> 0.
 * **Ubershader.** The bone forms are always the translated program (a provider-based scene form is never built from the ubershader port, `Device::variantWorker`); with `debug.ubershader` the owned skinned SOLID draws use them while the z pass keeps the port, whose clip position is the translated one by construction (`RVK_UBER_TRPOS`, shader-permutations.md 12). Porting the second run into `ge_default.vert.hlsl` would need the port to take its bone window as a parameter; not built.
 
 **Open.** (1) The compare's residue (0.2 - 0.4 px max) is the clip-to-world reconstruction's noise (equal to the same shader's rerun on the same image); an exact comparison would need both paths to keep the world position before the view-projection in the SAME space the motion pixel shader uses (the operand of `c0..c3` is not it). (2) The capture arm's motion only on the first frame of a screenshot burst (pre-existing). (3) Rigid moving draws (`upscale.object_motion=all`) still use captures: the same scheme needs a previous world row in the object table. (4) Characters without a skinning job (27 - 72 solid draws per 5 s) keep the RT scene's capture and stay composed. (5) Compare mode is Vulkan only (the Readback buffer is reached by address).
+
+## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
+
+User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us
+with our own shaders, and the engine's per-frame CPU collection is taken over too (F10, parked in 7.31b / 7.30 as "CPU collection takeover"). This section is the
+measured census of what is still missing (15.1 - 15.3) and the staged road to that end state (15.4 - 15.8). Three other agents are building S-5 (tree / grass /
+billboard shaders), the no-capture work (actors, rigid object motion, RT characters) and S-7c (post chain) while this was measured: their rows are marked "in progress".
+
+Setup: branch `worktree-agent-aa657641e5ec4cb9c` on main a3f8ef6 (no code change), private copy `risen-test-vk-plan`, instance 61, lock `rvk-plan`; logs, harness and parsers
+in `rvk-work/scratch/plan/` (`run.ps1` = the settings below, `table.py` = the census rows, `census.py`, `shaders.py`, `at.py` / `win.py` = window dumps). **Everything on**:
+Full + player defaults + the F1 / F2c chain + `owned_static / persistent / shadows / trees / billboards / vegetation / vegetation_ops / actors`, `clusters` + `cluster_cull` +
+`cluster_cull_shadows`, `bone_motion=on`, `vertex_pull`, `depth_z=on`, `own_post=on`, `debug.ubershader`, `rt.table_entries`, `lighting.clustered` + `full_lit`,
+`upscale.mode=performance`, `upscale.object_motion=all`, `gi.enabled`, `ao.enabled`, `shadows.rt=near`, `framegen.mode=fsr3` (runs c1 / c2 / c3 / c5; the later runs
+without frame generation, see 15.1 item 6). Runs: c1 spots (jungle, harbour_docks, monastery_hall, hero_idle, pub_idle with `show_actors=1`, freeze_wait 900), c2 the same
+with `native.coverage` (it blocks the packet cache, so its owned stages are inactive: it measures only engine vs ours), c4 control (harbour_docks + pub_idle, `depth_z=off`, no
+frame generation), c5 `rvk_spells` (night, spells), c6 `rvk_rare` (every rare kind incl. the crystal lights' point-light atlas), c7 `rvk_rtwalk` (quick-load walk, lod 2x),
+c8 savegame hold `-CpuProfile -Perf` (`RisenTest.exe`, vsync off, private copy: absolute ms carry other agents' load). All runs PASS except the two frame generation
+stalls of item 6; DIFFERING / MISS 0 in every run, no device loss, no error lines.
+
+### 15.1 Census: who draws what (per main view, 5 s windows; `owned` = persistent records / templates drawn by indirect flushes, the rest is composed by us)
+
+Three levels exist today: (1) **engine's own draws** (the engine's code issues the draw): coverage run c2 = **8 draws of 5,978,608 in the whole run (0.0001 %)**: the
+first sky cube face (buffers not created yet: 4), particles "unreadable" (2) and "permutation not compiled" (2). So the frame has no engine-issued draw left after the
+first world frames; lean frames skip every slot's engine code (`native: lean (5 s)`), copies in the post chain left to the engine 0. (2) **composed by us** (natively composed
+from the engine's op lists every frame, drawn through `prepareDraw` / the packet cache: CPU per op ~4.5 us, 7.29). (3) **owned** (persistent DrawRecords / templates, no
+per-op composition; CPU ~1.8 - 2.5 us per op for selection + hand-over, 7.29). Owned shares below include the composed-by-design frames: with `native.owned_check=10`
+1 check frame + 1 warm-up frame of every 10 main views are composed, so 80 % owned of all views = 100 % of the owned frames.
+
+| scene (run) | static main view ops (owned %) | cascade static ops | SpeedTree ops, all views | tree billboards | grass ops | actor ops, all views | alpha / refracted | decals / sky | particles + strips + rain | shadow-view ops composed (cascade trees / actors, terrain map, atlas) | effect units post / mask / SSAO chain | packet replayed share |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| jungle (c1) | 581 (67 %) | 131 (93 %) | 296 (**0 %**) | 33 (82 %) | 45 (51 %) | 41 (**0 %**) | 117 | 1 / 1 | 40 | 157 | 20 / 5 / 4 | 57 % |
+| harbour_docks (c1) | 151 (61 %) | 43 (92 %) | 21 (0 %) | 2 (82 %) | 21 (85 %) | 22 (29 %) | 6 | 1 / 1 | 4 | 19 | 20 / 5 / 4 | 65 % |
+| monastery_hall (c1) | 91 (71 %) | - | - | - | - | 43 (63 %) | 0 | 1 / 0 | 19 | 0 | 20 / 5 / 4 | 92 % |
+| hero_idle (c1) | 106 (70 %) | 18 (100 %) | - | 2 (82 %) | 10 (100 %) | 23 (73 %) | 3 | 1 / 1.8 | 16 | 4 | 20 / 5 / 4 | 92 % |
+| pub_idle (c1) | 50 (68 %) | - | - | - | - | 16 (75 %) | 1 | 1 / 0.8 | 6 | 0 | 20 / 5 / 4 | 94 % |
+| walk (c7, 5 windows) | 411 - 516 (73 - 80 %) | 156 - 196 (100 %) | 218 - 222 (0 %) | 13 (82 %) | 46 - 50 (100 %) | 39 - 102 (65 - 70 %) | 40 - 50 | 1 / 1.6 - 3 | 5 - 11 | 101 - 124 | 19 / 5 / 4 | 92 % |
+| spells (c5) | 123 - 125 (72 %) | 39 - 40 (100 %) | 20 (0 %) | 3 (82 %) | 10 (100 %) | 45 - 47 (74 %) | 3 | 1 / 1.7 | 22 - 26 (~320 quads) | 30 | 19 / 5 / 4 | 91 % |
+| rare (c6, crystal lights) | 224 - 262 (67 - 70 %) | 74 - 81 (96 - 100 %) | 295 - 382 (0 %) | 34 (80 %) | 21 (100 %) | 37 - 95 (19 - 34 %) | 37 - 43 | 1 / 2 - 4.5 | 15 - 16 | **383 - 710** (point-light atlas: 10 cells, ~340 mesh + 70 animation + 210 SpeedTree ops per frame) | 20 / 5 / 4 | 58 - 68 % |
+
+Frame sizes for scale (`hal: frame draw kinds`, one frame): jungle 4,617 draws (vegetation 2,623 instances-level, static 1,052, SpeedTree 508, instanced 189, tree
+billboards 120, skinned 52, particles 39, refracted 19), harbour_docks 448, monastery_hall 168, hero_idle 241, pub_idle 87.
+
+**What stays composed, by area and reason** (the stages' own counters; jungle unless noted, ops per main view):
+1. **Static meshes, main view** (33 % of the ops composed in all views, 16 % of owned frames): `left to the engine path` hardware batches 45, instance lists 39, blended
+   terrain layers / no-z-write draws 34 (7.28 section 3, unchanged); `no record` 65; `composed late` 97 ops / 113 draws = replay refusals (variant decision 65, "no v2 pipeline / table" 49,
+   texture 0.5: pipelines / variants still pending and the render-target texture of 7.43 finding 4). Walk / town: hardware batch + instance list + blended ~25 % of the ops.
+2. **Cascades, static**: 92 - 100 % owned (residue: "draw not retainable (no packet)" 7 per view at jungle).
+3. **SpeedTrees (main + cascades): 0 % owned in every run** - not a stage defect: `Device::ownedTreeObserversOk` refuses while an observer wants the trees' draws, and the RT
+   scene does (animated SpeedTrees in the RT range are vertex-shader captures, `RtScene::observeTree`; jungle: 146 k tree draws per 5 s, 25.5 k captured; `shadows.rt`,
+   GI and the water RT all hold the scene). With everything on the trees are the largest composed block (296 ops / view, 2,929 instances).
+4. **Grass**: 100 % of the owned frames without frame generation (walk, spells, rare, hero); **51 % at jungle and 85 % at harbour_docks with frame generation** (z owned,
+   part of the solid ops composed: not analysed further).
+5. **Actors**: 63 - 75 % (all owned frames) indoors / hero; **0 % at jungle, 19 - 34 % in rvk_rare**: those actors are excluded by `recExclusionActor` (fade < 1,
+   overlay flags, shader class, palette size; the reason is not in the stage line), the composed rest is drawn from the bone table (`composed draws served from the bone table`).
+6. **Everything else is composed by us every frame**: alpha / refracted lists (117 at jungle: alpha meshes, blended billboards, water), decals, sky dome + cube faces,
+   particles (CPU vertices: 146 k quads / 5 s at jungle), strips, light streaks, rain, the post chain (20 units: 16 on our kernels since S-7a / S-7b, ToneMap / DoFDown /
+   DoF screen / OverlayMovieStrips on translated engine shaders), the shadow mask units (SSM x 3, VSSM, UpscaleSSAO), the SSAO chain (Blur, BlurSSAO x 2, SSAO), PSSM,
+   the terrain-map blur, GUI sprites, and in the shadow views every SpeedTree / non-owned actor op, the terrain map's meshes and the whole point-light atlas.
+
+**Shaders of each class** (`native: owned shaders (5 s)`; control run c4): **owned items: pixel shader 100 % the HLSL ubershader or none**: with `depth_z=on` the main z
+and cascade items without texkill have no fragment stage, and the counter files them under `failed` (c1: 72 - 95 % of the owned static items, c4 with `depth_z=off`: 100 %
+`uber`, 0 `failed`): read `failed` as "depth-only" in this configuration. Vertex shaders: 100 % the port, except the **bone-motion forms of the skinned solid draws
+(translated program by design, 14.13: 40 - 55 % of the skinned owned items)**. Composed material draws (ge_default / leafs requests: trees, alpha meshes, refused static,
+hardware batches, instance lists, blended layers, composed actors) take the ubershader modules too (`decided` 100 % uber for SpeedTree, static, vegetation), except the
+**capture forms** (translated + capture epilogue). Composed effect draws (particles, strips, rain, sky dome / cube, decals' effect shaders, mask chain, SSAO, PSSM, ToneMap /
+DoF, overlay, GUI) run the **translated fx_2_0 shaders** of the engine. Every injected pass (RT, GI, ocean, water, lights, FSR, post kernels, depth_z) is ours.
+
+**Vertex captures still taken** (5 s windows): object motion `all` - rigid moving draws 8.4 k (jungle) / 19.6 k (hero_idle) captured (14.13 open 3); RT scene - animated
+SpeedTrees 25.5 k (jungle), characters without a skinning job 21 (hero) - 0 (jungle); packet cache "not capturable: capture variant" 21 k at jungle (those draws are never
+replayed). Bone-history motion removed the skinned captures (0 skinned draws without a capture request).
+
+**Found on the way.** (1) **Frame generation stalls**: 2 of the 3 runs with `framegen.mode=fsr3` stopped presenting (rvk.log silent, the run's 180 s watchdog killed
+the game: c3 at the monastery_hall -> hero_idle cut, c5 at the new game's start of `rvk_spells`); the same as 14.9's open item 4, so it reproduces with the full chain; the
+later runs were made without frame generation. (2) The `uber ... failed` bucket of `native: owned shaders` counts depth-only draws (above): the counter should get a
+`none` column. (3) The first run in a fresh copy (cold SPIR-V / HLSL caches) composed the first ~90 s with translated decisions until the ubershader modules arrived
+(decided `failed` 6 - 25 k per window); they were remade later, no fallback stays.
+
+### 15.2 CPU census: what the engine thread still runs in Full (c8, savegame hold, everything on except frame generation, 6 steady windows, frame interval 13.1 ms with the profiler; `-Perf` engine + HAL 11.9 - 13.0 ms, 7.43's chain without GI / FSR / RT shadows: 7.7)
+
+By module: d3d9 (ours) 8.26 ms, Engine.dll 1.54, ntdll 0.83, amdvlk64 0.68, vcruntime 0.65, sharedbase 0.58, Game.dll 0.21. **Our DLL is 63 % of the thread; the
+engine's own code (Engine + sharedbase) 2.1 ms = 16 %.**
+
+| inclusive item (ms / frame) | ms | class | replaced by |
+|---|---|---|---|
+| `StaticOps::opEnter` (composition + issue of every composed op, all views; `issue` 3.40 of it: `replayDraw` 1.02, `drawIndexedPrimitive` 0.83, `prepareDraw` 0.63) | 6.35 | ours: composition | the owned stages below (every composed op) |
+| - `composeOp` 1.80, `composeSolid` 0.64, `materialDraws` 0.80, `subMeshDraws` 0.60 | | static / alpha / actors | F2f, F9, F14, actor exclusions |
+| - SpeedTree slots (`contextSlot<7>` 1.35, `<8>` 1.17; `composeTree` 0.97 incl. the lambda 0.40, `treeCompEnd` 0.37) | ~2.5 | trees, composed because of the RT observer | F4-5 |
+| - `ownedPass` 1.09 (`ownedDrawOpPersistent` 0.35, `compactOwned` 0.34, `ownedFlush` 0.25, `ownedSelect` 0.20) | 1.09 | owned hand-over | F10-1 (no op to compact) |
+| shadow views: `RenderShadowMaps` 1.55 (our `detourExecuteShadowMap` 1.16: shadow ops; cascade fit ~0.3) | 1.55 | ours + engine fit | F4-5, F3-4; fit stays (or F10-3) |
+| injected passes `Device::inject` (`RtScene::observe` 0.52 + `record` 0.40, `LightTable::record` 0.42) | 1.43 | ours | F8 (RT from tables), persistent light table |
+| effects: `effectBegin` 0.53, `composeEffect` 0.26, decals 0.19, `vegPass` 0.24 | ~1.2 | ours: composition | F11 - F13 |
+| `eCProcessor::Process` (game logic, AI, animation, physics, streaming, audio) | 1.15 | **engine, stays** | - |
+| **engine collection / culling**: `RequestRenderOps` 0.43, `eCFrustumElementItem::Request` 0.37, `eCFrustumDatabase::Request` 0.31, the sector tree walker (`FUN_18015c4a0`, COMDAT hint `eCStaticLightPreprocessor`) 0.38, `OnQueryNodes` 0.37, `ExtractFromFrustum` 0.19, `eCBeamTree::Cull` self 0.13, `ExtractShadowMap` 0.06, `CullCamera` 0.06 (overlapping) | **~1.1 - 1.4** | **engine: collection / culling** | F10-1 .. F10-3 |
+| op list sorts (our `fast_sort`, inside Execute) | ~0.1 | engine sorting (ours since performance.md 14) | F10-4 (no lists) |
+| `eCPrefetchAdmin::CacheEntities` (stride 4) | 0.16 | engine streaming: **stays** (cache-in / out is game state) | - |
+| `UpdateShadowMask` 0.23, image-effect graph walk (`eCImageEffect::Execute`, `ExecuteJobs`, target pool), GUI `eCGuiModule2::Draw` 0.06, message loop | ~0.4 | engine control: stays or thin | S-7c / F13 shrink it |
+| allocations (`RtlAllocateHeap` 0.30 + 0.25 + 0.23, `operator new` 0.32), `RtlQueryPerformanceCounter` 0.17 | ~1.0 | ours: overhead | engineering (performance.md 33) |
+
+Engine functions that still run per frame and are **collection / culling / sorting we would replace**: `ExtractFromFrustum` 0x66fa60 (portal walk `ExtractFromPortalRooms`,
+the occluders' `AddOccluder` 0x675270 into the beam tree, the sector-tree query `OnQueryNodes` 0x66d960 with `CullCamera`), `eCFrustumDatabase::Request` 0x66e8c0 ->
+`RequestRenderOps` 0x66cfe0 (per element `CalculateFadeOut`, `eCFrustumElementItem::Request` 0x671370: `UpdateIllumination`, `UpdateLoD`, the visible stamp, the contexts'
+`RequestRenderOps` = `eCRenderOp2::Create` into the z / solid / alpha / refracted lists, hierarchy node culls, `AddRenderInstance`, the SpeedTree queue build), the op list
+sorts, and per shadow view `ExtractShadowMap` + the shadow dbs' `RequestRenderOps`. **Engine functions that stay** (game state, not rendering): `eCProcessor::Process`,
+`CacheEntities` (cache-in / out), the cascade fit / camera update, the particle emitters' simulation (random state, 7.31 / README 16), UpdateShadowMask's parameter objects,
+the GUI module's own logic, the message loop.
+
+### 15.3 What "no composed calls, no fallbacks, no captures" means, concretely
+
+* **No composed calls**: no op of the frame is composed from the engine's registers / pools per frame; every draw is a persistent record (or a GPU-generated one) whose inputs
+  arrive as events / table rows. Measured residue: everything in 15.1's "stays composed" list + the 2-in-10 check / warm-up frames (verification by composition must move to a
+  Debug compare mode, as `native.picture_check` / `scene_draws_check`: default `native.owned_check=0` in the end state).
+* **No fallbacks** (in Full; Wrapper keeps the translated path, 15.8): no "composed late" (pending pipelines / variants: pipelines are prebuilt or the draw waits like the
+  D3D12 path's "a draw whose PSO is pending is skipped", never a translated stand-in), no `left to the engine path` class, no "permutation not compiled" composition, no per-
+  draw translated shader (bone-motion forms, capture forms, fx_2_0 effect shaders), no stage that turns itself off at run time except on a GPU error (DIFFERING / MISS become
+  test gates, not run-time switches).
+* **No captures**: no vertex-shader capture variant anywhere (object motion, RT trees / characters, `rt_skin_verify` = Debug only).
+* **Collection taken over**: the engine's `ExtractFromFrustum` / `Request` / `RequestRenderOps` do not run for the main and shadow views; the engine's lists are empty;
+  its side effects (residency, visible stamp, illumination update, LOD prefetch) are done by us from our visible set.
+
+### 15.4 Roadmap (Full only; each stage behind a Debug setting until its gates pass; gains: CPU at the c8 savegame hold on this machine, GPU on the 14.3 680M model [I])
+
+| # | area | today (numbers from 15.1 / 15.2) | missing | stage | depends on | risk | gates | expected gain | parallel |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | tree / grass / billboard shaders | owned grass + billboards on the ported translated forms; trees composed | own VS / PS (16-byte pulled vertices, half wind, far-field PS) | **S-5 (in progress)** | S-1b | medium (wind / LOD pop) | 14.4 S-5 row | GPU 680M jungle -0.8 .. -1.3 ms | yes (other agent) |
+| 2 | captures: actors, rigid object motion, RT characters | rigid captures 8 - 20 k / 5 s, characters without a job 0 - 21, bone forms translated | previous object rows in the object table, the bone port in `ge_default.vert.hlsl` | **X-1 (in progress)** | 14.13 | medium | 14.13 compare (px), picture check, `rt.debug` probes | removes the last per-draw capture variants of actors / rigid | yes (other agent) |
+| 3 | post chain: ToneMap, DoFDown, DoF screen, overlay effects | 16 of 19 units on our kernels | the final pass into the display image (storage swapchain or a fragment pass of our own) | **S-7c (in progress)** | S-7b | medium (identity) | per-filter EQUAL, refcompare post spots | GPU 680M -0.8 .. -1.3 (rank 2) | yes (other agent) |
+| 4 | **SpeedTrees with the RT scene** | 0 % owned with any RT consumer; ~2.5 ms CPU of composition + issue; 296 ops / 2,929 instances per view at jungle | the RT scene must take the trees' animated geometry without the vertex capture: a wind / sway compute pass over the owned templates' instance rows (the same port S-5 writes) refitting the tree BLAS, `RtScene::ownedTreesOk` true | **F4-5** | S-5 (wind code), F8-0 | medium (sway mismatch RT vs raster) | `rt.debug=depth` probes on trees 0 red, `shadows.rt` A/B on jungle (`rvk_rtwalk` sway), owned trees check (rows / templates / MISS 0), picture check | CPU -1.0 .. -2.0 ms (the composed share of 2.5 ms; 7.25 measured -0.2 for the owned path alone, so the observer gate is the lever), GPU 680M trees on own shaders | after S-5 |
+| 5 | frame generation stall | 2 of 3 all-on runs hang | root cause (14.9 open 4) | **FG-1 (bug)** | - | low | 5 all-on spots runs with FG, no stall | unblocks the everything-on configuration | yes |
+| 6 | static: instance lists + hardware batches | 25 + 12 ops / view savegame (7.28), 39 + 45 jungle | object records keyed (resource, instance) with the matrix in the stamp; per-batch instance-row images (c32 + 4 i); `leanSortInstances` side effect | **F2f** | F2c-4a, vertex pull | low-medium | owned static check frames (DIFFERING / MISS 0), `rvk_d3d9test` case, picture check | CPU ~-0.1 ms (7.28: 2 us / op); 6 - 12 % of the static ops | yes |
+| 7 | blended terrain layers + no-z-write draws | 34 ops / view jungle, 22 k / 5 s savegame | an owned blended bucket drawn at the engine's sort position (solid list order), then single-pass layer blending (Full may change the picture) | **F9** | F2f (record kinds), S-3 | medium (order, picture) | ground crops jungle / beach / town, picture check, refcompare Full | CPU ~-0.13 ms; GPU 680M bandwidth (layers re-read the scene) | yes |
+| 8 | composed-late refusals | 97 ops / view jungle (variant pending 65, no v2 pipeline 49), 1 texture refusal per view | pipelines / variants prebuilt at load (the loading screen compiles them; S-4 module sharing, a pipeline list per area), a pending draw waits instead of composing, the render-target texture case owned | **F15-1** | load-time hook | low | 0 `composed late` after the first world window; loading time measured (`loadtimes.py`) | removes the run-time fallback | yes |
+| 9 | actors: fade < 1, overlay, special shaders | 0 % jungle, 19 - 34 % rare, 63 - 75 % elsewhere | the fade (c32.w) / overlay flags as record data, not exclusions; the exclusion reason in the stage line | **F6-2** | F6-1, X-1 | low | owned actors images 0 differing, `rvkcompare focus=1` (highlight), `rvk_spells` | CPU small; removes an exclusion class | yes |
+| 10 | alpha / refracted lists | 117 ops / view jungle, 40 - 50 walk; sorted back to front each frame | records for alpha meshes / blended billboards / refracted (water is ours already), the per-frame order as a key list (CPU sort of record ids by the engine's key, later GPU sort), the refraction copy in place | **F14** | F2f, F9 (blended bucket machinery) | medium (order) | picture check incl. the alpha pass, `rvk_rare` billboards, water A/B | CPU -0.3 .. -0.5 (composition of 117 ops at 4.5 us) | after F9 |
+| 11 | shadow views residue: cascade trees / actors, terrain map, point-light atlas | cascades 93 - 100 % static, trees 0 %, atlas fully composed (383 - 710 ops / view with crystal lights), terrain map composed | trees via F4-5; terrain map static ops as a view slot (F3 machinery); atlas cells as view slots (6 - 10 per light, per-cell cameras already composed natively), actors / trees in them | **F3-4** | F4-5, F3-1 | low-medium | `shadow-compare`, `rvk_pointshadow`, `rvk_rare` atlas compare | CPU -0.2 .. -1.0 when the atlas is live (rare scenes), ~0 otherwise | after F4-5 |
+| 12 | particles, strips, light streaks, rain | 6 - 40 particle ops / view (146 k quads / 5 s at jungle), CPU-generated vertices, translated fx shaders | particle records (position, size, colour, frame, orientation mode) written from the engine's simulation state per emitter, quads generated by a compute / vertex-pulled own shader (orientation modes 0..4, frame blending, lit styles, instanced emitters); simulation stays the engine's | **F11** | own shader set (S-x for effects) | medium (5 orientation modes, sorting) | effect draws compare vs the composed bytes (README 14 / 16 tables), `rvk_spells`, `rvk_rare` | CPU -0.2 .. -0.4 (composition + vertex generation); GPU ~0 | yes |
+| 13 | sky dome + cube faces, decals | 1 - 4.5 ops / view | own sky shader (dome parameters from the composed state, README 9) + the cube faces in compute; decals as records with the visible stamp | **F12** | - | low | sky A/B incl. `beach_night_storm` seam, decal crops | small; removes translated fx shaders | yes |
+| 14 | GUI sprites + loading screens | 0 - 2 flushes / frame (the menu 31 k draws / 5 s) | sprite records -> one instanced own shader, glyph atlas as a bindless image | **F13** | - | low | menu / character screen pictures (`rvk_menufps`), loading screens | small | yes |
+| 15 | mask chain, SSAO chain, PSSM, terrain blur | 5 + 4 units / frame, translated | own kernels (as S-7: EQUAL first), PSSM stencil passes as an own pass | **S-7d** | S-7c | low-medium | shadow mask compare, `rvk_pointshadow` | GPU 680M ~-0.3 .. -0.5 (rank 6 already in S-8) | after S-7c |
+| 16 | RT scene from tables | `RtScene::observe` 0.52 + `record` 0.40 ms | TLAS from the owned record set (bulk observers exist, F2c-4b) for every class, no per-draw observe | **F8-1** | F4-5, F14, F11 (all classes owned) | medium | `rt.debug` probes, RT shadows / water / GI A/B | CPU -0.4 .. -0.7 | after the classes |
+| 17 | **collection takeover (F10)** | engine collection ~1.1 - 1.4 ms + owned hand-over 1.1 ms; native collection proven exact (7.31b: 63,689 views, 0 differences, 2.0 - 2.6x cheaper) | see 15.5 | **F10-1 .. F10-4** | every class owned (an op the engine still has to create pins `RequestRenderOps`), F2e-1 events | high | 15.5 | CPU -1.5 .. -2.2 ms (collection + hand-over + sorts), engine thread floor ~3 - 4 ms | last |
+| 18 | load-time Full data layout (14.4b) | vertex data serves engine / composed / input-assembler forms | own mesh store at load, quantized positions, split position stream | **L-1** | 1 - 17 (no composed draw of the geometry left), the user's 680M RGP captures | medium | bit-equal decode across passes, RT BLAS from the same decode, memory budget | GPU 680M z / cascades vertex fetch (~28 - 32 % of the z bytes), RAM | last |
+| 19 | fallbacks removed | translated per-draw fallback, check frames, stage self-switch-off | 15.8 | **F15-2** | 1 - 18 | low | all gates green with `native.owned_check=0` in a soak | removes ~20 % composed frames (check / warm-up) | last |
+
+**Order.** Now (parallel): S-5, X-1, S-7c (in progress) + **FG-1**, **F2f**, **F15-1**, **F6-2**, F12 / F13 (independent, small). Then **F4-5** (after S-5: the biggest CPU block),
+**F9** -> **F14** (blended machinery first), **F3-4** (after F4-5), **F11**, **S-7d**. Then **F8-1** (needs every class owned), **F10-1 .. F10-4**, **L-1**, **F15-2**.
+Independent of each other: F2f / F6-2 / F12 / F13 / F15-1 / FG-1 / F11; serial chains: S-5 -> F4-5 -> F3-4 -> F8-1; F2f -> F9 -> F14 -> F8-1; all -> F10 -> L-1 -> F15-2.
+
+### 15.5 F10: what the collection takeover means concretely
+
+The native collection already exists in compare mode (`src/native/f10_collect.*`, `f10_portal.h`, `f10_math.h`, `RVK_F10_COMPARE=1`): portal walk, sector-tree leaf gate,
+live flags, dynamic bounds, fade, LOD pick, hierarchy nodes, exact in 63,689 main views (7.31b), at 207 - 252 us per view against the engine's 405 - 660. What is
+missing, in stages:
+* **F10-1 own visible set drives the owned classes** (main view): for an element whose every context is owned, the engine's `eCFrustumElementItem::Request` is not called;
+  we run its side effects ourselves: the visible stamp `item+0xc = db+8` (decals read it), `UpdateIllumination` when its dirty byte is set (a call into the engine, not a
+  copy), `UpdateLoD` (the pick is ported and exact; `PrefetchData` when the wanted LOD is not resident = an engine call), `QueueData(res, 1)` / `CacheResource(res)` for
+  the mesh and every sub-mesh material (the LRU: engine calls, at most once per resource and frame), the busy counter and `AddRenderInstance` (gone once F2f owns
+  instanced meshes). The op lists then only hold the not-yet-owned classes. Gate: the M3 side-effect digest (`diffSideEffects(engine, native).zero()`) over every view of the
+  soaks, on check frames the engine's Request runs and its ops are compared with the records (as `owned_check` today). Removes `RequestRenderOps` / `Request` for owned
+  elements (~0.7 ms) and the compaction (`compactOwned` 0.34: no op to take out).
+* **F10-2 the cull itself**: `ExtractFromFrustum` skipped for the main view: the native portal walk + the **occluders** (`eCOccluder_PS::AddOccluder` 0x675270, not ported:
+  7.31b open (a); until then the engine's final beam is read), the frustum beam built natively (`eCBeamTree::Init` 0x67bc40), the sector tree replaced by the scene table +
+  the per-entity cull data cached at cache-in (`OnCacheIn` / `OnUpdateBoundary` events; the actors' bounds per frame from the animation, 7.31b item 3). Later a GPU cull
+  of the scene table (F5's cluster cull extended to entities) with the visible set read back for the residency side effects (GD3D11's model: 2-frame lag + margin, so the
+  touches of F10-1 come from the read-back; the draws themselves need no CPU visible set).
+* **F10-3 shadow views**: the cascades' `ExtractShadowMap` + the shadow dbs' collection (caster callbacks, cylinder per cascade), the terrain map's and the atlas cells'.
+* **F10-4 the engine's Execute for the main view**: with empty lists the sorts and slot loops are idle; skip `eCFrustumDatabase::Execute`'s list walk, keep its frame
+  bookkeeping (`UpdateFrameDependencies`, the camera, `db+8` frame counter).
+* **Staying correct with the game logic**: everything the game decides stays the engine's (entity flags, cache-in / out, animation, particle simulation, scripts' hides /
+  shows); we only replace the *query* of that state. Inputs without an event (entity flag word: inline writers, the folded getter 0x852a0; dynamic bounds) are read live per
+  candidate as in 7.31b (~2 us per view) or per frame for the ~300 dynamic actors; the scrub and the check frames stay as Debug nets. Risk: residency (a resource that
+  is not touched is evicted: the LRU soft limit was never reached at the savegame, 7.29, so a missed touch is silent: the side-effect digest is the gate), streaming bursts
+  (a load creates ~1,900 resources), and the engine's own use of the visible stamp (decals, maybe AI / scripts' "is visible": not audited; to be searched before F10-1).
+
+### 15.6 Fallbacks and devices without features
+
+The floor (Vulkan 1.3 + push descriptors) is not enough for Full's owned path: it needs `drawIndirectCount` (optional in 1.2 / 1.3), `shaderDrawParameters`, buffer device
+addresses (core), descriptor indexing for the bindless set (core), `storageImageExtendedFormats` (own post's bloom blend), and for X-1 / the captures that remain
+`vertexPipelineStoresAndAtomics`; half precision (S-2) is optional with a float build of the same HLSL. Recommendation: **Full becomes a capability tier** ("Full requires",
+a `Spec::requirements` set on `renderer.mode=full`, greyed with the reason, as the RT tier); on devices without it the player gets Wrapper. **The translated path stays
+for Wrapper** (the faithful mode) and as the developer compare tool (`native.*_compare`, `rvk_shadereq`, `vs_equiv.py`), not as a per-draw fallback inside Full. The
+D3D12 backend needs the same list (SM 6.6 + binding tier 3 is already its floor; `ExecuteIndirect` with a count buffer is core). Once F15-2 lands, a Full frame either draws
+an item from its record or skips it for that frame (pipeline pending at most during a load), and a check failure is a test failure.
+
+### 15.7 The load-time Full data layout (14.4b) in this order
+
+L-1 comes after the last composed draw of a geometry class is gone (rows 1 - 17), because until then the engine's vertex layouts must stay readable by the composed /
+input-assembler forms and a second, packed copy would be an unread or duplicate output. With L-1 the render mode becomes a start-up choice (Wrapper <-> Full in-run A/B
+moves to two runs); its first step is the exact float32 position stream for the depth-only passes (z + cascades fetch 17.9 - 19.2 MB of positions per frame of
+26.4 - 26.8 MB, 14.12), the packing (16-bit cluster-relative positions, octahedral normals) needs the 680M captures to decide.
+
+### 15.8 Recommended next three stages
+
+1. **F4-5 SpeedTrees owned with the RT scene on** (after or together with S-5's wind port): the largest composed block in every outdoor scene with RT on (0 % owned,
+   ~2.5 ms CPU of composition + issue at the savegame, 296 ops / 2,929 instances per view at jungle), and it removes the RT scene's tree captures (25.5 k per 5 s).
+2. **F2f + F9 (instance lists, hardware batches, blended terrain layers)**: the static residue (16 % of the owned frames' static ops), small CPU, but it is what every later
+   stage (F14, F8-1, F10-1) needs: no class may pin the engine's op creation.
+3. **FG-1 + F15-1** (the frame generation stall and the composed-late / pending-pipeline fallback): both block the end-state configuration itself: the all-on run with
+   frame generation hangs in 2 of 3 runs, and 65 - 97 ops per view at jungle are still composed because a pipeline or variant was not ready.
+
+**Limits.** One run per scene (5 s windows, frozen spots), the actors' exclusion reasons and the grass split under frame generation not resolved, the CPU profile in a private
+copy (other agents' load), the sampler hides entries below ~1.5 % (particles, sky, GUI composition are below it), 680M numbers are the 14.3 model, no new counter was added
+(the existing stage lines were enough; the `uber ... failed` reading is proven by the control run c4).
