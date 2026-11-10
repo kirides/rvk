@@ -98,6 +98,10 @@ param(
     # other run removes the attribute again (also one the game wrote itself after the cheat code "minsky")
     [switch]$TestMode,
     [switch]$KeepRunning,
+    # the engine's real shutdown: after the run (scenario result / -Seconds) the game's window is closed (WM_CLOSE) instead of the
+    # process being killed, so HalDevice / Device::destroy / the backend's teardown run; waits up to 60 s, reports the exit code and
+    # new minidumps in bin\rvk\dumps, exit code 3 when the game crashed / hung on the way out
+    [switch]$GracefulExit,
     [switch]$NoAutostart,
     # let the game take the foreground / move the cursor (default: risen-spass background mode)
     [switch]$AllowFocus,
@@ -208,6 +212,35 @@ if ($NoRenderer) {
     Write-Host "deployed $dll (mode $Mode) to $bin"
 }
 
+# Instance ids: risen-spass renames the engine's single-instance mutex to GenomeMutex_<id> (id = max(-Instance, 1)). A game started while another
+# Risen (any copy) holds the same id quits ~0.2 s after the hooks are active, before Lua: the "game exits at once" of shared GPU sessions (two copies
+# run without -Instance both take id 1). Checked here: an explicit -Instance that is taken stops the run with the holders listed; without -Instance a
+# free id 2..40 is taken instead (logged).
+function Get-RisenInstanceHolders([int]$Id) {
+    Get-CimInstance Win32_Process -Filter "Name LIKE 'Risen%'" -ErrorAction SilentlyContinue | ForEach-Object {
+        $cfgFile = Join-Path (Split-Path $_.ExecutablePath -Parent) 'spass\config.toml'
+        $held = if (Test-Path $cfgFile) { (Select-String -Path $cfgFile -Pattern '^instance = "(\d+)"' | Select-Object -First 1).Matches.Groups[1].Value } else { '?' }
+        if ($held -eq "$Id") { "pid $($_.ProcessId) $($_.ExecutablePath)" }
+    }
+}
+function Test-RisenInstanceFree([int]$Id) {
+    $m = $null
+    if ([System.Threading.Mutex]::TryOpenExisting("GenomeMutex_$Id", [ref]$m)) { $m.Dispose(); return $false }
+    return $true
+}
+$instanceId = [Math]::Max($Instance, 1)
+if (-not (Test-RisenInstanceFree $instanceId)) {
+    $holders = @(Get-RisenInstanceHolders $instanceId)
+    $who = if ($holders.Count -gt 0) { $holders -join '; ' } else { 'a Risen process (not identified)' }
+    if ($PSBoundParameters.ContainsKey('Instance')) {
+        throw "instance id $instanceId is taken (GenomeMutex_$instanceId held by $who): the game would quit at start-up. Pass a free -Instance or wait."
+    }
+    $free = 2..40 | Where-Object { Test-RisenInstanceFree $_ } | Select-Object -First 1
+    if (-not $free) { throw "instance id $instanceId is taken ($who) and no id 2..40 is free" }
+    Write-Warning "instance id $instanceId is taken by $who; this run uses -Instance $free"
+    $Instance = $free
+}
+
 if (-not $ModPath) { $ModPath = @(Join-Path $repo 'mods') }
 $spassArgs = @{
     ModPath = $ModPath
@@ -216,7 +249,7 @@ $spassArgs = @{
 if ($Scenario) { $spassArgs.Scenario = $Scenario }
 if ($WaitForResult) { $spassArgs.WaitForResult = $true }
 if ($StallSeconds -gt 0) { $spassArgs.StallSeconds = $StallSeconds }
-if ($KeepRunning) { $spassArgs.KeepRunning = $true }
+if ($KeepRunning -or $GracefulExit) { $spassArgs.KeepRunning = $true }
 if ($NoAutostart) { $spassArgs.NoAutostart = $true }
 if ($AllowFocus) { $spassArgs.AllowFocus = $true }
 if ($Exe -ne 'Risen.exe') { $spassArgs.Exe = $Exe }
@@ -238,8 +271,51 @@ if (Test-Path $cfgUser) {
     throw "-Fullscreen / -TestMode need $cfgUser (created by the first run)"
 }
 
+$dumpDir = Join-Path $GameDir 'bin\rvk\dumps'
+$dumpsBefore = @(if (Test-Path $dumpDir) { (Get-ChildItem $dumpDir).Name })
 & (Join-Path $SpassRepo 'scripts\test-run.ps1') @spassArgs
 $code = $LASTEXITCODE
+
+if ($GracefulExit) {
+    $exeName = [IO.Path]::GetFileNameWithoutExtension($Exe)
+    $game = @(Get-Process $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$GameDir\*" })
+    if ($game.Count -eq 0) {
+        Write-Host "graceful exit: no $Exe of $GameDir alive after the run (it ended by itself or crashed before)"
+    } else {
+        $p = $game[0]
+        $null = $p.Handle  # (opens the process handle now: without it ExitCode is empty after the exit)
+        Write-Host "graceful exit: closing the window of pid $($p.Id)"
+        $null = $p.CloseMainWindow()
+        $closedAt = Get-Date
+        $knownExitCrash = $false
+        if ($p.WaitForExit(60000)) {
+            Write-Host ("graceful exit: exited, code 0x{0:X8}" -f $p.ExitCode)
+            if ($p.ExitCode -ne 0) {
+                # the faulting module from Windows Error Reporting's Application event 1000 (properties: 3 module, 7 offset, 8 process id)
+                Start-Sleep -Seconds 2
+                $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = $closedAt.AddSeconds(-5) } -ErrorAction SilentlyContinue |
+                    Where-Object { $v = [string]$_.Properties[8].Value; $id = if ($v -like '0x*') { [Convert]::ToInt32($v.Substring(2), 16) } else { [int]$v }; $id -eq $p.Id } | Select-Object -First 1
+                $fault = if ($ev) { '{0}+0x{1}' -f $ev.Properties[3].Value, ([string]$ev.Properties[7].Value -replace '^(0x)?0*', '') } else { '(no WER event)' }
+                Write-Host "graceful exit: crash in $fault"
+                # Known: SharedBase.dll+0x7caa9 (bCObjectBase::Read on a dead stream) crashes many graceful exits (intermittent) in every render mode, also
+                # Original (system D3D9): an engine / risen-spass exit crash, not the renderer's (2026-11-11); it does not fail the run
+                if ($fault -match '^SharedBase\.dll\+0x0*7caa9$') { $knownExitCrash = $true; Write-Host 'graceful exit: (the known engine exit crash, every render mode: not counted; its minidump neither)' }
+                else { $code = 3 }
+            }
+        } else {
+            Write-Host 'graceful exit: did NOT exit within 60 s of the close request; killed'
+            $p.Kill()
+            $code = 3
+        }
+    }
+    $newDumps = @(Get-ChildItem $dumpDir -ErrorAction SilentlyContinue | Where-Object { $dumpsBefore -notcontains $_.Name })
+    if ($newDumps.Count -gt 0) {
+        Write-Host "graceful exit: new dumps: $(($newDumps.Name) -join ', ')"
+        if (-not ($knownExitCrash -and @($newDumps | Where-Object { $_.Name -notlike '*_crash.dmp' }).Count -eq 0)) { $code = 3 }
+    } else {
+        Write-Host 'graceful exit: no new dumps'
+    }
+}
 
 if (-not $NoRenderer -and $RvkFilter) {
     Write-Host "---- $rvkLog"
