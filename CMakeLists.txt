@@ -489,9 +489,11 @@ else()
         target_compile_options(rvk_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/FI${header}>)
     endforeach()
 endif()
-set_source_files_properties(src/vk/volk_impl.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+# Vendored / third-party sources stay optimized in the no-optimization preset (clang-o0 appends /Od /Ob0 to RelWithDebInfo; the later /O2 wins), only our own code is /Od
+set(RVK_VENDORED_OPT "$<$<NOT:$<CONFIG:Debug>>:/O2;/Ob2>")
+set_source_files_properties(src/vk/volk_impl.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "${RVK_VENDORED_OPT}")
 # Dear ImGui's Vulkan backend, vendored from the imgui release vcpkg installs (third_party/imgui_vulkan: why there)
-set_source_files_properties(src/rhi/vulkan/imgui_vulkan_impl.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
+set_source_files_properties(src/rhi/vulkan/imgui_vulkan_impl.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3;${RVK_VENDORED_OPT}")
 
 # ---------------------------------------------------------------------------------------------
 # d3d9.dll: the proxy the game loads (Engine.dll imports d3d9.dll!Direct3DCreate9)
@@ -547,7 +549,7 @@ target_include_directories(rvk_rhi_d3d12 PUBLIC src include)
 target_include_directories(rvk_rhi_d3d12 PRIVATE third_party/imgui_dx12 third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include third_party/amd_fidelityfx/framegeneration/include)
 target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid d3dcompiler imgui::imgui)
 # Dear ImGui's DX12 backend, vendored from the imgui release vcpkg installs (third_party/imgui_dx12: built on the Agility headers like the rest of the backend)
-set_source_files_properties(third_party/imgui_dx12/imgui_impl_dx12.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
+set_source_files_properties(third_party/imgui_dx12/imgui_impl_dx12.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3;${RVK_VENDORED_OPT}")
 # d3d12.dll / dxgi.dll are delay-loaded by everything that links the backend: the Vulkan-only path never loads them
 target_link_libraries(rvk_rhi_d3d12 PUBLIC delayimp)
 target_link_options(rvk_rhi_d3d12 INTERFACE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll /DELAYLOAD:d3dcompiler_47.dll)
