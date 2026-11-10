@@ -22,6 +22,7 @@
 #include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
 #include "enh/ocean.h"
+#include "core/crash_dump.h"
 #include "engine/scene_hooks.h"
 #include "engine/fast_sort.h"
 #include "engine/load_accel.h"
@@ -353,6 +354,7 @@ HalDevice::~HalDevice() {
         std::erase(g_liveDevices, this);
     }
     spdlog::info("hal: device released by the engine: shutting down");
+    crashdump::armShutdownGuard();  // a Game.dll worker thread can fault on the destroyed app object during exit
     engine::scene::detach(&dev_);
     settings::registry().removeCallbacks(this);
     if (framegen_) framegen_->shutdown();  // AMD's swapchain calls into the overlay from its threads: it goes first
@@ -383,7 +385,8 @@ HalDevice::~HalDevice() {
     water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
     rtShadows_.reset();  // removes its pass, releases the RT scene
-    rtScene_.reset();    // unregisters its observer / pass, retires its acceleration structures
+    lightTable_.reset(); // its destructor releases the RT scene (lamp shadows hold it): before the scene goes
+    rtScene_.reset();   // unregisters its observer / pass, retires its acceleration structures
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
@@ -393,6 +396,11 @@ HalDevice::~HalDevice() {
         fvfDecls_.clear();
         depthBuffers_.clear();
     }
+    // the native frame's owners hold pipelines / images of the RHI device: they must go before dev_.destroy() frees it
+    // (as members they were destroyed after it: OwnPost's pipeline destructor read the freed VkDeviceImpl)
+    effectOps_.reset();
+    staticOps_.reset();
+    frameTap_.reset();
     gpuscene::clusterstore().destroy(&dev_);  // (the worker, the arena copies, the table: before the device goes)
     gpuscene::ownedcompact().destroy();
     dev_.destroy();
