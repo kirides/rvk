@@ -379,10 +379,20 @@ private:
         rhi::GpuRef outKey;        // ... its read reference: the identity the consumers ask for (markVertexCaptured)
         rhi::GpuRef ref;           // verify: the vertex shader capture of the same draw
         std::uint32_t slots = 0, stride = 0, offsets = 0;
+        // 14.15 c: the morph targets POSITION1..3 (bit k of morphMask: stream k + 1 is read; its vertex 0, stride, byte offset of the position, the weight c31[k])
+        std::uint32_t morphMask = 0;
+        rhi::GpuRef morph[3];
+        std::uint32_t morphStride[3] = {0, 0, 0}, morphOff[3] = {0, 0, 0};
+        float morphWeight[3] = {0.0f, 0.0f, 0.0f};
+    };
+    struct SkinLayout {
+        std::uint32_t offsets = 0, morphMask = 0;
+        std::uint32_t morphOff[3] = {0, 0, 0};
+        rhi::GpuRef morph[3];
     };
     bool skinReady();
     void recordSkin(rhi::CommandList& cl);
-    bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const;
+    bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, SkinLayout& l) const;
     void destroySkin();
     std::vector<SkinJob> skinJobs_;
     std::unordered_set<std::uint64_t> skinLogged_;
@@ -545,6 +555,7 @@ private:
         std::uint64_t holeFrames = 0, holes = 0;  // frames whose dynamic instances fell short of the count (TLAS built over fewer), and by how many
         std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
         std::uint64_t solidWithSkin = 0, solidNoSkin = 0, solidCaptureSkipped = 0;
+        std::uint64_t skinMorph = 0;  // (14.15 c: skinning jobs with morph targets)
         std::uint64_t skinIneligible = 0, skinDraws = 0;  // skinned draws of the cascades / pre-pass the skinning pass could not take (morph targets, dynamic buffer) / took
         std::uint64_t charCurrent = 0, charPrevious = 0, charSkinned = 0;  // characters' BLAS refits: from this frame's capture / the previous frame's / of them by the skinning pass
         std::uint64_t capCurrent = 0, capPrevious = 0;  // captures a frame's BLAS refits used: this frame's (the cascades' views) / the previous frame's

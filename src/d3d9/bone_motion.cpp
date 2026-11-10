@@ -154,6 +154,81 @@ void Device::setBoneMotion(int mode) {
     spdlog::info("native: bone motion {}", mode == 1 ? "on (the skinned solid draws' motion from the bone table's history)" : mode == 2 ? "compare (captures + GPU compare)" : "off");
 }
 
+Device::CaptureKind Device::captureKindOf(const ReplaceQuery& q) {
+    switch (q.kind) {
+        case draws::Kind::StaticMesh: return CaptureKind::Static;
+        case draws::Kind::InstancedMesh: return CaptureKind::Instanced;
+        case draws::Kind::SpeedTree: return CaptureKind::SpeedTree;
+        case draws::Kind::SpeedTreeBillboard:
+        case draws::Kind::Billboard: return CaptureKind::Billboard;
+        case draws::Kind::Vegetation: return CaptureKind::Vegetation;
+        case draws::Kind::Skinned: {
+            if (q.decl != nullptr) {
+                for (const VertexElement& e : q.decl->elements()) {
+                    if (e.stream == kDeclEndStream) break;
+                    if (e.stream != 0 || (e.usage == 0 && e.usageIndex != 0)) return CaptureKind::Morph;  // (POSITION1..3 in streams 1..3: the heads' morph targets)
+                }
+            }
+            return CaptureKind::Skinned;
+        }
+        default: return CaptureKind::Other;
+    }
+}
+
+void Device::captureCensusFrame() {
+    ++captureCensusFrames_;
+    const double now = secondsSinceCreate();
+    if (now - captureCensusLog_ < 5.0) return;
+    const bool first = captureCensusLog_ < -1e8;
+    captureCensusLog_ = now;
+    static constexpr const char* kBy[] = {"motion skinned", "motion rigid", "rt solid without a skin job", "rt solid for motion", "rt cascade", "rt skin verify", "rt tree", "other"};
+    static constexpr const char* kKind[] = {"static", "instanced mesh", "skinned", "morph", "speedtree", "vegetation", "billboard", "other"};
+    static constexpr const char* kSite[] = {"composed", "retained", "owned"};
+    std::string rows;
+    std::uint64_t total = 0, totalAvoided = 0;
+    for (std::size_t b = 0; b < static_cast<std::size_t>(CaptureBy::Count); ++b) {
+        for (std::size_t k = 0; k < static_cast<std::size_t>(CaptureKind::Count); ++k) {
+            std::uint64_t n[static_cast<std::size_t>(CaptureSite::Count)];
+            std::uint64_t sum = 0;
+            for (std::size_t s = 0; s < static_cast<std::size_t>(CaptureSite::Count); ++s) {
+                n[s] = captureCensus_.n[b][k][s] - captureCensusLast_.n[b][k][s];
+                sum += n[s];
+            }
+            const std::uint64_t av = captureCensus_.avoided[b][k] - captureCensusLast_.avoided[b][k];
+            total += sum;
+            totalAvoided += av;
+            if (sum == 0 && av == 0) continue;
+            rows += std::format("; {} x {}: {}", kBy[b], kKind[k], sum);
+            if (sum != 0) {
+                rows += " (";
+                bool any = false;
+                for (std::size_t s = 0; s < static_cast<std::size_t>(CaptureSite::Count); ++s) {
+                    if (n[s] == 0) continue;
+                    rows += std::format("{}{} {}", any ? ", " : "", kSite[s], n[s]);
+                    any = true;
+                }
+                rows += ")";
+            }
+            if (av != 0) rows += std::format(" avoided {}", av);
+        }
+    }
+    std::string win;
+    for (std::size_t b = 0; b < static_cast<std::size_t>(CaptureBy::Count); ++b) {
+        const std::uint64_t u = captureCensus_.win2[b][0] - captureCensusLast_.win2[b][0], o = captureCensus_.win2[b][1] - captureCensusLast_.win2[b][1],
+                            bo = captureCensus_.win2[b][2] - captureCensusLast_.win2[b][2];
+        if (u + o + bo != 0) win += std::format("{}{}: uploaded {} / object record {} / bone image {}", win.empty() ? "" : ", ", kBy[b], u, o, bo);
+    }
+    const std::uint64_t frames = std::max<std::uint64_t>(captureCensusFrames_ - captureCensusFramesLast_, 1);
+    if (!first || total != 0) {
+        const std::uint64_t r0 = captureCensus_.rigid[0] - captureCensusLast_.rigid[0], r1 = captureCensus_.rigid[1] - captureCensusLast_.rigid[1],
+                            r2 = captureCensus_.rigid[2] - captureCensusLast_.rigid[2];
+        spdlog::info("native: captures (5 s): {} vertex-capture requests ({:.1f} per frame), {} left out for a capture-free source{}; moving rigid captures: window 2 an object record {}, uploaded {}, entity with a scene-table slot {}; VS window 2 per requester: {}", total,
+                     static_cast<double>(total) / static_cast<double>(frames), totalAvoided, rows.empty() ? std::string("; none") : rows, r0, r1, r2, win.empty() ? std::string("-") : win);
+    }
+    captureCensusLast_ = captureCensus_;
+    captureCensusFramesLast_ = captureCensusFrames_;
+}
+
 bool Device::boneCompareOn() { return g_compare.load(std::memory_order_relaxed); }
 void Device::boneCompareForce(bool on) { g_compare.store(on, std::memory_order_relaxed); }
 

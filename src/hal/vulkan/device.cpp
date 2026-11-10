@@ -1767,6 +1767,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::objecttable().flush(dev_);
         gpuscene::bonetable().flush(dev_);  // F6-1: the owned actors' bone images (before the frame's draws, with the other tables)
         dev_.boneMotionFrame();         // 14.13: bone-history motion (compare readback, the 5 s line)
+        dev_.captureCensusFrame();      // 14.15: the vertex-capture census (`native: captures (5 s)`)
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
         gpuscene::bbtable().flush(dev_);
     }

@@ -1662,6 +1662,15 @@ bool uberVsCovers(const MaterialSource& src) {
     return shader::uberVsSupports(src.file, src.entry) && (g_uberSkip.load(std::memory_order_relaxed) & 256u) == 0;
 }
 
+// 14.15 a: RVK_UBER_BONE_TR=1 = the bone-motion vertex forms stay the translated program even with the ubershader on (the A/B of the port's bone form)
+bool uberBoneTranslated() {
+    static const bool v = [] {
+        char e[8];
+        return GetEnvironmentVariableA("RVK_UBER_BONE_TR", e, sizeof e) > 0 && e[0] == '1';
+    }();
+    return v;
+}
+
 bool uberVertexOptions(const Shader& s, shader::TranslateOptions& o) {
     const MaterialSource* src = s.source.load(std::memory_order_acquire);
     if (s.stage != shader::Stage::Vertex || src == nullptr || !uberVsCovers(*src)) return false;
@@ -1760,6 +1769,18 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         shader::TranslateOptions to = options;
         to.uber = false;
         to.uberDefines.clear();
+        // 14.15 a: the port's bone-history form (RVK_UBER_BONE_PREV): the translated part keeps the bone form's defines (RVK_BONE_PREV: window 2 can be redirected) and its
+        // rvk_prevWorld output, but instead of the second translated run it only hands the port the world point of its clip position (the port adds its own displacement)
+        const bool bonePrev = options.uberDefines.find("RVK_UBER_BONE_PREV") != std::string::npos;
+        if (bonePrev) {
+            to.rerunnable = false;
+            to.epilogue =
+                "    {\n"
+                "        // (14.15 a: the clip position's world point, as the translated bone form reconstructs its previous one)\n"
+                "        const float4 rvk_twW = mul(rvk_pos, rvkLoadFrame(pc.frame).invViewProj);\n"
+                "        rvk_out.rvk_prevWorld = abs(rvk_twW.w) > 1e-20 ? float4(rvk_twW.xyz / rvk_twW.w, 1.0) : float4(0.0, 0.0, 0.0, 0.0);\n"
+                "    }";
+        }
         const auto translated = shader::toHlsl(dec.program, to);
         if (!translated.ok()) return rhi::ShaderModule::None;
         static const bool ownPosition = [] {  // RVK_UBER_VS_OWNPOS=1: the port's own position (the A/B / negative control of the bridge)
@@ -1768,6 +1789,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         }();
         // (S-4: the pulled form needs the translated part: its entry builds the input struct; with the port's own position it stays translated)
         if (options.pullVertices && ownPosition) return rhi::ShaderModule::None;
+        if (bonePrev && ownPosition) return rhi::ShaderModule::None;  // (the bone form needs the translated part's world point)
         glsl = shader::uberVertexHlsl(src.file, src.entry, src.macros, inputs, options.sceneRecord, options.sceneView, options.uberDefines,
                                       ownPosition ? std::string_view() : std::string_view(translated.hlsl), options.pullVertices);
     } else {
@@ -2012,13 +2034,16 @@ void Device::variantWorker() {
                 provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "") +
                                (pull ? std::format("p{:08x}", shader::hlslPullHash()) : "");
                 const bool uberOn = ubershader_.load(std::memory_order_relaxed);
-                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn, pull](const Shader& sh, shader::TranslateOptions& o) {
+                const bool boneVs = v1 == VariantSlot::SceneVsBone;
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn, pull, boneVs](const Shader& sh, shader::TranslateOptions& o) {
                     if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
                     // S-1a: the plain scene pixel shader of a request the ubershader covers is built from it (the enhancement variants say so through their own hooks)
                     if (pixel && !hasBase && uberOn) uberBaseOptions(sh, o);
                     // S-1b: the plain scene vertex shader of a request the vertex port covers (the fade variant stays translated)
                     if (!pixel && !hasBase && uberOn && uberVertexOptions(sh, o) && lodVs) o.uberDefines = std::format("#define RVK_LOD_FADE {}\n", shader::abi::kFrameParamLod);
+                    // 14.15 a: the bone-motion vertex forms of a request the port covers are the port's bone form (RVK_UBER_BONE_PREV; RVK_UBER_BONE_TR=1 keeps them translated)
+                    if (!pixel && hasBase && boneVs && uberOn && !uberBoneTranslated() && uberVertexOptions(sh, o)) o.uberDefines += "#define RVK_UBER_BONE_PREV 1\n";
                     if (lodVs) {  // (the translated fallback of an ubershader build that failed needs it too)
                         o.inputOverrides.push_back({shader::Usage::BlendWeight, 1,
                                                     std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});

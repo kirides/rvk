@@ -1086,6 +1086,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.engineVs = vs_.get();
         q.enginePs = ps_.get();
         q.decl = decl_;
+        for (std::uint32_t k = 0; k < 3; ++k) {
+            q.morphBuffer[k] = geom.userPointer ? nullptr : streams_[k + 1].buffer;
+            q.morphOffset[k] = streams_[k + 1].offset;
+            q.morphStride[k] = streams_[k + 1].stride;
+        }
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
         q.blending = rs_[RS_ALPHABLENDENABLE] != 0;
         q.srcBlend = static_cast<std::uint8_t>(rs_[RS_SRCBLEND]);
@@ -1974,12 +1979,14 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
                                    (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
             obsBone_ = boneOfCached(c) && c.scenePipeline != GamePipeline::None && sceneActive();  // (14.13: the replayed packet is the bone-motion scene form)
             const CoverQuery cq = coverOf(q);
+            obsSite_ = CaptureSite::Retained;  // (capture census)
             for (DrawObserver* o : observers_) {
                 if (!o->observes(c.kind, c.phase)) continue;
                 if (o->coversDraw(cq)) continue;  // F8-0
                 if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 1);
                 o->observe(*this, q);
             }
+            obsSite_ = CaptureSite::Composed;
             if (opaqueObserver) {
                 for (DrawReplacer* r : replacers_) {
                     if (!r->wantsOpaque()) continue;
