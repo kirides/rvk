@@ -53,7 +53,7 @@ bool safeReadN(const void* src, void* dst) {
 #pragma warning(push)
 #pragma warning(disable : 4723)  // (inlined into callers that divide by a field: their fallback-0 path, IEEE as before)
 template <class T>
-inline bool readAt(const void* base, std::size_t offset, T& out) {
+inline bool readAtSafe(const void* base, std::size_t offset, T& out) {
     if (base == nullptr) return false;
     const void* p = static_cast<const std::uint8_t*>(base) + offset;
     if constexpr (std::is_trivially_copyable_v<T> && (sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8)) {
@@ -73,6 +73,16 @@ inline bool readAt(const void* base, std::size_t offset, T& out) {
 }
 #pragma warning(pop)
 
+// Unguarded counterpart of readAt: a plain copy of sizeof(T) bytes at base + offset, no null check, no SEH. The caller must guarantee that
+// the memory is readable (an object we own, or a range already checked with safeRead / readAt). A fault here crashes the game.
+template <class T>
+inline bool readAtUnsafe(const void* base, std::size_t offset, T& out) {
+    if (!base) return false;
+    std::memcpy(&out, static_cast<const std::uint8_t*>(base) + offset, sizeof(T));
+    return true;
+}
+
+#define readAt readAtUnsafe
 // A bCString field (SharedBase: a char* whose int length sits 8 bytes before the text) -> its text ("" when unreadable)
 std::string readCString(const void* field);
 
