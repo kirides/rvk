@@ -112,6 +112,8 @@ add_library(rvk_core STATIC
     src/core/config.cpp
     src/core/f2c4_measure.cpp
     src/core/f2c4_measure.h
+    src/core/iat_patch.cpp
+    src/core/iat_patch.h
     src/core/f5_measure.cpp
     src/core/f5_measure.h
     src/core/profile.h
@@ -423,7 +425,9 @@ add_library(rvk_core STATIC
     src/vk/framegen.cpp
     src/vk/framegen.h
     src/vk/fg_swapchain.cpp
+    src/vk/fg_trace.cpp
     src/vk/fg_swapchain.h
+    src/vk/fg_trace.h
     src/vk/fsr.cpp
     src/vk/fsr.h
     src/vk/frames.h

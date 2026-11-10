@@ -57,6 +57,7 @@
 #include "shader/spirv.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
+#include "vk/fg_swapchain.h"
 #include "vk/frames.h"
 #include "vk/framegen.h"
 #include "vk/fsr.h"
@@ -1298,6 +1299,17 @@ int fgTest(const std::string& dllArg, bool validation) {
         }
         return ok;
     };
+    // FG-1 (frame-generation.md 13): the swapchain's events must be process-private (the DLL names them; a second process would
+    // share them and steal the wake-ups). FgSwapchain::load maps the effect DLL and patches its CreateEventW import.
+    {
+        vk::FgSwapchain sc;
+        if (check(sc.load(dll), "load the DLL (swapchain loader)")) {
+            std::string why;
+            const bool priv = sc.eventsPrivate(&why);
+            std::printf("frame generation swapchain events: %s%s\n", priv ? "process-private" : "NAMED (session-wide): ", priv ? "" : why.c_str());
+            check(priv, "the frame generation swapchain's events are process-private");
+        }
+    }
     vk::FrameGen fg;
     if (check(fg.load(dll), "load the DLL")) {
         const std::vector<vk::FrameGenVersion> offered = fg.versionList(ctx);

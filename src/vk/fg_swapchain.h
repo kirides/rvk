@@ -16,6 +16,9 @@
 //  * teardown: frame generation context disabled / destroyed by its owner, then waitForPresents, then the swapchain context, then
 //    the swapchain (destroy())
 //  * the replacement images are handed over in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+//  * the DLL creates its three swapchain events with session-wide names ("PresentEvent", "InterpolationEvent", "PacerEvent"): a
+//    second process with the same swapchain shares them and steals our wake-ups (the "stall", frame-generation.md 13). load()
+//    points the DLL's CreateEventW import at a wrapper that drops the name (process-private events)
 //  * FFX contexts are not thread safe: contextMutex() covers every ffxConfigure / ffxDispatch(prepare) / create / destroy of the
 //    frame generation context (render thread) and present() (the present thread: the interpolation dispatch runs inside it)
 
@@ -69,6 +72,11 @@ public:
     // loads the FidelityFX loader (and, through it, the frame generation DLL next to it); false (logged) when it cannot
     bool load(const std::filesystem::path& loaderDll);
     bool loaded() const { return module_ != nullptr; }
+    // named events the frame generation DLL asked for and got unnamed (process-wide count; 3 per swapchain created)
+    static int privatizedEvents();
+    // self-test (rvk_vktest --fg): the loaded frame generation DLL's CreateEventW import goes through the wrapper and a named event
+    // made through it cannot be opened by name. `why` says what failed.
+    bool eventsPrivate(std::string* why) const;
 
     // Creates the swapchain context and its swapchain from `ci` (surface, extent, format, present mode ...; the replacement
     // images are minImageCount = 2). `reason` says why not. The queues are Context::queue() and Context::frameGenQueues().
@@ -117,7 +125,8 @@ private:
     void destroyViews();
     VkImageView viewOf(VkImage image, VkFormat format);
 
-    void* module_ = nullptr;  // HMODULE
+    void* module_ = nullptr;  // HMODULE of the loader
+    void* effect_ = nullptr;  // HMODULE of amd_fidelityfx_framegeneration_vk.dll (mapped by us first: its imports patched)
     struct Functions;
     Functions* fn_ = nullptr;
     Context* ctx_ = nullptr;

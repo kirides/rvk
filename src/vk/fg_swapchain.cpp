@@ -21,7 +21,10 @@
 #include <vk/ffx_api_framegeneration_vk.h>
 #include <vk/ffx_api_vk.h>
 
+#include "core/iat_patch.h"
+#include "core/stall_sampler.h"
 #include "vk/context.h"
+#include "vk/fg_trace.h"
 #include "vk/framegen.h"
 
 namespace rvk::vk {
@@ -122,6 +125,32 @@ void ffxMessage(std::uint32_t type, const wchar_t* message) {
     }
 }
 
+// ---- AMD's named events (frame-generation.md 13, FG-1) ----
+// The swapchain of amd_fidelityfx_framegeneration_vk.dll (SDK 2.4.0, FrameInterpolationSwapchainVK.cpp, init) creates its three
+// auto-reset events with NAMES: CreateEvent(NULL, FALSE, .., "PresentEvent" / "InterpolationEvent" / "PacerEvent"). A name puts the
+// event into the session's namespace, so every process using that swapchain (a second Risen with frame generation, any other
+// Vulkan FSR 3 game) opens the SAME three kernel events: the other process's presenter / interpolation threads wait on them and
+// steal our SetEvent (auto-reset: one waiter wakes), our presenter thread sleeps forever and our present thread waits without end
+// for the replacement buffer that presenter would have released (the "stall"). The names serve nothing (the DLL uses the handles):
+// the DLL's import of CreateEventW is pointed at a wrapper that creates every event unnamed (process-private).
+// RVK_FG_SHARED_EVENTS=1 (Win32 environment) keeps the names: the A/B arm.
+std::atomic<int> g_eventsPrivatized{0};
+decltype(&CreateEventW) g_createEventW = nullptr;
+
+HANDLE WINAPI privateCreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name) {
+    if (name != nullptr) {
+        name = nullptr;
+        g_eventsPrivatized.fetch_add(1);
+    }
+    return g_createEventW(sa, manualReset, initialState, name);
+}
+
+bool sharedEventsWanted() {
+    char buf[8] = {};
+    const DWORD n = GetEnvironmentVariableA("RVK_FG_SHARED_EVENTS", buf, sizeof(buf));
+    return n > 0 && buf[0] != '0';
+}
+
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 dstStage,
                   VkAccessFlags2 dstAccess) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -153,6 +182,33 @@ FgSwapchain::~FgSwapchain() {
         FreeLibrary(static_cast<HMODULE>(module_));
         module_ = nullptr;
     }
+    if (effect_ != nullptr) {
+        FreeLibrary(static_cast<HMODULE>(effect_));
+        effect_ = nullptr;
+    }
+}
+
+int FgSwapchain::privatizedEvents() { return g_eventsPrivatized.load(); }
+
+bool FgSwapchain::eventsPrivate(std::string* why) const {
+    const auto fail = [&](std::string w) {
+        if (why != nullptr) *why = std::move(w);
+        return false;
+    };
+    if (effect_ == nullptr) return fail("the frame generation DLL is not loaded");
+    void* target = iat::importTarget(effect_, "kernel32.dll", "CreateEventW");
+    if (target == nullptr) return fail("the DLL imports no CreateEventW");
+    if (target != reinterpret_cast<void*>(&privateCreateEventW)) return fail("its CreateEventW import is not the wrapper");
+    // what the DLL's own call does: a name must not reach the kernel
+    const std::wstring name = L"rvk_fg_event_probe_" + std::to_wstring(GetCurrentProcessId());
+    HANDLE e = reinterpret_cast<decltype(&CreateEventW)>(target)(nullptr, FALSE, FALSE, name.c_str());
+    if (e == nullptr) return fail("the wrapper made no event");
+    HANDLE byName = OpenEventW(SYNCHRONIZE, FALSE, name.c_str());
+    const bool named = byName != nullptr;
+    if (byName != nullptr) CloseHandle(byName);
+    CloseHandle(e);
+    if (named) return fail("the event can be opened by its name");
+    return true;
 }
 
 bool FgSwapchain::load(const std::filesystem::path& dll) {
@@ -180,6 +236,26 @@ bool FgSwapchain::load(const std::filesystem::path& dll) {
     f->api.Configure(nullptr, &dbg.header);
     module_ = m;
     fn_ = f;
+    // the effect DLL beside the loader, mapped now (the loader maps the same file when the first context is made): its imports are
+    // patched before any of its code runs
+    HMODULE fx = LoadLibraryExW((dll.parent_path() / L"amd_fidelityfx_framegeneration_vk.dll").c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (fx == nullptr) {
+        spdlog::warn("fg swapchain: amd_fidelityfx_framegeneration_vk.dll does not load beside the loader (error {}): its events stay named",
+                     GetLastError());
+    } else {
+        effect_ = fx;
+        if (sharedEventsWanted()) {
+            spdlog::warn("fg swapchain: RVK_FG_SHARED_EVENTS: AMD's swapchain events keep their session-wide names (A/B arm)");
+        } else if (!iat::patchImport(fx, "kernel32.dll", "CreateEventW", reinterpret_cast<void*>(&privateCreateEventW),
+                                     reinterpret_cast<void**>(&g_createEventW))) {
+            spdlog::warn("fg swapchain: the frame generation DLL's CreateEventW import was not found: its events stay named");
+        }
+        if (fgtrace::enabled()) {
+            fgtrace::install(fx, VK_NULL_HANDLE);
+            diag::setHangReporter(&fgtrace::dump);
+        }
+    }
     return true;
 }
 
@@ -268,8 +344,10 @@ bool FgSwapchain::create(Context& ctx, const VkSwapchainCreateInfoKHR& ci, std::
     swapchain_ = sc;
     ctx_ = &ctx;
     format_ = ci.imageFormat;
-    spdlog::info("fg swapchain: created {}x{}, {} app-facing images, present mode {}, provider '{}' (offered: {})", ci.imageExtent.width,
-                 ci.imageExtent.height, ci.minImageCount, static_cast<int>(ci.presentMode), provider_, describeVersions(versions));
+    spdlog::info("fg swapchain: created {}x{}, {} app-facing images, present mode {}, provider '{}' (offered: {}); named events made "
+                 "process-private so far: {}",
+                 ci.imageExtent.width, ci.imageExtent.height, ci.minImageCount, static_cast<int>(ci.presentMode), provider_,
+                 describeVersions(versions), g_eventsPrivatized.load());
     return true;
 }
 
@@ -329,13 +407,18 @@ std::vector<VkImage> FgSwapchain::images() const {
 }
 
 VkResult FgSwapchain::acquire(VkSemaphore signal, std::uint32_t& imageIndex) {
-    return fn_->rf.pOutAcquireNextImageKHR(ctx_->device(), swapchain_, UINT64_MAX, signal, VK_NULL_HANDLE, &imageIndex);
+    const VkResult r = fn_->rf.pOutAcquireNextImageKHR(ctx_->device(), swapchain_, UINT64_MAX, signal, VK_NULL_HANDLE, &imageIndex);
+    fgtrace::note("appAcquire", imageIndex, static_cast<std::uint64_t>(static_cast<std::int64_t>(r)));
+    return r;
 }
 
 VkResult FgSwapchain::present(VkQueue queue, const VkPresentInfoKHR& info) {
     // the interpolation dispatch (frame generation callback) runs inside: the frame generation context must not be used meanwhile
     const std::lock_guard lock(mutex_);
-    return fn_->rf.pOutQueuePresentKHR(queue, &info);
+    fgtrace::note("queuePresent>", info.pImageIndices != nullptr ? info.pImageIndices[0] : 0);
+    const VkResult r = fn_->rf.pOutQueuePresentKHR(queue, &info);
+    fgtrace::note("queuePresent<", static_cast<std::uint64_t>(static_cast<std::int64_t>(r)));
+    return r;
 }
 
 std::uint64_t FgSwapchain::realPresentCount() const {
