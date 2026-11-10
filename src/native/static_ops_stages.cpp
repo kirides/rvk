@@ -62,6 +62,15 @@ void StaticOps::stagesReport() {
     lastPull = dev_.vertexPullActs();
     line += stage("vertex_pull", settingOn(rs.nativeVertexPull), dev_.vertexPull(), vp, std::format("{} items pulled", vp));
     vertexPullReport();
+    // S-5: own foliage (native.own_foliage; acted = grass instances shrunk or removed by the distance thinning in the window)
+    {
+        static std::uint64_t last = 0;
+        const std::uint64_t acted = foliageTotal_.changed + foliageW_.changed;
+        const std::uint64_t a = acted - last;
+        last = acted;
+        line += stage("own_foliage", settingOn(rs.nativeOwnFoliage), ownFoliage_, a, std::format("{} grass instances thinned", a));
+        foliageReport();
+    }
     // 14.13: bone-history motion (native.bone_motion, restart; acted = skinned solid draws drawn with the bone-motion forms, composed + owned records, in the window)
     {
         static std::uint64_t last = 0;

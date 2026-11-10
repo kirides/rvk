@@ -24,6 +24,7 @@
 #include "enh/light_table.h"
 #include "native/f4_measure.h"
 #include "native/static_ops.h"
+#include "core/settings.h"
 
 namespace rvk::native {
 
@@ -694,6 +695,8 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     // F7-1: the op's source entries flattened (nodes in order) and handed to the retained stream of this op: the converted instances stay in a persistent GPU buffer
     // while the source bytes are unchanged (an exact compare), so the draws carry no CPU bytes
     VegRet* ret = nullptr;
+    // S-5 (native.own_foliage): the grid's range decides the thinning (the z op and the solid op of a context read the same grid: the same decision per instance)
+    const sc::GrassThin thin = grassThinOf(get<float>(ptr(ps, 0x90), 0x54));
     if (ownedVeg_ && packetMode_ != 0 && viewKind_ == ViewKind::Main && g_ != nullptr && !g_->compare && total != 0) {
         vegRaw_.resize(static_cast<std::size_t>(total) * sc::kGrassInstanceSize);
         std::size_t at = 0;
@@ -704,7 +707,7 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
             if (!safeRead(sources[static_cast<std::size_t>(i)], vegRaw_.data() + at, n)) return Skip::Unreadable;
             at += n;
         }
-        ret = vegRetain(op, total, wind, lift);
+        ret = vegRetain(op, total, wind, lift, thin);
     }
     if (ret == nullptr) {
         bytes.assign(static_cast<std::size_t>(total) * sc::kGrassInstanceSize, 0);
@@ -718,6 +721,11 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
             for (std::uint32_t k = 0; k < gn.count; ++k, at += sc::kGrassInstanceSize) {
                 sc::grassInstance(src.data() + sc::kGrassInstanceSize * static_cast<std::size_t>(k), wind, lift, bytes.data() + at);
             }
+        }
+        if (thin.on) {
+            std::uint32_t removed = 0;
+            const std::uint32_t changed = sc::grassThin(bytes.data(), total, thin, &removed);
+            foliageCount(thin, total, changed, removed);
         }
     }
     st.vegConvNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tC0).count());
@@ -773,6 +781,11 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     if (ret != nullptr && !stream1) {  // (no stream 1 in the record: the old CPU-bytes path; its bytes from the flattened source)
         bytes.assign(vegRaw_.size(), 0);
         for (std::size_t k = 0; k * sc::kGrassInstanceSize < vegRaw_.size(); ++k) sc::grassInstance(vegRaw_.data() + k * sc::kGrassInstanceSize, wind, lift, bytes.data() + k * sc::kGrassInstanceSize);
+        if (thin.on) {
+            std::uint32_t removed = 0;
+            const std::uint32_t changed = sc::grassThin(bytes.data(), vegRaw_.size() / sc::kGrassInstanceSize, thin, &removed);
+            foliageCount(thin, vegRaw_.size() / sc::kGrassInstanceSize, changed, removed);
+        }
         ret = nullptr;
     }
     if (vroOn) vegCompNote(op, draws, nodes, total, wind, lift, ax, ay);
@@ -822,7 +835,7 @@ void StaticOps::setOwnedVegetation(bool on) {
 
 // the op's flattened source entries are in vegRaw_ (total instances): the retained stream of (context, type, list), rebuilt only when the source bytes (or the type's
 // wind / lift flags) changed. nullptr = not retainable (the caller converts and uploads as before).
-StaticOps::VegRet* StaticOps::vegRetain(const Op& op, std::uint32_t total, bool wind, bool lift) {
+StaticOps::VegRet* StaticOps::vegRetain(const Op& op, std::uint32_t total, bool wind, bool lift, const sc::GrassThin& thin) {
     ++vegStat_.ops;
     const std::size_t n = static_cast<std::size_t>(total) * sc::kGrassInstanceSize;
     if (n == 0 || n > (8u << 20) || vegRaw_.size() != n) {
@@ -841,7 +854,7 @@ StaticOps::VegRet* StaticOps::vegRetain(const Op& op, std::uint32_t total, bool 
             sc::grassInstance(vegRaw_.data() + k * sc::kGrassInstanceSize, wind, lift, out.data() + k * sc::kGrassInstanceSize);
         }
     };
-    bool same = r.buf != nullptr && r.raw.size() == n && r.wind == wind && r.lift == lift && std::memcmp(r.raw.data(), vegRaw_.data(), n) == 0;
+    bool same = r.buf != nullptr && r.raw.size() == n && r.wind == wind && r.lift == lift && r.thin == thin && std::memcmp(r.raw.data(), vegRaw_.data(), n) == 0;
     if (same && frame % 10 == 0) {
         // check frame: the converted bytes of this source must be the retained ones (the stream's content is a pure function of the source + the flags)
         ++vegStat_.checks;
@@ -876,15 +889,86 @@ StaticOps::VegRet* StaticOps::vegRetain(const Op& op, std::uint32_t total, bool 
         ++vegStat_.fallback;
         return nullptr;
     }
-    std::memcpy(p, r.conv.data(), n);
+    if (thin.on) {
+        // S-5: the buffer holds the thinned bytes; r.conv stays the plain conversion (the check frames compare it with a fresh one)
+        static thread_local std::vector<std::uint8_t> thinned;
+        thinned.assign(r.conv.begin(), r.conv.end());
+        std::uint32_t removed = 0;
+        const std::uint32_t changed = sc::grassThin(thinned.data(), total, thin, &removed);
+        foliageCount(thin, total, changed, removed);
+        std::memcpy(p, thinned.data(), n);
+    } else {
+        std::memcpy(p, r.conv.data(), n);
+    }
     r.buf->unlock();
     r.raw.assign(vegRaw_.begin(), vegRaw_.end());
     r.wind = wind;
     r.lift = lift;
+    r.thin = thin;
     ++vegStat_.rebuilt;
     vegStat_.rebuiltBytes += n;
     ++vegStat_.retained;
     return &r;
+}
+
+// ---- S-5 grass distance thinning (native.own_foliage, frame-ownership.md 14.14) ------------------------------------------------------------
+
+void StaticOps::setOwnFoliage(bool on) {
+    if (on == ownFoliage_) return;
+    ownFoliage_ = on;
+    vegRet_.clear();  // (the retained streams hold the bytes of the old state)
+    spdlog::info("native: own foliage {}", on ? "on (grass distance thinning tied to lod.view on every converted grass stream of the main view)" : "off");
+}
+
+sc::GrassThin StaticOps::grassThinOf(float gridEnd) const {
+    // (not while the engine's bytes are compared: scene_ops_compare; the owned pass has no g_, so the group's own state decides for every path alike)
+    if (!ownFoliage_ || viewKind_ != ViewKind::Main || groups_[static_cast<std::size_t>(Group::Vegetation)].compare) return {};
+    static const bool all = [] {
+        char v[4] = {};
+        return GetEnvironmentVariableA("RVK_S5_GRASS_OFF", v, sizeof(v)) != 0 && v[0] == '1';
+    }();
+    const auto& rs = settings::renderer();
+    const float lodView = rs.lodView != nullptr ? rs.lodView->asFloat() : 1.0f;
+    return sc::grassThinParams(view_.camPos, gridEnd, lodView, all);
+}
+
+void StaticOps::foliageCount(const sc::GrassThin&, std::size_t instances, std::uint32_t changed, std::uint32_t removed) {
+    ++foliageW_.ops;
+    foliageW_.instances += instances;
+    foliageW_.changed += changed;
+    foliageW_.removed += removed;
+}
+
+void StaticOps::foliageReport() {
+    FoliageStats& w = foliageW_;
+    foliageTotal_.ops += w.ops;
+    foliageTotal_.instances += w.instances;
+    foliageTotal_.changed += w.changed;
+    foliageTotal_.removed += w.removed;
+    {
+        // S-5 measurement: what vertex pulling of the trees' / grass' own flushes could merge (always logged while those flushes run)
+        auto& f = dev_.treeFlushStats;
+        static std::uint64_t last[4][2] = {};
+        const std::uint64_t* now[4] = {f.kindFlushes, f.kindItems, f.kindCalls, f.kindPullKeys};
+        std::uint64_t d[4][2];
+        for (int a = 0; a < 4; ++a)
+            for (int k = 0; k < 2; ++k) {
+                d[a][k] = now[a][k] - last[a][k];
+                last[a][k] = now[a][k];
+            }
+        if (d[0][0] + d[0][1] != 0) {
+            const auto per = [](std::uint64_t x, std::uint64_t n) { return static_cast<double>(x) / static_cast<double>(std::max<std::uint64_t>(1, n)); };
+            spdlog::info("native: foliage flush calls (5 s): trees {} flushes, {:.1f} items / {:.1f} indirect calls / {:.1f} pulled calls at best per flush; grass {} flushes, {:.1f} items / {:.1f} calls / {:.1f} pulled at best",
+                         d[0][0], per(d[1][0], d[0][0]), per(d[2][0], d[0][0]), per(d[3][0], d[0][0]), d[0][1], per(d[1][1], d[0][1]), per(d[2][1], d[0][1]), per(d[3][1], d[0][1]));
+        }
+    }
+    if (ownFoliage_ || w.ops != 0) {
+        const auto& rs = settings::renderer();
+        spdlog::info("native: own foliage (5 s): grass thinning (lod.view {:g}): {} streams thinned, {} instances, {} shrunk or removed ({:.1f} %), {} removed ({:.1f} %)",
+                     rs.lodView != nullptr ? rs.lodView->asFloat() : 1.0f, w.ops, w.instances, w.changed, w.instances ? 100.0 * static_cast<double>(w.changed) / static_cast<double>(w.instances) : 0.0,
+                     w.removed, w.instances ? 100.0 * static_cast<double>(w.removed) / static_cast<double>(w.instances) : 0.0);
+    }
+    w = {};
 }
 
 }  // namespace rvk::native
