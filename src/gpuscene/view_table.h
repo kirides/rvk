@@ -55,6 +55,7 @@ public:
 
     // once per present (before the upload list is closed): uploads the changed slots, restarts the frame's bookkeeping, the 5 s log
     void flush(d3d9::Device& dev);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffer goes before the device
 
     struct Stats {
         std::uint64_t sets = 0, same = 0, written = 0, conflicts = 0, dynamic = 0, dynamicReused = 0, dynamicFull = 0;

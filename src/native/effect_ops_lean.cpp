@@ -128,12 +128,17 @@ void EffectOps::issueLean(bool draw) {
     const d3d9::draws::Tag savedTag = tag;
     issuing_ = true;
     for (std::size_t k = 0; k < drawCount_; ++k) {
-        const fxc::EffectDraw& d = *draws_[k];
+        const bool own = ownSwap_ && k == 0;  // S-7c: our pixel shader for this draw, the composed state after it
+        const fxc::EffectDraw& d = own ? *ownPatched_ : *draws_[k];
         applyDevice(d);
         issueIndex_ = k;
-        if (!draw) continue;  // S-7: a held unit (own_post): the state as for a draw, nothing drawn
+        if (!draw) {
+            if (own) applyDevice(*draws_[k]);
+            continue;  // S-7: a held unit (own_post): the state as for a draw, nothing drawn
+        }
         if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
+        if (own) applyDevice(*draws_[k]);
         ++stats_->issuedDraws;
     }
     issuing_ = false;

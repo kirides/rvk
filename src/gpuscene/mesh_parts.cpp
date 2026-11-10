@@ -40,6 +40,19 @@ MeshPartTable& meshparts() {
     return t;
 }
 
+void MeshPartTable::releaseGpu() {
+    std::lock_guard lock(mutex_);
+    pipeline_.reset();  // (waits for a build still running: its pipeline is destroyed while the device exists)
+    for (Fetch& f : fetch_) {
+        f.out.reset();
+        f.readback.reset();
+        f.busy = false;
+        f.expect.clear();
+    }
+    parts_.release();
+    layouts_.release();
+}
+
 std::uint32_t MeshPartTable::layoutFor(const d3d9::VertexDecl* decl) {
     if (decl == nullptr) return kNone;
     if (const auto it = layoutOfDecl_.find(decl->id()); it != layoutOfDecl_.end()) return it->second;

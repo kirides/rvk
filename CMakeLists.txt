@@ -213,6 +213,7 @@ add_library(rvk_core STATIC
     src/native/effect_ops_lean.cpp
     src/native/own_post.cpp
     src/native/own_post_groups.cpp
+    src/native/own_post_units.cpp
     src/native/own_post.h
     src/native/effect_ops.h
     src/native/frame_desc.cpp
@@ -314,6 +315,8 @@ add_library(rvk_core STATIC
     src/gpuscene/cluster_table.h
     src/gpuscene/owned_compact.cpp
     src/gpuscene/owned_compact.h
+    src/gpuscene/shutdown.cpp
+    src/gpuscene/shutdown.h
     src/d3d9/owned_persist.cpp
     src/d3d9/owned_trees.cpp
     src/gpuscene/view_table.h
