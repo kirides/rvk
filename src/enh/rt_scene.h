@@ -404,7 +404,7 @@ private:
     double skinVerifyAt_ = 0.0, skinLogAt_ = 0.0;
     std::uint64_t skinVerifyCompared_ = 0, skinVerifyMissing_ = 0;
     float skinVerifyMax_ = 0.0f;
-    std::uint64_t skinJobsTotal_ = 0, skinVerticesTotal_ = 0;
+    std::uint64_t skinJobsTotal_ = 0, skinVerticesTotal_ = 0, skinMorphTotal_ = 0;
     struct DynBlas {
         std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t slots = 0, triangles = 0;
@@ -555,7 +555,6 @@ private:
         std::uint64_t holeFrames = 0, holes = 0;  // frames whose dynamic instances fell short of the count (TLAS built over fewer), and by how many
         std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
         std::uint64_t solidWithSkin = 0, solidNoSkin = 0, solidCaptureSkipped = 0;
-        std::uint64_t skinMorph = 0;  // (14.15 c: skinning jobs with morph targets)
         std::uint64_t skinIneligible = 0, skinDraws = 0;  // skinned draws of the cascades / pre-pass the skinning pass could not take (morph targets, dynamic buffer) / took
         std::uint64_t charCurrent = 0, charPrevious = 0, charSkinned = 0;  // characters' BLAS refits: from this frame's capture / the previous frame's / of them by the skinning pass
         std::uint64_t capCurrent = 0, capPrevious = 0;  // captures a frame's BLAS refits used: this frame's (the cascades' views) / the previous frame's

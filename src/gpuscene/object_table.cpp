@@ -250,8 +250,9 @@ void ObjectTable::rollHistory() {
             ++i;
             continue;
         }
+        // (invalid: a still record's draws take the camera's motion from the pixel shader's reconstruction, as a record that never moved)
         ObjectRecord h = shadow[slot];
-        h.info[3] = h.info[3] != 0 ? 1u : 0u;
+        h.info[3] = 0u;
         writeHist(slot, h);
         lastRec_[slot] = shadow[slot];
         settlingMark_[slot] = 0;

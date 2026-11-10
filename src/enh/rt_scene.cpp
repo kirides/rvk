@@ -2419,7 +2419,6 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             j.morphStride[k] = (skinLayout.morphMask >> k & 1u) != 0 ? q.morphStride[k] : 0u;
             j.morphWeight[k] = dev.vsConstant(31)[k];
         }
-        if (j.morphMask != 0) ++iv_.skinMorph;
         // the bone matrices: c32 .. c231 of this draw's vertex shader constants
         const rhi::RingAlloc bones = dev.ring(200u * 16u, 16);
         if (bones.ptr == nullptr) return;
@@ -2735,6 +2734,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         }
         chunk += (j.slots + 63) / 64;
         skinVerticesTotal_ += j.slots;
+        if (j.morphMask != 0) ++skinMorphTotal_;
     }
     {
         d3d9::RegionScope r(dev_, "rt.skin");
@@ -2757,7 +2757,8 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const double now = dev_.secondsSinceCreate();
     if (now >= skinLogAt_ + 5.0) {
         skinLogAt_ = now;
-        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame)", skinJobsTotal_, skinVerticesTotal_, n);
+        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame; {} draws with morph targets so far)", skinJobsTotal_, skinVerticesTotal_, n,
+                     skinMorphTotal_);
     }
 }
 

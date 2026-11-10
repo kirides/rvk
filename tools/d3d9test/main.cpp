@@ -4609,14 +4609,14 @@ void testRigidMotion(Fixture& f) {
         ok = ok && !ot.prevOf(base).null() && ot.prevOf(base.plus(16)).null() && ot.prevOf(rhi::GpuRef{}).null();
         ok = ok && serve(mA, w);
         ot.flush(dev);
-        ok = ok && histValid() && histRows(mA);  // still: history = the record
+        ok = ok && !histValid() && histRows(mA);  // still: history = the record, marked invalid (the camera's motion)
         engine::scenetable::testMove(entity, mB);
         ok = ok && serve(mB, w);
         ot.flush(dev);
         ok = ok && histValid() && histRows(mA);  // moved: history = last frame's record
         ok = ok && serve(mB, w);
         ot.flush(dev);
-        ok = ok && histValid() && histRows(mB);  // settled
+        ok = ok && !histValid() && histRows(mB);  // settled: invalid again
         const std::uint64_t jumps = ot.historyStats().invalidJump;
         engine::scenetable::testMove(entity, mJ);
         ok = ok && serve(mJ, w);
@@ -4624,7 +4624,7 @@ void testRigidMotion(Fixture& f) {
         ok = ok && !histValid() && ot.historyStats().invalidJump == jumps + 1;  // a jump: invalid
         ok = ok && serve(mJ, w);
         ot.flush(dev);
-        ok = ok && histValid() && histRows(mJ);
+        ok = ok && !histValid() && histRows(mJ);
         if (!ok) {
             const auto& h = ot.historyStats();
             std::printf("  FAIL rigid motion: history (slot %u, changed %llu valid %llu new %llu jump %llu settled %llu)\n", slot, static_cast<unsigned long long>(h.changed),

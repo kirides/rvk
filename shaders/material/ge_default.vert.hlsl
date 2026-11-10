@@ -825,7 +825,8 @@ float4 rvkUberBonePrev(float4 trWorld) {
             else w1 = wp;
         }
         rvk_vsw2Ov = uint2(0u, 0u);
-        r = float4(trWorld.xyz + (w1 - w0), 1.0);
+        // (a vertex that did not move keeps w = 0: the motion pixel shader takes the camera's motion from its own reconstruction, as the translated form does)
+        if (any(w1 != w0)) r = float4(trWorld.xyz + (w1 - w0), 1.0);
     }
     return r;
 }

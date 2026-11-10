@@ -52,7 +52,9 @@ const char* kBoneEpilogue =
     "            // for it, bit for bit; back to the world as the capture variant does, through the inverse view-projection)\n"
     "            precise float4 rvk_bmP = $pos;\n"
     "            const float4 rvk_bmW = mul(rvk_bmP, rvkLoadFrame(pc.frame).invViewProj);\n"
-    "            if (abs(rvk_bmW.w) > 1e-20) rvk_out.rvk_prevWorld = float4(rvk_bmW.xyz / rvk_bmW.w, 1.0);\n"
+    "            // (14.15: a vertex that did not move (the same clip position, bit for bit) keeps w = 0: the motion pixel shader then takes the camera's motion\n"
+    "            // from its own reconstruction, exactly as for geometry without a motion source, instead of this one's clip-to-world rounding)\n"
+    "            if (abs(rvk_bmW.w) > 1e-20 && any(rvk_bmP != rvk_pos)) rvk_out.rvk_prevWorld = float4(rvk_bmW.xyz / rvk_bmW.w, 1.0);\n"
     "        }\n"
     "    }";
 
@@ -151,7 +153,7 @@ void Device::setBoneMotion(int mode) {
     boneMode_ = mode;
     ++variantEpoch_;
     g_compare.store(mode == 2, std::memory_order_relaxed);
-    if (mode == 1) setVariantProvider(VariantSlot::BoneVs, {"bmot6", boneVsOptions});
+    if (mode == 1) setVariantProvider(VariantSlot::BoneVs, {"bmot7", boneVsOptions});
     if (mode == 2) {
         // the capture variant (registered by enh/object_motion / enh/rt_scene) gets the compare text under its own cache tag
         VariantProvider cap;
