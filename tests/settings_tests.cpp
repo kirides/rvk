@@ -293,7 +293,7 @@ TEST(settings_renderer_registration) {
         // Hidden settings are the checkbox, the preset's invisible members, or developer switches (which carry Flag::Debug: a stray
         // value in settings.toml does not apply for players)
         const bool hidden = (s->spec().flags & Flag::Hidden) != 0;
-        CHECK(!hidden || s == r.showAdvanced || s == r.rtLodScale || s == r.shadowsRtRange || (s->spec().flags & Flag::Debug) != 0);
+        CHECK(!hidden || s == r.showAdvanced || s == r.rtLodScale || s == r.igpuPresetDone || s == r.shadowsRtRange || (s->spec().flags & Flag::Debug) != 0);
     }
     // the player defaults: enhanced water (high, RT reflections high) and enhanced shadows (low filter, 2048 maps)
     CHECK(r.waterEnabled->asBool() && r.waterQuality->asEnum() == "high" && r.waterOceanQuality->asEnum() == "high");
@@ -311,7 +311,7 @@ TEST(settings_presets_and_tabs) {
     Registry reg;
     const RendererSettings r = registerRendererSettings(reg);
     const auto& presets = graphicsPresets();
-    CHECK(presets.size() == 5);
+    CHECK(presets.size() == 6);
     for (const Preset& p : presets) {
         for (const auto& [key, text] : p.values) {
             const Setting* s = reg.find(key);
@@ -340,6 +340,26 @@ TEST(settings_presets_and_tabs) {
         CHECK_MSG(tab == kTabDisplay || tab == kTabGraphics || tab == kTabSystem || tab == kTabDebug, s->key());
         CHECK_MSG(debug == (tab == kTabDebug) || hidden, s->key());
     }
+}
+
+TEST(settings_integrated_defaults) {
+    Registry reg;
+    const RendererSettings r = registerRendererSettings(reg);
+    CHECK(reg.setText("lod.view", "3") == Result::Ok);  // the player changed this one: it keeps its value
+    const auto changes = applyIntegratedDefaults(reg);
+    CHECK(!changes.empty());
+    CHECK(r.igpuPresetDone->asBool());
+    CHECK(reg.find("lod.view")->value() == 3);
+    CHECK(reg.find("rt.reflections")->asEnum() == "off" && reg.find("upscale.mode")->asEnum() == "quality");
+    CHECK(reg.find("shadows.map_size")->asEnum() == "1024" && reg.find("lod.trees")->value() == 1.5);
+    CHECK(applyIntegratedDefaults(reg).empty());  // once
+    // a discrete GPU never calls it: the defaults are still High
+    Registry reg2;
+    registerRendererSettings(reg2);
+    CHECK(matchPreset(reg2) == 3);
+    // the preset matches once applied wholesale
+    applyPreset(reg2, graphicsPresets()[5]);
+    CHECK(matchPreset(reg2) == 5);
 }
 
 TEST(settings_overlay_metadata) {

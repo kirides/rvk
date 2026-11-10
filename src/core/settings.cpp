@@ -1000,6 +1000,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .unmetValue = 0,
         .page = "System",
     });
+    r.igpuPresetDone = &reg.add({
+        .key = "system.igpu_preset_done",
+        .label = "Integrated graphics defaults applied",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Set once the first run on an integrated graphics card has picked cheaper defaults (the Integrated "
+                       "graphics preset) for the settings you had not changed.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Hidden,
+        .page = "System",
+        .section = "Hardware",
+    });
 
     r.highFps = &reg.add({
         .key = "compat.high_fps",
@@ -2919,9 +2932,17 @@ const std::vector<Preset>& graphicsPresets() {
              {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
               {"water.ocean_quality", "high"}, {"rt.reflections", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "high"},
               {"shadows.map_size", "4096"}}},
+            // Integrated GPUs (a Radeon 680M and the like; docs/research/frame-ownership.md 14.11 has the cost model). The one preset that switches
+            // something on that is off by default (FSR); it is chosen by itself only on integrated graphics (applyIntegratedDefaults).
+            {"igpu", "Integrated",
+             {{"water.enabled", "true"}, {"water.quality", "low"}, {"water.reflections", "ssr"}, {"water.ocean", "gerstner"},
+              {"water.ocean_quality", "low"}, {"rt.reflections", "off"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+              {"shadows.map_size", "1024"}, {"shadows.range", "60"}, {"gi.enabled", "false"}, {"materials.quality", "medium"},
+              {"lighting.light_shadows", "nearby"}, {"upscale.mode", "quality"}, {"lod.trees", "1.5"}, {"lod.meshes", "1.5"},
+              {"lod.view", "1.5"}}},
         };
         const auto& rt = rtPresets();  // low, medium, high
-        const std::size_t member[5] = {0, 0, 1, 1, 2};  // per preset: its rtPresets() index (Original takes none)
+        const std::size_t member[6] = {0, 0, 1, 1, 2, 0};  // per preset: its rtPresets() index (Original takes none)
         for (std::size_t i = 1; i < p.size(); ++i) {
             for (const auto& kv : rt[member[i]].values) {
                 const bool named = std::ranges::any_of(p[i].values, [&](const auto& e) { return e.first == kv.first; });
@@ -2972,6 +2993,25 @@ bool syncRtPreset(Registry& reg) {
     if (reg.text(*preset) == want) return false;
     reg.setText("rt.preset", want);
     return true;
+}
+
+std::vector<std::string> applyIntegratedDefaults(Registry& reg) {
+    std::vector<std::string> changes;
+    Setting* done = reg.find("system.igpu_preset_done");
+    if (done == nullptr || done->asBool()) return changes;
+    const auto& presets = graphicsPresets();
+    const auto it = std::ranges::find(presets, std::string("igpu"), &Preset::name);
+    if (it != presets.end()) {
+        for (const auto& [key, text] : it->values) {
+            Setting* s = reg.find(key);
+            double v = 0.0;
+            if (s == nullptr || s->locked() || !s->isDefault() || !Registry::parseText(s->spec(), text, v) || s->value() == v) continue;
+            const std::string before = reg.text(*s);
+            if (reg.setText(key, text) == Result::Ok) changes.push_back(key + ": " + before + " -> " + reg.text(*s));
+        }
+    }
+    reg.set(*done, 1);
+    return changes;
 }
 
 void applyPreset(Registry& reg, const Preset& preset) {
