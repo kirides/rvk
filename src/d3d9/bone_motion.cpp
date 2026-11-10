@@ -34,16 +34,20 @@ constexpr std::uint32_t kCmpBytes = 32;  // per slot: max px bits, compared, max
 const char* kBoneEpilogue =
     "    rvk_out.rvk_prevWorld = float4(0.0, 0.0, 0.0, 0.0);\n"
     "    {\n"
-    "        // bone-history motion (native.bone_motion, frame-ownership.md 14.13): the previous frame's bone image (prevVs, 0 = none), its c32.x = 1 when valid\n"
+    "        // bone-history motion (native.bone_motion, frame-ownership.md 14.13): the previous frame's bone image (prevVs, 0 = none), its c231.x = 1 when valid\n"
     "        const uint2 rvk_bmRef = rvkDrawPrevVs();\n"
     "        const bool rvk_bmHas = any(rvk_bmRef != uint2(0u, 0u));\n"
     "        const uint2 rvk_bmPrev = rvk_bmHas ? rvk_bmRef : rvkVsWin(2u);  // (never the zero pair: a load hoisted above the test stays in a live buffer)\n"
-    "        const float4 rvk_bmOk = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bmPrev), 32u * 16u));\n"
+    "        const float4 rvk_bmOk = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bmPrev), 231u * 16u));\n"
     "        if (rvk_bmHas && rvk_bmOk.x == 1.0) {\n"
     "            rvk_vsw2Ov = rvk_bmPrev;\n"
+    "            rvk_resetRegs();\n"
     "            rvk_main();\n"
     "            rvk_vsw2Ov = uint2(0u, 0u);\n"
-    "            const float4 rvk_bmW = mul($pos, rvkLoadFrame(pc.frame).invViewProj);\n"
+    "            // (precise like the first run's position: the same operations in the same order, so the clip position of the previous image is what the first run gives\n"
+    "            // for it, bit for bit; back to the world as the capture variant does, through the inverse view-projection)\n"
+    "            precise float4 rvk_bmP = $pos;\n"
+    "            const float4 rvk_bmW = mul(rvk_bmP, rvkLoadFrame(pc.frame).invViewProj);\n"
     "            if (abs(rvk_bmW.w) > 1e-20) rvk_out.rvk_prevWorld = float4(rvk_bmW.xyz / rvk_bmW.w, 1.0);\n"
     "        }\n"
     "    }";
@@ -55,18 +59,20 @@ std::atomic<bool> g_compare{false};
 bool Device::boneVsOptions(const Shader& s, shader::TranslateOptions& o) {
     if (s.stage != shader::Stage::Vertex) return false;
     o.defines += "#define RVK_BONE_PREV 1\n";
+    o.rerunnable = true;
     o.extraOutputs += std::format("    [[vk::location({})]] float4 rvk_prevWorld : VARY{};", kPrevWorldLocation, kPrevWorldLocation);
     o.epilogue += kBoneEpilogue;
     return true;
 }
 
 // compare mode: appended to the capture variant (enh/rt_scene captureOptions, push form: pc.prevVs = the capture, pc.vsw2 = the bone image). The capture's previous world
-// position (rvk_prevWorld, from the previous frame's capture) against the bone path's (the image at the history delta, when its c32.x = 1)
+// position (rvk_prevWorld, from the previous frame's capture) against the bone path's (the image at the history delta, when its c231.x = 1)
 void Device::boneCompareText(shader::TranslateOptions& o) {
     if (!g_compare.load(std::memory_order_relaxed)) return;
     // (the header's slot count keeps bit 30 out of it)
     for (std::size_t at = o.epilogue.find("0x7FFFFFFFu"); at != std::string::npos; at = o.epilogue.find("0x7FFFFFFFu", at)) o.epilogue.replace(at, 11, "0x3FFFFFFFu");
     o.defines += "#define RVK_BONE_PREV 1\n";
+    o.rerunnable = true;
     o.epilogue += std::format(
         "\n    {{\n"
         "        // native.bone_motion=compare (frame-ownership.md 14.13)\n"
@@ -78,14 +84,19 @@ void Device::boneCompareText(shader::TranslateOptions& o) {
         "            const bool rvk_bcOn = (rvk_bcInfo.x & 0x40000000u) != 0u && any(rvk_bcBuf != uint2(0u, 0u)) && rvk_bcF.params[{}].z == 1.0;\n"
         "            const uint2 rvk_bcCur = rvkVsWin(2u);\n"
         "            const uint2 rvk_bcPrev = rvk_bcOn ? rvkPairAdd(rvk_bcCur, {}u) : rvk_bcCur;  // (the bone table's history delta; the current image when off)\n"
-        "            const float4 rvk_bcOk = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bcPrev), 32u * 16u));\n"
+        "            const float4 rvk_bcOk = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_bcPrev), 231u * 16u));\n"
         "            if (rvk_bcOn && rvk_bcOk.x == 1.0) {{\n"
         "                const RvkAddr rvk_bcE = rvkAddr(rvk_bcOn ? rvk_bcBuf : rvk_bcAddr);\n"
         "                if (rvk_out.rvk_prevWorld.w == 1.0) {{\n"
+        "                    // (every run's clip position precise, back to the world through the inverse view-projection: what the capture variant does)\n"
+        "                    const float4 rvk_bcOp1 = mul(rvk_pos, rvk_bcF.invViewProj);\n"
+        "                    precise float4 rvk_bcP2 = float4(0.0, 0.0, 0.0, 0.0);\n"
         "                    rvk_vsw2Ov = rvk_bcPrev;\n"
+        "                    rvk_resetRegs();\n"
         "                    rvk_main();\n"
         "                    rvk_vsw2Ov = uint2(0u, 0u);\n"
-        "                    const float4 rvk_bcW = mul($pos, rvk_bcF.invViewProj);\n"
+        "                    rvk_bcP2 = $pos;\n"
+        "                    const float4 rvk_bcW = mul(rvk_bcP2, rvk_bcF.invViewProj);\n"
         "                    if (abs(rvk_bcW.w) > 1e-20) {{\n"
         "                        const float3 rvk_bcB = rvk_bcW.xyz / rvk_bcW.w;\n"
         "                        const float3 rvk_bcA = rvk_out.rvk_prevWorld.xyz;\n"
@@ -100,6 +111,19 @@ void Device::boneCompareText(shader::TranslateOptions& o) {
         "                        rvkRwAtomicAdd(rvkAddrAdd(rvk_bcE, 4u), 1u);\n"
         "                        rvkRwAtomicMax(rvkAddrAdd(rvk_bcE, 8u), asuint(length(rvk_bcA - rvk_bcB)));\n"
         "                        if (rvk_bcPx > 0.01) rvkRwAtomicAdd(rvkAddrAdd(rvk_bcE, 12u), 1u);\n"
+        "                        // (the motion each path sees: its previous position against this frame's, world units)\n"
+        "                        const float3 rvk_bcC = rvk_bcOp1.xyz / rvk_bcOp1.w;\n"
+        "                        rvkRwAtomicMax(rvkAddrAdd(rvk_bcE, 20u), asuint(length(rvk_bcB - rvk_bcC)));\n"
+        "                        rvkRwAtomicMax(rvkAddrAdd(rvk_bcE, 24u), asuint(length(rvk_bcA - rvk_bcC)));\n"
+        "                        // (the second run itself: on this frame's image it must give this frame's position)\n"
+        "                        precise float4 rvk_bcP3 = float4(0.0, 0.0, 0.0, 0.0);\n"
+        "                        rvk_vsw2Ov = rvk_bcCur;\n"
+        "                        rvk_resetRegs();\n"
+        "                        rvk_main();\n"
+        "                        rvk_vsw2Ov = uint2(0u, 0u);\n"
+        "                        rvk_bcP3 = $pos;\n"
+        "                        const float4 rvk_bcR4 = mul(rvk_bcP3, rvk_bcF.invViewProj);\n"
+        "                        rvkRwAtomicMax(rvkAddrAdd(rvk_bcE, 28u), asuint(length(rvk_bcR4.xyz / rvk_bcR4.w - rvk_bcC)));\n"
         "                    }}\n"
         "                }} else {{\n"
         "                    rvkRwAtomicAdd(rvkAddrAdd(rvk_bcE, 16u), 1u);\n"
@@ -116,7 +140,7 @@ void Device::setBoneMotion(int mode) {
     boneMode_ = mode;
     ++variantEpoch_;
     g_compare.store(mode == 2, std::memory_order_relaxed);
-    if (mode == 1) setVariantProvider(VariantSlot::BoneVs, {"bmot1", boneVsOptions});
+    if (mode == 1) setVariantProvider(VariantSlot::BoneVs, {"bmot5", boneVsOptions});
     if (mode == 2) {
         // the capture variant (registered by enh/object_motion / enh/rt_scene) gets the compare text under its own cache tag
         VariantProvider cap;
@@ -187,6 +211,13 @@ void Device::boneMotionFrame() {
             std::memcpy(&world, &e[2], 4);
             s.compared += e[1];
             s.compareOver += e[3];
+            float mb = 0.0f, mc = 0.0f, rr = 0.0f;
+            std::memcpy(&mb, &e[5], 4);
+            std::memcpy(&mc, &e[6], 4);
+            std::memcpy(&rr, &e[7], 4);
+            s.winRerun = std::max(s.winRerun, rr);
+            s.winMotionBone = std::max(s.winMotionBone, mb);
+            s.winMotionCapture = std::max(s.winMotionCapture, mc);
             s.compareMiss += e[4];
             s.maxPx = std::max(s.maxPx, px);
             s.maxWorld = std::max(s.maxWorld, world);
@@ -208,9 +239,9 @@ void Device::boneMotionFrame() {
                      s.predicted - p.predicted, s.pending - p.pending, s.noHistory - p.noHistory, s.chosen - p.chosen, s.chosen2 - p.chosen2, s.chosenPull - p.chosenPull,
                      s.records - p.records, s.recordsNoPrev - p.recordsNoPrev, bonePipes_.size());
     } else {
-        spdlog::info("native: bone motion compare (5 s): {} capture draws with a bone image; vertices compared {}, max error {:.5f} px / {:.6f} units, {} above 0.01 px, {} without a previous capture",
-                     s.compareDraws - p.compareDraws, s.compared - p.compared, s.winPx, s.winWorld, s.compareOver - p.compareOver, s.compareMiss - p.compareMiss);
-        s.winPx = s.winWorld = 0.0f;
+        spdlog::info("native: bone motion compare (5 s): {} capture draws with a bone image; vertices compared {}, max error {:.5f} px / {:.6f} units, {} above 0.01 px, {} without a previous capture; largest motion seen: bone path {:.4f}, captures {:.4f} units; second run on this frame's image vs the first: {:.6f} units",
+                     s.compareDraws - p.compareDraws, s.compared - p.compared, s.winPx, s.winWorld, s.compareOver - p.compareOver, s.compareMiss - p.compareMiss, s.winMotionBone, s.winMotionCapture, s.winRerun);
+        s.winPx = s.winWorld = s.winMotionBone = s.winMotionCapture = s.winRerun = 0.0f;
     }
     boneLast_ = s;
 }

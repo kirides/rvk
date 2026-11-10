@@ -74,6 +74,8 @@ struct TranslateOptions {
     // ---- variant hooks for enhancements (docs/research/injection.md 4). All empty = the default translation, unchanged.
     // HLSL only: text before the ABI header's #include (preprocessor defines the header reacts to, e.g. RVK_BONE_PREV: frame-ownership.md 14.13)
     std::string defines;
+    // HLSL vertex shaders: also emit `rvk_resetRegs()` (every temp / address / output register to its initial value) for hooks that run `rvk_main()` a second time
+    bool rerunnable = false;
     // GLSL right after the ABI declarations, before the generated globals: declarations and functions that constOverrides /
     // inputOverrides expressions call (they are used inside the generated helpers, e.g. rvk_cRel), e.g. the GI lookup
     // (shaders/include/rvk_gi.glsl, enh/gi)

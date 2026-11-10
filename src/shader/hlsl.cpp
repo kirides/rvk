@@ -1015,6 +1015,23 @@ private:
             g += std::format("static float4 r{} = float4(0.0, 0.0, 0.0, 0.0);\n", t);
         }
         g += "static int4 a0 = int4(0, 0, 0, 0);\nstatic int aL = 0;\nstatic bool4 p0 = bool4(false, false, false, false);\n";
+        if (opt_.rerunnable && vs_) {
+            // (TranslateOptions::rerunnable: every register a second rvk_main() could read before it writes it, back to its initial value: D3D9 shaders read
+            // components they never wrote, which are 0 in the first run)
+            g += "void rvk_resetRegs() {\n";
+            for (auto t : temps_) g += std::format("    r{} = float4(0.0, 0.0, 0.0, 0.0);\n", t);
+            g += "    a0 = int4(0, 0, 0, 0);\n    aL = 0;\n    p0 = bool4(false, false, false, false);\n";
+            if (major_ >= 3) {
+                std::set<std::uint32_t> regs(outputs_.begin(), outputs_.end());
+                for (const auto& d : p_.outputs) regs.insert(d.reg.index);
+                for (auto r : regs) g += std::format("    o{} = float4(0.0, 0.0, 0.0, 0.0);\n", r);
+            } else {
+                g += "    oPos = float4(0.0, 0.0, 0.0, 0.0);\n    oFog = float4(0.0, 0.0, 0.0, 0.0);\n    oPts = float4(0.0, 0.0, 0.0, 0.0);\n";
+                for (auto i : attrOut_) g += std::format("    oD{} = float4(0.0, 0.0, 0.0, 0.0);\n", i);
+                for (auto i : outputs_) g += std::format("    oT{} = float4(0.0, 0.0, 0.0, 0.0);\n", i);
+            }
+            g += "}\n";
+        }
         for (const auto& [n, imm] : defF_) {
             bool isConstant = true;
             const std::string v = std::format("float4({}, {}, {}, {})", floatLiteral(imm[0], isConstant), floatLiteral(imm[1], isConstant),

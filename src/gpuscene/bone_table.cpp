@@ -88,7 +88,7 @@ void BoneTable::updateHistory(std::uint32_t slot, const float (*regs)[4], std::u
     if (valid) {
         if (prevSame_[slot] == 0 || prevValid_[slot] == 0) {
             std::memcpy(&prev, &cur, sizeof(BoneRecord));
-            prev.regs[1][0] = 1.0f;  // (valid; c32.x is never read by the skinned vertex shaders, zero in every current image)
+            prev.regs[kHistoryFlag][0] = 1.0f;  // (valid; c231 is past the last bone row (66 bones: c33..c230), never read, zero in every current image)
             table_.mark(kCapacity + slot);
             ++stats_.histCopied;
         } else {
@@ -96,8 +96,8 @@ void BoneTable::updateHistory(std::uint32_t slot, const float (*regs)[4], std::u
         }
         prevValid_[slot] = prevSame_[slot] = 1;
     } else {
-        if (prevValid_[slot] != 0 || prev.regs[1][0] != 0.0f) {
-            prev.regs[1][0] = 0.0f;
+        if (prevValid_[slot] != 0 || prev.regs[kHistoryFlag][0] != 0.0f) {
+            prev.regs[kHistoryFlag][0] = 0.0f;
             table_.mark(kCapacity + slot);
         }
         prevValid_[slot] = prevSame_[slot] = 0;

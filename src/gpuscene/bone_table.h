@@ -11,8 +11,8 @@
 //   * `flush` (once per present, FIRST in the table block of SwapScreen: 7.35) uploads the marked slots into the frame's upload list, a GPU read-back compares the
 //     whole table every 240th frame (0 differing), the 5 s log `native: bone table (5 s)`.
 //   * Bone history (frame-ownership.md 14.13, `native.bone_motion`, set before the buffer is made): a second image per slot at the fixed byte delta kHistoryDelta
-//     (records kCapacity .. 2 kCapacity - 1) holds the slot's image of the PREVIOUS frame; its c32.x = 1 says it is valid (the skinned vertex shaders never read
-//     c32.xyz). The first serve of a frame copies the current image into it when the slot was served in the previous frame with the same history tag (morph pick /
+//     (records kCapacity .. 2 kCapacity - 1) holds the slot's image of the PREVIOUS frame; its c231.x = 1 says it is valid (c231 = past the last bone row of
+//     66 bones: never read). The first serve of a frame copies the current image into it when the slot was served in the previous frame with the same history tag (morph pick /
 //     LOD) and the root bone did not jump (teleport); else the history is marked invalid (no motion: the camera's). A still part writes nothing (prev == cur).
 
 #include <cstdint>
@@ -31,7 +31,9 @@ namespace rvk::gpuscene {
 
 inline constexpr std::uint32_t kBoneFirstReg = 31;
 inline constexpr std::uint32_t kBoneRegs = 201;  // c31 .. c231: the whole VS window 2
-inline constexpr std::uint32_t kBoneMaxBones = 66;  // eCShaderDefault::GetMaxBoneMatrixCount (c33 .. c230)
+inline constexpr std::uint32_t kBoneMaxBones = 66;
+inline constexpr std::uint32_t kHistoryFlag = kBoneRegs - 1;  // 14.13: the history image's validity (c231.x = 1): 2 + 3 x 66 = 200 registers hold the bones, c231 is never read
+static_assert(2 + 3 * kBoneMaxBones <= kHistoryFlag);  // eCShaderDefault::GetMaxBoneMatrixCount (c33 .. c230)
 static_assert(shader::abi::kVsWindowFirst[2] == kBoneFirstReg && shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2] == kBoneRegs, "the record is VS window 2");
 
 struct alignas(16) BoneRecord {
@@ -86,7 +88,7 @@ public:
     // and returns Served, else the reason (out untouched). `verifyMask` of the window: c32 (.w only) and the bone registers inside the first 32.
     // `histTag`: what makes two frames' images of the key comparable for the history (the morph pick + LOD: the morph streams the weights refer to)
     BoneWhy serve(const BoneKey& key, const float (*regs)[4], std::uint32_t count, d3d9::OwnedWindows::Win& out, std::uint64_t histTag = 0);
-    // the history image of the key's slot (CPU twin; c32.x = 1 valid), null without a slot / history
+    // the history image of the key's slot (CPU twin; c231.x = 1 valid), null without a slot / history
     const BoneRecord* prevImage(const BoneKey& key) const;
     // the window of the key's slot without writing anything (false: no slot / not ready)
     bool windowFor(const BoneKey& key, d3d9::OwnedWindows::Win& out) const;

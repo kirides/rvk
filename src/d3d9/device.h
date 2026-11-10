@@ -983,13 +983,13 @@ public:
         std::uint64_t predicted = 0, chosen = 0, chosen2 = 0, chosenPull = 0, pending = 0, noHistory = 0, records = 0, recordsNoPrev = 0, compareDraws = 0;
         std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
         float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
-        float winPx = 0.0f, winWorld = 0.0f;
+        float winPx = 0.0f, winWorld = 0.0f, winMotionBone = 0.0f, winMotionCapture = 0.0f, winRerun = 0.0f;
     } boneStats;
     static bool boneVsOptions(const Shader& s, shader::TranslateOptions& o);  // the BoneVs provider (vertex shaders)
     static void boneCompareText(shader::TranslateOptions& o);  // compare mode: added to the capture variant's text (enh/rt_scene captureOptions)
     static bool boneCompareOn();
     static void boneCompareForce(bool on);  // tools (rvk_shadertool --capture-bone): the compare text without a device
-    static const char* captureTag() { return boneCompareOn() ? "cap6c" : "cap6"; }  // the capture variant's cache tag (its text changes in compare mode)
+    static const char* captureTag() { return boneCompareOn() ? "cap6c8" : "cap6"; }  // the capture variant's cache tag (its text changes in compare mode)
     void setSceneVeg(bool on) { if (on != sceneVeg_) ++variantEpoch_; sceneVeg_ = on; }  // F7-2: the grass draws' scene ABI v2 form
     void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)

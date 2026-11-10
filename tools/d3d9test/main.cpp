@@ -4349,7 +4349,7 @@ int presentTest(bool vsync) {
     return 0;
 }
 
-// 14.13 bone-history motion (native.bone_motion) through the device's own path: the bone table's history (the previous frame's image at the history delta, c32.x = 1 valid;
+// 14.13 bone-history motion (native.bone_motion) through the device's own path: the bone table's history (the previous frame's image at the history delta, c231.x = 1 valid;
 // invalid after a gap / a tag change / a root jump; a still part writes nothing) and the compare mode's capture vertex shader: a skinned quad drawn with the capture variant (the
 // RT scene's cap6 + the compare text) whose VS window 2 is the table's image; frame by frame the image alternates A / B, the capture chain's previous position (the previous
 // frame's capture) and the bone path's (the translated program run again on the history image) must agree EXACTLY; a negative control (the capture chain pointed at the frame
@@ -4401,7 +4401,7 @@ void testBoneMotion(Fixture& f) {
     const gpuscene::BoneKey key{&wrapper, 0, 0x3f800000u};
     const auto prevValid = [&] {
         const gpuscene::BoneRecord* p = bt.prevImage(key);
-        return p != nullptr && p->regs[1][0] == 1.0f;
+        return p != nullptr && p->regs[gpuscene::kHistoryFlag][0] == 1.0f;
     };
     const auto prevEquals = [&](const float (*regs)[4]) {
         const gpuscene::BoneRecord* p = bt.prevImage(key);
