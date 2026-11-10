@@ -897,14 +897,20 @@ void Overlay::buildSettingsWindow() {
             return clicked;
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(em * 0.25f, 0));
+        const bool integrated = caps::current().integratedGpu;
+        bool first = true;
         for (std::size_t i = 0; i < presets.size(); ++i) {
-            if (i > 0) ImGui::SameLine();
+            // the Integrated preset is offered on integrated graphics (or while the settings match it)
+            if (presets[i].name == "igpu" && !integrated && static_cast<int>(i) != current) continue;
+            if (!first) ImGui::SameLine();
+            first = false;
             if (segment(presets[i].label.c_str(), static_cast<int>(i) == current, true)) {
                 settings::applyPreset(reg, presets[i]);
                 spdlog::info("overlay: preset {}", presets[i].name);
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
                 ImGui::SetTooltip("%s", presets[i].name == "original" ? "The game's own look: the enhancements off."
+                                        : presets[i].name == "igpu"   ? "For integrated graphics: no ray-traced reflections, smaller shadow maps, shorter draw distances, FSR upscaling."
                                         : presets[i].name == "high"   ? "The recommended defaults."
                                                                       : "Sets the water, sea, sun shadow and ray tracing quality together.");
             }
@@ -921,6 +927,7 @@ void Overlay::buildSettingsWindow() {
                 line = nm == "original" ? "The game's own look: every enhancement off."
                        : nm == "low"    ? "Light on the graphics card: the cheapest enhancements."
                        : nm == "medium" ? "A balance of looks and speed."
+                       : nm == "igpu"   ? "Made for integrated graphics: the picture's look with the costly extras off."
                        : nm == "high"   ? "The recommended defaults."
                                         : "Everything on, for the strongest graphics cards.";
             }

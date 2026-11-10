@@ -477,11 +477,26 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {
         caps::Report report = dev_.game().capabilityReport(options.pipelineLibraries);
+        // test knob: RVK_FAKE_INTEGRATED=1 makes the device count as integrated (low bandwidth auto, the Integrated preset's first-run defaults)
+        if (char fake[8] = {}; GetEnvironmentVariableA("RVK_FAKE_INTEGRATED", fake, sizeof(fake)) > 0 && fake[0] == '1' && !report.integratedGpu) {
+            report.integratedGpu = true;
+            spdlog::info("caps: RVK_FAKE_INTEGRATED=1: the device counts as an integrated GPU");
+        }
         // the session's render mode (renderer.mode): the overlay's System tab "Graphics card" and the caps lines
         report.properties.emplace_back("render mode", std::format("{} at start (Vulkan; Wrapper / Full switch at run time)", toString(renderMode())));
         for (const auto& line : report.lines()) spdlog::info("caps: {}", line);
         caps::setCurrent(report);
         reg.setCapabilities(report);
+        // integrated GPU: the first run picks the Integrated preset for every setting still at its default (docs/research/frame-ownership.md 14.11)
+        if (report.known && report.integratedGpu) {
+            const auto changes = settings::applyIntegratedDefaults(reg);
+            if (changes.empty()) {
+                spdlog::info("settings: integrated GPU: Integrated preset already applied, or nothing left at its default");
+            } else {
+                spdlog::info("settings: integrated GPU: Integrated preset chosen by default, {} values set", changes.size());
+                for (const auto& c : changes) spdlog::info("settings: integrated preset: {}", c);
+            }
+        }
         // Low bandwidth mode (docs/research/low-bandwidth.md): auto = on for integrated GPUs; the decision is read by the passes that
         // create the affected images (caps::lowBandwidth()), a change re-creates them (transients are keyed by description)
         if (rs.lowBandwidth != nullptr) {

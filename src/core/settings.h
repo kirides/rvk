@@ -368,6 +368,7 @@ struct RendererSettings {
     Setting* fullscreen = nullptr;   // vulkan.fullscreen: "borderless", "exclusive" (needs FullScreenExclusive; window-mode.md 8)
     Setting* api = nullptr;          // vulkan.api: vulkan | d3d12 (restart)
     Setting* adapter = nullptr;      // vulkan.adapter: -1 = best discrete GPU (restart)
+    Setting* igpuPresetDone = nullptr; // system.igpu_preset_done (hidden): the integrated-GPU defaults were applied once (applyIntegratedDefaults)
     Setting* lowBandwidth = nullptr; // vulkan.low_bandwidth: auto | off | on (core/low_bandwidth.h; auto = on for integrated GPUs)
     Setting* toggleKey = nullptr;    // overlay.toggle_key
     Setting* abKey = nullptr;        // overlay.ab_key
@@ -527,7 +528,8 @@ struct Preset {
     std::string label;  // overlay
     std::vector<std::pair<std::string, std::string>> values;  // key -> value text (Registry::setText)
 };
-// Original (the game's look), Low, Medium, High (= the defaults), Ultra
+// Original (the game's look), Low, Medium, High (= the defaults), Ultra, Integrated ("igpu": the 680M table, docs/research/frame-ownership.md 14.11; index 5, shown
+// in the overlay on integrated GPUs or while it matches)
 const std::vector<Preset>& graphicsPresets();
 // the RT quality presets (rt.preset): low / medium / high = the cost knobs of everything that traces (shadows, reflections, GI, material
 // reflections, the LOD ladder, the memory limit); matchRtPreset = index of the first whose values all match, -1 = custom
@@ -539,6 +541,10 @@ int matchRtPreset(const Registry& reg);
 bool syncRtPreset(Registry& reg);
 // sets the preset's values (locked settings keep theirs)
 void applyPreset(Registry& reg, const Preset& preset);
+// Integrated GPUs (caps::Report::integratedGpu): the first run on such a GPU applies the "igpu" preset to every setting still at its default
+// (settings the player or a file already set keep their value; locked ones too), once (system.igpu_preset_done). Returns the changes as
+// "key: old -> new" lines (empty = nothing applied: already done, or no setting left at its default)
+std::vector<std::string> applyIntegratedDefaults(Registry& reg);
 // index of the first preset whose values all match the current ones, -1 = custom
 int matchPreset(const Registry& reg);
 // resets every setting of an overlay tab to its default (locked ones stay); returns how many changed
