@@ -1003,6 +1003,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     scenePipe_ = GamePipeline::None;
     scenePipe2_ = GamePipeline::None;
     scenePipePull_ = GamePipeline::None;
+    sceneBone_ = false;
+    obsBone_ = false;
     packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
@@ -1103,6 +1105,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         captureRequestRw_ = {};
         captureInstances_ = false;
     }
+    // 14.13 (native.bone_motion): the draw will take the bone-motion forms: its observers need no vertex capture for its motion (boneMotionDraw)
+    obsBone_ = boneMode_ == 1 && bonePredict(kind, phase);
     if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         const bool f2cStatic = native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
                                (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::DepthPrepass);
@@ -1695,6 +1699,7 @@ void Device::fillCapture(const DrawPacket& p) {
     c.scenePipeline = scenePipe_;
     c.scenePipeline2 = scenePipe2_;
     c.scenePipelinePull = scenePipe2_ != GamePipeline::None ? scenePipePull_ : GamePipeline::None;
+    c.boneMotion = sceneBone_;
     c.pull = {};
     if (c.scenePipelinePull != GamePipeline::None && pullFetch_.valid == shader::abi::kVertexFetchValid) {
         c.pull = pullFetch_;
@@ -1967,6 +1972,7 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             captureInstances_ = false;
             const bool f2cStatic = native::f2c::on() && c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main &&
                                    (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
+            obsBone_ = boneOfCached(c) && c.scenePipeline != GamePipeline::None && sceneActive();  // (14.13: the replayed packet is the bone-motion scene form)
             const CoverQuery cq = coverOf(q);
             for (DrawObserver* o : observers_) {
                 if (!o->observes(c.kind, c.phase)) continue;

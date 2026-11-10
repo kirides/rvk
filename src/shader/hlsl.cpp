@@ -860,6 +860,7 @@ private:
         // the ABI declarations (push constants, the pointers, the bindless heap): shaders/include/rvk_draw.hlsli
         if (scene()) h += "#define RVK_SCENE_RECORD 1\n";  // (the push block becomes a ScenePush, the draw's data comes from a DrawRecord)
         if (opt_.sceneView) h += "#define RVK_SCENE_VIEW 1\n";    // (ABI v2: the view's windows / posFix / c5.xyz come from the view table)
+        h += opt_.defines;
         h += "#include \"rvk_draw.hlsli\"\n\n";
         if (opt_.pullVertices) h += "#include \"rvk_pull.hlsli\"\n\n";  // (S-4: after the ABI header; uberTranslatedPart keeps it inside rvkTr's text)
         return h;
@@ -1014,6 +1015,23 @@ private:
             g += std::format("static float4 r{} = float4(0.0, 0.0, 0.0, 0.0);\n", t);
         }
         g += "static int4 a0 = int4(0, 0, 0, 0);\nstatic int aL = 0;\nstatic bool4 p0 = bool4(false, false, false, false);\n";
+        if (opt_.rerunnable && vs_) {
+            // (TranslateOptions::rerunnable: every register a second rvk_main() could read before it writes it, back to its initial value: D3D9 shaders read
+            // components they never wrote, which are 0 in the first run)
+            g += "void rvk_resetRegs() {\n";
+            for (auto t : temps_) g += std::format("    r{} = float4(0.0, 0.0, 0.0, 0.0);\n", t);
+            g += "    a0 = int4(0, 0, 0, 0);\n    aL = 0;\n    p0 = bool4(false, false, false, false);\n";
+            if (major_ >= 3) {
+                std::set<std::uint32_t> regs(outputs_.begin(), outputs_.end());
+                for (const auto& d : p_.outputs) regs.insert(d.reg.index);
+                for (auto r : regs) g += std::format("    o{} = float4(0.0, 0.0, 0.0, 0.0);\n", r);
+            } else {
+                g += "    oPos = float4(0.0, 0.0, 0.0, 0.0);\n    oFog = float4(0.0, 0.0, 0.0, 0.0);\n    oPts = float4(0.0, 0.0, 0.0, 0.0);\n";
+                for (auto i : attrOut_) g += std::format("    oD{} = float4(0.0, 0.0, 0.0, 0.0);\n", i);
+                for (auto i : outputs_) g += std::format("    oT{} = float4(0.0, 0.0, 0.0, 0.0);\n", i);
+            }
+            g += "}\n";
+        }
         for (const auto& [n, imm] : defF_) {
             bool isConstant = true;
             const std::string v = std::format("float4({}, {}, {}, {})", floatLiteral(imm[0], isConstant), floatLiteral(imm[1], isConstant),
@@ -1150,7 +1168,9 @@ private:
             // results without it, other drivers need not (DXVK decorates the position Invariant for the same reason)
             m += std::format("    precise float4 rvk_pos = {};\n", pos);
             if (!opt_.epilogue.empty()) {
-                m += opt_.epilogue;
+                std::string ep = opt_.epilogue;  // (`$pos`: the position output register, TranslateOptions::epilogue)
+                for (std::size_t at = ep.find("$pos"); at != std::string::npos; at = ep.find("$pos", at + pos.size())) ep.replace(at, 4, pos);
+                m += ep;
                 m += "\n";
             }
             // the half-pixel fix, then the reversed depth remap (abi.h posFix: xy fix, zw z' = z (1 + zw.x) + zw.y w; 0 = none)

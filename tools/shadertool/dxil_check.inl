@@ -548,9 +548,23 @@ int cmdDxilCheck(int argc, char** argv) {
             else if (a == "--gi") variant = &rvk::enh::Gi::variantOptions;
             else if (a == "--gbuf") variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::Gbuffer, o); };
             else if (a == "--gbuf-motion") variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::GbufferMotion, o); };
-            else if (a == "--capture") variant = &rvk::enh::RtScene::captureOptions;
+            else if (a == "--capture" || a == "--capture-bone") {
+                if (a == "--capture-bone") rvk::d3d9::Device::boneCompareForce(true);  // (14.13: native.bone_motion=compare's capture text)
+                variant = &rvk::enh::RtScene::captureOptions;
+            }
             else if (a == "--tint") options.tintEpilogue = true;
-            else if (a == "--scene") options.sceneRecord = true;
+            else if (a == "--bone" || a == "--bone-pull") {
+                // 14.13 (native.bone_motion): the bone-motion vertex shader forms (with --scene / --scene2; --bone-pull = the pulled v2 form)
+                if (a == "--bone-pull") {
+                    variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
+                        if (!rvk::d3d9::Device::boneVsOptions(sh, o)) return false;
+                        o.sceneRecord = o.sceneView = o.pullVertices = true;
+                        return true;
+                    };
+                } else {
+                    variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::d3d9::Device::boneVsOptions(sh, o); };
+                }
+            } else if (a == "--scene") options.sceneRecord = true;
             else if (a == "--scene2") options.sceneView = true;  // scene ABI v2 (ViewBlock2 view table, frame-ownership.md 7.19)
             else if (a == "--pull") {
                 // S-4 (frame-ownership.md 14.12): the pulled scene v2 vertex shaders (the pixel shaders are skipped: they have no pulled form)

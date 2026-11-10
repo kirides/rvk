@@ -842,7 +842,14 @@ private:
         std::uint32_t draws = 0, offered = 0;  // the op's draws / those whose window 2 was served from the bone table
         float weights[3] = {0.0f, 0.0f, 0.0f};  // c31.xyz as the composition wrote them
         float fade = 1.0f;                      // c32.w
+        std::uint64_t histTag = 0;              // 14.13: the bone history's tag (actorHistTag)
     } actorCur_;
+    // 14.13 (native.bone_motion): what makes two frames' bone images of a part comparable: the HRA (resource), its LOD, the morph pick (the streams the weights refer to)
+    static std::uint64_t actorHistTag(const void* hra, std::uint32_t lod, const std::uint32_t (&pick)[3]) {
+        std::uint64_t h = (reinterpret_cast<std::uintptr_t>(hra) >> 3) * 0x9E3779B97F4A7C15ull;
+        for (const std::uint32_t v : {lod, pick[0], pick[1], pick[2]}) h = (h ^ v) * 0x100000001B3ull;
+        return h;
+    }
     struct PickMemo {
         std::uint32_t targets = 0;
         float weights[3] = {};

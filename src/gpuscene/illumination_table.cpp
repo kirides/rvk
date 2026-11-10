@@ -158,6 +158,14 @@ void GpuTable<T>::collect(rhi::GameDevice& game, const char* name) {
 }
 
 template <class T>
+void GpuTable<T>::zero(d3d9::Device& dev) {
+    if (!buffer_) return;
+    rhi::CommandList& list = dev.uploadList();
+    list.fillBuffer(*buffer_, 0, buffer_->desc().size, 0);
+    list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+}
+
+template <class T>
 void GpuTable<T>::release() {
     buffer_.reset();
     ref_ = {};

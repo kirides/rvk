@@ -60,7 +60,7 @@ private:
     std::unordered_map<std::uint64_t, State> states_;
     std::uint64_t frame_ = 0;
     std::uint32_t perFrame_ = 0;
-    std::uint64_t captures_ = 0, rigidMoving_ = 0;
+    std::uint64_t captures_ = 0, rigidMoving_ = 0, boneDraws_ = 0;
     double lastLog_ = -1e9;
     std::uint64_t diagRigid_ = 0, diagNoEntity_ = 0, diagInstanced_ = 0, diagRing_ = 0, diagCapped_ = 0;
     double diagLog_ = -1e9, diagSkinLog_ = -1e9;

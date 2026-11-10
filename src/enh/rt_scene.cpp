@@ -2089,6 +2089,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "        }}\n"
         "    }}",
         tc);
+    d3d9::Device::boneCompareText(o);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
     return true;
 }
 
@@ -2122,7 +2123,7 @@ void RtScene::setDynamic(const void* consumer, bool on) {
     dynamic_ = want;
     if (want) {
         if (!captureRegistered_) {
-            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap6", captureOptions});
+            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {d3d9::Device::captureTag(), captureOptions});
             captureRegistered_ = true;
         }
         spdlog::info("rt: scene: characters on (skinned solid draws captured each frame)");
@@ -2298,7 +2299,8 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         for (const DynDraw& d : dyn_) has = has || (d.key == key && d.skin);
         ++(has ? iv_.solidWithSkin : iv_.solidNoSkin);
         // (F-VAR2: the skinning pass has this frame's pose of the character, nothing reads its capture: no request, so an owned solid draw stays owned)
-        if (has && !characterMotion_ && !skinVerify_) {
+        // (14.13: a bone-motion draw's motion needs no capture either: dev.boneMotionDraw)
+        if (has && (!characterMotion_ || dev.boneMotionDraw()) && !skinVerify_) {
             ++iv_.solidCaptureSkipped;
             return;
         }
@@ -2348,6 +2350,12 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions: motion)
     // (bit 31 of the slots: a cascade's view, whose vertex shader's world position operand is captured instead of the clip position)
     std::uint32_t header[4] = {slots | ((mainView || useSkin) ? 0u : 0x80000000u), 0, 0, 0};
+    if (solid && !useSkin) {
+        // native.bone_motion=compare (frame-ownership.md 14.13): the solid-pass capture is the motion source: its vertex shader compares the bone path too (bit 30)
+        const std::uint32_t bit = dev.boneCompareBit();
+        header[0] |= bit;
+        if (bit != 0) ++dev.boneStats.compareDraws;
+    }
     if (mainView && !useSkin && !b.lastCapture.null() && b.lastCaptureFrame + 1 == frame) {
         header[1] = b.lastCapture.low();
         header[2] = b.lastCapture.high();

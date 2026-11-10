@@ -178,7 +178,15 @@ static const uint RVK_DRAW_TINTED = 0x10000u;
 #define RVK_VS_WIN(n) ((uint(n)) < 12u ? 0 : (uint(n)) < 31u ? 1 : (uint(n)) < 232u ? 2 : 3)
 #define RVK_PS_WIN(n) ((uint(n)) < 5u ? 0 : (uint(n)) < 6u ? 1 : (uint(n)) < 14u ? 2 : 3)
 // (offset of c[n] in StageConsts = n * 16: a float4 load from the window's block)
+#ifdef RVK_BONE_PREV
+// bone-history motion (native.bone_motion, frame-ownership.md 14.13; the BoneVs variants only): while rvk_vsw2Ov is set, VS window 2 (the bone table's image of the part) reads
+// the previous frame's image instead, so a second run of the translated program gives the previous frame's skinned position
+static uint2 rvk_vsw2Ov = uint2(0u, 0u);
+uint2 rvkVsWinBm(uint w) { return w == 2u && any(rvk_vsw2Ov != uint2(0u, 0u)) ? rvk_vsw2Ov : rvkVsWin(w); }
+#define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWinBm(RVK_VS_WIN(n))), uint(n) * 16u))
+#else
 #define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWin(RVK_VS_WIN(n))), uint(n) * 16u))
+#endif
 #ifdef RVK_SCENE_VIEW
 #define RVK_PSC(n) ((uint(n)) == 5u ? rvkSceneC5() : rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(RVK_PS_WIN(n))), uint(n) * 16u)))
 #else

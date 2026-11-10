@@ -17,6 +17,7 @@
 #include "core/f2c4_measure.h"
 #include "d3d9/device.h"
 #include "d3d9/scene_hash.h"
+#include "gpuscene/bone_table.h"
 #include "gpuscene/lighting_images.h"
 
 namespace rvk::d3d9 {
@@ -129,18 +130,24 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         if (captureDraw && probe_ != nullptr) probe_->capture = true;
         return;
     }
-    if (gbufWrite_) base = gbufferSlot(false);
+    // 14.13 (native.bone_motion): a skinned main solid draw whose bone window has a history takes the bone-motion forms (the vertex shader's second run on the previous
+    // bone image -> the G-buffer motion variant's previous position); the observers were told so (obsBone_: no capture)
+    const bool bone = actor && obsBone_ && boneMode_ == 1 && phase.pass == scene::Pass::Solid && gbufWrite_ && gbuf_.motion != nullptr && owned_ != nullptr &&
+                      owned_->w[0][2].kind == OwnedWindows::Kind::Bones && !lodVs;
+    if (gbufWrite_) base = gbufferSlot(bone);
     else if (giDraw) base = VariantSlot::Gi;
     const VariantSlot sceneFs = sceneSlotOf(base);
+    const VariantSlot vsSlot1 = bone ? VariantSlot::SceneVsBone : VariantSlot::SceneVs, vsSlot2 = bone ? VariantSlot::SceneVsBone2 : VariantSlot::SceneVs2,
+                      vsSlotPull = bone ? VariantSlot::SceneVsBonePull : VariantSlot::SceneVsPull;
     if (sceneFs == VariantSlot::Count) {
         ++sceneStats_.fbVariantKind;
         return;
     }
-    const rhi::ShaderModule vsM = v2only ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
+    const rhi::ShaderModule vsM = v2only ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : vsSlot1);
     // (S-6: a draw that left its pixel shader out needs no scene form of it)
     const rhi::ShaderModule fsM = v2only || psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneFs);
     if (!v2only && (vsM == rhi::ShaderModule::None || (fsM == rhi::ShaderModule::None && !psDropped_))) {
-        const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
+        const bool failed = vs_->variantState[static_cast<std::size_t>(vsSlot1)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
         if (failed) {
             ++sceneStats_.fbVariantFailed;
         } else {
@@ -180,14 +187,19 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
             return;
         }
         scenePipe_ = sp;
+        if (bone) {
+            bonePipes_.insert(static_cast<std::uint64_t>(sp));
+            sceneBone_ = true;
+            ++boneStats.chosen;
+        }
     }
     // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
     if (sceneV2_ && (kind == draws::Kind::StaticMesh || v2only || actor)) {
-        const rhi::ShaderModule vs2 = variant(vs_, VariantSlot::SceneVs2);
+        const rhi::ShaderModule vs2 = variant(vs_, vsSlot2);
         const rhi::ShaderModule fs2 = psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneView2Of(sceneFs));
         if (vs2 == rhi::ShaderModule::None || (fs2 == rhi::ShaderModule::None && !psDropped_)) {
-            const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs2)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneView2Of(sceneFs))].load() == 3;
+            const bool failed = vs_->variantState[static_cast<std::size_t>(vsSlot2)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneView2Of(sceneFs))].load() == 3;
             if (!failed) {
                 ++sceneStats_.fbVariantPending;
                 pending();
@@ -205,12 +217,16 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
             return;
         }
         scenePipe2_ = sp2;
+        if (bone) {
+            bonePipes_.insert(static_cast<std::uint64_t>(sp2));
+            ++boneStats.chosen2;
+        }
         // S-4 (native.vertex_pull): the pulled form of the v2 pipeline: the same pixel shader + state, the SceneVsPull vertex shader, only the ref stream as vertex
         // input (one binding, per instance). Building = the draw is not retained yet (scenePending: retried, as the v2 form); a failed build = it keeps its vertex input
         if (vertexPull_ && pullFetch_.valid == shader::abi::kVertexFetchValid && !lodVs && !v2only) {  // (the trees' / grass' flushes keep their instance streams)
-            const rhi::ShaderModule vsp = variant(vs_, VariantSlot::SceneVsPull);
+            const rhi::ShaderModule vsp = variant(vs_, vsSlotPull);
             if (vsp == rhi::ShaderModule::None) {
-                if (vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVsPull)].load() != 3) {
+                if (vs_->variantState[static_cast<std::size_t>(vsSlotPull)].load() != 3) {
                     ++vertexPullStats_.pipelinesPending;
                     pending();
                 }
@@ -232,13 +248,17 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
                     pending();
                 } else {
                     scenePipePull_ = pp;
+                    if (bone) {
+                        bonePipes_.insert(static_cast<std::uint64_t>(pp));
+                        ++boneStats.chosenPull;
+                    }
                 }
             }
         }
     }
     if (scenePipe2_ != GamePipeline::None || scenePipe_ != GamePipeline::None) {
         const UberWhy why = uberWhyOf(*ps_, scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs);
-        const std::uint8_t vsForm = uberVsFormOf(*vs_, scenePipe2_ != GamePipeline::None ? VariantSlot::SceneVs2 : lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
+        const std::uint8_t vsForm = uberVsFormOf(*vs_, scenePipe2_ != GamePipeline::None ? vsSlot2 : lodVs ? VariantSlot::SceneVsLod : vsSlot1);
         if (capture_ != nullptr) {
             lastVariant_.uberPs = static_cast<std::uint8_t>(why);
             lastVariant_.uberVs = vsForm;
@@ -311,6 +331,8 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t vi
     }
     r.draw = p.push.draw;
     r.prevVs = p.push.prevVsConsts;
+    // 14.13: a bone-motion form reads the previous frame's bone image (only a VS window 2 base the bone table handed out has one; else 0 = no motion of its own)
+    if (bonePipe(pipeline)) r.prevVs = gpuscene::bonetable().prevOf(rhi::GpuRef{p.push.vsWin[2]}).bits;
     r.drawId = p.push.drawId;
     r.flags = p.push.flags;
     if (v2) {
@@ -402,7 +424,8 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
         }
     }
     if (c.v.gate && !gbufTaken && ((c.v.staticOk && in.ambientLit) != c.v.wanted)) return variantRefusal(4, c);
-    if (!c.v.wanted && !c.v.gbufWanted && uberAskedNow(*c.ps) != c.v.uberAsked) return variantRefusal(7, c);  // S-1a: the ubershader module the draw was offered (or the setting) moved
+    if (!c.v.wanted && !c.v.gbufWanted && uberAskedNow(*c.ps) != c.v.uberAsked) return variantRefusal(7, c);
+    if (c.boneMotion && (!boneOfCached(c) || !gbufTaken)) return variantRefusal(8, c);  // 14.13: the bone-motion forms need the G-buffer's motion target and material pass  // S-1a: the ubershader module the draw was offered (or the setting) moved
     if (c.v.gate && c.v.wanted && !gbufTaken) {
         // the variant the draw was offered (None while it was still being built): a module that exists now makes the draw take another pixel shader and pipeline (variant(): read only)
         const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
@@ -658,6 +681,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             captureRequest_ = {};
             captureRequestRw_ = {};
             captureInstances_ = false;
+            obsBone_ = boneOfCached(c);  // (14.13)
             bool loaded = false;
             const CoverQuery cq = coverOf(q);
             for (DrawObserver* o : observers_) {

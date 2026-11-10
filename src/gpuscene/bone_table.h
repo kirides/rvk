@@ -10,6 +10,10 @@
 //   * Slots idle for kIdleFrames are released; a released slot is not handed out again for kFramesInFlight + 1 presents (frames in flight still read it).
 //   * `flush` (once per present, FIRST in the table block of SwapScreen: 7.35) uploads the marked slots into the frame's upload list, a GPU read-back compares the
 //     whole table every 240th frame (0 differing), the 5 s log `native: bone table (5 s)`.
+//   * Bone history (frame-ownership.md 14.13, `native.bone_motion`, set before the buffer is made): a second image per slot at the fixed byte delta kHistoryDelta
+//     (records kCapacity .. 2 kCapacity - 1) holds the slot's image of the PREVIOUS frame; its c231.x = 1 says it is valid (c231 = past the last bone row of
+//     66 bones: never read). The first serve of a frame copies the current image into it when the slot was served in the previous frame with the same history tag (morph pick /
+//     LOD) and the root bone did not jump (teleport); else the history is marked invalid (no motion: the camera's). A still part writes nothing (prev == cur).
 
 #include <cstdint>
 #include <unordered_map>
@@ -27,7 +31,9 @@ namespace rvk::gpuscene {
 
 inline constexpr std::uint32_t kBoneFirstReg = 31;
 inline constexpr std::uint32_t kBoneRegs = 201;  // c31 .. c231: the whole VS window 2
-inline constexpr std::uint32_t kBoneMaxBones = 66;  // eCShaderDefault::GetMaxBoneMatrixCount (c33 .. c230)
+inline constexpr std::uint32_t kBoneMaxBones = 66;
+inline constexpr std::uint32_t kHistoryFlag = kBoneRegs - 1;  // 14.13: the history image's validity (c231.x = 1): 2 + 3 x 66 = 200 registers hold the bones, c231 is never read
+static_assert(2 + 3 * kBoneMaxBones <= kHistoryFlag);  // eCShaderDefault::GetMaxBoneMatrixCount (c33 .. c230)
 static_assert(shader::abi::kVsWindowFirst[2] == kBoneFirstReg && shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2] == kBoneRegs, "the record is VS window 2");
 
 struct alignas(16) BoneRecord {
@@ -54,19 +60,36 @@ enum class BoneWhy : std::uint8_t { Served, NotReady, Full, Conflict, TooLong, C
 struct BoneStats {
     std::uint64_t requests = 0, served = 0, unchanged = 0, rewrites = 0, newSlots = 0, released = 0;
     std::uint64_t why[static_cast<std::size_t>(BoneWhy::Count)] = {};
+    // bone history (first serve of a slot in a frame): the previous image copied / already equal, or invalid because the slot was not served in the previous frame
+    // (new, idle), its history tag moved (morph pick, LOD), or its root bone jumped more than kHistoryJump units
+    std::uint64_t histCopied = 0, histKept = 0, histGap = 0, histTag = 0, histJump = 0;
 };
 
 class BoneTable {
 public:
     static constexpr std::uint32_t kCapacity = 1024;  // records (3.1 MiB); the last one is never handed out (a zero tail pad), so 1,023 slots
     static constexpr std::uint64_t kIdleFrames = 600;
+    static constexpr std::int64_t kHistoryDelta = static_cast<std::int64_t>(kCapacity) * static_cast<std::int64_t>(sizeof(BoneRecord));  // previous image = current + this
+    static constexpr float kHistoryJump = 500.0f;  // units (5 m) the root bone may move in one frame before the history counts as a teleport
+
+    // bone history (native.bone_motion): only before the buffer is created (the history doubles it); false after = ignored
+    void setHistory(bool on) {
+        if (!created_) history_ = on;
+    }
+    bool history() const { return history_; }
+    // the previous frame's image of the bone window `base` (a VS window 2 base this table handed out), null when `base` is not one of its slots or there is no history.
+    // The vertex shader of a bone-motion draw reads it (GPU safety: only a base inside the table's current images gets one)
+    rhi::GpuRef prevOf(rhi::GpuRef base) const;
 
     void setActive(bool on) { active_ = on; }
     bool active() const { return active_; }
 
     // The key's image := `regs` (`count` float4 from c31: c31, c32, then the bone rows; count <= kBoneRegs), the rest zero. Fills `out` (kind Bones, base, covered, CPU twin)
     // and returns Served, else the reason (out untouched). `verifyMask` of the window: c32 (.w only) and the bone registers inside the first 32.
-    BoneWhy serve(const BoneKey& key, const float (*regs)[4], std::uint32_t count, d3d9::OwnedWindows::Win& out);
+    // `histTag`: what makes two frames' images of the key comparable for the history (the morph pick + LOD: the morph streams the weights refer to)
+    BoneWhy serve(const BoneKey& key, const float (*regs)[4], std::uint32_t count, d3d9::OwnedWindows::Win& out, std::uint64_t histTag = 0);
+    // the history image of the key's slot (CPU twin; c231.x = 1 valid), null without a slot / history
+    const BoneRecord* prevImage(const BoneKey& key) const;
     // the window of the key's slot without writing anything (false: no slot / not ready)
     bool windowFor(const BoneKey& key, d3d9::OwnedWindows::Win& out) const;
     // the key's slot was served earlier in this frame: its window (the image is final for the frame)
@@ -92,7 +115,9 @@ private:
     void window(std::uint32_t slot, d3d9::OwnedWindows::Win& out) const;
     void report(d3d9::Device& dev);
 
-    bool active_ = false;
+    void updateHistory(std::uint32_t slot, const float (*regs)[4], std::uint32_t count, std::uint64_t histTag);
+
+    bool active_ = false, history_ = false;
     GpuTable<BoneRecord> table_;
     bool created_ = false, gpuFailed_ = false;
     std::unordered_map<BoneKey, Entry, BoneKeyHash> map_;
@@ -104,6 +129,8 @@ private:
     std::vector<Pending> pending_;
     std::vector<std::uint64_t> servedFrame_;  // per slot: frame_ + 1 of the last serve
     std::vector<std::uint32_t> usedRegs_;     // per slot: the register count of its image (the registers behind are zero)
+    std::vector<std::uint64_t> histTag_;      // per slot (history): the tag of its current image
+    std::vector<std::uint8_t> prevValid_, prevSame_;  // per slot (history): the previous image is valid / equals the current image (nothing to copy)
     std::uint32_t used_ = 0;
     std::uint32_t conflictLogged_ = 0;
     std::uint64_t frame_ = 0;

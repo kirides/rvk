@@ -2855,6 +2855,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeBoneMotion = &reg.add({
+        .key = "native.bone_motion",
+        .label = "Native frame: bone-history motion",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Debug, Full (docs/research/frame-ownership.md 14.13; needs native.owned_actors): the bone table keeps each actor part's previous-frame image, and the skinned "
+                       "solid draws' vertex shader runs a second time on it for the previous world position the G-buffer's motion needs, so per-object motion (FSR, frame "
+                       "generation) takes no vertex capture of the characters and their owned solid draws stay owned. The clip position is the translated shader's, bit for bit. "
+                       "Compare = the captures as before plus a GPU compare of both previous positions (rvk.log `native: bone motion compare (5 s)`, Vulkan). Restart. Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the vertex captures"},
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (the bone table's history doubles its buffer, made once)
+        .needs = {{"native.owned_actors", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnPost = &reg.add({
         .key = "native.own_post",
         .label = "Native frame: post chain on own shaders",

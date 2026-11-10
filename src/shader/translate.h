@@ -72,6 +72,10 @@ struct TranslateOptions {
     bool pullVertices = false;
 
     // ---- variant hooks for enhancements (docs/research/injection.md 4). All empty = the default translation, unchanged.
+    // HLSL only: text before the ABI header's #include (preprocessor defines the header reacts to, e.g. RVK_BONE_PREV: frame-ownership.md 14.13)
+    std::string defines;
+    // HLSL vertex shaders: also emit `rvk_resetRegs()` (every temp / address / output register to its initial value) for hooks that run `rvk_main()` a second time
+    bool rerunnable = false;
     // GLSL right after the ABI declarations, before the generated globals: declarations and functions that constOverrides /
     // inputOverrides expressions call (they are used inside the generated helpers, e.g. rvk_cRel), e.g. the GI lookup
     // (shaders/include/rvk_gi.glsl, enh/gi)
@@ -90,7 +94,8 @@ struct TranslateOptions {
     std::string extraInputs;
     // statements at the end of main(). Pixel shaders: after the alpha test (and the tint), before oC# are copied to the
     // outputs (oC0..oC3 and the varyings v#/t# are in scope). Vertex shaders: after the clip position `rvk_pos` is final and
-    // before the half-pixel fix (the o# / oT# / oD# registers and rvk_pos are in scope)
+    // before the half-pixel fix (the o# / oT# / oD# registers and rvk_pos are in scope; HLSL vertex shaders: `$pos` stands for the shader's position output
+    // register, e.g. to read it again after the epilogue re-ran rvk_main())
     std::string epilogue;
     // named-constant overrides: float constant register -> GLSL expression that replaces every read of it (direct and
     // relative); `$c` in the expression stands for the original value (e.g. pc.ps.c[15]). Callers pick registers by CTAB

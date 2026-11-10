@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "d3d9/device.h"
+#include "gpuscene/bone_table.h"
 #include "core/cluster_cull.h"
 #include "core/f5_measure.h"
 #include "gpuscene/object_table.h"
@@ -229,6 +230,11 @@ int Device::ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWind
     r.vsWin[0] = r.vsWin[1] = r.psWin[0] = r.psWin[1] = 0;  // (the view's windows come from the view table)
     r.draw = blockAddress.bits;
     r.prevVs = 0;
+    // 14.13 (native.bone_motion): the bone-motion form reads the previous frame's bone image of its window 2 (the history base; 0 = no motion of its own)
+    if (c.boneMotion && bonePipe(c.scenePipeline2)) {
+        r.prevVs = gpuscene::bonetable().prevOf(rhi::GpuRef{r.vsWin[2]}).bits;
+        ++(r.prevVs != 0 ? boneStats.records : boneStats.recordsNoPrev);
+    }
     r.drawId = 0;  // (no shader of the corpus / the variants reads it)
     r.flags = c.packet.push.flags;
     r.c5w = std::bit_cast<std::uint32_t>(c5w);
@@ -344,6 +350,7 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
             d.ownedReplay_ = false;
         }
     } scope(*this, &ow);
+    obsBone_ = boneOfCached(c);  // (14.13: the owned draw is the bone-motion form: its motion needs no capture)
     ReplaceQuery q = c.query;
     q.tag = &tag_;
     q.textures = c.tex;
@@ -452,6 +459,7 @@ Device::OwnedDrawScope::OwnedDrawScope(Device& d, const OwnedRecordView& r) : d_
     q_.textures = c.tex;
     q_.mainView = d.firings_.mainViews();
     q_.objectRows = d.ownedObjectRows();
+    d.obsBone_ = d.boneOfCached(c);
     d.captureRequest_ = {};
     d.captureRequestRw_ = {};
     d.captureInstances_ = false;
