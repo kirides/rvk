@@ -1,4 +1,5 @@
 #include "core/pacer.h"
+#include "core/profile.h"
 
 #include <windows.h>
 
@@ -198,6 +199,7 @@ void FramePacer::sleepFor(double ms) {
 }
 
 void FramePacer::wait() {
+    RVK_ZONE("FramePacer::wait");
     if (interval_ <= 0.0) {
         return;
     }

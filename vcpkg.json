@@ -18,6 +18,10 @@
     "spdlog",
     "spirv-tools",
     "stb",
+    {
+      "name": "tracy",
+      "default-features": false
+    },
     "tomlplusplus",
     "volk",
     "winpixevent",

@@ -7,6 +7,7 @@
 
 #include "shader/abi.h"
 #include "vk/bindless.h"
+#include "core/profile.h"
 #include "vk/context.h"
 #include "vk/frames.h"
 
@@ -140,6 +141,7 @@ VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::spa
 }
 
 VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, const PassGraphicsDesc& desc) {
+    RVK_ZONE("vk::createPassGraphicsPipeline");
     const VkShaderModule vs = module(ctx, desc.vs);
     const VkShaderModule fs = module(ctx, desc.fs);
     VkPipeline p = VK_NULL_HANDLE;

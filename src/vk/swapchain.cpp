@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "vk/context.h"
+#include "core/profile.h"
 #include "vk/fg_swapchain.h"
 
 namespace rvk::vk {
@@ -322,6 +323,7 @@ void Swapchain::destroy() {
 }
 
 bool Swapchain::acquire(VkSemaphore acquired, std::uint32_t& imageIndex) {
+    RVK_ZONE("Swapchain::acquire");
     acquireNotReady_ = false;
     if (swapchain_ == VK_NULL_HANDLE) {
         return false;

@@ -37,6 +37,14 @@ find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SPIRV-Tools CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
+
+# Tracy profiler client (wolfpld/tracy, vcpkg port without the GUI / CLI tools): the zones and frame marks of src/core/profile.h.
+# Off by default: the shipped d3d9.dll is unchanged. ON = TRACY_ENABLE on every target that links rvk_core, the client connects to
+# a running Tracy profiler (default port 8086, the profiler's own "Connect" window; the game does not wait for it).
+option(RVK_TRACY "Build with the Tracy profiler client (zones, frame marks; see src/core/profile.h)" OFF)
+if(RVK_TRACY)
+    find_package(Tracy CONFIG REQUIRED)
+endif()
 find_path(STB_INCLUDE_DIR stb_image_write.h REQUIRED)
 
 function(rvk_warnings target)
@@ -106,6 +114,7 @@ add_library(rvk_core STATIC
     src/core/f2c4_measure.h
     src/core/f5_measure.cpp
     src/core/f5_measure.h
+    src/core/profile.h
     src/core/cluster_build.cpp
     src/core/cluster_build.h
     src/core/cluster_cull.cpp
@@ -449,6 +458,11 @@ target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui
 target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include third_party/amd_fidelityfx/framegeneration/include)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
+# Tracy: PUBLIC so every target that links rvk_core sees the same TRACY_ENABLE (its inline functions differ with it: one ODR)
+if(RVK_TRACY)
+    target_compile_definitions(rvk_core PUBLIC TRACY_ENABLE)
+    target_link_libraries(rvk_core PUBLIC Tracy::TracyClient)
+endif()
 target_link_libraries(rvk_core PUBLIC
     spdlog::spdlog
     minhook::minhook

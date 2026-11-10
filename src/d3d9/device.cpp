@@ -1,6 +1,7 @@
 // d3d9::Device: creation, frames, resources, state setters, clears, copies. Draw preparation is in draw.cpp.
 
 #include "d3d9/device.h"
+#include "core/profile.h"
 #include "core/stall_sampler.h"
 #include "shader/uber.h"
 
@@ -225,6 +226,7 @@ void Device::inject(inject::Point point) {
     if (!passes_.any(point) || injecting_ || !created_) return;  // the common case: nothing registered
     const bool inMain = phases_.view() == scene::View::Main;
     if (!firings_.take(point, inMain)) return;
+    RVK_ZONE_DYN(injectZone, inject::name(point));
     syncPhaseRegions();
     const auto t0 = std::chrono::steady_clock::now();
     endRendering();
@@ -244,6 +246,7 @@ void Device::inject(inject::Point point) {
         game_->passCommands();                 // (the list again, with nothing bound: a pass sees no state of the one before)
         {
             RegionScope region(*this, list[i].name.c_str());
+            RVK_ZONE_DYN(passZone, list[i].name.c_str());
             const auto p0 = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             list[i].fn(ctx);
             if (options_.perf) {
@@ -265,6 +268,7 @@ void Device::inject(inject::Point point) {
 
 bool Device::runPassNow(const char* name, const std::function<void(PassContext&)>& fn) {
     if (injecting_ || !created_ || !fn) return false;
+    RVK_ZONE_DYN(passNowZone, name);
     syncPhaseRegions();
     const auto t0 = std::chrono::steady_clock::now();
     endRendering();
@@ -578,6 +582,7 @@ Device::FrameGenReport Device::takeFrameGenReport() {
 }
 
 void Device::flushFrameAndWait() {
+    RVK_ZONE("Device::flushFrameAndWait");
     endRendering();
     submitFrame(false);
     game_->waitFrame(game_->frameValue() - 1);
@@ -768,6 +773,7 @@ void Device::destroy() {
 // ---- frames ---------------------------------------------------------------------------------------------------------
 
 void Device::beginFrame() {
+    RVK_ZONE("Device::beginFrame");
     game_->beginFrame();
     viArena_.clear();  // every chunk of the last submission has been recorded and executed
     dynArena_.clear();
@@ -997,6 +1003,7 @@ PerfStats Device::takePerf() {
 }
 
 void Device::submitFrame(bool presenting) {
+    RVK_ZONE("Device::submitFrame");
     endRendering();
     regionsClose();  // a submission's command buffer must not end with labels open
     const auto t0 = std::chrono::steady_clock::now();
@@ -1104,6 +1111,7 @@ void diagAfterDraw(Device& d, const char* what) {
 }
 
 void Device::present() {
+    RVK_ZONE("Device::present");
     presentStart_ = std::chrono::steady_clock::now();
     if (stats_.frames > 0) {
         ++perf_.frames;
@@ -1119,6 +1127,7 @@ void Device::present() {
     struct PresentEnd {
         Device& d;
         ~PresentEnd() {
+            RVK_FRAME();  // the frame mark after the present's own work (Tracy guide 3.3: right after the swap)
             const auto now = std::chrono::steady_clock::now();
             if (d.stats_.frames > 1) {
                 d.perf_.presentMs += std::chrono::duration<double, std::milli>(now - d.presentStart_).count();
@@ -1357,6 +1366,7 @@ std::string moduleLabel(bool names, shader::Stage stage, std::uint64_t hash, std
 }  // namespace
 
 std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> bytecode) {
+    RVK_ZONE("Device::createShader");
     const std::size_t bytes = shader::byteLength(bytecode.data(), bytecode.size());
     if (bytes == 0) {
         spdlog::warn("d3d9: shader bytecode without END token");

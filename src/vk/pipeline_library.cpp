@@ -30,6 +30,7 @@
 
 #include "vk/context.h"
 #include "vk/pipeline.h"
+#include "core/profile.h"
 
 namespace rvk::vk {
 namespace {
@@ -202,6 +203,7 @@ void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBit
 }
 
 VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
+    RVK_ZONE("vk::PipelineCache::link");
     VkPipeline libs[4]{};
     {
         // vertex input interface per topology class, fragment output per attachment formats (few of each)

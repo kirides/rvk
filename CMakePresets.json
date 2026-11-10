@@ -26,6 +26,15 @@
       }
     },
     {
+      "name": "profiling",
+      "displayName": "Tracy profiling (VS 2026 x64, RVK_TRACY=ON; build/RelWithProfiling, the shipped build/ stays RVK_TRACY=OFF)",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build/RelWithProfiling",
+      "cacheVariables": {
+        "RVK_TRACY": "ON"
+      }
+    },
+    {
       "name": "public-release",
       "displayName": "Public Release (Ninja, RelWithDebInfo linked without /INCREMENTAL, /OPT:REF /OPT:ICF; CI + nightly)",
       "inherits": "ninja",

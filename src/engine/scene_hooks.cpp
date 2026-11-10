@@ -24,6 +24,7 @@
 #include "hal/vulkan/hal_vulkan.h"
 #include "rhi/game_device.h"
 #include "rhi/d3d_formats.h"
+#include "core/profile.h"
 
 namespace rvk::engine::scene {
 namespace {
@@ -58,7 +59,8 @@ void logPhase(d3d9::Device& d, const char* what) {
 struct ViewScope {
     d3d9::Device* d;
     const char* what;
-    ViewScope(View v, Pass p, const char* w) : d(device()), what(w) {
+    rvk::prof::DynamicZone zone;  // the engine's view (its name): a Tracy zone for the scope
+    ViewScope(View v, Pass p, const char* w) : d(device()), what(w), zone(w) {
         if (d != nullptr) {
             d->phases().push(v, p);
             logPhase(*d, what);
@@ -78,7 +80,8 @@ struct ViewScope {
 struct PassScope {
     d3d9::Device* d;
     Pass saved = Pass::None;
-    PassScope(Pass p, const char* what) : d(device()) {
+    rvk::prof::DynamicZone zone;  // the engine's pass (its name): a Tracy zone for the scope
+    PassScope(Pass p, const char* what) : d(device()), zone(what) {
         if (d != nullptr) {
             saved = d->phases().pass();
             d->phases().setPass(p);
@@ -186,6 +189,7 @@ MapLabel shadowMapLabel(const void* map) {
 using ExecuteFn = void (*)(void* db, void* desc);
 Hook<ExecuteFn> g_execute;
 void detourExecute(void* db, void* desc) {
+    RVK_ZONE("eCFrustumDatabase::Execute");
     const View v = g_inRenderEntity > 0 ? View::Preview : (g_inSceneFilter > 0 || g_inCameraRender > 0) ? View::Main : View::Other;
     ViewScope scope(v, Pass::Setup, "eCFrustumDatabase::Execute");
     OpTap* tap = nullptr;
@@ -483,6 +487,7 @@ void showSceneImageAtDisplaySize(void* filter, std::uint32_t width, std::uint32_
 }
 
 bool detourSceneUpdate(void* filter, int index) {
+    RVK_ZONE("eCImageEffect::SceneUpdate");
     restoreSceneImageSize();
     ++g_inSceneFilter;
     d3d9::Device* d = device();
@@ -539,6 +544,7 @@ bool detourEffectExecute(void* effect) {
 // N5.7: the sprite batcher's flush (GUI, fonts, cursor, videos: native/effect_ops_gui.cpp)
 Hook<VoidThisFn> g_spriteFlush;
 void detourSpriteFlush(void* sprite) {
+    RVK_ZONE("eCSprite::Flush");
     EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
     // O3 lean: true = composed, issued and the records reset (the original not called)
     const bool skip = tap != nullptr && tap->spriteFlushBegin(sprite);
@@ -549,6 +555,7 @@ void detourSpriteFlush(void* sprite) {
 using CameraRenderFn = void (*)(void* camera, void* desc);
 Hook<CameraRenderFn> g_cameraRender;
 void detourCameraRender(void* camera, void* desc) {
+    RVK_ZONE("eCCamera::Render");
     ++g_inCameraRender;
     g_cameraRender.original(camera, desc);
     --g_inCameraRender;
@@ -557,6 +564,7 @@ void detourCameraRender(void* camera, void* desc) {
 using RenderEntityFn = void (*)(void* admin, void* db, void* entity);
 Hook<RenderEntityFn> g_renderEntity;
 void detourRenderEntity(void* admin, void* db, void* entity) {
+    RVK_ZONE("eCRenderAdmin::RenderEntity");
     ++g_inRenderEntity;
     g_renderEntity.original(admin, db, entity);
     --g_inRenderEntity;
@@ -856,6 +864,7 @@ bool detourSubMeshRender(void* self, const void* mesh, std::uint32_t node, int l
 
 Hook<VoidThisFn> g_skydomeRender;
 void detourSkydomeRender(void* self) {
+    RVK_ZONE("eCSkydome::Render");
     TagScope tag(Source::Sky, self, nullptr, 0x10);
     // a sky cube face (UpdateSkydomeEnvCubemap's view): the N5.2c scene ops compose it like the main view's sky op
     OpTap* t = tag.d != nullptr && tag.d->phases().view() == View::SkyCube ? g_opTap.load(std::memory_order_relaxed) : nullptr;
@@ -867,12 +876,14 @@ void detourSkydomeRender(void* self) {
 using RenderFloatFn = void (*)(void* self, float t);
 Hook<RenderFloatFn> g_particleRender;
 void detourParticleRender(void* self, float t) {
+    RVK_ZONE("eCParticle::Render");
     TagScope tag(Source::Particle, self, nullptr, 0x10);
     g_particleRender.original(self, t);
 }
 
 Hook<RenderFloatFn> g_stripRender;
 void detourStripRender(void* self, float t) {
+    RVK_ZONE("eCStrip::Render");
     TagScope tag(Source::Strip, self, nullptr, 0x10);
     g_stripRender.original(self, t);
 }
@@ -880,6 +891,7 @@ void detourStripRender(void* self, float t) {
 using DecalsFn = bool (*)(void* admin, void* db);
 Hook<DecalsFn> g_decalsRender;
 bool detourDecalsRender(void* admin, void* db) {
+    RVK_ZONE("eCDecals::Render");
     TagScope tag(Source::Decal, admin, nullptr, 0);
     OpTap* t = tag.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
     // O2a lean: composed, issued and its side effects done (the original not called; Execute ignores the result)
@@ -892,6 +904,7 @@ bool detourDecalsRender(void* admin, void* db) {
 using BillboardsFn = bool (*)(void* admin);
 Hook<BillboardsFn> g_billboardsRender;
 bool detourBillboardsRender(void* admin) {
+    RVK_ZONE("eCBillboards::Render");
     TagScope tag(Source::Billboard, admin, nullptr, 0);
     OpTap* t = tag.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
     const bool skip = t != nullptr && t->nonOpBegin(OpTap::NonOp::Billboards, admin, nullptr);

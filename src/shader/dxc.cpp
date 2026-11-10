@@ -24,6 +24,7 @@
 #include <directx-dxc/d3d12shader.h>
 
 #include "shader/embedded.h"
+#include "core/profile.h"
 
 namespace rvk::shader::dxc {
 namespace {
@@ -407,6 +408,7 @@ std::vector<std::string> arguments(const Request& r) {
 }
 
 Result compile(const Request& request) {
+    RVK_ZONE("shader::dxc compile");
     Result result;
     Library& lib = library();
     if (!lib.ok) {

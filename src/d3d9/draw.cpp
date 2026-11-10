@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+
+#include "core/profile.h"
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
@@ -2118,6 +2120,7 @@ void Device::submitInterned(DrawPacket& p) {
 // The upload ring could not take a user-pointer draw's data (a ring chunk could not be created): the draw is dropped
 void Device::flushBatch() {
     if (batch_.empty()) return;
+    RVK_ZONE("Device::flushBatch");
     const std::uint32_t n = static_cast<std::uint32_t>(batch_.size());
     const bool threaded = scopeSecondary_ && rendering_;
     const auto record = [&](const DrawPacket& p) {

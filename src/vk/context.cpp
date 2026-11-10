@@ -9,6 +9,7 @@
 
 #include "core/crash_dump.h"
 #include "core/paths.h"
+#include "core/profile.h"
 #include "vk/debug_names.h"
 #include "vk/probe.h"
 
@@ -654,6 +655,7 @@ bool Context::createAllocator() {
 }
 
 VkResult Context::queueSubmit(const VkSubmitInfo2& submit, VkFence fence) {
+    RVK_ZONE("vk::queueSubmit");
     VkResult r;
     {
         const std::lock_guard lock(queueMutex_);
@@ -674,6 +676,7 @@ VkResult Context::queueSubmit(std::uint32_t submitCount, const VkSubmitInfo* sub
 }
 
 VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
+    RVK_ZONE("vk::queuePresent");
     VkResult r;
     {
         const std::lock_guard lock(queueMutex_);

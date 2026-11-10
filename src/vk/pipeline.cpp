@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "vk/context.h"
+#include "core/profile.h"
 
 namespace rvk::vk {
 
@@ -319,6 +320,7 @@ VkPipeline PipelineCache::get(const PipelineDesc& desc, bool* created) {
 }
 
 VkPipeline PipelineCache::build(const PipelineDesc& d) {
+    RVK_ZONE("vk::PipelineCache::build");
     const bool eds3 = ctx_->features().extendedDynamicState3;
     const bool dynVertexInput = ctx_->features().vertexInputDynamicState;
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "core/profile.h"
 #include "d3d9/device.h"
 
 namespace rvk::d3d9 {
@@ -51,6 +52,7 @@ void Device::emitClear(const ClearOp& op) {
 // hand the open chunk to the backend: a record worker starts on it at once (when the scope began secondary)
 void Device::closeChunk() {
     if (!chunksOpen_) return;
+    RVK_ZONE("Device::closeChunk");
     chunksOpen_ = false;
     game_->scopeChunk(std::move(workChunk_));
 }
