@@ -129,10 +129,16 @@ private:
     std::chrono::steady_clock::time_point vramAt_{};
 
     struct Command {
-        std::uint64_t frame;
+        std::uint64_t frame;  // absolute present number, or (load != 0) presents after the anchor
         std::string text;
+        std::uint32_t load = 0;  // "load<k>+<n>: ...": n presents after the k-th loading screen ended (the world shown again); kFreeze: "freeze+<n>"
     };
+    static constexpr std::uint32_t kFreeze = 0xffffffffu;  // "freeze+<n>": n presents after the app state first showed the time freeze (bit 8)
     std::vector<Command> commands_;
+    // the loading screens' ends (menu state Loading -> Game) seen so far: tracked while anchored commands wait
+    std::vector<std::uint64_t> loadEnds_;
+    bool sawLoading_ = false;
+    std::uint64_t freezeAt_ = 0;  // the first present with the time freeze (0 = not yet)
     float scrollFrac_ = 0.0f;  // [debug] command "overlay scroll <0..1>"
     int scrollFrames_ = 0;
     std::string selectTab_;  // [debug] command "overlay tab <name>": selected at the next build of the settings window

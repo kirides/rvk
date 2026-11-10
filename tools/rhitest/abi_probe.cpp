@@ -13,6 +13,9 @@
 #include <string>
 #include <vector>
 
+#include <windows.h>
+#include <psapi.h>
+
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/abi_blocks.h"
@@ -93,6 +96,14 @@ int run(rhi::Device& dev) {
     std::vector<Block> all(blocks().begin(), blocks().end());
     all.push_back({"AbiMutantPush", "(packed C++ twin)", Kind::Push, 28, kMutantFields, 3});
     int mutantWords = 0;
+    // RVK_RHITEST_PROGRESS=1: one line per block and step with the process's private bytes (where a run under the D3D12 GPU-based validation grows)
+    const bool progress = GetEnvironmentVariableA("RVK_RHITEST_PROGRESS", nullptr, 0) != 0;
+    const auto step = [&](const char* block, const char* what) {
+        if (!progress) return;
+        PROCESS_MEMORY_COUNTERS_EX pmc{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc);
+        std::printf("  abi probe progress: %s %s (private %.2f GB)\n", block, what, static_cast<double>(pmc.PrivateUsage) / (1024.0 * 1024.0 * 1024.0));
+    };
     for (const Block& b : all) {
         const std::vector<Expected> want = expectedWords(b);
         if (want.size() != probeWordCount(b) || want.size() > kImageWidth) {
@@ -129,6 +140,7 @@ int run(rhi::Device& dev) {
         req.cache = false;
         req.optLevel = 1;
         req.target = d3d12 ? shader::dxc::Target::Dxil : shader::dxc::Target::Spirv;
+        step(b.name, "compile");
         const shader::dxc::Result res = shader::dxc::compile(req);
         if (!res.ok()) {
             std::printf("  FAIL: %s: probe did not compile:\n%s\n", b.name, res.log.c_str());
@@ -139,7 +151,9 @@ int run(rhi::Device& dev) {
         if (d3d12) sh.dxil = res.bytes;
         else sh.spirv = res.words;
         const std::string pipeName = std::string("abi probe ") + b.name;
+        step(b.name, "pipeline");
         auto pipeline = dev.createComputePipeline({sh, pipeName.c_str()});
+        step(b.name, "dispatch");
         if (!pipeline) {
             std::printf("  FAIL: %s: pipeline creation\n", b.name);
             ++failures;
