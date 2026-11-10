@@ -521,6 +521,22 @@ private:
 class D3DCommandList;
 
 class D3D12DeviceImpl final : public GameDevice {
+    // Declared first = destroyed last: with the debug layer, the D3D12 objects still alive after every other member was released are listed by name
+    // (a leak at the device's teardown; the layer's own report at process exit has no names). The message callback is unregistered here too: a
+    // device kept alive by a leak would otherwise call into the destroyed object.
+    struct Teardown {
+        ComPtr<ID3D12DebugDevice> debug;
+        ComPtr<ID3D12InfoQueue1> queue;
+        DWORD cookie = 0;
+        ~Teardown() {
+            if (debug) {
+                spdlog::info("d3d12: device teardown: objects still alive (the device's Refcount 2 = this report's debug + info queue references):");
+                debug->ReportLiveDeviceObjects(D3D12_RLDO_DETAIL | D3D12_RLDO_IGNORE_INTERNAL);
+            }
+            if (queue && cookie != 0) queue->UnregisterMessageCallback(cookie);
+        }
+    } teardown_;
+
 public:
     ~D3D12DeviceImpl() override;
 #include "d3d12_game_decl.inc"
@@ -635,7 +651,10 @@ public:
                         }
                     },
                     D3D12_MESSAGE_CALLBACK_FLAG_NONE, this, &cookie);
+                teardown_.queue = iq;
+                teardown_.cookie = cookie;
             }
+            device_.As(&teardown_.debug);
         }
         queryRayTracingCaps(desc);
         D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
@@ -677,6 +696,16 @@ public:
             spdlog::error("d3d12: descriptor heaps");
             return false;
         }
+        // (names: the debug layer's live-object report at the teardown names what leaked)
+        queue_->SetName(L"rhi queue");
+        allocator_->SetName(L"rhi legacy allocator");
+        list_->SetName(L"rhi legacy list");
+        fence_->SetName(L"rhi legacy fence");
+        srvHeap_->SetName(L"rhi srv heap");
+        samplerHeap_->SetName(L"rhi sampler heap");
+        rtvHeap_->SetName(L"rhi rtv heap");
+        dsvHeap_->SetName(L"rhi dsv heap");
+        uavClearHeap_->SetName(L"rhi uav clear heap");
         srvInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         samplerInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         rtvInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -1057,6 +1086,10 @@ public:
     void waitIdle() override;
     void legacyWaitIdle() {
         if (removed_.load()) return;
+        if (!queue_ || !fence_ || fenceEvent_ == nullptr) {  // (a resource outliving the device's core objects: a teardown order bug, see ~D3D12DeviceImpl)
+            spdlog::error("d3d12: waitIdle after the queue / fence were released (a resource destroyed after the device's teardown)");
+            return;
+        }
         const std::uint64_t v = ++fenceValue_;
         queue_->Signal(fence_.Get(), v);
         if (fence_->GetCompletedValue() < v) {
@@ -1233,6 +1266,7 @@ private:
             return false;
         }
         RVK_HR(device_->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rootSignature_)), "CreateRootSignature");
+        rootSignature_->SetName(L"rhi root signature");
         return true;
     }
 

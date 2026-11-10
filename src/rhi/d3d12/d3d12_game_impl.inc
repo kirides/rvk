@@ -4,11 +4,16 @@
 
 // ---- lifetime ----------------------------------------------------------------------------------------------------------------
 
+// Every member that owns a D3DBuffer / D3DTexture must be released here (or in shutdownGame), not by the implicit member destruction: those
+// destructors wait on queue_ / fence_ and release slots in srvAlloc_, which are declared after the game members (d3d12_game_priv.inc) and so are
+// destroyed BEFORE them (the capture pool did that: a null queue_ in legacyWaitIdle at the game's exit, 2026-11-11).
 D3D12DeviceImpl::~D3D12DeviceImpl() {
     shutdownGame();
+    defaultTexture_.reset();
     if (fenceEvent_ != nullptr) {
         legacyWaitIdle();
         CloseHandle(fenceEvent_);
+        fenceEvent_ = nullptr;
     }
 }
 
@@ -70,6 +75,13 @@ void D3D12DeviceImpl::shutdownGame() {
         retired_.clear();
     }
     for (auto& r : rings_) r.chunks.clear();
+    for (auto& c : capture_) {  // (the vertex capture pool: its D3DBuffers need queue_ / srvAlloc_, which the implicit member destruction removes first)
+        c.chunks.clear();
+        c.cur = 0;
+    }
+    captureAllRead_ = false;
+    tsReadback_.reset();
+    tsHeap_.Reset();
     arena_.clear();
     entries_.clear();
     blitPsos_.clear();
@@ -80,6 +92,7 @@ void D3D12DeviceImpl::shutdownGame() {
 bool D3D12DeviceImpl::initPool(ListPool& p) {
     for (std::uint32_t s = 0; s < rhi::kFramesInFlight; ++s) {
         RVK_HR(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&p.alloc[s])), "CreateCommandAllocator");
+        p.alloc[s]->SetName(L"rhi pool allocator");
     }
     return true;
 }
@@ -89,6 +102,7 @@ ID3D12GraphicsCommandList4* D3D12DeviceImpl::acquireList(ListPool& p, std::uint3
     if (p.used[slot] == lists.size()) {
         ComPtr<ID3D12GraphicsCommandList4> l;
         if (FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, p.alloc[slot].Get(), nullptr, IID_PPV_ARGS(&l)))) return nullptr;
+        l->SetName(L"rhi pool list");
         lists.push_back(std::move(l));
     } else {
         lists[p.used[slot]]->Reset(p.alloc[slot].Get(), nullptr);
@@ -201,6 +215,7 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
     blitSamplers_[1] = createSampler({VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f});
 
     RVK_HR(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&frameFence_)), "CreateFence (frames)");
+    frameFence_->SetName(L"rhi frame fence");
     frameEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!initPool(mainPool_) || !initPool(uploadPool_) || !initPool(labelPool_)) return false;
     {
