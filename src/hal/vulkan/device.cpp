@@ -40,6 +40,7 @@
 #include "gpuscene/billboard_table.h"
 #include "gpuscene/object_table.h"
 #include "gpuscene/material_table.h"
+#include "gpuscene/shutdown.h"
 #include "gpuscene/verify.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
@@ -412,8 +413,9 @@ HalDevice::~HalDevice() {
     effectOps_.reset();
     staticOps_.reset();
     frameTap_.reset();
-    gpuscene::clusterstore().destroy(&dev_);  // (the worker, the arena copies, the table: before the device goes)
-    gpuscene::ownedcompact().destroy();
+    // the process-wide GPU scene tables (static / leaked singletons) hold buffers and pipelines of the device: released before it (cluster store's worker included);
+    // left alive they were leaked at vkDestroyDevice and the static ones' destructors at process exit retired them through the freed backend
+    gpuscene::releaseGpuObjects(dev_);
     dev_.destroy();
 }
 

@@ -201,6 +201,12 @@ IllumTable& illumtable() {
     return t;
 }
 
+void IllumTable::releaseGpu() {
+    std::lock_guard lock(mutex_);
+    illums_.release();
+    sets_.release();
+}
+
 std::uint32_t IllumTable::allocIllum() {
     if (illumKey_.empty()) {
         illumKey_.assign(kIllumCapacity, nullptr);

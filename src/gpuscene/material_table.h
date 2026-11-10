@@ -94,6 +94,7 @@ public:
 
     // once per present: uploads, read-back verification, idle sweep, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffer goes before the device
 
     rhi::GpuRef ref() const { return table_.ref(); }
     const MaterialStats& stats() const { return stats_; }
