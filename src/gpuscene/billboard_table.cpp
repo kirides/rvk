@@ -14,6 +14,13 @@ BbTable& bbtable() {
     return t;
 }
 
+void BbTable::releaseGpu() {
+    buffer_.reset();
+    ref_ = {};
+    uploaded_ = 0;
+    failed_ = false;
+}
+
 std::uint32_t BbTable::intern(const float* consts, std::uint32_t n) {
     if (!active_ || buffer_ == nullptr || n == 0 || n > kBbRegs - 1) return kNone;
     const std::uint64_t h = native::ret::hashBytes(consts, static_cast<std::size_t>(n) * 16);

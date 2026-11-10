@@ -35,6 +35,12 @@ InstanceBuffer& instances() {
 
 InstanceBuffer::~InstanceBuffer() = default;
 
+void InstanceBuffer::releaseGpu() {
+    buffer_.reset();
+    ref_ = {};
+    for (Pending& p : pending_) p = Pending{};
+}
+
 bool InstanceBuffer::create(d3d9::Device& dev) {
     if (failed_) return false;
     rhi::Device* rd = dev.rhi();

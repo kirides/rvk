@@ -87,6 +87,7 @@ public:
 
     // once per present, after illumtable().flush (engine thread): entry uploads, idle sweep, the compose pass, the read-back check, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffers and the compose pipeline go before the device
 
     // shader references of entry `e` (read form): its first register c14 / the window base for PS window 3 (c14 at offset 14 x 16: `RVK_PSC(n)` reads base + n x 16)
     rhi::GpuRef entryRef(std::uint32_t e) const { return imagesRef_.plus(static_cast<std::int64_t>(kLightingPad) + static_cast<std::int64_t>(e) * kLightingStride); }

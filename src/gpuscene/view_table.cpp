@@ -20,6 +20,11 @@ ViewTable& viewtable() {
     return t;
 }
 
+void ViewTable::releaseGpu() {
+    table_.release();
+    created_ = gpuFailed_ = false;
+}
+
 bool ViewTable::ensure(d3d9::Device& dev) {
     if (table_.ready()) return true;
     if (gpuFailed_ || dev.rhi() == nullptr) return false;

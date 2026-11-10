@@ -67,6 +67,7 @@ public:
 
     // once per present (engine thread, before the frame's draws are submitted): uploads, read-back verify, the fetch test, idle sweep, 5 s log
     void flush(d3d9::Device& dev, bool verify);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffers and the fetch pipeline go before the device
 
     rhi::GpuRef partRef() const { return parts_.ref(); }
     rhi::GpuRef layoutRef() const { return layouts_.ref(); }

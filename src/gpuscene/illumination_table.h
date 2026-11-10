@@ -135,6 +135,7 @@ public:
 
     // once per present (engine thread, before the frame's draws are submitted): uploads, verification, idle sweep, 5 s log. `verify` = read-back every 240th frame
     void flush(d3d9::Device& dev, bool verify);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffers go before the device
 
     rhi::GpuRef illumRef() const { return illums_.ref(); }
     rhi::GpuRef setRef() const { return sets_.ref(); }

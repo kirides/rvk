@@ -312,6 +312,8 @@ add_library(rvk_core STATIC
     src/gpuscene/cluster_table.h
     src/gpuscene/owned_compact.cpp
     src/gpuscene/owned_compact.h
+    src/gpuscene/shutdown.cpp
+    src/gpuscene/shutdown.h
     src/d3d9/owned_persist.cpp
     src/d3d9/owned_trees.cpp
     src/gpuscene/view_table.h

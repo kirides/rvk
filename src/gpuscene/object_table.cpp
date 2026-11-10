@@ -22,6 +22,11 @@ ObjectTable& objecttable() {
     return t;
 }
 
+void ObjectTable::releaseGpu() {
+    table_.release();
+    created_ = gpuFailed_ = false;
+}
+
 ObjectWhy ObjectTable::serve(const void* entity, const float composed[kObjectRegs][4], std::uint32_t composedBits, d3d9::OwnedWindows::Win& out) {
     ++stats_.requests;
     const auto fail = [&](ObjectWhy why) {
