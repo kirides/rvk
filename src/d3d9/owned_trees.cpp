@@ -307,7 +307,26 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
         sceneStats_.records += end - start;
         treeFlushStats.commands += end - start;
         ++treeFlushStats.packets;
+        ++treeFlushStats.kindCalls[inst != nullptr ? 1 : 0];
         start = end;
+    }
+    {
+        // S-5: what vertex pulling of these flushes could merge (the calls are cut by the vertex input today)
+        const std::size_t k = inst != nullptr ? 1 : 0;
+        std::vector<std::uint64_t> keys;
+        keys.reserve(n);
+        for (const TreeItem& it : items) {
+            const CachedDraw& c = *it.cd;
+            const std::uintptr_t ids[2] = {reinterpret_cast<std::uintptr_t>(c.vs), reinterpret_cast<std::uintptr_t>(c.ps)};
+            std::uint64_t h = hashBytes(1469598103934665603ull, ids, sizeof(ids));
+            h = hashBytes(h ^ hashDyn(c.dyn), &c.packet.indexBuffer, sizeof(c.packet.indexBuffer));
+            h ^= static_cast<std::uint64_t>(c.packet.index32) << 63;
+            keys.push_back(h);
+        }
+        std::sort(keys.begin(), keys.end());
+        ++treeFlushStats.kindFlushes[k];
+        treeFlushStats.kindItems[k] += n;
+        treeFlushStats.kindPullKeys[k] += static_cast<std::uint64_t>(std::unique(keys.begin(), keys.end()) - keys.begin());
     }
     treeFlushStats.items += n;
     treeFlushStats.records += recs.size();

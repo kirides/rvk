@@ -296,6 +296,23 @@ void grassInstance(const std::uint8_t* entry, bool wind, bool lift, std::uint8_t
 // eCShaderDefault::SetVegationAlpha 0x6c9f20: c31.xy = (-1 / R, (R + start) / R), R = (end - start) / (1 - maskRef / 256)
 void vegetationAlpha(float start, float end, std::uint8_t maskRef, float& x, float& y);
 
+// S-5 grass distance thinning (docs/research/frame-ownership.md 14.14; native.own_foliage, Full, Debug): beyond `start` = end x clamp(kGrassThinStart x lod.view,
+// 0.2, 0.9) of the grid's view range (`end` = grid +0x54) the share of instances kept falls linearly to kGrassThinKeepFar at `end`; an instance (hash of its position
+// bits) shrinks to scale 0 over a band of kGrassThinBand of that share (no pop) instead of vanishing. Exact by construction across every form of the grass: z, solid,
+// composed, composed late and owned draws all read our converted instance bytes, and the decision is a pure CPU function of the instance, the camera snapped to
+// kGrassThinSnap units and the grid's range (the z-equal colour pass sees the z pass's geometry bit for bit).
+inline constexpr float kGrassThinStart = 0.35f, kGrassThinKeepFar = 0.35f, kGrassThinBand = 0.12f, kGrassThinSnap = 100.0f;
+struct GrassThin {
+    bool on = false;
+    bool all = false;      // (measurement: every instance at scale 0 = the grass's GPU ceiling, RVK_S5_GRASS_OFF=1)
+    float cam[3] = {};     // the camera, snapped
+    float start = 0, end = 0;
+    bool operator==(const GrassThin&) const = default;
+};
+GrassThin grassThinParams(const float camPos[3], float gridEnd, float lodView, bool all);
+// scales the instances in place (converted 0x2c-byte instances, `count` of them); returns how many were changed (shrunk or removed), `removed` = how many reached 0
+std::uint32_t grassThin(std::uint8_t* inst, std::size_t count, const GrassThin& t, std::uint32_t* removed = nullptr);
+
 // ---- constants ----------------------------------------------------------------------------------------------------------
 
 // eCShaderMaterialAdmin::SetFog 0x6b9fc0: PS c3 = colour, PS c4 = VS c30 = (-start k, k, density, 0), k = 1 / ((end - start) / density)
