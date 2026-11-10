@@ -234,7 +234,14 @@ void EffectOps::postEnd(void* /*effect*/) {
     if (postDepth_ == 0) return;
     if (--postDepth_ > 0) return;
     if (grpOpen_ >= 0) flushLum();  // S-7: units of an open group that never completed
+    finishOwnCompare();
     if (unit_ == Unit::Post) finishUnit();
+    if (tmHeldValid_) {
+        // S-7c: the folded ToneMap: its consumers tone-mapped the scene themselves, or nothing read it (the HDRI graph's public ToneMap): it is never drawn
+        tmHeldValid_ = false;
+        own_->countToneMap(tmFusedUses_ != 0 ? 0 : 2);
+    }
+    tmValid_ = false;
     postEffect_ = nullptr;
 }
 

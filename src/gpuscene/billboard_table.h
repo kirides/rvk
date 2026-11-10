@@ -41,6 +41,7 @@ public:
     const BbConstRecord* record(std::uint32_t slot) const { return slot < used_ ? &shadow_[slot] : nullptr; }
     // once per present: creates the buffer, uploads the records appended since the last flush
     void flush(d3d9::Device& dev);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffer goes before the device (the records stay: re-uploaded on a new one)
     bool ready() const { return buffer_ != nullptr; }
     std::uint32_t used() const { return used_; }
     std::uint64_t fullRefusals() const { return full_; }

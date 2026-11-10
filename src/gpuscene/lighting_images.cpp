@@ -27,6 +27,20 @@ struct LightingImages::Pipeline {
 LightingImages::LightingImages() = default;
 LightingImages::~LightingImages() = default;
 
+void LightingImages::releaseGpu() {
+    std::lock_guard lock(mutex_);
+    pipeline_.reset();  // (waits for a build still running: its pipeline is destroyed while the device exists)
+    pipelineReady_ = false;
+    images_.reset();
+    imagesRef_ = {};
+    jobs_.release();
+    for (Pending& p : pending_) {
+        p.buffer.reset();
+        p.expect.clear();
+        p.busy = false;
+    }
+}
+
 LightingImages& lightingimages() {
     static LightingImages t;
     return t;

@@ -27,6 +27,11 @@ MaterialTable& materialtable() {
     return t;
 }
 
+void MaterialTable::releaseGpu() {
+    std::lock_guard lock(mutex_);
+    table_.release();
+}
+
 std::uint32_t MaterialTable::lookupOrCreate(const void* key, const void* material) {
     const auto it = slotOf_.find(key);
     if (it != slotOf_.end()) return it->second;

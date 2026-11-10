@@ -43,6 +43,7 @@ public:
     ~InstanceBuffer();
     // `mode`: 0 = off, 1 = upload, 2 = upload + read-back verification. Call once per frame on the engine thread, before the frame's draws.
     void flush(d3d9::Device& dev, int mode);
+    void releaseGpu();  // device shutdown (gpuscene::releaseGpuObjects): the buffers go before the device
     bool ready() const { return buffer_ != nullptr; }
     // the table's shader reference (record i at + i * sizeof(InstanceRecord))
     rhi::GpuRef ref() const { return ref_; }
