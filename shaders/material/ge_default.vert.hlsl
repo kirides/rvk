@@ -749,7 +749,7 @@ sVSOutput_Default VS_DefaultZPass() {
 
 #endif
 
-RvkVsOut VSMain(RvkVsIn rvk_in) {
+RvkVsOut rvkPortMain(RvkVsIn rvk_in) {
 #ifdef RVK_SCENE_RECORD
     rvkSceneBeginVs(rvk_in.rvk_sceneRef);
 #endif
@@ -780,3 +780,92 @@ RvkVsOut VSMain(RvkVsIn rvk_in) {
     rvk_out.position = rvk_pos;
     return rvk_out;
 }
+
+#ifdef RVK_UBER_TRPOS
+// The clip position of the TRANSLATED vertex shader of the same bytecode (shader::uberVertexHlsl puts the translator's text in namespace rvkTr before this
+// file; shader-permutations.md 12). The z pre-pass and the colour pass test the depth for equality, and a geometry's two passes do not always take the
+// same form: an owned z op (this port) meets a composed colour op (the translated base / capture variant) and vice versa. The port computes the same
+// position in another order of operations (a few ulps apart): every such pair failed the equality test and the colour pass left black holes (owned
+// SpeedTrees with the light table, jungle). The translated position is exact by construction; the port's own position still feeds vViewPos / the
+// world position. The entry takes the translator's input struct (float4 per declared register, as the pipeline fetches them); the port gets its copies.
+#define RVK_CAT_(a, b) a##b
+#define RVK_CAT(a, b) RVK_CAT_(a, b)
+#define RVK_TRIN(attr) t.RVK_CAT(v, RVK_LOC_##attr)
+RvkVsOut VSMain(rvkTr::RvkVsIn t) {
+    RvkVsIn p = (RvkVsIn)0;
+#ifdef RVK_LOC_aPos
+    p.aPos = RVK_TRIN(aPos);
+#endif
+#ifdef RVK_LOC_aNorm
+    p.aNorm = RVK_TRIN(aNorm).xyz;
+#endif
+#ifdef RVK_LOC_aTangent
+    p.aTangent = RVK_TRIN(aTangent).xyz;
+#endif
+#ifdef RVK_LOC_aCol0
+    p.aCol0 = RVK_TRIN(aCol0);
+#endif
+#ifdef RVK_LOC_aCol1
+    p.aCol1 = RVK_TRIN(aCol1);
+#endif
+#ifdef RVK_LOC_aTex0
+    p.aTex0 = RVK_TRIN(aTex0).xy;
+#endif
+#ifdef RVK_LOC_aLightmap
+    p.aLightmap = RVK_TRIN(aLightmap).xy;
+#endif
+#ifdef RVK_LOC_aTex1
+    p.aTex1 = RVK_TRIN(aTex1).xy;
+#endif
+#ifdef RVK_LOC_aTex2
+    p.aTex2 = RVK_TRIN(aTex2).xy;
+#endif
+#ifdef RVK_LOC_aTex3
+    p.aTex3 = RVK_TRIN(aTex3).xy;
+#endif
+#ifdef RVK_LOC_aInstance
+    p.aInstance = RVK_TRIN(aInstance).x;
+#endif
+#ifdef RVK_LOC_aBillboard
+    p.aBillboard = RVK_TRIN(aBillboard).xy;
+#endif
+#ifdef RVK_LOC_aIndices0
+    p.aIndices0 = RVK_TRIN(aIndices0);
+#endif
+#ifdef RVK_LOC_aWeights0
+    p.aWeights0 = RVK_TRIN(aWeights0);
+#endif
+#ifdef RVK_LOC_aWeights1
+    p.aWeights1 = RVK_TRIN(aWeights1);
+#endif
+#ifdef RVK_LOC_aWeights2
+    p.aWeights2 = RVK_TRIN(aWeights2);
+#endif
+#ifdef RVK_LOC_aNormDelta1
+    p.aNormDelta1 = RVK_TRIN(aNormDelta1).xyz;
+#endif
+#ifdef RVK_LOC_aNormDelta2
+    p.aNormDelta2 = RVK_TRIN(aNormDelta2).xyz;
+#endif
+#ifdef RVK_LOC_aPosDelta1
+    p.aPosDelta1 = RVK_TRIN(aPosDelta1);
+#endif
+#ifdef RVK_LOC_aPosDelta2
+    p.aPosDelta2 = RVK_TRIN(aPosDelta2);
+#endif
+#ifdef RVK_LOC_aPosDelta3
+    p.aPosDelta3 = RVK_TRIN(aPosDelta3);
+#endif
+#ifdef RVK_LOC_aNormDelta3
+    p.aNormDelta3 = RVK_TRIN(aNormDelta3).xyz;
+#endif
+#ifdef RVK_SCENE_RECORD
+    p.rvk_sceneRef = t.rvk_sceneRef;
+#endif
+    RvkVsOut o = rvkPortMain(p);
+    o.position = rvkTr::VSMain(t).position;
+    return o;
+}
+#else
+RvkVsOut VSMain(RvkVsIn rvk_in) { return rvkPortMain(rvk_in); }
+#endif

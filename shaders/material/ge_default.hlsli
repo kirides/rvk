@@ -242,11 +242,19 @@ static float4 g_ShaderData[8];
 #define g_DirLight_Specular RVK_PSC(23)
 #define g_DirLight_Direction RVK_PSC(24)
 #ifdef RVK_MV_CLUSTER
-// the Full-owned light table (rvk_material_variant.hlsli rvkMvCluster, run right before the point lights): the per-pixel registers
-#define g_PointLight_PosAndRcpRange(i) rvkClReg(i, 0)
-#define g_PointLight_Diffuse(i) rvkClReg(i, 1)
-#define g_PointLight_Specular(i) rvkClReg(i, 2)
-#define g_PointLight_ShadowMask(i) rvkClReg(i, 3)
+// the Full-owned light table (rvk_material_variant.hlsli rvkMvCluster, run right before the point lights): the per-pixel registers.
+// RVK_MV_CL_COUNT (the slots the table fills) comes from the translated shader's CTAB, min(3, registers / 4): the compiler trims a light's unread
+// registers (3 lights without XFX_PNTLIGHTSHADOWS: c25..c34 / c35 = 10 / 11 registers = 2 slots), so the loop below can run past it. Such a slot
+// keeps the engine's own registers, as the translated shader does (rvk_clSrc / rvk_clK have RVK_MV_CL_COUNT entries: an index past them read
+// garbage = black leaves of owned SpeedTrees with the light table on, shader-permutations.md 12)
+float4 rvkUberPointReg(int i, uint comp) {
+    if (uint(i) < uint(RVK_MV_CL_COUNT)) return rvkClReg(min(uint(i), uint(RVK_MV_CL_COUNT) - 1u), comp);
+    return RVK_PSC(25 + 4 * i + int(comp));
+}
+#define g_PointLight_PosAndRcpRange(i) rvkUberPointReg(i, 0u)
+#define g_PointLight_Diffuse(i) rvkUberPointReg(i, 1u)
+#define g_PointLight_Specular(i) rvkUberPointReg(i, 2u)
+#define g_PointLight_ShadowMask(i) rvkUberPointReg(i, 3u)
 #else
 #define g_PointLight_PosAndRcpRange(i) RVK_PSC(25 + 4 * (i))
 #define g_PointLight_Diffuse(i) RVK_PSC(26 + 4 * (i))

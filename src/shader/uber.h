@@ -40,8 +40,14 @@ struct VertexInput {
 };
 bool uberVsSupports(std::string_view effectFile, std::string_view entry);
 // extraDefines: more #define lines (the billboard fade variant: `#define RVK_LOD_FADE <frame parameter>`, Device::lodModule's translated form)
+// translatedPosition: the translator's HLSL of the same bytecode with the same scene / input options (shader::toHlsl). Non-empty = the module's clip position
+// is the translated shader's (namespace rvkTr, RVK_UBER_TRPOS in ge_default.vert.hlsl): bit-identical to every translated form of the request, so a z pre-pass
+// and a colour pass of one geometry pass the depth-equal test whichever form each takes (shader-permutations.md 12). Empty = the port's own position (offline tools).
 std::string uberVertexHlsl(std::string_view effectFile, std::string_view entry, const MacroList& macros, std::span<const VertexInput> inputs, bool sceneRecord = false,
-                           bool sceneView = false, std::string_view extraDefines = {});
+                           bool sceneView = false, std::string_view extraDefines = {}, std::string_view translatedPosition = {});
+// the translator's text wrapped for uberVertexHlsl: its leading #define lines and `#include "rvk_draw.hlsli"` at global scope, the rest in `namespace rvkTr`
+// (empty when the text does not have that shape)
+std::string uberTranslatedPart(std::string_view translated);
 // a hash of the HLSL texts of the ubershader (and what it includes): cache names of compiled variants change when they do
 std::uint64_t uberHlslHash();
 

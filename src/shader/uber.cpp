@@ -104,10 +104,41 @@ const char* uberAttrName(Usage usage, std::uint32_t index) {
 }
 }  // namespace
 
+std::string uberTranslatedPart(std::string_view translated) {
+    // the translator's text starts with its #define lines (RVK_SCENE_*: the header reads them) and `#include "rvk_draw.hlsli"`; those stay global (the port
+    // includes the same header with the same defines: #pragma once), everything after goes into the namespace
+    constexpr std::string_view kInclude = "#include \"rvk_draw.hlsli\"\n";
+    const std::size_t at = translated.find(kInclude);
+    if (at == std::string_view::npos) return {};
+    const std::string_view head = translated.substr(0, at);
+    for (std::size_t p = 0; p < head.size();) {  // (only #define / comment / blank lines before the include)
+        const std::size_t e = std::min(head.find('\n', p), head.size());
+        const std::string_view line = head.substr(p, e - p);
+        if (!line.empty() && !line.starts_with("#define ") && !line.starts_with("//")) return {};
+        p = e + 1;
+    }
+    std::string out;
+    out.reserve(translated.size() + 128);
+    out += "// the translated vertex shader of the same bytecode (src/shader/hlsl.cpp): its clip position is the module's (RVK_UBER_TRPOS)\n";
+    out += head;
+    // (the path the port's own include of the header takes, material/ge_default.hlsli -> "./material/rvk_draw.hlsli": DXC's #pragma once compares those names,
+    // the plain name would include the header a second time)
+    out += "#include \"material/rvk_draw.hlsli\"\n";
+    out += "namespace rvkTr {\n";
+    out += translated.substr(at + kInclude.size());
+    out += "\n}  // namespace rvkTr\n#define RVK_UBER_TRPOS 1\n";
+    return out;
+}
+
 std::string uberVertexHlsl(std::string_view effectFile, std::string_view entry, const MacroList& macros, std::span<const VertexInput> inputs, bool sceneRecord,
-                           bool sceneView, std::string_view extraDefines) {
+                           bool sceneView, std::string_view extraDefines, std::string_view translatedPosition) {
     (void)effectFile;  // the vertex shaders of both effect files are ge_default_vs.fx
     std::string out = "// HLSL material vertex shader (shaders/material/ge_default.vert.hlsl) built from the engine's macros + the bytecode's input declarations\n";
+    if (!translatedPosition.empty()) {
+        const std::string part = uberTranslatedPart(translatedPosition);
+        if (part.empty()) return {};
+        out += part;
+    }
     if (!appendMacros(out, macros)) return {};
     if (entry.ends_with("ZPass")) out += "#define XFX_PASS 1\n";
     out += "#define RVK_VS_DECL 1\n";

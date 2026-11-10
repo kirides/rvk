@@ -500,7 +500,13 @@ void testSceneCorpus(Harness& h, bool v2 = false, bool uberVs = false) {
         if (uberVs) {
             std::vector<shader::VertexInput> inputs;
             for (const auto& in : vsRefl.vertexInputs) inputs.push_back({in.usage, in.usageIndex, in.location});
-            if (!compileBoth("scene_corpus_uber_vs_s.hlsl", shader::uberVertexHlsl("ge_default_phong.fx", "VS_Default", uberMacros[ki], inputs, true, v2), "VSMain", "vs_6_6", c.svs)) {
+            // the run time's form (d3d9 Device::uberModule): the clip position from the translated scene shader of the same bytecode (shader-permutations.md 12)
+            const shader::DecodeResult vdec = shader::decode(vsTokens);
+            shader::setVaryingFillers(true);
+            const shader::HlslResult vtr = vdec.ok() ? shader::toHlsl(vdec.program, sceneOpt) : shader::HlslResult{.error = "decode"};
+            shader::setVaryingFillers(false);
+            const std::string uberText = vtr.ok() ? shader::uberVertexHlsl("ge_default_phong.fx", "VS_Default", uberMacros[ki], inputs, true, v2, {}, vtr.hlsl) : std::string();
+            if (uberText.empty() || !compileBoth("scene_corpus_uber_vs_s.hlsl", uberText, "VSMain", "vs_6_6", c.svs)) {
                 check(false, c.label + ": uber vertex shader");
                 continue;
             }

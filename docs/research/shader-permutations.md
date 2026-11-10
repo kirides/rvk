@@ -235,3 +235,38 @@ captured macros as `-D`, run by `rvk_shadereq` (16 trials, 8 jobs; 14 s for 194 
   * `python tools/uber_hlsl_check.py --vs` (now includes leaf requests): 1340 compiles + `spirv-val`, 0 failed (PS x 4 hook sets, VS);
     `rvk_shadertool dxil-check uber` (uses `uberSupportsFile`): 337 requests x 6 variants (plain, G-buffer, motion, GI, scene), 2022 of
     2022 SPIR-V + DXIL OK; `dxil-check embedded` 74 of 74.
+
+## 12. Black foliage with `debug.ubershader`: the vertex port's clip position (2026-11-10) [C]
+
+* **Symptom**: Full, `debug.ubershader` on, all owned stages + table lighting: black patches in the jungle's SpeedTree bushes (rvkcompare
+  `jungle`, near-black pixels 0.12 - 0.18 % vs 0 % with the translated shaders). It needs the owned SpeedTrees *and* the light table:
+  owned trees draw their solid ops only with table merging (`treePlan` why 4), and only scene forms use the vertex port.
+* **Bisect**: `RVK_UBER_HALF=0` keeps it (0.13 %): not half precision. `debug.ubershader_skip=256` (vertex shaders translated): 0 %;
+  `=255` (pixel shaders translated, vertex port on): 0.29 %. `lighting.debug=prebake`: the black pixels are 0, not NaN. A pixel-shader probe
+  of every varying for non-finite values: none at the black pixels. So the colour pass never wrote them.
+* **Root cause**: the colour pass tests the z pre-pass depth for equality. The port computes the clip position in a different order of
+  operations from the translated shader (`vs_equiv.py --tol 0`: 23 of 52 requests differ, probe 0 = the position, a few ulps), and its
+  VS_Default / VS_DefaultZPass modules are not bit-identical to each other either. A geometry's two passes do not always take the same form:
+  an owned z op (port) meets a composed-late colour op (translated base / capture variant; `native: owned trees` "composed late") and
+  vice versa. Each such pair fails the equality test and leaves the HDR target's clear colour. Making the port's position chain
+  `precise` only cut it to 0.04 %: the port-vs-translated pairs remain.
+* **Fix** (`shader::uberVertexHlsl(..., translatedPosition)`, `RVK_UBER_TRPOS` in `ge_default.vert.hlsl`): the module also holds the
+  translator's text of the same bytecode and options in `namespace rvkTr`. Its entry takes the translator's input struct (float4 per dcl
+  register, as the pipeline fetches them), hands the port its copies, and outputs the TRANSLATED clip position. The port's own position
+  still feeds vViewPos and the world position. That position is bit-identical to every translated form of the request by construction;
+  the rest of the translated program is dead code. The header include goes through `material/rvk_draw.hlsli`, the path the port's own
+  include takes, because DXC's `#pragma once` compares those names. The uber cache key now hashes the assembled text.
+  `RVK_UBER_VS_OWNPOS=1` = the port's own position (the A/B).
+* **Found on the way**: `RVK_MV_CL_COUNT` (the light-table slots) comes from the translated CTAB, `min(3, registers / 4)`. A 3-light shader
+  without `XFX_PNTLIGHTSHADOWS` keeps only 10 / 11 of its 12 registers, which gives 2 slots, and the ubershader's light loop then indexed
+  `rvk_clSrc` / `rvk_clK` past their end. `rvkUberPointReg` (ge_default.hlsli) now gives such a slot the engine's registers, as the translated
+  shader does. `dxil-check uber` has a `cluster2+gi+sceneview` variant for this case.
+* **Numbers** (rvkcompare `jungle`, player defaults + all owned stages + `lighting.clustered` / `full_lit`, near-black = max channel < 6
+  within the letterbox, 3 burst frames): Vulkan before 0.12 %, after 0.000 % (GPU-AV run 0.0004 %), translated 0.000 %; D3D12 after
+  0.000 %, translated 0.000 %; negative control `RVK_UBER_VS_OWNPOS=1` (same build): Vulkan 0.51 %, D3D12 0.51 %. Ubershader share unchanged (static / skinned / SpeedTree vertex: owned
+  uber 100 %).
+* **Gates**: rvk_tests 328 / 0 failures; `dxil-check embedded` 89 / 89, `uber` (census jungle + town) 3441 / 3441 (also `--half`);
+  `ubershader_check.py` 259 EQUAL (float, `--half --tol 0.02`, `--scene2`); `vs_equiv.py` 52 EQUAL; rvk_rhitest PASS on both backends (the scene
+  corpus uber-VS cases now build the run-time form); rvk_d3d9test `--validation` PASS on Vulkan and D3D12.
+* **Lesson**: a port that replaces one of a depth-equal pair must reproduce the other pass's position bit for bit, not within a
+  tolerance. `vs_equiv.py`'s default tolerance hid it (`--tol 0` shows it).

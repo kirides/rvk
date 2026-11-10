@@ -370,6 +370,8 @@ int cmdDxilUber(int argc, char** argv) {
         // scene ABI v2 (RVK_SCENE_VIEW: the view windows / posFix / c5.xyz from the view table, frame-ownership.md 7.19)
         {"plain+sceneview", "", true, true},
         {"gbuffer+motion+sceneview", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_GBUFFER 1\n#define RVK_MV_MOTION 1\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n", true, true},
+        // the light table (RVK_MV_CLUSTER; enh/material_variant.cpp): 2 slots = a 3-light shader whose CTAB trimmed the last light's registers (shader-permutations.md 12)
+        {"cluster2+gi+sceneview", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG 25\n#define RVK_MV_CL_COUNT 2\n#define RVK_MV_CL_PARAM 4\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n", true, true},
     };
     constexpr std::size_t kN = std::size(kVariants);
     std::vector<Item> items(reqs.size() * kN);

@@ -1753,19 +1753,34 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         for (const auto& d : dec.program.inputs) {
             if (d.reg.type == shader::RegType::Input) inputs.push_back({d.usage, d.usageIndex, d.reg.index});
         }
-        glsl = shader::uberVertexHlsl(src.file, src.entry, src.macros, inputs, options.sceneRecord, options.sceneView, options.uberDefines);
+        // the clip position from the translated shader of the same options (bit-identical to the translated forms the same geometry's other pass may take:
+        // the depth-equal test of the colour pass after the z pre-pass, shader-permutations.md 12)
+        shader::TranslateOptions to = options;
+        to.uber = false;
+        to.uberDefines.clear();
+        const auto translated = shader::toHlsl(dec.program, to);
+        if (!translated.ok()) return rhi::ShaderModule::None;
+        static const bool ownPosition = [] {  // RVK_UBER_VS_OWNPOS=1: the port's own position (the A/B / negative control of the bridge)
+            char v[8];
+            return GetEnvironmentVariableA("RVK_UBER_VS_OWNPOS", v, sizeof v) > 0 && v[0] == '1';
+        }();
+        glsl = shader::uberVertexHlsl(src.file, src.entry, src.macros, inputs, options.sceneRecord, options.sceneView, options.uberDefines,
+                                      ownPosition ? std::string_view() : std::string_view(translated.hlsl));
     } else {
         glsl = shader::uberPixelHlsl(src.file, src.entry, src.macros, options.uberDefines, options.sceneRecord, options.sceneView);
     }
     if (glsl.empty()) return rhi::ShaderModule::None;
     // S-2: the lit core in real half precision (ge_default.frag.hlsl `rvkh`) when the device has 16-bit arithmetic; float otherwise (RVK_UBER_HALF=0 forces it)
     const bool half16 = !vertex && uberHalf();
+    // the cache key: the embedded sources + the assembled text (the request's defines, the translated part of a vertex shader: a translator change moves it too)
+    std::uint64_t textHash = shader::uberHlslHash();
+    for (const char c : glsl) textHash = (textHash ^ static_cast<std::uint8_t>(c)) * 1099511628211ull;
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
         options_.cacheDir.empty()
             ? std::filesystem::path()
             : options_.cacheDir / "spirv" /
-                  std::format("{:016x}_{}_u{:08x}{}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)), half16 ? "h" : "");
+                  std::format("{:016x}_{}_u{:08x}{}.spv", s.hash, tag, static_cast<std::uint32_t>(textHash ^ (textHash >> 32)), half16 ? "h" : "");
     if (options_.backend == rhi::Backend::D3D12) {
         return dxilModule(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16);
     }
