@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -14,6 +16,7 @@
 #include "engine/scene_table.h"
 #include "enh/material_variant.h"
 #include "enh/rhi_scope.h"
+#include "enh/tree_wind.h"
 #include "shader/embedded.h"
 #include "engine/memread.h"
 #include "shader/pass_push.h"
@@ -35,6 +38,9 @@ constexpr std::uint64_t kChurnWindow = 90;   // frames: a range with kChurnLimit
 constexpr std::uint32_t kChurnLimit = 48;
 constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instance stays in the TLAS after its last sighting
 constexpr std::uint32_t kMaxAnimatedTrees = 160;  // SpeedTree draws captured per frame (their captures take 32 bytes per vertex of the frame's ring)
+// F4-5 (native.tree_wind): the stages line reads these (TreeWindState)
+std::atomic<bool> g_treeWindArmed{false};
+std::atomic<std::uint64_t> g_treeWindJobs{0}, g_treeWindOwned{0};
 constexpr float kBoxMaxRadius = 2000.0f;        // world units (20 m): bigger objects (cliffs, level meshes) never become boxes
 constexpr std::uint32_t kBoxMinTriangles = 64;  // a smaller BLAS gains nothing from a 12-triangle box
 constexpr float kBoxShrink = 0.92f;             // the box's half extents relative to the object's bounds
@@ -117,6 +123,8 @@ void RtScene::activate() {
     // screen probes); AfterOpaque builds it in frames without a z pre-pass
     passId_ = dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
     passId2_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
+    // F4-5: the animated trees' wind by compute (the frame's observations of the solid pass, before a scene built at AfterOpaque takes them)
+    passId3_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "rt.tree_wind", [this](d3d9::PassContext& ctx) { recordTreeWind(ctx); }, this, -110);
     lastLog_ = std::chrono::steady_clock::now();
     iv_ = {};
     spdlog::info("rt: scene: on (TLAS cap {} instances, {} builds / {}k triangles per frame, BLAS budget {} MiB, radius {:.0f})",
@@ -130,12 +138,14 @@ void RtScene::deactivate() {
     dev_.removeDrawObserver(this);
     if (passId_ != 0) dev_.removePass(passId_);
     if (passId2_ != 0) dev_.removePass(passId2_);
-    passId_ = passId2_ = 0;
+    if (passId3_ != 0) dev_.removePass(passId3_);
+    passId_ = passId2_ = passId3_ = 0;
     logStats(true);
     tableClear();
     registry_.clear();
     dropDynamic(true, 0);
     destroySkin();
+    destroyTreeWind();
     std::vector<std::uint64_t> ids;
     ids.reserve(blas_.size());
     for (const auto& [id, b] : blas_) ids.push_back(id);
@@ -610,6 +620,11 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             for (std::uint32_t i = 0; i < n; ++i) std::memcpy(&index[i], bytes + i * src.stride + layout.instanceOffset, 4);
             fromStream = true;
         }
+    }
+    if (!fromStream && speedTree && dev.ownedReplayActive()) {
+        // F4-5: an owned tree run (Device::ownedTreeObserve) binds our identity ramp as the instance stream (no CPU copy to read back): instance i = row i by construction
+        for (std::uint32_t i = 0; i < n; ++i) index[i] = static_cast<float>(i);
+        fromStream = true;
     }
     TreeBatch treeBatch;
     const bool treeBatchOk = speedTree && animated_ && fromStream && q.phase.view == View::Main && q.phase.pass == Pass::Solid;
@@ -2188,30 +2203,96 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
     const rhi::GpuAddr indices = b.key.strip != 0 ? addrOf(*b.listIndices) : b.ibAddress.plus(static_cast<std::int64_t>(b.key.first) * (index32 ? 4u : 2u));
     if (indices.null()) return;
     const std::uint32_t slots = b.maxVertex + 1;
-    if (batch.base.null()) {
-        // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
-        // not they are all close enough: instance k always writes run k)
-        const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32 * count, 16);
-        if (a.ptr == nullptr) {
-            batch.failed = true;
-            return;
+    // F4-5 (native.tree_wind): the instance's positions by the compute pass; the capture only for a compare (composed draws: an owned run has no draw to capture)
+    // or when the compute cannot take the declaration (composed: the capture as before; owned: the rest pose, counted)
+    const bool replay = dev.ownedReplayActive();
+    const TreeLayoutEntry* tl = treeWind_ != 0 && treeWindReady() ? &treeLayout(q) : nullptr;
+    const bool compute = tl != nullptr && tl->ok && index < kMaxBatch && kInstanceDataBase + 4 * index + 3 < kInstanceDataEnd;
+    if (tl != nullptr && !compute) ++tw_.refused;
+    const bool capture = !replay && (!compute || treeWind_ == 2);
+    if (!compute && !capture) return;
+    if (capture) {
+        if (batch.base.null()) {
+            // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
+            // not they are all close enough: instance k always writes run k)
+            const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32 * count, 16);
+            if (a.ptr == nullptr) {
+                batch.failed = true;
+                return;
+            }
+            // (compare: bit 31 = the capture stores the operand the vertex shader multiplies with its view-projection, i.e. its exact world position,
+            // not the clip position turned back into the world through the inverse matrix (that round trip alone is off by up to ~0.7 units at the jungle))
+            const std::uint32_t header[4] = {slots | (compute ? 0x80000000u : 0u), 0, 0, 0};
+            std::memcpy(a.ptr, header, 16);
+            // (compare: slots the vertex shader does not write must not look written)
+            if (compute) std::memset(static_cast<std::uint8_t*>(a.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32 * count);
+            batch.base = a.addr();
+            batch.baseRw = a.rw();
+            batch.slots = slots;
+            dev.requestVertexCapture(a, q.instanced);
         }
-        const std::uint32_t header[4] = {slots, 0, 0, 0};
-        std::memcpy(a.ptr, header, 16);
-        batch.base = a.addr();
-        batch.slots = slots;
-        dev.requestVertexCapture(a, q.instanced);
+        if (batch.slots != slots) return;
     }
-    if (batch.slots != slots) return;
+    rhi::GpuAddr cap = capture ? batch.base.plus(static_cast<std::int64_t>(index) * slots * 32) : rhi::GpuAddr{};
+    rhi::GpuRef requested = capture ? batch.base.ref : rhi::GpuRef{};
+    if (compute) {
+        const rhi::GpuAddr vb = q.vertexBuffer != nullptr ? q.vertexBuffer->gpuAddress() : rhi::GpuAddr{};
+        const std::int64_t at = static_cast<std::int64_t>(q.vertexOffset) + static_cast<std::int64_t>(q.baseVertex) * q.vertexStride;
+        const rhi::RingAlloc out = !vb.null() && at >= 0 ? dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32, 16) : rhi::RingAlloc{};
+        const rhi::RingAlloc k = out.ptr != nullptr ? dev.ring(treewind::kConsts * 16u, 16) : rhi::RingAlloc{};
+        if (out.ptr == nullptr || k.ptr == nullptr) {
+            ++tw_.ringFull;
+            if (!capture) return;
+        } else {
+            if (treeJobsFrame_ != frame) {
+                treeJobs_.clear();
+                treeJobsFrame_ = frame;
+            }
+            const std::uint32_t header[4] = {slots, 0, 0, 0};
+            std::memcpy(out.ptr, header, 16);
+            auto* c = static_cast<float*>(k.ptr);
+            // c14..c29: what the draw's vertex shader reads: an owned view window (window 1 = c12..c30, served from the view table) holds them for the
+            // draw; the register file may hold an older copy then
+            const d3d9::OwnedWindows* ow = dev.ownedWindows();
+            const d3d9::OwnedWindows::Win* w1 = ow != nullptr ? &ow->w[0][1] : nullptr;
+            const bool fromWindow = w1 != nullptr && w1->kind != d3d9::OwnedWindows::Kind::None && w1->image != nullptr &&
+                                    shader::abi::kVsWindowFirst[1] <= 14 && w1->covered >= 30 - shader::abi::kVsWindowFirst[1];
+            const float* wind = fromWindow ? w1->image + 4 * (14 - shader::abi::kVsWindowFirst[1]) : dev.vsConstant(14);
+            if (fromWindow) {
+                ++tw_.windFromWindow;
+                if (std::memcmp(wind, dev.vsConstant(14), 16u * 16u) != 0) ++tw_.windRegisterStale;
+            }
+            std::memcpy(c, wind, 16u * 16u);                                                       // c14..c29
+            std::memcpy(c + 16 * 4, dev.vsConstant(kInstanceDataBase + 4 * index), 4u * 16u);  // the instance's row c32 + 4 i ..
+            TreeJob j;
+            j.vertices = vb.plus(at).ref;
+            j.consts = k.ref;
+            j.out = out.rw();
+            j.outKey = out.ref;
+            if (capture) j.ref = batch.baseRw.plus(16 + static_cast<std::int64_t>(index) * slots * 32);
+            j.slots = slots;
+            j.stride = q.vertexStride;
+            j.cls = tl->cls;
+            std::memcpy(j.words, tl->words, sizeof(j.words));
+            treeJobs_.push_back(j);
+            ++(replay ? tw_.owned : tw_.composed);
+            if (capture) ++tw_.compareJobs;
+            g_treeWindJobs.fetch_add(1, std::memory_order_relaxed);
+            if (replay) g_treeWindOwned.fetch_add(1, std::memory_order_relaxed);
+            // the scene takes the compute's output (a compare keeps the capture as its reference only)
+            cap = out.addr();
+            requested = out.ref;
+        }
+    }
     DynBlas& db = dynBlas_[in.key];
     if (db.id == 0) {
         db.id = nextDynId_++;
         db.updates = static_cast<std::uint32_t>((in.key >> 8) % 30);  // refits / rebuilds of the trees do not all fall in one frame
     }
-    DynDraw d{in.key, batch.base.plus(static_cast<std::int64_t>(index) * slots * 32), indices, slots, b.triangles, index32, false, true, b.id, batch.base.ref};
+    DynDraw d{in.key, cap, indices, slots, b.triangles, index32, false, true, b.id, requested};
     dyn_.push_back(d);
     ++dynTrees_;
-    ++iv_.treeCaptured;
+    if (capture) ++iv_.treeCaptured;
 }
 
 // the vertex layout the skinning pass reads (rt_skin.comp): stream 0 only, POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES0 UBYTE4,
@@ -2688,6 +2769,203 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         skinLogAt_ = now;
         spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame)", skinJobsTotal_, skinVerticesTotal_, n);
     }
+}
+
+// ---- F4-5: SpeedTrees in the wind by compute (native.tree_wind, docs/research/frame-ownership.md 14.17) ----------------------------------------------------
+
+TreeWindState treeWindState() { return {g_treeWindArmed.load(std::memory_order_relaxed), g_treeWindJobs.load(std::memory_order_relaxed), g_treeWindOwned.load(std::memory_order_relaxed)}; }
+
+void RtScene::setTreeWind(int mode) {
+    mode = std::clamp(mode, 0, 2);
+    if (mode == treeWind_) return;
+    static constexpr const char* kName[3] = {"off", "on", "compare"};
+    spdlog::info("rt: tree wind: {} (the animated SpeedTrees' positions {})", kName[mode], mode == 0 ? "from the vertex shader capture" : mode == 1 ? "by compute, no capture" : "by compute, compared with the capture of the composed draws");
+    treeWind_ = mode;
+    if (mode == 0) {
+        treeJobs_.clear();
+        g_treeWindArmed = false;
+    } else if (treeWindReady_) {
+        g_treeWindArmed = true;
+    }
+}
+
+// the pipeline builds in the background on first use; until it is ready the animated trees take the vertex shader captures (and stay composed)
+bool RtScene::treeWindReady() {
+    if (treeWind_ == 0 || treeWindFailed_) return false;
+    if (treeWindReady_) return true;
+    if (!treeWindStarted_) {
+        treeWindStarted_ = true;
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev == nullptr) {
+            treeWindFailed_ = true;
+            return false;
+        }
+        treeWindBuild_ = std::async(std::launch::async, [rdev]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv("rt/rt_tree_wind.comp");
+            d.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_tree_wind.comp");
+            d.name = "rt.tree_wind";
+            return rdev->createComputePipeline(d);
+        });
+        return false;
+    }
+    if (!treeWindBuild_.valid() || treeWindBuild_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    treeWindPipe_ = treeWindBuild_.get();
+    if (!treeWindPipe_) {
+        spdlog::error("rt: tree wind: the compute pipeline failed: the animated SpeedTrees keep the vertex shader captures");
+        treeWindFailed_ = true;
+        return false;
+    }
+    treeWindReady_ = true;
+    g_treeWindArmed = treeWind_ != 0;
+    spdlog::info("rt: tree wind: compute pipeline ready");
+    return true;
+}
+
+void RtScene::destroyTreeWind() {
+    treeJobs_.clear();
+    if (treeWindBuild_.valid()) treeWindBuild_.get();
+    treeWindPipe_.reset();
+    treeWindErr_.reset();
+    treeWindReady_ = treeWindStarted_ = treeWindFailed_ = false;
+    g_treeWindArmed = false;
+}
+
+const RtScene::TreeLayoutEntry& RtScene::treeLayout(const d3d9::ReplaceQuery& q) {
+    static const TreeLayoutEntry kNone{};
+    if (q.decl == nullptr || q.tag == nullptr) return kNone;
+    const std::uint32_t op = q.tag->opDesc > 1 ? 2u : q.tag->opDesc;
+    const std::uint64_t key = q.decl->id() * 4 + op;
+    auto [it, fresh] = treeLayouts_.try_emplace(key);
+    if (!fresh) return it->second;
+    std::vector<treewind::Element> els;
+    std::string d;
+    for (const d3d9::VertexElement& e : q.decl->elements()) {
+        if (e.stream == d3d9::kDeclEndStream) break;
+        els.push_back({e.stream, e.offset, e.type, e.usage, e.usageIndex});
+        d += std::format(" {}{}@{}+{}:t{}", e.usage, e.usageIndex, e.stream, e.offset, e.type);
+    }
+    const treewind::Layout l = treewind::layoutOf(els, q.tag->opDesc);
+    TreeLayoutEntry& t = it->second;
+    t.ok = l.ok && q.vertexStride >= 12 && q.vertexStride % 4 == 0 && q.vertexOffset % 4 == 0;
+    t.cls = l.cls;
+    std::memcpy(t.words, l.words, sizeof(t.words));
+    // (every word's offset must be 4-byte aligned: the compute reads words)
+    for (std::uint32_t w : t.words) {
+        if (w != treewind::kAbsent && (w & 3u) != 0) t.ok = false;
+    }
+    static constexpr const char* kCls[3] = {"wind only (branches / fronds)", "leaf mesh", "leaf cards"};
+    spdlog::info("rt: tree wind: declaration [{} ] (stride {}, op {}) -> {}", d, q.vertexStride, q.tag->opDesc,
+                 t.ok ? kCls[t.cls] : std::format("NOT taken ({})", l.why != nullptr ? l.why : "stride / offset alignment"));
+    if (treeLayouts_.size() > 4096) treeLayouts_.clear();  // (declarations live with the device: a bound, not a cache policy)
+    return t;
+}
+
+// one dispatch for the frame's tree jobs (every observation of the main view's solid pass, composed draws and owned runs), at AfterOpaque: the same frame the
+// capture would have run in, so the next frame's refit (buildDynamic: the previous frame's captures) takes the outputs unchanged
+void RtScene::recordTreeWind(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || treeJobs_.empty()) return;
+    const std::uint64_t frame = dev_.frameValue();
+    if (treeJobsFrame_ != frame || treeWind_ == 0 || !treeWindReady()) {
+        tw_.dropped += treeJobs_.size();
+        treeJobs_.clear();
+        return;
+    }
+    rhi::CommandList& cl = ctx.cmd;
+    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(treeJobs_.size(), 1024));
+    std::uint32_t chunks = 0;
+    for (std::uint32_t i = 0; i < n; ++i) chunks += (treeJobs_[i].slots + 63) / 64;
+    const rhi::RingAlloc t = dev_.ring(treewind::kHeadBytes + treewind::kJobWords * 4ull * n, 16);
+    if (t.ptr == nullptr || chunks == 0) {
+        tw_.ringFull += treeJobs_.size();
+        treeJobs_.clear();
+        return;
+    }
+    bool compare = false;
+    for (std::uint32_t i = 0; i < n && !compare; ++i) compare = !treeJobs_[i].ref.null();
+    rhi::GpuRef errAddress;
+    if (treeWind_ == 2) {
+        const std::uint32_t slot = dev_.frameSlot();
+        if (treeWindErr_ == nullptr) {
+            if (rhi::Device* rd = dev_.rhi(); rd != nullptr) {
+                treeWindErr_ = rd->createBuffer({treewind::kErrBytes * rhi::kFramesInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "rt tree wind compare"});
+            }
+            if (treeWindErr_ != nullptr && treeWindErr_->map() != nullptr) std::memset(treeWindErr_->map(), 0, treewind::kErrBytes * rhi::kFramesInFlight);
+        }
+        if (treeWindErr_ != nullptr && treeWindErr_->map() != nullptr) {
+            treeWindErr_->invalidate();
+            auto* e = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(treeWindErr_->map()) + treewind::kErrBytes * slot);
+            // this slot's previous frame has completed (Frames::begin waited for it)
+            float maxErr = 0.0f;
+            std::memcpy(&maxErr, &e[0], 4);
+            tw_.maxErr = std::max(tw_.maxErr, maxErr);
+            tw_.compared += e[1];
+            tw_.missing += e[2];
+            tw_.over01 += e[3];
+            tw_.over1 += e[4];
+            for (int c = 0; c < 3; ++c) {
+                float m = 0.0f;
+                std::memcpy(&m, &e[5 + c], 4);
+                tw_.clsMax[c] = std::max(tw_.clsMax[c], m);
+            }
+            std::memset(e, 0, treewind::kErrBytes);
+            treeWindErr_->flush();
+            if (compare) {
+                const std::array<std::uint32_t, 2> er = treeWindErr_->shaderRef(treewind::kErrBytes * slot);
+                errAddress = rhi::GpuRef::fromWords(er[0], er[1]);
+            }
+        }
+    }
+    auto* head = static_cast<std::uint32_t*>(t.ptr);
+    head[0] = n;
+    head[1] = chunks;
+    head[2] = errAddress.low();
+    head[3] = errAddress.high();
+    std::uint32_t* jobs = head + 4;
+    std::uint32_t chunk = 0;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const TreeJob& j = treeJobs_[i];
+        std::uint32_t* w = jobs + static_cast<std::size_t>(treewind::kJobWords) * i;
+        w[0] = j.vertices.low();
+        w[1] = j.vertices.high();
+        w[2] = j.consts.low();
+        w[3] = j.consts.high();
+        w[4] = j.out.low();
+        w[5] = j.out.high();
+        w[6] = j.slots;
+        w[7] = j.stride;
+        w[8] = chunk;
+        w[9] = j.cls;
+        w[10] = j.ref.low();
+        w[11] = j.ref.high();
+        std::memcpy(w + 12, j.words, sizeof(j.words));
+        chunk += (j.slots + 63) / 64;
+        tw_.vertices += j.slots;
+    }
+    {
+        d3d9::RegionScope r(dev_, "rt.tree_wind");
+        // compare: the reference captures were written by the solid pass's vertex shaders before the compute reads them
+        barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        dev_.game().captureAccess(cl, true);  // (D3D12: the capture pool in its write state)
+        cl.bindPipeline(*treeWindPipe_);
+        abi::SkinPush push{};
+        push.h.frame = 0;
+        push.table[0] = t.ref.low();
+        push.table[1] = t.ref.high();
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(chunks, 1, 1);
+        dev_.game().captureAccess(cl, false);
+        // the outputs -> a scene built at AfterOpaque of this frame (no z pre-pass) / the next frame's refits (their own barrier covers compute writes too)
+        barrier(cl, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    }
+    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(treeJobs_[i].outKey);
+    tw_.jobs += n;
+    tw_.dropped += treeJobs_.size() - n;
+    ++tw_.dispatches;
+    treeJobs_.clear();
 }
 
 // characters not seen for 2 s (all: off / deactivated): BLAS + material released
@@ -3265,6 +3543,21 @@ void RtScene::logStats(bool force) {
                      iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
                      iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, iv_.solidCaptureSkipped, dev_.game().gameCaps().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
+    }
+    if (treeWind_ != 0 || tw_.jobs != 0) {
+        // F4-5 (native.tree_wind): the animated trees' positions by compute (owned runs / composed draws), the compare with the capture (compare mode, composed draws)
+        std::string cmp;
+        if (treeWind_ == 2) {
+            cmp = std::format("; compare with the vertex shader capture: {} jobs, {} vertices compared, max error {:.5f} units (branches / fronds {:.5f}, leaf meshes {:.5f}, leaf cards {:.5f}), "
+                              "{} over 0.1, {} over 1, {} slots the capture did not write; wind registers from the draw's view window {} (register file differed {})",
+                              tw_.compareJobs, tw_.compared, tw_.maxErr, tw_.clsMax[0], tw_.clsMax[1], tw_.clsMax[2], tw_.over01, tw_.over1, tw_.missing, tw_.windFromWindow,
+                              tw_.windRegisterStale);
+        }
+        spdlog::info("rt: tree wind (5 s): {}, {} tree instances by compute ({} from owned runs, {} from composed draws), {} vertices, {} dispatches, captures requested {}, "
+                     "declarations refused {}, ring full {}, dropped {}{}",
+                     treeWind_ == 0 ? "off" : treeWindReady_ ? (treeWind_ == 2 ? "compare" : "on") : "on (pipeline pending)", tw_.jobs, tw_.owned, tw_.composed, tw_.vertices,
+                     tw_.dispatches, iv_.treeCaptured, tw_.refused, tw_.ringFull, tw_.dropped, cmp);
+        tw_ = {};
     }
     if (iv_.holes > 0) {
         spdlog::info("rt: scene: TLAS built over fewer instances than counted in {} frames of the interval ({} dynamic instances dropped out: their registry instance or BLAS was gone)",

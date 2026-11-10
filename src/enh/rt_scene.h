@@ -48,6 +48,14 @@
 
 namespace rvk::enh {
 
+// F4-5 (native.tree_wind): for the stages line of the native frame (native/static_ops_stages.cpp): the compute is armed (mode on + pipeline ready) and how many
+// tree instances it evaluated so far (the process total; the caller takes the window's difference)
+struct TreeWindState {
+    bool armed = false;
+    std::uint64_t jobs = 0, owned = 0;
+};
+TreeWindState treeWindState();
+
 class RtScene final : public d3d9::DrawObserver {
 public:
     explicit RtScene(d3d9::Device& device);
@@ -88,6 +96,15 @@ public:
     // runs the capture variant on the cascades' draws and compares both (rvk.log `rt: skin verify`). The engine's draws are untouched.
     void setGpuSkinning(bool on, bool verify);
     bool gpuSkinning() const { return skinWanted_ && skinReady_; }
+    // F4-5 (docs/research/frame-ownership.md 14.17; native.tree_wind, Full): the animated SpeedTrees' wind / sway by a compute pass instead of the vertex
+    // shader capture: per tree instance the position part of the SpeedTree vertex shader (rt_tree_wind.comp.hlsl, enh/tree_wind.h) runs over the draw's own
+    // vertex buffer with the constants of its observation (wind matrices c14..c29, the instance's row c32..c35) into a capture-layout buffer, at AfterOpaque
+    // of the frame the draw was observed in (= when the capture would have run), so the next frame's refit takes it as it took the capture. Needs no
+    // composed draw: the owned tree runs (Device::ownedTreeObserve) feed it as well, so ownedTreesOk() holds with animated trees. Mode 2 (compare) also takes
+    // the capture of the composed draws (not of owned runs) and compares both on the GPU (rvk.log `rt: tree wind (5 s)`: max error in world units).
+    void setTreeWind(int mode);
+    int treeWind() const { return treeWind_; }
+    bool treeWindActive() const { return treeWind_ != 0 && treeWindReady_; }
     // the scene captures skinned draws right now (enh/object_motion leaves them to it)
     bool capturingCharacters() const { return active_ && dynamic_; }
     // F-VAR2 (frame-ownership.md 7.45): the solid pass's capture of a character is only needed for the motion chain (enh/object_motion reads its previous positions) and as the
@@ -130,7 +147,8 @@ public:
     void observeOwned(d3d9::Device& device, const d3d9::OwnedFrame& frame) override;
     // F4-3 (frame-ownership.md 7.25b): the owned SpeedTree runs are shown to observe() through Device::ownedTreeObserve (rows in c32 + 4 i, one batch of <= 50 instances per call) as the
     // composed batches were; only the animated trees (their vertex capture needs the composed draw) keep them composed
-    bool ownedTreesOk() const override { return !animated_; }
+    // (F4-5: with native.tree_wind the animated trees need no capture either: the compute pass takes them from the owned runs' observations)
+    bool ownedTreesOk() const override { return !animated_ || treeWindActive(); }
     void bufferChanged(std::uint64_t bufferId) override;
     void textureReleased(const d3d9::Texture* texture) override;
 
@@ -350,6 +368,7 @@ private:
     void observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q);
     struct TreeBatch {  // the capture buffer of one draw (a plain draw or an instanced batch of trees)
         rhi::GpuAddr base;
+        rhi::GpuRef baseRw;  // (F4-5 compare: the capture's writable reference, D3D12)
         std::uint32_t slots = 0;
         bool failed = false;
     };
@@ -382,6 +401,41 @@ private:
     };
     bool skinReady();
     void recordSkin(rhi::CommandList& cl);
+    // F4-5 tree wind by compute (setTreeWind)
+    struct TreeJob {
+        rhi::GpuRef vertices;      // vertex slot 0 of the draw (stream offset + base vertex applied)
+        rhi::GpuRef consts;        // 20 float4: c14..c29, c32..c35 of the instance (the ring)
+        rhi::GpuRef out;           // the capture-layout buffer (the writable reference)
+        rhi::GpuRef outKey;        // ... its read reference (markVertexCaptured)
+        rhi::GpuRef ref;           // compare: the vertex shader capture of the same instance (its first vertex slot, after the header)
+        std::uint32_t slots = 0, stride = 0, cls = 0;
+        std::uint32_t words[8] = {};
+    };
+    bool treeWindReady();
+    void recordTreeWind(d3d9::PassContext& ctx);
+    // the compute's verdict on a draw's declaration (cached by declaration id x op class)
+    struct TreeLayoutEntry {
+        bool ok = false;
+        std::uint32_t cls = 0;
+        std::uint32_t words[8] = {};
+    };
+    const TreeLayoutEntry& treeLayout(const d3d9::ReplaceQuery& q);
+    std::unordered_map<std::uint64_t, TreeLayoutEntry> treeLayouts_;
+    std::vector<TreeJob> treeJobs_;
+    std::uint64_t treeJobsFrame_ = ~0ull;
+    int treeWind_ = 0;
+    bool treeWindReady_ = false, treeWindFailed_ = false, treeWindStarted_ = false;
+    std::future<std::unique_ptr<rhi::Pipeline>> treeWindBuild_;
+    std::unique_ptr<rhi::Pipeline> treeWindPipe_;
+    std::unique_ptr<rhi::Buffer> treeWindErr_;  // compare: treewind::kErrBytes per frame slot
+    std::uint32_t passId3_ = 0;
+    struct TreeWindStats {
+        std::uint64_t jobs = 0, vertices = 0, dispatches = 0, owned = 0, composed = 0, compareJobs = 0, refused = 0, ringFull = 0, dropped = 0;
+        std::uint64_t compared = 0, missing = 0, over01 = 0, over1 = 0, windFromWindow = 0, windRegisterStale = 0;
+        float clsMax[3] = {0.0f, 0.0f, 0.0f};
+        float maxErr = 0.0f;
+    } tw_;
+    void destroyTreeWind();
     bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const;
     void destroySkin();
     std::vector<SkinJob> skinJobs_;

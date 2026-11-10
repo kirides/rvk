@@ -941,6 +941,7 @@ public:
     // Window override (frame-ownership.md 7.8, F1a): the register windows `w` covers are not uploaded for the draws prepared while it is set (null =
     // none); the caller keeps the object alive until it clears it. Render thread.
     void setOwnedWindows(const OwnedWindows* w) { owned_ = w; }
+    const OwnedWindows* ownedWindows() const { return owned_; }  // (F4-5: the RT scene reads the wind registers the draw reads)
     // ---- F2b-1 scene draws (docs/research/frame-ownership.md 7.11; src/d3d9/scene_draws.cpp): the static ops' main-view z / solid draws are recorded as
     // DrawRecords and drawn by one indirect call per run of draws with the same pipeline and state. setSceneDraws = the setting (false without the
     // capabilities: logged once), setSceneIssue = the caller is issuing such draws now (native/static_ops)

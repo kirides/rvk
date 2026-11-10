@@ -45,6 +45,7 @@
 #include "core/cluster_cull.h"
 #include "core/crash_dump.h"
 #include "core/profile.h"
+#include "enh/tree_wind.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/dxc.h"
@@ -73,7 +74,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, treeWind, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -1691,6 +1692,246 @@ void testSkin(rhi::Device& dev, const Shaders& sh) {
     report(dev, name, before);
 }
 
+// F4-5 (frame-ownership.md 14.17): shaders/rt/rt_tree_wind.comp.hlsl (the RT scene's SpeedTree wind by compute) on both backends against the CPU reference of the
+// vertex shader's position (enh/tree_wind.h): three jobs of the three vertex classes (wind only, leaf mesh, leaf cards) with different declarations (offsets,
+// UBYTE4 indices, FLOAT16_2 texture coordinates) through enh::treewind::layoutOf, vertices / constants behind non-zero offsets, and the compare path: a reference
+// capture of job 0 with unwritten slots (w = 0), exact slots and slots moved by 0.5 / 2.0 units: max error, compared / missing / over 0.1 / over 1 counts
+void testTreeWind(rhi::Device& dev, const Shaders& sh) {
+    namespace tw = rvk::enh::treewind;
+    const int before = failures;
+    const char* name = "SpeedTree wind compute (rt_tree_wind, F4-5)";
+    if (!sh.treeWind.ok) {
+        check(false, "rt_tree_wind shader did not compile");
+        report(dev, name, before);
+        return;
+    }
+    std::uint32_t seed = 4711;
+    const auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f;
+    };
+    const auto sym = [&]() { return rnd() * 2.0f - 1.0f; };
+    // (normal values only: the test's texture coordinates are k / 16 and k / 8)
+    const auto toHalf = [](float x) -> std::uint16_t {
+        if (x == 0.0f) return 0;
+        std::uint32_t b = 0;
+        std::memcpy(&b, &x, 4);
+        const std::uint32_t sign = (b >> 16) & 0x8000u, e = ((b >> 23) & 0xFFu) - 127u + 15u, m = (b >> 13) & 0x3FFu;
+        return static_cast<std::uint16_t>(sign | (e << 10) | m);
+    };
+    struct Job {
+        std::uint32_t op, slots, stride;
+        std::vector<tw::Element> els;
+        tw::Layout layout;
+        std::vector<std::uint8_t> bytes;
+        std::vector<tw::Vertex> ref;
+        std::vector<float> tc;  // 4 per slot
+        float consts[tw::kConsts][4];
+    };
+    Job jobs[3];
+    // job 0: a branch (op 0): POSITION F3 @0, BLENDINDICES UBYTE4 @12, BLENDWEIGHT0 F4 @16, TEXCOORD0 F2 @32, stride 40
+    jobs[0].op = 0, jobs[0].slots = 150, jobs[0].stride = 40;
+    jobs[0].els = {{0, 0, 2, 0, 0}, {0, 12, 5, 2, 0}, {0, 16, 3, 1, 0}, {0, 32, 1, 5, 0}, {1, 0, 0, 5, 4}};
+    // job 1: a leaf mesh (op 2): POSITION F3 @0, NORMAL F3 @12, BLENDINDICES UBYTE4 @24, BLENDWEIGHT0 F4 @28, BLENDWEIGHT2 F4 @44, NORMAL1 F3 @60, NORMAL2 F3 @72,
+    // TEXCOORD0 F2 @84, stride 92
+    jobs[1].op = 2, jobs[1].slots = 70, jobs[1].stride = 92;
+    jobs[1].els = {{0, 0, 2, 0, 0}, {0, 12, 2, 3, 0}, {0, 24, 5, 2, 0}, {0, 28, 3, 1, 0}, {0, 44, 3, 1, 2}, {0, 60, 2, 3, 1}, {0, 72, 2, 3, 2}, {0, 84, 1, 5, 0}};
+    // job 2: leaf cards (op 3): POSITION F3 @0, BLENDINDICES UBYTE4 @12, BLENDWEIGHT0 F4 @16, BLENDWEIGHT1 F4 @32, BLENDWEIGHT2 F4 @48, TEXCOORD0 FLOAT16_2 @64, stride 68
+    jobs[2].op = 3, jobs[2].slots = 65, jobs[2].stride = 68;
+    jobs[2].els = {{0, 0, 2, 0, 0}, {0, 12, 5, 2, 0}, {0, 16, 3, 1, 0}, {0, 32, 3, 1, 1}, {0, 48, 3, 1, 2}, {0, 64, 15, 5, 0}};
+    const tw::Class want[3] = {tw::kWind, tw::kLeafMesh, tw::kLeafCards};
+    for (int j = 0; j < 3; ++j) {
+        Job& J = jobs[j];
+        J.layout = tw::layoutOf(J.els, J.op);
+        check(J.layout.ok && J.layout.cls == want[j], std::format("job {}: layoutOf gives ok {} class {} ({})", j, J.layout.ok, static_cast<int>(J.layout.cls), J.layout.why != nullptr ? J.layout.why : ""));
+        for (auto& c : J.consts) {
+            for (float& f : c) f = sym();
+        }
+        // wind matrices near the identity (the real ones are rotations), rows = a rotation-ish matrix with a far translation (the world's coordinates)
+        for (int m = 0; m < 3; ++m) {
+            for (int r = 0; r < 3; ++r) J.consts[3 * m + r][r] += 1.0f;
+        }
+        for (int r = 0; r < 3; ++r) {
+            J.consts[17 + r][r] += 1.5f;
+            J.consts[17 + r][3] = (rnd() - 0.5f) * 40000.0f;
+        }
+        J.bytes.assign(static_cast<std::size_t>(J.slots) * J.stride, 0);
+        J.ref.resize(J.slots);
+        J.tc.resize(static_cast<std::size_t>(J.slots) * 4);
+        for (std::uint32_t i = 0; i < J.slots; ++i) {
+            std::uint8_t* v = J.bytes.data() + static_cast<std::size_t>(i) * J.stride;
+            tw::Vertex& x = J.ref[i];
+            const auto put = [&](std::uint32_t attr, float* dst, int n) {
+                const std::uint32_t word = J.layout.words[attr];
+                for (int c = 0; c < n; ++c) dst[c] = sym() * (attr == tw::kPos ? 300.0f : 1.0f);
+                std::memcpy(v + (word & 0xFFFFu), dst, sizeof(float) * n);
+            };
+            put(tw::kPos, x.pos, 3);
+            x.pos[3] = 1.0f;
+            const std::uint8_t idx[4] = {static_cast<std::uint8_t>(i % 3), 7, 1, 200};
+            std::memcpy(v + (J.layout.words[tw::kIndices0] & 0xFFFFu), idx, 4);
+            x.indices0[0] = static_cast<float>(idx[0]);
+            put(tw::kWeights0, x.weights0, 4);
+            x.weights0[0] = rnd();
+            std::memcpy(v + (J.layout.words[tw::kWeights0] & 0xFFFFu), x.weights0, 16);
+            if (J.layout.cls != tw::kWind) {
+                put(tw::kWeights2, x.weights2, 4);
+                x.weights2[3] = static_cast<float>(i % 4);
+                std::memcpy(v + (J.layout.words[tw::kWeights2] & 0xFFFFu), x.weights2, 16);
+            }
+            if (J.layout.cls == tw::kLeafMesh) {
+                put(tw::kNormal1, x.normal1, 3);
+                put(tw::kNormal2, x.normal2, 3);
+            }
+            if (J.layout.cls == tw::kLeafCards) put(tw::kWeights1, x.weights1, 4);
+            float* tc = J.tc.data() + static_cast<std::size_t>(i) * 4;
+            tc[0] = static_cast<float>(i % 32) / 16.0f;
+            tc[1] = static_cast<float>(i % 7) / 8.0f;
+            tc[2] = 0.0f;
+            tc[3] = 1.0f;
+            const std::uint32_t tw0 = J.layout.words[tw::kTex0];
+            if ((tw0 >> 16) == 15) {
+                const std::uint16_t h[2] = {toHalf(tc[0]), toHalf(tc[1])};
+                std::memcpy(v + (tw0 & 0xFFFFu), h, 4);
+            } else {
+                std::memcpy(v + (tw0 & 0xFFFFu), tc, 8);
+            }
+        }
+    }
+    constexpr std::uint32_t kVertShift = 64, kConstShift = 48, kErrAt = 0, kRefAt = 256;
+    std::unique_ptr<rhi::Buffer> vb[3], kb[3];
+    std::uint64_t outAt[3];
+    std::uint64_t workBytes = kRefAt + 16 + static_cast<std::uint64_t>(jobs[0].slots) * 32;
+    for (int j = 0; j < 3; ++j) {
+        workBytes = (workBytes + 255) & ~255ull;
+        outAt[j] = workBytes;
+        workBytes += 16 + static_cast<std::uint64_t>(jobs[j].slots) * 32;
+    }
+    constexpr VkBufferUsageFlags kRw = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    auto table = dev.createBuffer({tw::kHeadBytes + tw::kJobWords * 4ull * 3, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi tree wind table"});
+    auto work = dev.createBuffer({workBytes, kRw, rhi::Memory::Device, "rhi tree wind work"});
+    auto fill = dev.createBuffer({workBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi tree wind fill"});
+    auto readback = dev.createBuffer({workBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi tree wind readback"});
+    auto pipeline = dev.createComputePipeline({sh.treeWind.shader(), "rhi rt tree wind"});
+    bool ok = table && work && fill && readback && pipeline;
+    for (int j = 0; j < 3 && ok; ++j) {
+        vb[j] = dev.createBuffer({kVertShift + jobs[j].bytes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi tree wind vertices"});
+        kb[j] = dev.createBuffer({kConstShift + tw::kConsts * 16ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi tree wind constants"});
+        ok = vb[j] && kb[j];
+        if (!ok) break;
+        std::memcpy(static_cast<std::uint8_t*>(vb[j]->map()) + kVertShift, jobs[j].bytes.data(), jobs[j].bytes.size());
+        std::memcpy(static_cast<std::uint8_t*>(kb[j]->map()) + kConstShift, jobs[j].consts, sizeof(jobs[j].consts));
+    }
+    if (!ok) {
+        check(false, "tree wind resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    // the CPU's expectations
+    std::vector<float> expect[3];
+    for (int j = 0; j < 3; ++j) {
+        expect[j].resize(static_cast<std::size_t>(jobs[j].slots) * 8);
+        for (std::uint32_t i = 0; i < jobs[j].slots; ++i) {
+            float w[3];
+            tw::world(jobs[j].consts, jobs[j].ref[i], jobs[j].layout.cls, w);
+            float* e = expect[j].data() + static_cast<std::size_t>(i) * 8;
+            e[0] = w[0], e[1] = w[1], e[2] = w[2], e[3] = 1.0f;
+            std::memcpy(e + 4, jobs[j].tc.data() + static_cast<std::size_t>(i) * 4, 16);
+        }
+    }
+    // the work buffer: the accumulator 0, the reference capture of job 0 (header + slots: every 5th unwritten, every 7th + 1 moved by 0.5, slot 3 by 2.0), the outputs poisoned
+    auto* f = static_cast<std::uint8_t*>(fill->map());
+    std::memset(f, 0xAB, workBytes);
+    std::memset(f + kErrAt, 0, tw::kErrBytes);
+    std::uint32_t refWritten = 0, refOver01 = 0, refOver1 = 0, refMissing = 0;
+    {
+        auto* r = reinterpret_cast<float*>(f + kRefAt + 16);
+        for (std::uint32_t i = 0; i < jobs[0].slots; ++i) {
+            float* s = r + static_cast<std::size_t>(i) * 8;
+            const float* e = expect[0].data() + static_cast<std::size_t>(i) * 8;
+            if (i % 5 == 0) {
+                std::memset(s, 0, 32);
+                ++refMissing;
+                continue;
+            }
+            const float d = i == 3 ? 2.0f : (i % 7 == 1 ? 0.5f : 0.0f);
+            s[0] = e[0], s[1] = e[1], s[2] = e[2] + d, s[3] = 1.0f;
+            s[4] = s[5] = s[6] = s[7] = 0.0f;
+            ++refWritten;
+            if (d > 0.1f) ++refOver01;
+            if (d > 1.0f) ++refOver1;
+        }
+    }
+    auto* t = static_cast<std::uint32_t*>(table->map());
+    std::memset(t, 0, tw::kHeadBytes + tw::kJobWords * 4ull * 3);
+    const auto er = work->shaderRefRw(kErrAt);
+    t[0] = 3;
+    t[2] = er[0];
+    t[3] = er[1];
+    std::uint32_t chunk = 0;
+    for (int j = 0; j < 3; ++j) {
+        std::uint32_t* w = t + 4 + tw::kJobWords * j;
+        const Job& J = jobs[j];
+        const auto vr = vb[j]->shaderRef(kVertShift), kr = kb[j]->shaderRef(kConstShift), orf = work->shaderRefRw(outAt[j]);
+        w[0] = vr[0], w[1] = vr[1], w[2] = kr[0], w[3] = kr[1], w[4] = orf[0], w[5] = orf[1];
+        w[6] = J.slots;
+        w[7] = J.stride;
+        w[8] = chunk;
+        w[9] = static_cast<std::uint32_t>(J.layout.cls);
+        if (j == 0) {
+            const auto rr = work->shaderRefRw(kRefAt + 16);
+            w[10] = rr[0], w[11] = rr[1];
+        }
+        std::memcpy(w + 12, J.layout.words, sizeof(J.layout.words));
+        chunk += (J.slots + 63) / 64;
+    }
+    t[1] = chunk;
+    struct Push {
+        std::uint32_t frame[2];
+        std::uint32_t passId, passFlags;
+        std::uint32_t table[2];
+        std::uint32_t pad[2];
+    } push{};
+    const auto tr = table->shaderRef(0);
+    push.table[0] = tr[0];
+    push.table[1] = tr[1];
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.copyBuffer(*work, 0, *fill, 0, workBytes);
+        cl.bufferBarrier(*work, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(chunk, 1, 1);
+        cl.bufferBarrier(*work, rhi::BufferAccess::IndirectRead);
+        cl.copyBuffer(*readback, 0, *work, 0, workBytes);
+    });
+    const auto* rb = static_cast<const std::uint8_t*>(readback->map());
+    int bad = 0;
+    float maxErr = 0.0f;
+    for (int j = 0; j < 3; ++j) {
+        const auto* o = reinterpret_cast<const float*>(rb + outAt[j] + 16);
+        for (std::uint32_t i = 0; i < jobs[j].slots; ++i) {
+            for (int c = 0; c < 8; ++c) {
+                const float e = expect[j][static_cast<std::size_t>(i) * 8 + c], g = o[static_cast<std::size_t>(i) * 8 + c];
+                const float err = std::abs(g - e);
+                maxErr = std::max(maxErr, err / std::max(1.0f, std::abs(e)));
+                if (!(err <= 4e-6f * std::max(1.0f, std::abs(e)) + 1e-4f) && bad++ < 6) std::printf("    job %d slot %u component %d = %f, expected %f\n", j, i, c, g, e);
+            }
+        }
+        // the header stays the caller's (the shader writes slots only), the slot past the last stays poisoned
+        const auto* past = rb + outAt[j] + 16 + static_cast<std::uint64_t>(jobs[j].slots) * 32;
+        if (outAt[j] + 16 + static_cast<std::uint64_t>(jobs[j].slots) * 32 + 4 <= workBytes) check(past[0] == 0xAB, std::format("job {} wrote past its last slot", j));
+    }
+    check(bad == 0, std::format("{} component(s) differ from the CPU reference of the SpeedTree vertex shader (max relative error {})", bad, maxErr));
+    std::uint32_t acc[8];
+    std::memcpy(acc, rb + kErrAt, sizeof(acc));
+    float gotMax = 0.0f;
+    std::memcpy(&gotMax, &acc[0], 4);
+    check(acc[1] == refWritten && acc[2] == refMissing && acc[3] == refOver01 && acc[4] == refOver1,
+          std::format("compare counts: compared {} (want {}), missing {} (want {}), over 0.1 {} (want {}), over 1 {} (want {})", acc[1], refWritten, acc[2], refMissing, acc[3], refOver01, acc[4], refOver1));
+    check(std::abs(gotMax - 2.0f) < 0.01f, std::format("compare max error {} (want 2.0)", gotMax));
+    report(dev, name, before);
+}
+
 // the pixel of src/vk/raytracing.cpp selfTest's scene (rt_query.comp's encoding); `ambiguous`: on a triangle edge (either result is valid)
 std::uint32_t expectedRay(std::uint32_t px, std::uint32_t py, std::uint32_t size, bool& ambiguous, float dz = 0.0f) {
     constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
@@ -2353,6 +2594,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testDepthZ(*dev, sh);
     testOwnedCull(*dev, sh);
     testSkin(*dev, sh);
+    testTreeWind(*dev, sh);
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
@@ -2461,6 +2703,7 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_pull.vert.hlsl", "VSMain", "vs_6_6", sh.pullVs);
     compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
     compileBoth("rt/rt_skin.comp.hlsl", "CSMain", "cs_6_6", sh.skin);
+    compileBoth("rt/rt_tree_wind.comp.hlsl", "CSMain", "cs_6_6", sh.treeWind);
     compileBoth("debug/picture_check.comp.hlsl", "CSMain", "cs_6_6", sh.picture);
     compileBoth("test/depth_z_scene.vert.hlsl", "VSMain", "vs_6_6", sh.dzVs);
     compileBoth("test/depth_z_scene.frag.hlsl", "PSMain", "ps_6_6", sh.dzPsOld);
