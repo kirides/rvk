@@ -18,8 +18,10 @@ build\RelWithDebInfo\rvk_tests.exe              # unit tests
 
 Further checks, run only when asked:
 - `build\RelWithDebInfo\rvk_vktest.exe`, plus the switches the caller names (`--passes`, `--rt`, `--hazard`, ...): GPU self-tests.
-- `build\RelWithDebInfo\rvk_d3d9test.exe`
-- `build\RelWithDebInfo\rvk_shadertool.exe corpus corpus`, plus `--tint` if asked: must translate and validate every shader (2483/2483).
+- `build\RelWithDebInfo\rvk_d3d9test.exe` (`--backend d3d12`, `--validation`, `--sync-validation` when asked)
+- `build\RelWithDebInfo\rvk_rhitest.exe` (runs Vulkan + D3D12; `--validation` = Vulkan layers + the D3D12 debug layer WITHOUT GPU-based validation; add `--gbv` only if the caller asks, it can use 10+ GB of RAM)
+- `build\RelWithDebInfo\rvk_shadertool.exe corpus corpus`, plus `--tint` / `--gi` / ... if asked: must translate and validate every shader. It runs on a thread pool (`-j N` to limit).
+- `build\RelWithDebInfo\rvk_shadertool.exe dxil-check embedded | corpus corpus [...] | uber <jsonl>`: 0 failures; for repeated runs add `--cache B:\DevDrive\rvk-work\scratch\dxcache` (unchanged items in seconds).
 - `python tools/compare_disasm.py corpus`: must stay at 100 %.
 - `python -m unittest discover -s tools/tests`
 
@@ -33,7 +35,7 @@ Further checks, run only when asked:
 
 ```
 build: OK | FAILED (n errors)
-rvk_tests: 96/96 passed | FAILED: <test names>
+rvk_tests: N/N passed (the count the binary prints) | FAILED: <test names>
 <other checks>: <result line>
 ```
 

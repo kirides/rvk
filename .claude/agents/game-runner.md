@@ -22,7 +22,10 @@ Repo: `B:\DevDrive\git\github\risen-enhanced-graphics`. Read its `CLAUDE.md` sec
 .\scripts\run.ps1 -Mode vulkan -Mods <mod> -Scenario <mod> -WaitForResult -Seconds 240 [-Validation] [-SyncValidation] [-Perf] [-PerfFrame N] [-Screenshots 'a,b'] [-Setting k=v] [-Commands ...]
 .\scripts\refcompare.ps1 [-ReferenceDir out\refcompare\<stamp>] [-Spots a,b] [-Setting k=v]
 .\scripts\water-compare.ps1 ...
+.\scripts\perf-ab.ps1 ...   # performance A/B of a setting: A B A B windows inside ONE session per scene (CLAUDE.md Performance, performance.md 34); -Restart only for restart-only settings
 ```
+
+For any "is X faster than Y" question use `perf-ab.ps1`, not repeated separate `run.ps1 -Perf` launches (launch-to-launch spread 0.04 - 0.13 ms hides the effects we measure). Report its per-arm mean / sd table and the stage-state check result.
 
 ## What to collect and report
 
