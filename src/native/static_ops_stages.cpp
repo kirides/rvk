@@ -56,10 +56,42 @@ void StaticOps::stagesReport() {
     lastDepthZ = dev_.depthZActs();
     const bool dzSetting = rs.nativeDepthZ != nullptr && rs.nativeDepthZ->asInt() != 0;
     line += stage("depth_z", dzSetting, dev_.depthZ() != d3d9::Device::DepthZ::Off, dz, std::format("{} z scopes / pixel shaders without colour output", dz));
+    // S-4: vertex pulling (native.vertex_pull; acted = owned items drawn through the pulled vertex shaders in the window)
+    static std::uint64_t lastPull = 0;
+    const std::uint64_t vp = dev_.vertexPullActs() - lastPull;
+    lastPull = dev_.vertexPullActs();
+    line += stage("vertex_pull", settingOn(rs.nativeVertexPull), dev_.vertexPull(), vp, std::format("{} items pulled", vp));
+    vertexPullReport();
     // S-1a: the HLSL ubershader (debug.ubershader; the owned-shader line holds the per-kind counts)
     const bool uberSetting = settingOn(rs.ubershader), uberCode = dev_.ubershader();
     line += std::format(" ubershader={}", uberCode == uberSetting ? (uberCode ? "active(HLSL material shaders)" : "inactive(setting off)") : "INCONSISTENT(setting vs code)");
     spdlog::info("native: stages (5 s):{}", line);
+}
+
+// S-4 (frame-ownership.md 14.12): per view kind of the persistent owned flushes: items, pulled items, indirect commands (= buckets) per flush, the pulled share of them;
+// and why items / layouts were not pulled. Logged while pulling is on, and once more in the window it went off
+void StaticOps::vertexPullReport() {
+    d3d9::Device::VertexPullStats& s = dev_.vertexPullStats();
+    // (also while off: the commands per flush of the vertex-input buckets are the A/B's baseline)
+    const bool on = dev_.vertexPull();
+    if (s.flushes[0] + s.flushes[1] + s.flushes[2] + s.flushes[3] == 0 && !on) {
+        s = {};
+        return;
+    }
+    static constexpr const char* kKind[4] = {"main z", "main solid", "other", "cascades"};
+    std::string views;
+    for (int k = 0; k < 4; ++k) {
+        if (s.flushes[k] == 0) continue;
+        const double f = static_cast<double>(s.flushes[k]);
+        views += std::format(" [{}: {} flushes, {:.1f} items / flush, {:.1f} pulled, {:.1f} indirect commands / flush ({:.1f} of them pulled; {:.1f} distinct pipelines, {:.1f} index bindings)]",
+                             kKind[k], s.flushes[k], static_cast<double>(s.items[k]) / f, static_cast<double>(s.pulled[k]) / f, static_cast<double>(s.buckets[k]) / f,
+                             static_cast<double>(s.pulledBuckets[k]) / f, static_cast<double>(s.pipelines[k]) / f, static_cast<double>(s.indexBindings[k]) / f);
+    }
+    spdlog::info("native: vertex pull (5 s): {}{}; items not pulled: no pulled pipeline {}, no fetch block {}; draw layouts pullable {}, refused (format {}, instance / user-pointer stream {}, "
+                 "no arena address {}, alignment {}, stream > 3 {}); pulled pipelines pending {}; variant modules (run): {} built, {} requests shared a module of the same text",
+                 on ? "on" : "off", views.empty() ? std::string(" (no owned flush)") : views, s.noPipeline, s.noFetch, s.layoutOk, s.layoutRefused[0], s.layoutRefused[1], s.layoutRefused[2],
+                 s.layoutRefused[3], s.layoutRefused[4], s.pipelinesPending, dev_.sharedModuleMisses(), dev_.sharedModuleHits());
+    s = {};
 }
 
 }  // namespace rvk::native

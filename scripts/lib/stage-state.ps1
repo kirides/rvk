@@ -22,6 +22,7 @@ $script:StageOfSetting = [ordered]@{
     'native.cluster_cull'          = 'cluster_cull'
     'debug.ubershader'             = 'ubershader'
     'native.depth_z'               = 'depth_z'
+    'native.vertex_pull'           = 'vertex_pull'
 }
 
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)

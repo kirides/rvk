@@ -952,6 +952,9 @@ void StaticOps::ownedMissReport(const char* where, const Op* op, const orec::Dra
     }
     if (x.alphaFunc != y.alphaFunc || x.alphaRef != y.alphaRef) add(std::format("alpha {} {} vs {} {}", x.alphaFunc, x.alphaRef, y.alphaFunc, y.alphaRef));
     if (x.pad[0] != y.pad[0] || x.pad[1] != y.pad[1]) add(std::format("pad ({}, {}) vs ({}, {})", x.pad[0], x.pad[1], y.pad[0], y.pad[1]));
+    if (const shader::abi::VertexFetch* fs = tab.fetchShadow(); fs != nullptr && std::memcmp(&fs[slot], &fresh.fetch, sizeof(fresh.fetch)) != 0) {
+        add(std::format("vertex fetch (valid {:#x} vs {:#x}, base vertex {} vs {})", fs[slot].valid, fresh.fetch.valid, fs[slot].baseVertex, fresh.fetch.baseVertex));
+    }
     spdlog::error("native: owned persistent: MISS ({}): the persistent draw of {} (slot {}, material '{}') differs from a fresh derivation although nothing it was derived from moved: {}", where,
                   op != nullptr ? describe(*op) : std::string("an op"), slot, r.tagMaterialName != nullptr ? r.tagMaterialName : "", what.empty() ? "(bytes)" : what);
 }
@@ -1066,7 +1069,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             }
             if (scrub) {
                 ++S.scrubbed;
-                if (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) {
+                if (!tab.holds(P.handle.slot, out.rec, out.blk, &out.fetch)) {
                     ++S.scrubMiss;
                     ownedMissReport("rolling scrub", &op, r, out, P.handle.slot);
                 }
@@ -1077,12 +1080,12 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             // looks up to date from now on): the check frames / the scrub must find it (MISS)
             bool skipWrite = false;
             if (!scrub && P.valid && persistInjectEvery_ != 0 &&
-                (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) &&
+                !tab.holds(P.handle.slot, out.rec, out.blk, &out.fetch) &&
                 ++persistInjectSeen_ % persistInjectEvery_ == 0) {
                 skipWrite = true;
                 ++S.injected;
             }
-            if (!skipWrite && tab.write(P.handle.slot, out.rec, out.blk) && !scrub) ++S.derivedChanged;
+            if (!skipWrite && tab.write(P.handle.slot, out.rec, out.blk, &out.fetch) && !scrub) ++S.derivedChanged;
             P.valid = true;
             P.epoch = epoch;
             P.sig = sig;
@@ -1140,7 +1143,7 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
         return;
     }
     ++S.checkCompared;
-    if (std::memcmp(&tab.record(P.handle.slot), &fresh.rec, sizeof(fresh.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &fresh.blk, sizeof(fresh.blk)) != 0) {
+    if (!tab.holds(P.handle.slot, fresh.rec, fresh.blk, &fresh.fetch)) {
         ++S.checkMiss;
         ownedMissReport("check frame", op_, r, fresh, P.handle.slot);
     }

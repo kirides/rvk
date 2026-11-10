@@ -298,6 +298,12 @@ void HalDevice::applyStaticOps() {
         // frame-ownership.md 7.21: F2c-4a persistent owned draws (scene ABI v2 + the view table)
         staticOps_->setOwnedPersistent(ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent));
         {
+            // frame-ownership.md 14.12: S-4 vertex pulling of the persistent owned draws (their slots get vertex fetch blocks, the draws' pulled vertex shaders are built)
+            const bool pull = ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent) && on(rs.nativeVertexPull);
+            if (pull != dev_.vertexPull()) spdlog::info("native: vertex pull {}", pull ? "on" : "off");
+            dev_.setVertexPull(pull);
+        }
+        {
             // frame-ownership.md 7.25: F4-2 / F4-3 owned SpeedTrees (the persistent blocks + scene ABI v2; the trees' v2 scene forms are built while it is on)
             const bool trees = on(rs.nativeOwnedTrees) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
             dev_.setSceneTrees(trees);
@@ -715,7 +721,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

@@ -44,6 +44,11 @@ public:
     rhi::GpuRef zeroRef() const { return zero_ ? zero_->ref() : rhi::GpuRef{}; }
     rhi::GpuRef recordsRef() const { return records_ ? records_->ref() : rhi::GpuRef{}; }
     rhi::GpuRef blocksRef() const { return blocks_ ? blocks_->ref() : rhi::GpuRef{}; }
+    // S-4 (native.vertex_pull, frame-ownership.md 14.12): the VertexFetch table parallel to the records (slot i at + i * kVertexFetchSize), created on the first
+    // ensureFetch (only while pulling is on: no table nobody reads); null / zero until then
+    bool ensureFetch(d3d9::Device& dev);
+    rhi::GpuRef fetchRef() const { return fetch_ && fetch_->ready() ? fetch_->ref() : rhi::GpuRef{}; }
+    const shader::abi::VertexFetch* fetchShadow() const { return fetch_ && fetch_->ready() ? fetch_->shadow().data() : nullptr; }
     // the DrawBlock address a record of `slot` holds
     rhi::GpuRef blockRef(std::uint32_t slot) const { return blocks_->ref().plus(static_cast<std::int64_t>(slot) * static_cast<std::int64_t>(sizeof(shader::abi::DrawBlock))); }
 
@@ -51,8 +56,11 @@ public:
     std::uint32_t alloc();
     // the slot goes back after the deferral (idempotent per slot is the caller's duty: a slot is released once)
     void release(std::uint32_t slot);
-    // writes the slot's record + block; true = the bytes differ from what the slot held (marked for upload)
-    bool write(std::uint32_t slot, const shader::abi::DrawRecord& rec, const shader::abi::DrawBlock& blk);
+    // writes the slot's record + block (+ its vertex fetch block: null = zeros; ignored while the fetch table does not exist); true = the bytes differ from what the
+    // slot held (marked for upload)
+    bool write(std::uint32_t slot, const shader::abi::DrawRecord& rec, const shader::abi::DrawBlock& blk, const shader::abi::VertexFetch* fetch = nullptr);
+    // the slot holds exactly these bytes (record, block, and the fetch block where the table exists; null = zeros)
+    bool holds(std::uint32_t slot, const shader::abi::DrawRecord& rec, const shader::abi::DrawBlock& blk, const shader::abi::VertexFetch* fetch = nullptr) const;
     // the CPU twins of a slot (what the GPU reads once uploaded)
     const shader::abi::DrawRecord& record(std::uint32_t slot) const { return records_->shadow()[slot]; }
     const shader::abi::DrawRecord* recordsShadow() const { return records_ ? records_->shadow().data() : nullptr; }
@@ -76,6 +84,8 @@ private:
     std::unique_ptr<GpuTable<shader::abi::DrawRecord>> records_;
     std::unique_ptr<GpuTable<shader::abi::DrawBlock>> blocks_;
     std::unique_ptr<GpuTable<ZeroBlock>> zero_;
+    std::unique_ptr<GpuTable<shader::abi::VertexFetch>> fetch_;
+    bool fetchFailed_ = false;
     std::vector<std::uint8_t> liveFlags_;
     std::vector<std::uint32_t> free_;
     struct Pending {

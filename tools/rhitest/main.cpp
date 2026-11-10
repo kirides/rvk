@@ -69,7 +69,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -680,6 +680,161 @@ void testIndirectPull(rhi::Device& dev, const Shaders& sh) {
         }
     }
     check(std::memcmp(readbacks[0]->map(), readbacks[1]->map(), static_cast<std::size_t>(pitch) * kTarget) == 0, "count / no-count images differ");
+    report(dev, name, before);
+}
+
+// S-4 (frame-ownership.md 14.12): the pulled scene vertex shaders' conversions (shaders/include/rvk_pull.hlsli, rvkPullAttr) against the input assembler, BIT FOR BIT,
+// for every format the renderer pulls and every code of the 8- and 16-bit formats: 65,536 vertices of 88 bytes (13 attributes, one per format), each read once by the
+// pipeline's vertex input (the D3D9 formats as d3d9/convert.cpp maps them, so D3D12 reads UBYTE4 as UNORM like the game) and once through a VertexFetch block of the same
+// buffer. The z pre-pass and the colour pass test the depth for equality: a pulled owned z draw and an input-assembler colour draw of the same geometry must get the same
+// inputs, not close ones. Half NaNs are counted apart (a NaN payload may be quietened by either path; the engine's data has none).
+void testPullFormats(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "vertex pulling = the input assembler, bit for bit (S-4)";
+    if (!sh.pullVs.ok || !sh.vtxPs.ok) {
+        check(false, "pull shaders did not compile");
+        report(dev, name, before);
+        return;
+    }
+    constexpr std::uint32_t kVerts = 65536, kStride = 88, kAttrs = 13;
+    using PF = shader::abi::PullFormat;
+    const bool d3d12 = dev.caps().backend == rhi::Backend::D3D12;
+    struct Attr {
+        VkFormat format;
+        std::uint32_t offset;
+        PF pull;
+        const char* name;
+    };
+    const Attr attrs[kAttrs] = {
+        {VK_FORMAT_R32G32B32A32_SFLOAT, 0, PF::Float4, "FLOAT4"},
+        {VK_FORMAT_B8G8R8A8_UNORM, 16, PF::Bgra8Unorm, "D3DCOLOR"},
+        {VK_FORMAT_R8G8B8A8_USCALED, 20, d3d12 ? PF::Rgba8Unorm : PF::Rgba8Uscaled, d3d12 ? "UBYTE4 (D3D12: UNORM)" : "UBYTE4"},
+        {VK_FORMAT_R8G8B8A8_UNORM, 24, PF::Rgba8Unorm, "UBYTE4N"},
+        {VK_FORMAT_R16G16_SNORM, 28, PF::Rg16Snorm, "SHORT2N"},
+        {VK_FORMAT_R16G16B16A16_SNORM, 32, PF::Rgba16Snorm, "SHORT4N"},
+        {VK_FORMAT_R16G16_UNORM, 40, PF::Rg16Unorm, "USHORT2N"},
+        {VK_FORMAT_R16G16B16A16_UNORM, 44, PF::Rgba16Unorm, "USHORT4N"},
+        {VK_FORMAT_R16G16_SFLOAT, 52, PF::Rg16Float, "FLOAT16_2"},
+        {VK_FORMAT_R16G16B16A16_SFLOAT, 56, PF::Rgba16Float, "FLOAT16_4"},
+        {VK_FORMAT_R32G32B32_SFLOAT, 64, PF::Float3, "FLOAT3"},
+        {VK_FORMAT_R32G32_SFLOAT, 76, PF::Float2, "FLOAT2"},
+        {VK_FORMAT_R32_SFLOAT, 84, PF::Float1, "FLOAT1"},
+    };
+    std::vector<std::uint8_t> verts(static_cast<std::size_t>(kVerts + 2) * kStride, 0);
+    std::uint32_t seed = 4242;
+    const auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return seed;
+    };
+    for (std::uint32_t v = 0; v < kVerts + 2; ++v) {
+        std::uint8_t* p = verts.data() + static_cast<std::size_t>(v) * kStride;
+        // floats: random bits (finite, of every exponent); 8-bit channels: (v + 64 c) & 255 = every code in every channel; 16-bit channels: (v + 16384 c) & 0xffff
+        for (std::uint32_t o : {0u, 4u, 8u, 12u, 64u, 68u, 72u, 76u, 80u, 84u}) {
+            std::uint32_t bits = rnd();
+            if (((bits >> 23) & 0xffu) == 0xffu) bits ^= 0x00800000u;  // (no Inf / NaN)
+            std::memcpy(p + o, &bits, 4);
+        }
+        for (std::uint32_t o : {16u, 20u, 24u}) {
+            for (std::uint32_t c = 0; c < 4; ++c) p[o + c] = static_cast<std::uint8_t>((v + 64 * c) & 255);
+        }
+        for (std::uint32_t o : {28u, 40u, 52u}) {
+            for (std::uint32_t c = 0; c < 2; ++c) {
+                const std::uint16_t w = static_cast<std::uint16_t>((v + 16384 * c) & 0xffff);
+                std::memcpy(p + o + 2 * c, &w, 2);
+            }
+        }
+        for (std::uint32_t o : {32u, 44u, 56u}) {
+            for (std::uint32_t c = 0; c < 4; ++c) {
+                const std::uint16_t w = static_cast<std::uint16_t>((v + 16384 * c) & 0xffff);
+                std::memcpy(p + o + 2 * c, &w, 2);
+            }
+        }
+    }
+    constexpr std::uint64_t kOutBytes = static_cast<std::uint64_t>(kVerts) * 2 * kAttrs * 16;
+    auto vb = dev.createBuffer({verts.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi pull vertices"});
+    auto fetchBuf = dev.createBuffer({sizeof(shader::abi::VertexFetch), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi pull fetch block"});
+    auto out = dev.createBuffer({kOutBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi pull out"});
+    auto readback = dev.createBuffer({kOutBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi pull readback"});
+    auto target = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {16, 16, 1}, 1, 1, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, "rhi pull target"});
+    VkVertexInputAttributeDescription va[kAttrs];
+    for (std::uint32_t k = 0; k < kAttrs; ++k) va[k] = {k, 0, attrs[k].format, attrs[k].offset};
+    const VkVertexInputBindingDescription binding{0, kStride, VK_VERTEX_INPUT_RATE_VERTEX};
+    rhi::GraphicsPipelineDesc gd;
+    gd.vs = sh.pullVs.shader();
+    gd.ps = sh.vtxPs.shader();
+    gd.colorFormats[0] = VK_FORMAT_R8G8B8A8_UNORM;
+    gd.vertexBindings = {&binding, 1};
+    gd.vertexAttributes = {va, kAttrs};
+    gd.name = "rhi pull formats";
+    auto pipeline = dev.createGraphicsPipeline(gd);
+    if (!vb || !fetchBuf || !out || !readback || !target || !pipeline) {
+        check(false, "pull resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    std::memcpy(vb->map(), verts.data(), verts.size());
+    shader::abi::VertexFetch f{};
+    const auto vr = vb->shaderRef(0);
+    f.ref[0][0] = vr[0];
+    f.ref[0][1] = vr[1];
+    f.stride[0] = kStride;
+    f.baseVertex = 0;
+    f.valid = shader::abi::kVertexFetchValid;
+    for (std::uint32_t k = 0; k < kAttrs; ++k) f.attr[k] = attrs[k].offset | 0u << shader::abi::kPullAttrStreamShift | static_cast<std::uint32_t>(attrs[k].pull) << shader::abi::kPullAttrFormatShift;
+    std::memcpy(fetchBuf->map(), &f, sizeof(f));
+    struct Push {
+        std::uint32_t fetch[2], out[2], count, pad[3];
+    } push{};
+    const auto fr = fetchBuf->shaderRef(0), orf = out->shaderRefRw(0);
+    push.fetch[0] = fr[0], push.fetch[1] = fr[1], push.out[0] = orf[0], push.out[1] = orf[1], push.count = kVerts;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.bufferBarrier(*out, rhi::BufferAccess::ShaderWrite);
+        cl.transition(*target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        rhi::RenderingInfo ri;
+        ri.colorCount = 1;
+        ri.color[0].texture = target.get();
+        ri.color[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ri.width = ri.height = 16;
+        cl.beginRendering(ri);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        rhi::Buffer* buffers[1] = {vb.get()};
+        const std::uint64_t offsets[1] = {0};
+        const std::uint32_t strides[1] = {kStride};
+        cl.setVertexBuffers(0, buffers, offsets, strides);
+        cl.draw(kVerts + 2, 1, 0, 0);  // (a multiple of 3: every vertex is shaded)
+        cl.endRendering();
+        cl.bufferBarrier(*out, rhi::BufferAccess::IndirectRead);
+        cl.copyBuffer(*readback, 0, *out, 0, kOutBytes);
+    });
+    const auto* o = static_cast<const std::uint32_t*>(readback->map());
+    std::uint64_t bad[kAttrs] = {}, nan[kAttrs] = {};
+    std::string first[kAttrs];
+    for (std::uint32_t v = 0; v < kVerts; ++v) {
+        for (std::uint32_t k = 0; k < kAttrs; ++k) {
+            const std::uint32_t* ia = o + (static_cast<std::size_t>(v) * 2 * kAttrs + k) * 4;
+            const std::uint32_t* pu = o + (static_cast<std::size_t>(v) * 2 * kAttrs + kAttrs + k) * 4;
+            if (std::memcmp(ia, pu, 16) == 0) continue;
+            bool bothNan = true;
+            for (int c = 0; c < 4; ++c) {
+                if (ia[c] == pu[c]) continue;
+                const bool na = (ia[c] & 0x7f800000u) == 0x7f800000u && (ia[c] & 0x7fffffu) != 0, nb = (pu[c] & 0x7f800000u) == 0x7f800000u && (pu[c] & 0x7fffffu) != 0;
+                bothNan = bothNan && na && nb;
+            }
+            if (bothNan && (attrs[k].pull == PF::Rg16Float || attrs[k].pull == PF::Rgba16Float)) {
+                ++nan[k];
+                continue;
+            }
+            if (bad[k]++ == 0) {
+                first[k] = std::format("vertex {}: input assembler {:08x} {:08x} {:08x} {:08x}, pulled {:08x} {:08x} {:08x} {:08x}", v, ia[0], ia[1], ia[2], ia[3], pu[0], pu[1], pu[2], pu[3]);
+            }
+        }
+    }
+    for (std::uint32_t k = 0; k < kAttrs; ++k) {
+        std::printf("%s  %-22s %llu of %u vertices differ%s%s\n", tag(dev).c_str(), attrs[k].name, static_cast<unsigned long long>(bad[k]), kVerts,
+                    nan[k] != 0 ? std::format(" ({} NaN codes with another payload, not counted)", nan[k]).c_str() : "", bad[k] != 0 ? (" - first: " + first[k]).c_str() : "");
+        check(bad[k] == 0, std::format("{}: {} vertices differ ({})", attrs[k].name, bad[k], first[k]));
+    }
     report(dev, name, before);
 }
 
@@ -2188,6 +2343,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
     testIndirectPull(*dev, sh);
+    testPullFormats(*dev, sh);
     testOwnedCompact(*dev, sh);
     testPictureCheck(*dev, sh);
     testDepthZ(*dev, sh);
@@ -2288,6 +2444,7 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_vtx.frag.hlsl", "PSMain", "ps_6_6", sh.vtxPs);
     compileBoth("test/rhi_ind.comp.hlsl", "CSMain", "cs_6_6", sh.indCs);
     compileBoth("test/rhi_ind.vert.hlsl", "VSMain", "vs_6_6", sh.indVs);
+    compileBoth("test/rhi_pull.vert.hlsl", "VSMain", "vs_6_6", sh.pullVs);
     compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
     compileBoth("rt/rt_skin.comp.hlsl", "CSMain", "cs_6_6", sh.skin);
     compileBoth("debug/picture_check.comp.hlsl", "CSMain", "cs_6_6", sh.picture);

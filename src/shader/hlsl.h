@@ -32,5 +32,7 @@ HlslResult toHlsl(const Program& program, const TranslateOptions& options = {});
 
 // a hash of the embedded HLSL the translated shaders include (rvk_draw / rvk_abi / rvk_common / rvk_oct): part of the device's SPIR-V cache keys
 std::uint64_t hlslIncludesHash();
+// S-4: a hash of shaders/include/rvk_pull.hlsli (only the pulled vertex shaders include it: their cache tags carry it, the other forms' keys stay)
+std::uint32_t hlslPullHash();
 
 }  // namespace rvk::shader

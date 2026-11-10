@@ -182,6 +182,7 @@ template class GpuTable<shader::abi::ViewBlock2>;  // the view table (view_table
 template class GpuTable<BoneRecord>;  // the bone table (bone_table.cpp)
 template class GpuTable<shader::abi::DrawRecord>;  // the persistent draw records / blocks (draw_record_table.cpp)
 template class GpuTable<shader::abi::DrawBlock>;
+template class GpuTable<shader::abi::VertexFetch>;  // S-4: the persistent draws' vertex fetch blocks (draw_record_table.cpp)
 template class GpuTable<ZeroBlock>;
 template class GpuTable<ClusterRow>;  // the cluster table (cluster_table.cpp, F5-1)
 

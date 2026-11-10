@@ -131,9 +131,11 @@ std::string uberTranslatedPart(std::string_view translated) {
 }
 
 std::string uberVertexHlsl(std::string_view effectFile, std::string_view entry, const MacroList& macros, std::span<const VertexInput> inputs, bool sceneRecord,
-                           bool sceneView, std::string_view extraDefines, std::string_view translatedPosition) {
+                           bool sceneView, std::string_view extraDefines, std::string_view translatedPosition, bool pull) {
     (void)effectFile;  // the vertex shaders of both effect files are ge_default_vs.fx
+    if (pull && translatedPosition.empty()) return {};
     std::string out = "// HLSL material vertex shader (shaders/material/ge_default.vert.hlsl) built from the engine's macros + the bytecode's input declarations\n";
+    if (pull) out += "#define RVK_UBER_PULL 1\n";
     if (!translatedPosition.empty()) {
         const std::string part = uberTranslatedPart(translatedPosition);
         if (part.empty()) return {};
@@ -158,7 +160,7 @@ std::string uberVertexHlsl(std::string_view effectFile, std::string_view entry, 
 std::uint64_t uberHlslHash() {
     std::uint64_t h = 1469598103934665603ull;
     for (const char* name : {"material/ge_default.frag.hlsl", "material/ge_default.vert.hlsl", "material/ge_default.hlsli", "include/rvk_material_variant.hlsli", "include/rvk_gi.hlsli",
-                             "include/rvk_draw.hlsli", "include/rvk_abi.hlsli", "include/rvk_common.hlsli", "include/rvk_oct.hlsli"}) {
+                             "include/rvk_draw.hlsli", "include/rvk_abi.hlsli", "include/rvk_common.hlsli", "include/rvk_oct.hlsli", "include/rvk_pull.hlsli"}) {
         for (const char c : embedded::hlslSource(name)) {
             h ^= static_cast<std::uint8_t>(c);
             h *= 1099511628211ull;

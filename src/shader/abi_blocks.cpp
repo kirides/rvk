@@ -208,6 +208,10 @@ FM(uint4, vsw01, 1, vsWin) FO(uint4, vsw23, 1, offsetof(C, vsWin) + 16) FM(uint4
 FM(uint4, drawPrev, 1, draw) FM(uint4, ids, 1, drawId) FM(uint4, slots, 1, materialSlot) FM(uint4, reserved, 1, args)
 END(RvkDrawRecord, Ptr, abi::DrawRecord)
 
+BLOCK(RvkVertexFetch, Raw, abi::VertexFetch)
+FM(uint4, ref01, 1, ref) FO(uint4, ref23, 1, offsetof(C, ref) + 16) F(uint4, stride, 1) F(int, baseVertex, 1) F(uint, valid, 1) F(uint2, pad, 1) F(uint4, attr, 4)
+END(RvkVertexFetch, Raw, abi::VertexFetch)
+
 BLOCK(RvkViewBlock2, Ptr, abi::ViewBlock2)
 F(float4, vs0, 12) F(float4, ps0, 5) F(float4, vs1, 19) F(float4, posFix, 1) F(float4, c5, 1) F(uint4, flags, 1) F(uint4, reserved, 1)
 END(RvkViewBlock2, Ptr, abi::ViewBlock2)
@@ -338,7 +342,7 @@ std::span<const Block> blocks() {
         REG(PostGlowParams, Ptr, native::PostGlowParams) REG(PostBloomParams, Ptr, native::PostBloomParams) REG(PostDofMidParams, Ptr, native::PostDofMidParams)
         REG(WaterRtParams, Ptr, enh::WaterRtParams) REG(WaterBlockData, Ptr, enh::WaterBlock) REG(ShadowBlock, Ptr, enh::ShadowBlock)
         REG(RtShadowParams, Ptr, enh::RtShadowParams) REG(RvkLight, Ptr, enh::GpuLight)
-        REG(RvkInstance, Raw, gpuscene::InstanceRecord) REG(RvkMeshPart, Raw, gpuscene::PartRecord) REG(RvkClusterRow, Raw, gpuscene::ClusterRow)
+        REG(RvkInstance, Raw, gpuscene::InstanceRecord) REG(RvkMeshPart, Raw, gpuscene::PartRecord) REG(RvkClusterRow, Raw, gpuscene::ClusterRow) REG(RvkVertexFetch, Raw, abi::VertexFetch)
     };
 #undef REG
     return kBlocks;

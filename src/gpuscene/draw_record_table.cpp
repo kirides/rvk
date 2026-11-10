@@ -18,6 +18,8 @@ void DrawRecordTable::destroy() {
     records_.reset();
     blocks_.reset();
     zero_.reset();
+    fetch_.reset();
+    fetchFailed_ = false;
     created_ = false;
     gpuFailed_ = false;
     used_ = liveCount_ = peak_ = 0;
@@ -53,6 +55,22 @@ bool DrawRecordTable::ensure(d3d9::Device& dev) {
     return ready();
 }
 
+bool DrawRecordTable::ensureFetch(d3d9::Device& dev) {
+    if (fetch_ && fetch_->ready()) return true;
+    if (fetchFailed_ || !ready()) return false;
+    fetch_ = std::make_unique<GpuTable<shader::abi::VertexFetch>>();
+    fetch_->init(kCapacity);
+    if (!fetch_->create(dev, kCapacity, "draw vertex fetch")) {
+        fetchFailed_ = true;
+        fetch_.reset();
+        spdlog::warn("native: draw record table: the vertex fetch table could not be created (no vertex pulling)");
+        return false;
+    }
+    // (every slot starts as zeros = not pullable; the live ones are written by their next derivation: the pull switch moves the env epoch)
+    for (std::uint32_t s = 0; s < std::max(used_, 1u); ++s) fetch_->mark(s);
+    return true;
+}
+
 std::uint32_t DrawRecordTable::alloc() {
     if (!records_ || !blocks_) return kNoSlot;
     std::uint32_t s;
@@ -72,6 +90,10 @@ std::uint32_t DrawRecordTable::alloc() {
     blocks_->shadow()[s] = {};
     records_->mark(s);
     blocks_->mark(s);
+    if (fetch_) {
+        fetch_->shadow()[s] = {};
+        fetch_->mark(s);
+    }
     ++liveCount_;
     peak_ = std::max(peak_, liveCount_);
     windowPeak_ = std::max(windowPeak_, liveCount_ + static_cast<std::uint32_t>(pending_.size()));
@@ -87,7 +109,15 @@ void DrawRecordTable::release(std::uint32_t slot) {
     pending_.push_back({slot, frame_ + rhi::kFramesInFlight + 1});
 }
 
-bool DrawRecordTable::write(std::uint32_t slot, const shader::abi::DrawRecord& rec, const shader::abi::DrawBlock& blk) {
+bool DrawRecordTable::holds(std::uint32_t slot, const shader::abi::DrawRecord& rec, const shader::abi::DrawBlock& blk, const shader::abi::VertexFetch* fetch) const {
+    if (slot >= kCapacity || !records_ || !blocks_) return false;
+    if (std::memcmp(&records_->shadow()[slot], &rec, sizeof(rec)) != 0 || std::memcmp(&blocks_->shadow()[slot], &blk, sizeof(blk)) != 0) return false;
+    if (!fetch_) return true;
+    static const shader::abi::VertexFetch kZero{};
+    return std::memcmp(&fetch_->shadow()[slot], fetch != nullptr ? fetch : &kZero, sizeof(kZero)) == 0;
+}
+
+bool DrawRecordTable::write(std::uint32_t slot, const shader::abi::DrawRecord& rec, const shader::abi::DrawBlock& blk, const shader::abi::VertexFetch* fetch) {
     if (slot >= kCapacity || !live(slot)) return false;
     auto& rs = records_->shadow()[slot];
     auto& bs = blocks_->shadow()[slot];
@@ -101,6 +131,16 @@ bool DrawRecordTable::write(std::uint32_t slot, const shader::abi::DrawRecord& r
         bs = blk;
         blocks_->mark(slot);
         changed = true;
+    }
+    if (fetch_) {
+        static const shader::abi::VertexFetch kZero{};
+        const shader::abi::VertexFetch& f = fetch != nullptr ? *fetch : kZero;
+        auto& fs = fetch_->shadow()[slot];
+        if (std::memcmp(&fs, &f, sizeof(f)) != 0) {
+            fs = f;
+            fetch_->mark(slot);
+            changed = true;
+        }
     }
     if (changed) ++stats_.writes;
     else ++stats_.same;
@@ -120,8 +160,10 @@ void DrawRecordTable::flush(d3d9::Device& dev) {
         records_->flush(dev, verify, std::max(used_, 1u));
         blocks_->flush(dev, verify, std::max(used_, 1u));
         zero_->flush(dev, false, 1);
+        if (fetch_) fetch_->flush(dev, verify, std::max(used_, 1u));
         records_->collect(dev.game(), "draw records");
         blocks_->collect(dev.game(), "draw blocks");
+        if (fetch_) fetch_->collect(dev.game(), "draw vertex fetch");
     }
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (now - lastReport_ < 5.0) return;

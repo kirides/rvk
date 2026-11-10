@@ -791,7 +791,12 @@ RvkVsOut rvkPortMain(RvkVsIn rvk_in) {
 #define RVK_CAT_(a, b) a##b
 #define RVK_CAT(a, b) RVK_CAT_(a, b)
 #define RVK_TRIN(attr) t.RVK_CAT(v, RVK_LOC_##attr)
-RvkVsOut VSMain(rvkTr::RvkVsIn t) {
+#ifdef RVK_UBER_PULL
+#define RVK_TR_BODY rvkTr::rvkVsMain  // (S-4: the translator's pulled form names its program rvkVsMain; its entry reads the inputs from the fetch block)
+#else
+#define RVK_TR_BODY rvkTr::VSMain
+#endif
+RvkVsOut rvkUberFromTr(rvkTr::RvkVsIn t) {
     RvkVsIn p = (RvkVsIn)0;
 #ifdef RVK_LOC_aPos
     p.aPos = RVK_TRIN(aPos);
@@ -863,9 +868,16 @@ RvkVsOut VSMain(rvkTr::RvkVsIn t) {
     p.rvk_sceneRef = t.rvk_sceneRef;
 #endif
     RvkVsOut o = rvkPortMain(p);
-    o.position = rvkTr::VSMain(t).position;
+    o.position = RVK_TR_BODY(t).position;
     return o;
 }
+#ifdef RVK_UBER_PULL
+// S-4 vertex pulling (frame-ownership.md 14.12): the translator's pulled entry builds its input struct from the draw's VertexFetch block (rvk_pull.hlsli);
+// the port and the translated position take it as from the input assembler
+RvkVsOut VSMain(rvkTr::RvkVsPullIn pin) { return rvkUberFromTr(rvkTr::rvkPullInputs(pin)); }
+#else
+RvkVsOut VSMain(rvkTr::RvkVsIn t) { return rvkUberFromTr(t); }
+#endif
 #else
 RvkVsOut VSMain(RvkVsIn rvk_in) { return rvkPortMain(rvk_in); }
 #endif

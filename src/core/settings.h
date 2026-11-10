@@ -507,7 +507,8 @@ struct RendererSettings {
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
-    Setting* nativeDepthZ = nullptr;           // native.depth_z: depth-only z passes (S-6: no pixel shader / colour attachment where nothing reads them; the R32F depth map derived from the hardware depth)
+    Setting* nativeVertexPull = nullptr;       // native.vertex_pull: S-4 vertex pulling of the persistent owned draws (no vertex input: one indirect command per pipeline x state x index binding)
+    Setting* nativeDepthZ = nullptr;          // native.depth_z: depth-only z passes (S-6: no pixel shader / colour attachment where nothing reads them; the R32F depth map derived from the hardware depth)
     Setting* nativeOwnPost = nullptr;         // native.own_post: the post chain on our own shaders (S-7: the luminance chain in one dispatch)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)

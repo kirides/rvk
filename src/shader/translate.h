@@ -65,6 +65,11 @@ struct TranslateOptions {
     // posFix and pixel c5.xyz come from a ViewBlock2 slot of the view table (the ref stream's y) instead of the DrawRecord's window bases / the DrawBlock;
     // c5.w from DrawRecord::c5w. Implies sceneRecord (own variant slots: a pipeline's two stages must both be v1 or both v2). Default text unchanged when false.
     bool sceneView = false;
+    // S-4 vertex pulling (docs/research/frame-ownership.md 14.12, abi.h VertexFetch, shaders/include/rvk_pull.hlsli; vertex shaders, needs sceneView): the entry
+    // VSMain takes only SV_VertexID / SV_InstanceID and the ref stream (RvkVsPullIn) and builds the translator's RvkVsIn by reading every declared input from
+    // the draw's VertexFetch block (`rvkPullInputs`); the translated program (`rvkVsMain`) is the same text as the input-assembler form's, so its clip position
+    // is bit-identical when the pulled inputs are. The UBYTE4 rescale of the D3D12 input path is kept (the fetch block reproduces what that path delivers).
+    bool pullVertices = false;
 
     // ---- variant hooks for enhancements (docs/research/injection.md 4). All empty = the default translation, unchanged.
     // GLSL right after the ABI declarations, before the generated globals: declarations and functions that constOverrides /

@@ -283,7 +283,7 @@ private:
     bool texcoord4_ = false;
 };
 
-inline constexpr std::size_t kVariantSlots = 21;  // VariantSlot::Count
+inline constexpr std::size_t kVariantSlots = 22;  // VariantSlot::Count
 
 class Shader {
 public:
@@ -371,6 +371,9 @@ enum class VariantSlot : std::uint8_t {
     SceneGbuffer2 = 18,
     SceneGbufferM2 = 19,
     SceneGbufferA2 = 20,
+    // S-4 (native.vertex_pull, frame-ownership.md 14.12): the scene ABI v2 vertex shader in its pulled form (TranslateOptions::pullVertices: inputs from the draw's
+    // VertexFetch block, no vertex input but the ref stream). Not a "+7" form: Device::variantWorker treats it by name
+    SceneVsPull = 21,
     Count
 };
 static_assert(static_cast<std::size_t>(VariantSlot::Count) == kVariantSlots, "Shader::variants / variantState sizes");
@@ -1061,6 +1064,10 @@ public:
         const Shader* ps = nullptr;
         GamePipeline scenePipeline = GamePipeline::None;  // F2b-1: the scene form's pipeline when the draw was eligible and it existed (None: drawn normally)
         GamePipeline scenePipeline2 = GamePipeline::None;  // F2c-4-0: the scene ABI v2 form's pipeline (only while setSceneViews is on; None otherwise)
+        // S-4 (native.vertex_pull): the pulled form's pipeline (scenePipeline2's pixel shader + the SceneVsPull vertex shader, the ref stream as the only vertex input)
+        // and the draw's VertexFetch block (valid = kVertexFetchValid when every input can be pulled); None / invalid = the draw keeps its vertex input
+        GamePipeline scenePipelinePull = GamePipeline::None;
+        shader::abi::VertexFetch pull{};
         rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;  // vsModule: the one drawn with (the engine's, or the billboards' fade variant); fsModule: the engine's
         // the enhancement variant decision of prepareDraw and what it was derived from (retained-signals.md 13): replayBuild re-derives the cheap inputs
         // (settings, the ambient registers, the variant's build state) and refuses the replay when the decision would differ
@@ -1178,6 +1185,7 @@ public:
     struct OwnedPersist {
         shader::abi::DrawRecord rec{};
         shader::abi::DrawBlock blk{};
+        shader::abi::VertexFetch fetch{};  // S-4: the slot's vertex fetch block (zero while native.vertex_pull is off or the draw cannot be pulled)
         std::uint64_t bucketKey = 0;
     };
     std::uint64_t ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok) const;
@@ -1235,6 +1243,7 @@ public:
         ReplaceQuery q_;
     };
     std::uint64_t ownedBucketKey(const CachedDraw& c, std::uint32_t viewSlot) const;
+    std::uint64_t ownedPullKey(const CachedDraw& c, std::uint32_t viewSlot) const;  // S-4: the bucket key of a pulled item (no vertex input)
     struct OwnedItem {
         const CachedDraw* cd = nullptr;
         std::uint64_t bucket = 0;
@@ -1255,6 +1264,27 @@ public:
     struct OwnedPersistStats {
         std::uint64_t derived = 0, refused = 0, observed = 0, buckets = 0, packets = 0, items = 0, bucketKeyClash = 0;
     } ownedPersistStats;
+    // S-4 vertex pulling (native.vertex_pull, frame-ownership.md 14.12; Full, the persistent owned draws): an owned item whose draw has a pulled pipeline and a written
+    // VertexFetch slot is bucketed without its vertex input (key = pulled pipeline x dynamic state x index binding x view slot) and drawn with vertexOffset 0
+    // (the variant modules are shared by their text only while it is on: off = the module set of before, exactly)
+    void setVertexPull(bool on) {
+        if (on != vertexPull_) ++variantEpoch_;
+        vertexPull_ = on;
+        shareModules_.store(on, std::memory_order_relaxed);
+    }
+    bool vertexPull() const { return vertexPull_; }
+    struct VertexPullStats {
+        // per view kind (0 main z, 1 main solid, 2 other, 3 cascades): flushes, items, items pulled, buckets (= indirect commands), buckets of pulled items
+        std::uint64_t flushes[4] = {}, items[4] = {}, pulled[4] = {}, buckets[4] = {}, pulledBuckets[4] = {};
+        std::uint64_t pipelines[4] = {}, indexBindings[4] = {};  // distinct per flush, summed
+        // why an owned item was not pulled: no pulled pipeline (the draw's form / pending), no fetch block in its slot
+        std::uint64_t noPipeline = 0, noFetch = 0;
+        // prepareDraw: draws of the scene v2 path whose inputs could / could not be pulled (format, per-instance / user-pointer stream, no arena address, alignment)
+        std::uint64_t layoutOk = 0, layoutRefused[6] = {};
+        std::uint64_t pipelinesPending = 0;
+    };
+    VertexPullStats& vertexPullStats() { return vertexPullStats_; }
+    std::uint64_t vertexPullActs() const { return vertexPullActs_; }  // cumulative pulled items (native: stages line)
     // F2c-4-0 item 6 (RVK_F2C4_MEASURE): the draw's bucket = what a GPU compaction pass could merge into one indirect call: the v2 scene pipeline, the vertex input and
     // dynamic state (by content), the index binding. Not the frame block (one per frame)
     std::uint64_t f2c4BucketKey(const CachedDraw& c) const;
@@ -2026,6 +2056,8 @@ private:
     void currentPosFix(float out[4], float& jx, float& jy);
     const VertexInputValues* internSceneVi(const VertexInputValues& normal, std::int32_t viewSlot = -1);
     const VertexInputValues* internSceneViAt(const VertexInputValues& normal, std::uint64_t refBuffer, std::uint64_t refOffset);
+    // S-4: the vertex input of a pulled scene draw: the ref stream alone (binding 0, per instance, attribute 24)
+    const VertexInputValues* internPullVi(bool dynamicLayout, std::uint64_t refBuffer, std::uint64_t refOffset);
     void sceneFlushRun(const std::vector<std::uint32_t>& run, const std::function<void(const DrawPacket&)>& record);
     int sceneMergeBreak(const DrawPacket& a, const DrawPacket& b) const;  // -1 = mergeable, else the SceneDrawStats::breaks index
     void sceneBeginFrame();
@@ -2035,6 +2067,34 @@ private:
     std::uint32_t sceneCheckEvery_ = 0;
     GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
     GamePipeline scenePipe2_ = GamePipeline::None;  // ... its scene ABI v2 form (retained draws only)
+    GamePipeline scenePipePull_ = GamePipeline::None;  // ... and its pulled form (S-4)
+    void computePullFetch(const PipelineDesc& pd, const std::uint32_t* streamBinding, std::uint32_t nullBinding);
+    // S-4: variant modules shared by their text (Device::moduleTextKey; variantModule / uberModule)
+    struct ModuleTextKey {
+        std::uint64_t a = 0, b = 0, meta = 0;
+        bool operator==(const ModuleTextKey&) const = default;
+    };
+    struct ModuleTextKeyHash {
+        std::size_t operator()(const ModuleTextKey& k) const { return static_cast<std::size_t>(k.a ^ (k.b * 0x9E3779B97F4A7C15ull) ^ k.meta); }
+    };
+    static ModuleTextKey moduleTextKey(shader::Stage stage, std::string_view text, bool half16);
+    rhi::ShaderModule sharedModule(const ModuleTextKey& key);
+    rhi::ShaderModule addSharedModule(const ModuleTextKey& key, rhi::ShaderModule m);
+    std::mutex sharedModuleMutex_;
+    std::unordered_map<ModuleTextKey, rhi::ShaderModule, ModuleTextKeyHash> sharedModules_;
+    std::atomic<std::uint64_t> sharedModuleHits_{0}, sharedModuleMisses_{0};
+    std::atomic<bool> shareModules_{false};
+
+public:
+    // S-4: variant module requests answered by a module of the same text (hits) / modules built (misses), cumulative
+    std::uint64_t sharedModuleHits() const { return sharedModuleHits_; }
+    std::uint64_t sharedModuleMisses() const { return sharedModuleMisses_; }
+
+private:
+    shader::abi::VertexFetch pullFetch_{};             // S-4: the draw's VertexFetch block (computeVertexInput; valid = 0: not pullable)
+    bool vertexPull_ = false;
+    VertexPullStats vertexPullStats_;
+    std::uint64_t vertexPullActs_ = 0;
     bool sceneV2_ = false;
     struct SceneViewTable {
         rhi::GpuRef base;

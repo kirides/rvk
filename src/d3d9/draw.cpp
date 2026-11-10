@@ -414,6 +414,76 @@ void Device::wp0Log() {
     spdlog::info("wp0:   variants: capture draws {}, gi draws {}, g-buffer-writing draws {}", w.capture, w.gi, w.gbuf);
 }
 
+// S-4 (native.vertex_pull, frame-ownership.md 14.12): the draw's VertexFetch block = what the input assembler reads for each declared input, as references into the
+// static copies (the mesh arena). Only while pulling is on and the scene ABI v2 forms are built; valid stays 0 for a layout the pulled shader cannot read exactly like
+// the input assembler (a format without a conversion in rvk_pull.hlsli, a per-instance or user-pointer stream, a buffer without an arena address, an unaligned stride /
+// offset): such a draw keeps its vertex input. The base vertex is the draw's (fillCapture)
+void Device::computePullFetch(const PipelineDesc& pd, const std::uint32_t* streamBinding, std::uint32_t nullBinding) {
+    pullFetch_.valid = 0;
+    if (!vertexPull_ || !sceneV2_) return;
+    VertexPullStats& st = vertexPullStats_;
+    const auto refuse = [&](int why) {
+        ++st.layoutRefused[why];
+        pullFetch_.valid = 0;
+    };
+    if (customVertices_ != 0 || up_.active) return refuse(1);
+    shader::abi::VertexFetch f{};
+    std::uint32_t streamOf[rhi::kMaxVertexBindings];
+    std::fill(std::begin(streamOf), std::end(streamOf), UINT32_MAX);
+    for (std::uint32_t s = 0; s < kStreams; ++s) {
+        if (streamBinding[s] != UINT32_MAX) {
+            if (s >= 4) return refuse(4);
+            streamOf[streamBinding[s]] = s;
+        }
+    }
+    for (std::uint32_t s = 0; s < 4; ++s) {
+        if (streamBinding[s] == UINT32_MAX) continue;
+        const Stream& ss = streams_[s];
+        if (ss.buffer == nullptr || pd.bindings[streamBinding[s]].perInstance != 0) return refuse(1);
+        const rhi::GpuAddr a = ss.buffer->arenaAddress();
+        if (a.ref.null()) return refuse(2);
+        if ((ss.stride & 3u) != 0 || (ss.offset & 3u) != 0 || ss.stride == 0) return refuse(3);
+        const rhi::GpuRef r = a.ref.plus(static_cast<std::int64_t>(ss.offset));
+        f.ref[s][0] = r.low();
+        f.ref[s][1] = r.high();
+        f.stride[s] = ss.stride;
+    }
+    for (std::uint32_t i = 0; i < pd.attributeCount; ++i) {
+        const rhi::VertexAttribute& at = pd.attributes[i];
+        if (at.location >= 16) return refuse(0);
+        if (at.binding == nullBinding) {
+            f.attr[at.location] = 0;  // (not declared: (0, 0, 0, 1), as the null vertex buffer)
+            continue;
+        }
+        const std::uint32_t s = at.binding < rhi::kMaxVertexBindings ? streamOf[at.binding] : UINT32_MAX;
+        if (s >= 4) return refuse(4);
+        if ((at.offset & 3u) != 0 || at.offset > shader::abi::kPullAttrOffsetMask) return refuse(3);
+        using PF = shader::abi::PullFormat;
+        PF fmt;
+        switch (at.format) {
+        case VK_FORMAT_R32_SFLOAT: fmt = PF::Float1; break;
+        case VK_FORMAT_R32G32_SFLOAT: fmt = PF::Float2; break;
+        case VK_FORMAT_R32G32B32_SFLOAT: fmt = PF::Float3; break;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: fmt = PF::Float4; break;
+        case VK_FORMAT_B8G8R8A8_UNORM: fmt = PF::Bgra8Unorm; break;
+        // (D3D12 reads a UBYTE4 as R8G8B8A8_UNORM: the translated shader scales it back under push flag bit 17 + register; the fetch delivers what the input assembler does)
+        case VK_FORMAT_R8G8B8A8_USCALED: fmt = options_.backend == rhi::Backend::D3D12 ? PF::Rgba8Unorm : PF::Rgba8Uscaled; break;
+        case VK_FORMAT_R8G8B8A8_UNORM: fmt = PF::Rgba8Unorm; break;
+        case VK_FORMAT_R16G16_SNORM: fmt = PF::Rg16Snorm; break;
+        case VK_FORMAT_R16G16B16A16_SNORM: fmt = PF::Rgba16Snorm; break;
+        case VK_FORMAT_R16G16_UNORM: fmt = PF::Rg16Unorm; break;
+        case VK_FORMAT_R16G16B16A16_UNORM: fmt = PF::Rgba16Unorm; break;
+        case VK_FORMAT_R16G16_SFLOAT: fmt = PF::Rg16Float; break;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: fmt = PF::Rgba16Float; break;
+        default: return refuse(0);
+        }
+        f.attr[at.location] = at.offset | s << shader::abi::kPullAttrStreamShift | static_cast<std::uint32_t>(fmt) << shader::abi::kPullAttrFormatShift;
+    }
+    f.valid = shader::abi::kVertexFetchValid;
+    pullFetch_ = f;
+    ++st.layoutOk;
+}
+
 bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t streamBinding[kStreams];
     std::fill(std::begin(streamBinding), std::end(streamBinding), UINT32_MAX);
@@ -499,6 +569,7 @@ bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
         }
     }
     vertexShift_ = out.vertexShift;
+    computePullFetch(pd, streamBinding, nullBinding);
     out.dynamicLayout = game_->gameCaps().vertexInputDynamicState;
     if (out.dynamicLayout) {
         out.bindingCount = pd.bindingCount;
@@ -924,6 +995,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     customVertices_ = 0;
     scenePipe_ = GamePipeline::None;
     scenePipe2_ = GamePipeline::None;
+    scenePipePull_ = GamePipeline::None;
     packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
@@ -1615,6 +1687,14 @@ void Device::fillCapture(const DrawPacket& p) {
     c.ps = ps_.get();
     c.scenePipeline = scenePipe_;
     c.scenePipeline2 = scenePipe2_;
+    c.scenePipelinePull = scenePipe2_ != GamePipeline::None ? scenePipePull_ : GamePipeline::None;
+    c.pull = {};
+    if (c.scenePipelinePull != GamePipeline::None && pullFetch_.valid == shader::abi::kVertexFetchValid) {
+        c.pull = pullFetch_;
+        c.pull.baseVertex = p.vertexOffset - c.vi.vertexShift;  // (the D3D9 base vertex: the packet's vertexOffset holds it + the arena binding's shift)
+    } else {
+        c.scenePipelinePull = GamePipeline::None;
+    }
     c.vsModule = vs_->module;
     c.fsModule = ps_->module;
     c.v = lastVariant_;

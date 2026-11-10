@@ -2134,6 +2134,320 @@ mov oC0, r0
     dev.release(std::move(ib));
 }
 
+// S-4 (native.vertex_pull, frame-ownership.md 14.12): persistent owned draws through the pulled vertex shaders (Device::computePullFetch -> CachedDraw::pull ->
+// ownedDerive's fetch block -> DrawRecordTable's fetch table -> ownedFlush's pulled buckets -> the compaction with vertexOffset 0). Eight quads in two vertex layouts (two
+// buffers, strides 28 and 48: two buckets with their vertex input, ONE pulled), drawn as the game draws them: a z pre-pass through the input assembler, then the owned
+// colour draws with ZFUNC EQUAL. Every pixel must equal the input-assembler reference (a clip position one ulp off leaves the clear colour). Negative control: the
+// position read as FLOAT3 instead of FLOAT4 (w = 1 + 1 ulp in the data becomes 1) must lose pixels. Guards: a slot without a fetch block is drawn with its vertex input.
+void testOwnedPull(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned pull: scene draws are not available on this device\n");
+        return;
+    }
+    static const char* kVs = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_position o0
+dcl_color o1
+dp4 o0.x, v0, c1
+dp4 o0.y, v0, c2
+dp4 o0.z, v0, c3
+dp4 o0.w, v0, c4
+add o1, v1, c0
+)";
+    static const char* kPs = R"(
+ps_3_0
+dcl_color v0
+add r0, v0, c0
+mov oC0, r0
+)";
+    const auto vsV = shaderFrom(dev, kVs);
+    const auto psV = shaderFrom(dev, kPs);
+    if (!vsV || !psV) {
+        std::printf("  FAIL owned pull: shaders\n");
+        ++g_failures;
+        return;
+    }
+    const VertexElement kDeclB[] = {
+        {0, 0, DECLTYPE_FLOAT4, 0, 0 /*POSITION*/, 0},
+        {0, 32, DECLTYPE_D3DCOLOR, 0, 10 /*COLOR*/, 0},
+        {0, 36, DECLTYPE_FLOAT2, 0, 5 /*TEXCOORD*/, 0},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    auto declB = dev.createVertexDecl(std::span<const VertexElement>(kDeclB));
+    constexpr std::uint32_t kQuads = 8, kSlots = 16, kStrideA = sizeof(Vertex), kStrideB = 48;
+    const float w1 = std::nextafter(1.0f, 2.0f);  // (1 + 1 ulp: the negative control's FLOAT3 read makes it 1)
+    std::vector<std::uint8_t> bytesA, bytesB;
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        const float x0 = -0.93f + 0.231f * static_cast<float>(k), x1 = x0 + 0.217f;
+        const std::uint32_t color = 0xFF000000u | (k * 21u + 10u) << 16 | (30u + k * 17u) << 8 | (k & 1u ? 140u : 20u);
+        const float corner[4][2] = {{x0, 0.61f}, {x1, 0.57f}, {x0, -0.53f}, {x1, -0.49f}};
+        for (const auto& c : corner) {
+            const float pos[4] = {c[0], c[1], 0.3f + 0.037f * static_cast<float>(k), w1};
+            std::vector<std::uint8_t>& out = k < 4 ? bytesA : bytesB;
+            const std::uint32_t stride = k < 4 ? kStrideA : kStrideB;
+            const std::size_t at = out.size();
+            out.resize(at + stride, 0);
+            std::memcpy(out.data() + at, pos, 16);
+            std::memcpy(out.data() + at + (k < 4 ? 16 : 32), &color, 4);
+        }
+    }
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vbA = dev.createBuffer(static_cast<std::uint32_t>(bytesA.size()), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto vbB = dev.createBuffer(static_cast<std::uint32_t>(bytesB.size()), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vbA->lock(0, 0, 0), bytesA.data(), bytesA.size());
+    vbA->unlock();
+    std::memcpy(vbB->lock(0, 0, 0), bytesB.data(), bytesB.size());
+    vbB->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    rhi::Device* rd = dev.rhi();
+    auto tableBuf = rd->createBuffer({static_cast<std::uint64_t>(kSlots) * shader::abi::kViewBlock2Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned pull view table"});
+    if (!tableBuf) {
+        std::printf("  FAIL owned pull: view table buffer\n");
+        ++g_failures;
+        return;
+    }
+    const auto tw = tableBuf->shaderRef(0);
+    const rhi::GpuRef tableRef = rhi::GpuRef::fromWords(tw[0], tw[1]);
+    std::vector<shader::abi::ViewBlock2> twin(kSlots);
+    std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
+    // c0 the colour offset, c1..c4 a matrix of values no float holds exactly (the dot products round: a reordered or differently fed position differs in the last bits)
+    const float vsC[5][4] = {{0.05f, 0.02f, 0.01f, 0.0f}, {0.9131f, 0.0313f, 0.0071f, 0.0137f}, {-0.0211f, 0.8873f, 0.0093f, -0.0119f}, {0.0123f, 0.0456f, 0.7891f, 0.1011f}, {0.0011f, -0.0007f, 0.0021f, 0.9973f}};
+    const float psC0[4] = {0.10f, 0.05f, 0.02f, 0.0f};
+    const auto setRegs = [&] {
+        dev.setVertexShaderConstantF(0, vsC[0], 5);
+        dev.setPixelShaderConstantF(0, psC0, 1);
+    };
+    const auto fillSlot = [&](std::uint32_t slot) {
+        shader::abi::ViewBlock2& b = twin[slot];
+        std::memset(&b, 0, sizeof(b));
+        std::memcpy(b.vs0[0], vsC, sizeof(vsC));
+        std::memcpy(b.ps0[0], psC0, 16);
+        dev.viewPosFix(b.posFix);
+        std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2));
+    };
+    const auto windowsOf = [&](std::uint32_t slot) {
+        OwnedWindows ow;
+        const auto set = [&](OwnedWindows::Win& w, bool vertex, std::uint32_t win, std::uint32_t covered) {
+            w.kind = OwnedWindows::Kind::View;
+            w.base = rhi::GpuRef{gpuscene::ViewTable::windowBase(tableRef, slot, vertex, win)};
+            w.covered = covered;
+        };
+        set(ow.w[0][0], true, 0, 12);
+        set(ow.w[0][1], true, 1, 19);
+        set(ow.w[1][0], false, 0, 5);
+        ow.viewSlot = slot;
+        return ow;
+    };
+    const auto bindQuad = [&](std::uint32_t k) {
+        dev.setVertexDecl(k < 4 ? f.decl.get() : declB.get());
+        dev.setStreamSource(0, k < 4 ? vbA.get() : vbB.get(), 0, k < 4 ? kStrideA : kStrideB);
+    };
+    const auto drawQuad = [&](std::uint32_t k) { dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * (k % 4)), 0, 4, 0, 2); };
+    const auto begin = [&] {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexShader(vsV);
+        dev.setPixelShader(psV);
+        dev.setIndices(ib.get());
+        setRegs();
+    };
+    const auto zPrepass = [&] {
+        dev.setRenderState(RS_ZENABLE, 1);
+        dev.setRenderState(RS_ZFUNC, CMP_LESSEQUAL);
+        dev.setRenderState(RS_ZWRITEENABLE, 1);
+        dev.setRenderState(RS_COLORWRITEENABLE, 0);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            bindQuad(k);
+            drawQuad(k);
+        }
+        dev.setRenderState(RS_ZFUNC, CMP_EQUAL);
+        dev.setRenderState(RS_ZWRITEENABLE, 0);
+        dev.setRenderState(RS_COLORWRITEENABLE, 0xF);
+    };
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    tab.setActive(true);
+    gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
+    compact.setCheckEvery(1);
+    const auto end = [&](const char* name) {
+        tab.flush(dev);
+        compact.flush(dev);
+        dev.setSceneIssue(false);
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    const auto differ = [&](const Pixels& a, const Pixels& b) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < a.bgra.size() && i < b.bgra.size(); ++i) n += a.bgra[i] != b.bgra[i];
+        return a.bgra.size() != b.bgra.size() ? 0xffffffffu : n;
+    };
+    // references: the EQUAL colour pass through the input assembler after the input-assembler z pass; and the plain LESSEQUAL picture (the same: no holes)
+    begin();
+    zPrepass();
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        bindQuad(k);
+        drawQuad(k);
+    }
+    const Pixels refEq = end("ownedpull_ref_equal");
+    begin();
+    dev.setRenderState(RS_ZENABLE, 1);
+    dev.setRenderState(RS_ZFUNC, CMP_LESSEQUAL);
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        bindQuad(k);
+        drawQuad(k);
+    }
+    const Pixels refLe = end("ownedpull_ref_lessequal");
+    if (differ(refEq, refLe) != 0) {
+        std::printf("  FAIL owned pull: the input-assembler EQUAL pass differs from its LESSEQUAL picture (%u bytes)\n", differ(refEq, refLe));
+        ++g_failures;
+    }
+    if (!tab.ensure(dev)) {
+        std::printf("  FAIL owned pull: the draw record tables\n");
+        ++g_failures;
+        return;
+    }
+    for (int i = 0; i < 1200 && !compact.usable(dev); ++i) Sleep(50);
+    dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+    dev.setSceneViews(true);
+    dev.setVertexPull(true);
+    std::vector<Device::CachedDraw> cd(kQuads);
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        begin();
+        zPrepass();
+        dev.setSceneIssue(true);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            bindQuad(k);
+            dev.beginCapture(&cd[k]);
+            drawQuad(k);
+            dev.endCapture();
+        }
+        end("ownedpull_capture");
+        ready = true;
+        for (const auto& c : cd) ready = ready && c.valid && c.scenePipeline2 != GamePipeline::None && c.scenePipelinePull != GamePipeline::None && c.pull.valid == shader::abi::kVertexFetchValid;
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned pull: the draws never got their pulled pipelines (layouts pullable %llu, refused format %llu / stream %llu / address %llu / alignment %llu)\n",
+                    static_cast<unsigned long long>(dev.vertexPullStats().layoutOk), static_cast<unsigned long long>(dev.vertexPullStats().layoutRefused[0]),
+                    static_cast<unsigned long long>(dev.vertexPullStats().layoutRefused[1]), static_cast<unsigned long long>(dev.vertexPullStats().layoutRefused[2]),
+                    static_cast<unsigned long long>(dev.vertexPullStats().layoutRefused[3]));
+        ++g_failures;
+        dev.setVertexPull(false);
+        return;
+    }
+    if (cd[0].pull.stride[0] != kStrideA || cd[4].pull.stride[0] != kStrideB || cd[5].pull.baseVertex != 4 || cd[0].pull.attr[1] == 0) {
+        std::printf("  FAIL owned pull: fetch blocks: strides %u / %u, base vertex of quad 5 %d, colour word %#x\n", cd[0].pull.stride[0], cd[4].pull.stride[0], cd[5].pull.baseVertex, cd[0].pull.attr[1]);
+        ++g_failures;
+    }
+    fillSlot(3);
+    std::uint32_t slots[kQuads];
+    for (auto& s : slots) s = tab.alloc();
+    // one frame: the input-assembler z pass, then the eight owned colour draws (derived on view slot 3; `mutate` edits a derivation before it is written)
+    const auto frame = [&](const char* name, auto mutate, std::uint64_t& calls, std::uint64_t& pulled) {
+        begin();
+        zPrepass();
+        dev.setSceneIssue(true);
+        std::vector<Device::OwnedItem> items;
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            Device::DeriveIn in;
+            in.streams[0] = k < 4 ? vbA.get() : vbB.get();
+            in.strides[0] = k < 4 ? kStrideA : kStrideB;
+            in.indices = ib.get();
+            in.alphaFunc = 8u;
+            Device::OwnedPersist out;
+            const int rc = dev.ownedDerive(cd[k], in, windowsOf(3), tab.blockRef(slots[k]), tab.zeroRef(), true, out);
+            if (rc != 0) {
+                std::printf("  FAIL owned pull (%s): quad %u derive returned %d\n", name, k, rc);
+                ++g_failures;
+            }
+            mutate(k, out);
+            tab.write(slots[k], out.rec, out.blk, &out.fetch);
+            items.push_back({&cd[k], out.bucketKey, slots[k]});
+        }
+        const auto s0 = dev.sceneStats();
+        const std::uint64_t p0 = dev.vertexPullActs();
+        Device::OwnedArena arena;
+        if (!dev.ownedReserve(kQuads, arena) || !dev.ownedFlush(items, arena, 3, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity)) {
+            std::printf("  FAIL owned pull (%s): the flush was refused\n", name);
+            ++g_failures;
+        }
+        calls = dev.sceneStats().indirectCalls - s0.indirectCalls;
+        pulled = dev.vertexPullActs() - p0;
+        return end(name);
+    };
+    std::uint64_t calls = 0, pulled = 0;
+    const auto none = [](std::uint32_t, Device::OwnedPersist&) {};
+    // 1. pulled: two layouts, ONE indirect command, the reference's pixels
+    for (int round = 0; round < 2; ++round) {  // (round 2: the slots hold their blocks already)
+        const Pixels p = frame("ownedpull_on", none, calls, pulled);
+        if (differ(refEq, p) != 0 || calls != 1 || pulled != kQuads) {
+            std::printf("  FAIL owned pull (round %d): %u bytes differ from the input-assembler EQUAL picture, %llu indirect commands (expected 1), %llu of %u items pulled\n", round, differ(refEq, p),
+                        static_cast<unsigned long long>(calls), static_cast<unsigned long long>(pulled), kQuads);
+            ++g_failures;
+        }
+    }
+    // 2. not pulled (the setting off: the derivation writes no fetch block): two buckets, the same pixels
+    dev.setVertexPull(false);
+    {
+        const Pixels p = frame("ownedpull_off", none, calls, pulled);
+        if (differ(refEq, p) != 0 || calls != 2 || pulled != 0) {
+            std::printf("  FAIL owned pull (off): %u bytes differ, %llu indirect commands (expected 2), %llu pulled\n", differ(refEq, p), static_cast<unsigned long long>(calls), static_cast<unsigned long long>(pulled));
+            ++g_failures;
+        }
+    }
+    dev.setVertexPull(true);
+    // 3. a slot without a valid fetch block (GPU safety): drawn with its vertex input in a bucket of its own, the same pixels
+    {
+        const std::uint64_t nf0 = dev.vertexPullStats().noFetch;
+        const Pixels p = frame("ownedpull_guard", [](std::uint32_t k, Device::OwnedPersist& out) { if (k == 6) out.fetch.valid = 0; }, calls, pulled);
+        if (differ(refEq, p) != 0 || calls != 2 || pulled != kQuads - 1 || dev.vertexPullStats().noFetch != nf0 + 1) {
+            std::printf("  FAIL owned pull (guard): %u bytes differ, %llu indirect commands (expected 2), %llu pulled (expected 7), no-fetch refusals %llu\n", differ(refEq, p),
+                        static_cast<unsigned long long>(calls), static_cast<unsigned long long>(pulled), static_cast<unsigned long long>(dev.vertexPullStats().noFetch - nf0));
+            ++g_failures;
+        }
+    }
+    // 4. negative control: the position read as FLOAT3 (w = 1 instead of 1 + 1 ulp): the EQUAL pass must lose pixels (the check above can see a last-bit difference)
+    {
+        const auto asFloat3 = [](std::uint32_t, Device::OwnedPersist& out) {
+            const std::uint32_t w = out.fetch.attr[0];
+            out.fetch.attr[0] = (w & ~(0xffu << shader::abi::kPullAttrFormatShift)) | static_cast<std::uint32_t>(shader::abi::PullFormat::Float3) << shader::abi::kPullAttrFormatShift;
+        };
+        const Pixels p = frame("ownedpull_negative", asFloat3, calls, pulled);
+        const std::uint32_t n = differ(refEq, p);
+        std::printf("  owned pull: negative control (position w one ulp off): %u bytes differ\n", n);
+        if (n == 0) {
+            std::printf("  FAIL owned pull: the negative control did not change the picture (the EQUAL check cannot see a last-bit difference)\n");
+            ++g_failures;
+        }
+    }
+    const gpuscene::OwnedCompact::Stats& cs = compact.stats();
+    if (cs.differing != 0 || cs.countDiffering != 0) {
+        std::printf("  FAIL owned pull: the GPU compaction's arguments differ from the CPU's (%llu records, %llu counts)\n", static_cast<unsigned long long>(cs.differing), static_cast<unsigned long long>(cs.countDiffering));
+        ++g_failures;
+    }
+    std::printf("  owned pull: compaction checks %llu, records %llu; table fetch ref %s\n", static_cast<unsigned long long>(cs.checks), static_cast<unsigned long long>(cs.checkedRecords),
+                tab.fetchRef().null() ? "null" : "set");
+    for (const std::uint32_t s : slots) tab.release(s);
+    dev.setVertexPull(false);
+    tab.setActive(false);
+    compact.destroy();
+    tab.destroy();
+    dev.setSceneViews(false);
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vbA));
+    dev.release(std::move(vbB));
+    dev.release(std::move(ib));
+    dev.release(std::move(declB));
+}
+
 // F5-2 cluster cull through the owned path (frame-ownership.md 7.34, native.cluster_cull): a 40 x 40 grid (3,200 triangles, x / y in [-3, 3]: the viewport shows a ninth of it)
 // is drawn as a clustered static mesh by the owned persistent path (the record carries its cluster rows, the compaction pass culls with the view table's c0..c3 and the object
 // window's world rows). The picture must equal the normal draw's in four situations: (A) the grid inside a unit clip cube: most clusters culled; (B) the object moved
@@ -4088,7 +4402,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

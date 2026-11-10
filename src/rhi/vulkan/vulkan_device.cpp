@@ -464,11 +464,11 @@ public:
         {
             // the static vertex / index buffers' arena (vk/mesh_arena.h); with the ray tracing tier also BLAS build inputs that shaders read through their
             // addresses (docs/research/raytracing.md 2)
-            VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;  // (TRANSFER_SRC: the cluster copies' read-back check)
-            if (ctx_.features().rayTracing.enabled) {
-                usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-            }
+            // (S-4: device addresses also without the RT tier: the pulled vertex shaders of native.vertex_pull read the static vertex data by reference; Vulkan 1.3 has
+            // bufferDeviceAddress, the floor)
+            VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;  // (TRANSFER_SRC: the cluster copies' read-back check)
+            if (ctx_.features().rayTracing.enabled) usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
             ownArena_.create(ctx_, usage);
         }
         presenter_ = std::make_unique<vulkan::VkGamePresenter>(*this, ctx_, frames_);

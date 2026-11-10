@@ -552,7 +552,14 @@ int cmdDxilCheck(int argc, char** argv) {
             else if (a == "--tint") options.tintEpilogue = true;
             else if (a == "--scene") options.sceneRecord = true;
             else if (a == "--scene2") options.sceneView = true;  // scene ABI v2 (ViewBlock2 view table, frame-ownership.md 7.19)
-            else if (a == "--fillers") rvk::shader::setVaryingFillers(true);  // the D3D12 game device's dense signatures
+            else if (a == "--pull") {
+                // S-4 (frame-ownership.md 14.12): the pulled scene v2 vertex shaders (the pixel shaders are skipped: they have no pulled form)
+                variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
+                    if (sh.stage != Stage::Vertex) return false;
+                    o.sceneRecord = o.sceneView = o.pullVertices = true;
+                    return true;
+                };
+            } else if (a == "--fillers") rvk::shader::setVaryingFillers(true);  // the D3D12 game device's dense signatures
             else if (a == "--jobs" && i + 1 < argc) jobs = std::atoi(argv[++i]);
             else if (a == "--max-errors" && i + 1 < argc) maxErrors = std::atoi(argv[++i]);
         }

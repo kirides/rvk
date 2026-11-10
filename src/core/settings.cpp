@@ -2840,6 +2840,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeVertexPull = &reg.add({
+        .key = "native.vertex_pull",
+        .label = "Native frame: vertex pulling",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "S-4 (docs/research/frame-ownership.md 14.12; Full, needs the persistent owned draws): the owned static / skinned draws' vertex shaders read their inputs from the "
+                       "mesh arena by reference (a VertexFetch block per record slot, the input assembler's conversions) instead of a vertex input, so the meshes of every vertex "
+                       "layout and arena block share one indirect command per pipeline, state and index binding (rvk.log `native: vertex pull (5 s)`: items pulled, indirect "
+                       "commands per view before / after). The clip position stays the translated shader's, bit for bit. Off by default.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnPost = &reg.add({
         .key = "native.own_post",
         .label = "Native frame: post chain on own shaders",

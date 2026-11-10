@@ -205,6 +205,36 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
             return;
         }
         scenePipe2_ = sp2;
+        // S-4 (native.vertex_pull): the pulled form of the v2 pipeline: the same pixel shader + state, the SceneVsPull vertex shader, only the ref stream as vertex
+        // input (one binding, per instance). Building = the draw is not retained yet (scenePending: retried, as the v2 form); a failed build = it keeps its vertex input
+        if (vertexPull_ && pullFetch_.valid == shader::abi::kVertexFetchValid && !lodVs && !v2only) {  // (the trees' / grass' flushes keep their instance streams)
+            const rhi::ShaderModule vsp = variant(vs_, VariantSlot::SceneVsPull);
+            if (vsp == rhi::ShaderModule::None) {
+                if (vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVsPull)].load() != 3) {
+                    ++vertexPullStats_.pipelinesPending;
+                    pending();
+                }
+            } else {
+                PipelineDesc sp3 = sd2;
+                sp3.vs = vsp;
+                if (!workVi_.dynamicLayout) {
+                    std::memset(sp3.bindings, 0, sizeof(sp3.bindings));
+                    std::memset(sp3.attributes, 0, sizeof(sp3.attributes));
+                    sp3.bindings[0] = {8, 1};
+                    sp3.attributes[0] = {shader::abi::kSceneRefLocation, 0, VK_FORMAT_R32G32_UINT, 0};
+                    sp3.bindingCount = 1;
+                    sp3.attributeCount = 1;
+                }
+                const GamePipeline pp = findPipeline(sp3);
+                if (pp == GamePipeline::None) {
+                    game_->prewarmOncePipeline(sp3);
+                    ++vertexPullStats_.pipelinesPending;
+                    pending();
+                } else {
+                    scenePipePull_ = pp;
+                }
+            }
+        }
     }
     if (scenePipe2_ != GamePipeline::None || scenePipe_ != GamePipeline::None) {
         const UberWhy why = uberWhyOf(*ps_, scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs);
@@ -238,6 +268,23 @@ const VertexInputValues* Device::internSceneViAt(const VertexInputValues& n, std
         v.bindings[idx] = {8, 1};
         v.bindingCount = idx + 1;
         v.attributes[v.attributeCount++] = {shader::abi::kSceneRefLocation, idx, VK_FORMAT_R32G32_UINT, 0};
+    }
+    if (lastSceneVi_ == nullptr || !viEqual(*lastSceneVi_, v)) lastSceneVi_ = viArena_.push(v);
+    return lastSceneVi_;
+}
+
+const VertexInputValues* Device::internPullVi(bool dynamicLayout, std::uint64_t refBuffer, std::uint64_t refOffset) {
+    VertexInputValues& v = sceneViWork_;
+    v = {};
+    v.bufferCount = 1;
+    v.buffers[0] = refBuffer;
+    v.offsets[0] = refOffset;
+    v.dynamicLayout = dynamicLayout;
+    if (dynamicLayout) {
+        v.bindingCount = 1;
+        v.bindings[0] = {8, 1};
+        v.attributeCount = 1;
+        v.attributes[0] = {shader::abi::kSceneRefLocation, 0, VK_FORMAT_R32G32_UINT, 0};
     }
     if (lastSceneVi_ == nullptr || !viEqual(*lastSceneVi_, v)) lastSceneVi_ = viArena_.push(v);
     return lastSceneVi_;

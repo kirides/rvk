@@ -12,7 +12,8 @@
 // start to the last visible cluster): one argument record per run, same firstInstance. Everything is guarded: rows beyond the table / of another entry / a range
 // that is not the record's draw = the entry's whole range as one record; an entry with no visible cluster writes none. The reference is src/core/cluster_cull.*.
 // Job (2 x uint4 per bucket): x first entry, y entries, z argument index of the first record, w count index; x capacity (argument records of the bucket), y flags
-// (bit 0: cull, bit 1: side planes only), zw 0.
+// (bit 0: cull, bit 1: side planes only), z flags (bit 0, S-4: a pulled bucket: every record's vertexOffset is 0, the vertex shader adds the base vertex itself from
+// its VertexFetch block: D3D12's SV_VertexID ignores the command's base vertex), w 0.
 
 #include "rvk_common.hlsli"
 
@@ -187,6 +188,7 @@ void CSMain(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex) {
                 if ((w.x | w.y) != 0u && g.x != 0u) {
                     kind = 1u;
                     a = g.xyz;
+                    if ((job1.z & 1u) != 0u) a.z = 0u;
                     const uint rowCount = g.w >> 16;
                     const uint rowFirst = g.w & 0xffffu;
                     if (cullOn && rowCount != 0u && rowCount <= kMaxRows && rowFirst + rowCount <= pc.clusterRows && ent.y < pc.viewSlots) {

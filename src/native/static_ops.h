@@ -180,6 +180,7 @@ public:
     // a view begins (frame tap; every kind): the frame kind, the prerequisites. F4-4: a sun cascade's z list takes its SpeedTree ops too while native.owned_shadows is on
     void treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade);
     void stagesReport();  // frame-ownership.md 7.47: every owned stage's state (setting / armed / acted) in one 5 s line
+    void vertexPullReport();  // S-4 (frame-ownership.md 14.12): the `native: vertex pull (5 s)` line
     bool treeKindOk(ViewKind kind) const { return ownedTrees_ && (kind == ViewKind::Main || (kind == ViewKind::Cascade && ownedShadowsOn())); }
     bool treeSelect(const Op& op);            // compaction: this tree op leaves the list
     void treeTake(List list, std::vector<Op>&& ops, std::uint64_t ns);

@@ -15,6 +15,7 @@
 #include "gpuscene/object_table.h"
 #include "d3d9/scene_hash.h"
 #include "gpuscene/cluster_table.h"
+#include "gpuscene/draw_record_table.h"
 #include "gpuscene/owned_compact.h"
 #include "gpuscene/verify.h"
 
@@ -27,6 +28,22 @@ inline std::uint64_t hmix(std::uint64_t h, std::uint64_t v) {
     return h * 0xff51afd7ed558ccdull;
 }
 inline std::uint64_t hmixF(std::uint64_t h, float f) { return hmix(h, std::bit_cast<std::uint32_t>(f)); }
+
+// S-4, GPU safety: a fetch block the pulled shader may read through: written for a pulled draw, every declared input's stream has a reference and a stride, every
+// format a known code (rvk_pull.hlsli reads nothing for an unknown one, but a block like that was not made by computePullFetch)
+bool pullFetchUsable(const shader::abi::VertexFetch& f) {
+    if (f.valid != shader::abi::kVertexFetchValid) return false;
+    bool any = false;
+    for (const std::uint32_t w : f.attr) {
+        const std::uint32_t fmt = (w >> shader::abi::kPullAttrFormatShift) & 0xffu;
+        if (fmt == 0) continue;
+        if (fmt > static_cast<std::uint32_t>(shader::abi::PullFormat::Rgba16Float)) return false;
+        const std::uint32_t s = (w >> shader::abi::kPullAttrStreamShift) & 3u;
+        if ((f.ref[s][0] | f.ref[s][1]) == 0 || f.stride[s] == 0) return false;
+        any = true;
+    }
+    return any;
+}
 
 }  // namespace
 
@@ -100,6 +117,16 @@ std::uint64_t Device::ownedBucketKey(const CachedDraw& c, std::uint32_t viewSlot
     h = hmix(h, c.packet.indexBuffer);
     h = hmix(h, c.packet.indexOffset);
     h = hmix(h, c.packet.index32 ? 1u : 0u);
+    return hmix(h, viewSlot);
+}
+
+// S-4: the bucket of a pulled owned draw: no vertex input (the ref stream is the same for every item of a flush), the pulled pipeline, the state, the index binding
+std::uint64_t Device::ownedPullKey(const CachedDraw& c, std::uint32_t viewSlot) const {
+    std::uint64_t h = hmix(0x50554c4c50554c4cull, hashDyn(c.dyn));
+    h = hmix(h, static_cast<std::uint64_t>(c.scenePipelinePull));
+    h = hmix(h, c.packet.indexBuffer);
+    h = hmix(h, c.packet.indexOffset);
+    h = hmix(h, (c.packet.index32 ? 1u : 0u) | (c.vi.dynamicLayout ? 2u : 0u));
     return hmix(h, viewSlot);
 }
 
@@ -220,6 +247,11 @@ int Device::ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWind
             r.args[3] = ci.rowFirst | ci.rowCount << 16;
             r.reserved0 = static_cast<std::uint32_t>(c.clusterWait);
         }
+    }
+    // S-4 (native.vertex_pull): the slot's vertex fetch block (the draw's static stream references, strides, input formats, base vertex: all fixed by the retained draw and
+    // its stream bindings, which the signature covers); zero = the draw keeps its vertex input
+    if (vertexPull_ && c.scenePipelinePull != GamePipeline::None && c.pull.valid == shader::abi::kVertexFetchValid && gpuscene::drawrecords().ensureFetch(*this)) {
+        out.fetch = c.pull;
     }
     out.bucketKey = ownedBucketKey(c, ow.viewSlot);
     return 0;
@@ -561,6 +593,31 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) return false;
+    // S-4 (native.vertex_pull): which items are pulled (a pulled pipeline + a written fetch block in the slot's twin: GPU safety, the shader reads the stream references
+    // there); a pulled item's bucket has no vertex input in its key, so the meshes of every vertex layout / arena block share one indirect command per pipeline x state x index binding
+    const std::uint32_t viewKindP = viewSlot <= shader::abi::kViewSlotMainSolid ? viewSlot : (viewSlot >= shader::abi::kViewSlotCascade0 && viewSlot < shader::abi::kViewSlotDynamicFirst) ? 3u : 2u;
+    static thread_local std::vector<std::uint8_t> pulledOf;
+    pulledOf.assign(n, 0);
+    std::uint32_t pulledN = 0;
+    rhi::GpuRef fetchRef;
+    if (vertexPull_) {
+        gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+        const shader::abi::VertexFetch* fs = tab.fetchShadow();
+        fetchRef = tab.fetchRef();
+        for (std::uint32_t i = 0; i < n; ++i) {
+            const CachedDraw& c = *items[i].cd;
+            if (c.scenePipelinePull == GamePipeline::None) {
+                ++vertexPullStats_.noPipeline;
+                continue;
+            }
+            if (fs == nullptr || fetchRef.null() || items[i].slot >= gpuscene::DrawRecordTable::kCapacity || !pullFetchUsable(fs[items[i].slot])) {
+                ++vertexPullStats_.noFetch;
+                continue;
+            }
+            pulledOf[i] = 1;
+            ++pulledN;
+        }
+    }
     // buckets in the order they first appear; the items keep their order inside a bucket (the engine's order)
     ownedBucketKeys_.clear();
     ownedBucketStart_.clear();
@@ -577,7 +634,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         table.assign(cap, {});
         const std::uint32_t mask = cap - 1;
         for (std::uint32_t i = 0; i < n; ++i) {
-            const std::uint64_t key = items[i].bucket;
+            const std::uint64_t key = pulledOf[i] != 0 ? ownedPullKey(*items[i].cd, viewSlot) : items[i].bucket;
             std::uint32_t at = static_cast<std::uint32_t>((key * 0x9E3779B97F4A7C15ull) >> 40) & mask;
             while (table[at].bucket != 0xffffffffu && table[at].key != key) at = (at + 1) & mask;
             if (table[at].bucket == 0xffffffffu) {
@@ -586,12 +643,18 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
                 ownedBucketStart_.push_back(i);  // (the first item: its draw describes the bucket)
             }
             ownedBucketOf_[i] = table[at].bucket;
-            if ((i & 7u) == 0 && items[i].cd != items[ownedBucketStart_[table[at].bucket]].cd) {
+            if (((i & 7u) == 0 || (pulledN != 0 && gpuscene::verifyFrame())) && items[i].cd != items[ownedBucketStart_[table[at].bucket]].cd) {
                 // (1 of 8 verified exactly: a bucket key that merges different pipelines / inputs would draw with the wrong state)
-                const CachedDraw& a = *items[ownedBucketStart_[table[at].bucket]].cd;
+                const std::uint32_t first = ownedBucketStart_[table[at].bucket];
+                const CachedDraw& a = *items[first].cd;
                 const CachedDraw& b = *items[i].cd;
-                if (a.scenePipeline2 != b.scenePipeline2 || !viEqual(a.vi, b.vi) || !dynEqual(a.dyn, b.dyn) || a.packet.indexBuffer != b.packet.indexBuffer ||
-                    a.packet.indexOffset != b.packet.indexOffset || a.packet.index32 != b.packet.index32) {
+                // (S-4: a pulled bucket's items share the pulled pipeline, the state and the index binding, not the vertex input; pulled and not pulled never share a key)
+                const bool pulledA = pulledOf[first] != 0, pulledB = pulledOf[i] != 0;
+                const bool differ = pulledA != pulledB ||
+                                    (pulledA ? a.scenePipelinePull != b.scenePipelinePull : (a.scenePipeline2 != b.scenePipeline2 || !viEqual(a.vi, b.vi))) ||
+                                    (pulledA && a.vi.dynamicLayout != b.vi.dynamicLayout) || !dynEqual(a.dyn, b.dyn) || a.packet.indexBuffer != b.packet.indexBuffer ||
+                                    a.packet.indexOffset != b.packet.indexOffset || a.packet.index32 != b.packet.index32;
+                if (differ) {
                     ++ownedPersistStats.bucketKeyClash;
                     spdlog::error("d3d9: owned persistent: two different buckets share the key {:#x}", key);
                     return false;
@@ -656,7 +719,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
             args[5 * j + 0] = c.packet.count;
             args[5 * j + 1] = 1;
             args[5 * j + 2] = c.packet.first;
-            args[5 * j + 3] = static_cast<std::uint32_t>(c.packet.vertexOffset);
+            args[5 * j + 3] = pulledOf[i] != 0 ? 0u : static_cast<std::uint32_t>(c.packet.vertexOffset);  // (S-4: a pulled draw adds its base vertex itself)
             args[5 * j + 4] = j;
         } else {
             posItem[j] = i;
@@ -703,7 +766,8 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
             jobs[8 * b + 3] = range.firstCount + b;
             jobs[8 * b + 4] = capBucket[b];
             jobs[8 * b + 5] = job.cullFlags;
-            jobs[8 * b + 6] = 0;
+            const bool pulledB = pulledOf[ownedBucketStart_[b]] != 0;
+            jobs[8 * b + 6] = pulledB ? 1u : 0u;  // (S-4: bit 0 = the bucket is pulled: the commands' vertexOffset is 0)
             jobs[8 * b + 7] = 0;
             if (!check) {
                 for (std::uint32_t k = cursor[b]; k < cursor[b + 1]; ++k) cullCapable += capOf[posItem[k]] > 1 ? 1 : 0;
@@ -718,10 +782,11 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
                 if (capOf[ii] > 1) {
                     ++cullCapable;
                     job.culls.push_back(cullCheckItem(shadow[it.slot], viewSlot, k, b));
+                    if (pulledB) job.culls.back().vertexOffset = 0;
                     continue;
                 }
                 ++want;
-                recs.insert(recs.end(), {it.cd->packet.count, 1u, it.cd->packet.first, static_cast<std::uint32_t>(it.cd->packet.vertexOffset), k});
+                recs.insert(recs.end(), {it.cd->packet.count, 1u, it.cd->packet.first, pulledB ? 0u : static_cast<std::uint32_t>(it.cd->packet.vertexOffset), k});
             }
             job.expect[2 * b] = capCursor[b];
             job.expect[2 * b + 1] = want;
@@ -733,10 +798,11 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     for (std::uint32_t b = 0; b < buckets; ++b) {
         const CachedDraw& c = *items[ownedBucketStart_[b]].cd;
         const std::uint32_t count = cursor[b + 1] - cursor[b];
+        const bool pulledB = pulledOf[ownedBucketStart_[b]] != 0;
         DrawPacket m = c.packet;
-        m.vi = internSceneViAt(c.vi, arena.list.buffer, arena.list.offset);
+        m.vi = pulledB ? internPullVi(c.vi.dynamicLayout, arena.list.buffer, arena.list.offset) : internSceneViAt(c.vi, arena.list.buffer, arena.list.offset);
         m.dyn = internDyn(c.dyn);
-        m.pipeline = c.scenePipeline2;
+        m.pipeline = pulledB ? c.scenePipelinePull : c.scenePipeline2;
         m.op = DrawPacket::Op::DrawIndexedIndirect;
         m.scene = 0;
         m.count = count;
@@ -753,6 +819,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         sp.records = recordsRef.bits;
         sp.frame = frameBlock.bits;
         sp.views = sceneViews_.base.bits;
+        if (pulledB) sp.spare[0] = fetchRef.bits;  // (S-4: the vertex fetch table, rvk_pull.hlsli pc.spare1)
         static_assert(sizeof(sp) == sizeof(m.push));
         std::memcpy(&m.push, &sp, sizeof(sp));
         submitInterned(m);
@@ -760,9 +827,31 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         sceneStats_.records += count;
         sceneStats_.maxRun = std::max<std::uint64_t>(sceneStats_.maxRun, count);
         ++ownedPersistStats.packets;
+        if (pulledB) ++vertexPullStats_.pulledBuckets[viewKindP];
     }
     ownedPersistStats.buckets += buckets;
     ownedPersistStats.items += n;
+    VertexPullStats& ps = vertexPullStats_;
+    {
+        // (distinct pipelines and index bindings of the flush's buckets: what is left of the command count once the vertex input is out of the key)
+        static thread_local std::vector<std::uint64_t> seenP, seenI;
+        seenP.clear();
+        seenI.clear();
+        for (std::uint32_t b = 0; b < buckets; ++b) {
+            const CachedDraw& c = *items[ownedBucketStart_[b]].cd;
+            const std::uint64_t pk = static_cast<std::uint64_t>(pulledOf[ownedBucketStart_[b]] != 0 ? c.scenePipelinePull : c.scenePipeline2);
+            const std::uint64_t ik = c.packet.indexBuffer ^ (c.packet.index32 ? 0x8000000000000000ull : 0ull);
+            if (std::find(seenP.begin(), seenP.end(), pk) == seenP.end()) seenP.push_back(pk);
+            if (std::find(seenI.begin(), seenI.end(), ik) == seenI.end()) seenI.push_back(ik);
+        }
+        ps.pipelines[viewKindP] += seenP.size();
+        ps.indexBindings[viewKindP] += seenI.size();
+    }
+    ++ps.flushes[viewKindP];
+    ps.items[viewKindP] += n;
+    ps.pulled[viewKindP] += pulledN;
+    ps.buckets[viewKindP] += buckets;
+    vertexPullActs_ += pulledN;
     return true;
 }
 

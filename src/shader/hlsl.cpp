@@ -101,6 +101,7 @@ public:
         }
         emitBody();
         if (error_.empty() && scene()) checkScene();
+        if (error_.empty() && opt_.pullVertices && (!vs_ || !opt_.sceneView || !opt_.extraInputs.empty())) error_ = "vertex pulling: only for scene ABI v2 vertex shaders without extra inputs";
         if (!error_.empty()) {
             res.error = error_;
             return res;
@@ -860,6 +861,7 @@ private:
         if (scene()) h += "#define RVK_SCENE_RECORD 1\n";  // (the push block becomes a ScenePush, the draw's data comes from a DrawRecord)
         if (opt_.sceneView) h += "#define RVK_SCENE_VIEW 1\n";    // (ABI v2: the view's windows / posFix / c5.xyz come from the view table)
         h += "#include \"rvk_draw.hlsli\"\n\n";
+        if (opt_.pullVertices) h += "#include \"rvk_pull.hlsli\"\n\n";  // (S-4: after the ABI header; uberTranslatedPart keeps it inside rvkTr's text)
         return h;
     }
 
@@ -1080,7 +1082,8 @@ private:
     std::string entryPoint() const {
         std::string m;
         if (vs_) {
-            m += "RvkVsOut VSMain(RvkVsIn rvk_in) {\n";
+            // (S-4: the pulled form keeps the same body under another name; its entry, after it, builds rvk_in from the fetch block)
+            m += opt_.pullVertices ? "RvkVsOut rvkVsMain(RvkVsIn rvk_in) {\n" : "RvkVsOut VSMain(RvkVsIn rvk_in) {\n";
             if (scene()) m += "    rvkSceneBeginVs(rvk_in.rvk_sceneRef);\n";
             m += "    rvk_draw = rvkLoadDraw();\n    RvkVsOut rvk_out = (RvkVsOut)0;\n";
             if (scene()) m += "    rvk_out.rvk_sceneIdx = rvk_sceneIndex;\n";
@@ -1181,6 +1184,21 @@ private:
             }
         }
         m += "    return rvk_out;\n}\n";
+        if (vs_ && opt_.pullVertices) m += pullEntry();
+        return m;
+    }
+
+    // S-4: the pulled entry (rvk_pull.hlsli): SV_VertexID + the ref stream in, every declared input read from the draw's VertexFetch block in the
+    // input assembler's conversion, then the translated program unchanged
+    std::string pullEntry() const {
+        std::string m = "\nstruct RvkVsPullIn {\n    uint rvk_vertexId : SV_VertexID;\n    uint rvk_instanceId : SV_InstanceID;\n";
+        m += std::format("    [[vk::location({})]] uint2 rvk_sceneRef : ATTR{};\n}};\n", abi::kSceneRefLocation, abi::kSceneRefLocation);
+        m += "RvkVsIn rvkPullInputs(RvkVsPullIn p) {\n    RvkVsIn r = (RvkVsIn)0;\n    r.rvk_vertexId = p.rvk_vertexId;\n    r.rvk_instanceId = p.rvk_instanceId;\n"
+             "    r.rvk_sceneRef = p.rvk_sceneRef;\n    const RvkAddr blk = rvkPullBlock(p.rvk_sceneRef);\n";
+        for (const auto& d : p_.inputs) {
+            if (d.reg.type == RegType::Input) m += std::format("    r.v{} = rvkPullAttr(blk, {}u, p.rvk_vertexId);\n", d.reg.index, d.reg.index);
+        }
+        m += "    return r;\n}\nRvkVsOut VSMain(RvkVsPullIn rvk_pin) { return rvkVsMain(rvkPullInputs(rvk_pin)); }\n";
         return m;
     }
 
@@ -1222,6 +1240,15 @@ std::uint64_t hlslIncludesHash() {
         }
     }
     return h;
+}
+
+std::uint32_t hlslPullHash() {
+    std::uint64_t h = 1469598103934665603ull;
+    for (const char c : embedded::hlslSource("include/rvk_pull.hlsli")) {
+        h ^= static_cast<std::uint8_t>(c);
+        h *= 1099511628211ull;
+    }
+    return static_cast<std::uint32_t>(h ^ (h >> 32));
 }
 
 }  // namespace rvk::shader

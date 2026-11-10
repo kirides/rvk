@@ -455,6 +455,13 @@ int main(int argc, char** argv) {
                 // (always HLSL now; the flag is kept for old command lines)
             } else if (a == "--scene2") {
                 options.sceneView = true;  // scene ABI v2: + the view table (frame-ownership.md 7.19)
+            } else if (a == "--pull") {
+                // S-4 (frame-ownership.md 14.12): the pulled scene v2 vertex shaders (pixel shaders skipped)
+                variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
+                    if (sh.stage != rvk::shader::Stage::Vertex) return false;
+                    o.sceneRecord = o.sceneView = o.pullVertices = true;
+                    return true;
+                };
             } else if (a == "--scene") {
                 options.sceneRecord = true;  // scene variants: the draw's data from a DrawRecord (frame-ownership.md 7.10)
             } else if (a == "--fillers") {

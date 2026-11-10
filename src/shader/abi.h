@@ -163,6 +163,37 @@ struct DrawRecord {
 };
 static_assert(sizeof(DrawRecord) == kDrawRecordSize && alignof(DrawRecord) == 8);
 
+// ---- S-4 vertex pulling (docs/research/frame-ownership.md 14.12, TranslateOptions::pullVertices, HLSL shaders/include/rvk_pull.hlsli) -------------------------------
+// A pulled scene vertex shader has no vertex input but the ref stream: it reads its D3D9 inputs v0..v15 from the draw's static buffers (the mesh arena) by
+// reference, in the format the input assembler would have converted. One VertexFetch per persistent DrawRecord slot, in a table parallel to the records
+// (ScenePush::spare[0] = its base; block = base + slot * kVertexFetchSize). The indirect command's vertexOffset is 0 (D3D12's SV_VertexID ignores the base
+// vertex, Vulkan's VertexIndex includes it): the shader adds baseVertex itself. Vertex address = ref[stream] + (SV_VertexID + baseVertex) * stride[stream] + offset.
+inline constexpr std::uint32_t kVertexFetchSize = 128;
+inline constexpr std::uint32_t kVertexFetchValid = 0x50554C4Cu;  // 'PULL'
+// VertexFetch::attr format codes (the IA conversion each reproduces; 0 = the input is not declared: (0, 0, 0, 1))
+enum class PullFormat : std::uint32_t {
+    None = 0,
+    Float1 = 1, Float2 = 2, Float3 = 3, Float4 = 4,  // R32[G32[B32[A32]]]_SFLOAT: (x, 0, 0, 1) ...
+    Bgra8Unorm = 5,                                  // D3DCOLOR (B8G8R8A8_UNORM): bytes B, G, R, A -> (R, G, B, A) / 255
+    Rgba8Uscaled = 6,                                // UBYTE4 (R8G8B8A8_USCALED): (b0, b1, b2, b3)
+    Rgba8Unorm = 7,                                  // UBYTE4N, and UBYTE4 where the backend reads it as UNORM (D3D12: the push flag bit 17 + register scales it back)
+    Rg16Snorm = 8, Rgba16Snorm = 9,                  // SHORT2N / SHORT4N: max(c / 32767, -1)
+    Rg16Unorm = 10, Rgba16Unorm = 11,                // USHORT2N / USHORT4N: c / 65535
+    Rg16Float = 12, Rgba16Float = 13,                // FLOAT16_2 / FLOAT16_4
+};
+inline constexpr std::uint32_t kPullAttrOffsetMask = 0xFFFu;  // attr word: byte offset in the vertex (bits 0..11), stream (12..13), format (16..23)
+inline constexpr std::uint32_t kPullAttrStreamShift = 12;
+inline constexpr std::uint32_t kPullAttrFormatShift = 16;
+struct VertexFetch {
+    std::uint32_t ref[4][2];   // 0: per stream the reference pair (rvkAddr) of its data as the draw binds it (the arena copy + the stream offset); unused streams 0
+    std::uint32_t stride[4];   // 32: per stream the vertex stride in bytes (a multiple of 4)
+    std::int32_t baseVertex;   // 48: the D3D9 base vertex index (the draw's vertexOffset minus the arena binding's shift)
+    std::uint32_t valid;       // 52: kVertexFetchValid when the block was written for a pulled draw (0 = none: the draw is never pulled)
+    std::uint32_t pad[2];      // 56
+    std::uint32_t attr[16];    // 64: per input register v0..v15 (offset | stream << 12 | format << 16), 0 = not declared
+};
+static_assert(sizeof(VertexFetch) == kVertexFetchSize);
+
 struct ScenePush {
     std::uint64_t records;     // 0: the frame's DrawRecord buffer (record i at + i * kDrawRecordSize)
     std::uint64_t pad0;        // 8: (PushConstants::ps)
@@ -171,7 +202,7 @@ struct ScenePush {
     std::uint32_t recordBase;  // 32: added to ref.x (a bucket of records that starts inside the buffer)
     std::uint32_t pad2;        // 36
     std::uint64_t views;       // 40: ABI v2 (sceneView): the view table (ViewBlock2 slot i at + i * kViewBlock2Size); 0 in v1 draws
-    std::uint64_t spare[8];    // 48: to 112 bytes
+    std::uint64_t spare[8];    // 48: to 112 bytes. spare[0] (HLSL spare1) = S-4: the VertexFetch table of a pulled draw (rvk_pull.hlsli; 0 elsewhere)
 };
 static_assert(sizeof(ScenePush) == sizeof(PushConstants) && offsetof(ScenePush, frame) == offsetof(PushConstants, frame));
 

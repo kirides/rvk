@@ -737,6 +737,7 @@ void Device::destroy() {
     orphanLive();
     {
         const std::lock_guard lock(shaderMutex_);
+        std::unordered_set<rhi::ShaderModule> destroyed;  // (S-4: variant modules are shared by text: each destroyed once)
         for (auto& [h, s] : shaders_) {
             if (s->module != rhi::ShaderModule::None) {
                 game_->destroyShaderModule(s->module, false);
@@ -744,15 +745,16 @@ void Device::destroy() {
             }
             for (rhi::ShaderModule* m : {&s->tintModule, &s->lodModule}) {
                 if (*m != rhi::ShaderModule::None) {
-                    game_->destroyShaderModule(*m, false);
+                    if (destroyed.insert(*m).second) game_->destroyShaderModule(*m, false);
                     *m = rhi::ShaderModule::None;
                 }
             }
             for (auto& m : s->variants) {
-                if (const rhi::ShaderModule v = m.exchange(rhi::ShaderModule::None); v != rhi::ShaderModule::None) game_->destroyShaderModule(v, false);
+                if (const rhi::ShaderModule v = m.exchange(rhi::ShaderModule::None); v != rhi::ShaderModule::None && destroyed.insert(v).second) game_->destroyShaderModule(v, false);
             }
         }
         shaders_.clear();
+        sharedModules_.clear();
     }
     vs_.reset();
     ps_.reset();
@@ -1764,8 +1766,10 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
             char v[8];
             return GetEnvironmentVariableA("RVK_UBER_VS_OWNPOS", v, sizeof v) > 0 && v[0] == '1';
         }();
+        // (S-4: the pulled form needs the translated part: its entry builds the input struct; with the port's own position it stays translated)
+        if (options.pullVertices && ownPosition) return rhi::ShaderModule::None;
         glsl = shader::uberVertexHlsl(src.file, src.entry, src.macros, inputs, options.sceneRecord, options.sceneView, options.uberDefines,
-                                      ownPosition ? std::string_view() : std::string_view(translated.hlsl));
+                                      ownPosition ? std::string_view() : std::string_view(translated.hlsl), options.pullVertices);
     } else {
         glsl = shader::uberPixelHlsl(src.file, src.entry, src.macros, options.uberDefines, options.sceneRecord, options.sceneView);
     }
@@ -1781,8 +1785,11 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
             ? std::filesystem::path()
             : options_.cacheDir / "spirv" /
                   std::format("{:016x}_{}_u{:08x}{}.spv", s.hash, tag, static_cast<std::uint32_t>(textHash ^ (textHash >> 32)), half16 ? "h" : "");
+    // S-4: one module per distinct text (two requests of different bytecode that assemble the same text share it, and with it their pipelines and owned buckets)
+    const ModuleTextKey textKey = moduleTextKey(s.stage, glsl, half16);
+    if (const rhi::ShaderModule shared = sharedModule(textKey); shared != rhi::ShaderModule::None) return shared;
     if (options_.backend == rhi::Backend::D3D12) {
-        return dxilModule(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16);
+        return addSharedModule(textKey, dxilModule(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16));
     }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
@@ -1812,8 +1819,8 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
     if (const std::uint64_t n = ++ubershadersBuilt_; n == 1 || n % 50 == 0) {
         spdlog::info("d3d9: GLSL material shaders: {} modules built, {} failed", n, ubershadersFailed_.load());
     }
-    return game_->createShaderModule(
-        {.spirv = spirv}, game_->namesEnabled() ? moduleLabel(game_->namesEnabled(), s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)).c_str() : nullptr);
+    return addSharedModule(textKey, game_->createShaderModule(
+        {.spirv = spirv}, game_->namesEnabled() ? moduleLabel(game_->namesEnabled(), s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)).c_str() : nullptr));
 }
 
 rhi::ShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber) {
@@ -1842,8 +1849,10 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
     std::vector<std::uint32_t> spirv;
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
                                                      : options_.cacheDir / "spirv" / std::format("{:016x}_{}_h{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::hlslIncludesHash() ^ (shader::hlslIncludesHash() >> 32)));
+    const ModuleTextKey textKey = moduleTextKey(dec.program.version.stage, glsl.hlsl, false);  // (S-4: one module per distinct text, as uberModule)
+    if (const rhi::ShaderModule shared = sharedModule(textKey); shared != rhi::ShaderModule::None) return shared;
     if (options_.backend == rhi::Backend::D3D12) {
-        return dxilModule(dec.program.version.stage, glsl.hlsl, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag), s.hash);
+        return addSharedModule(textKey, dxilModule(dec.program.version.stage, glsl.hlsl, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag), s.hash));
     }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
@@ -1867,7 +1876,44 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
             out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
         }
     }
-    return game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag).c_str());
+    return addSharedModule(textKey, game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag).c_str()));
+}
+
+// S-4 (frame-ownership.md 14.12): variant modules by their text. The text is the whole input of the compile (defines, includes by name: the embedded headers are one
+// set per build; the half flag apart), so equal text = the same module: two shaders of different bytecode whose variants assemble the same text share one module, and with
+// it their pipelines and owned buckets (e.g. the z pass vertex shaders that differ only in inputs the pulled form does not read through a vertex input). Keyed by two
+// independent 64-bit hashes + the length + stage + half
+Device::ModuleTextKey Device::moduleTextKey(shader::Stage stage, std::string_view text, bool half16) {
+    ModuleTextKey k;
+    k.a = fnv1a(text.data(), text.size());
+    std::uint64_t b = 0x9ae16a3b2f90404full;
+    for (const char c : text) b = (b ^ static_cast<std::uint8_t>(c)) * 0x100000001b3ull + 0x632be59bd9b4e019ull;
+    k.b = b;
+    k.meta = text.size() << 8 | (stage == shader::Stage::Vertex ? 1u : 0u) | (half16 ? 2u : 0u);
+    return k;
+}
+
+rhi::ShaderModule Device::sharedModule(const ModuleTextKey& key) {
+    if (!shareModules_.load(std::memory_order_relaxed)) return rhi::ShaderModule::None;
+    const std::lock_guard lock(sharedModuleMutex_);
+    const auto it = sharedModules_.find(key);
+    if (it == sharedModules_.end()) return rhi::ShaderModule::None;
+    ++sharedModuleHits_;
+    return it->second;
+}
+
+rhi::ShaderModule Device::addSharedModule(const ModuleTextKey& key, rhi::ShaderModule m) {
+    if (m == rhi::ShaderModule::None || !shareModules_.load(std::memory_order_relaxed)) return m;
+    const std::lock_guard lock(sharedModuleMutex_);
+    const auto [it, fresh] = sharedModules_.try_emplace(key, m);
+    if (!fresh) {
+        // (another worker built the same text meanwhile: keep the first, this one is dropped)
+        game_->destroyShaderModule(m, true);
+        ++sharedModuleHits_;
+        return it->second;
+    }
+    ++sharedModuleMisses_;
+    return m;
 }
 
 // ---- thin G-buffer (enh/gbuffer) ----
@@ -1958,12 +2004,15 @@ void Device::variantWorker() {
                 if (b != VariantSlot::Count) base = variantProviders_[static_cast<std::size_t>(b)];
                 // (scene ABI v2: the same forms with the view table, slot = v1 slot + 7: frame-ownership.md 7.19)
                 const bool view = isSceneView(job.slot);
-                const VariantSlot v1 = view ? static_cast<VariantSlot>(static_cast<std::uint8_t>(job.slot) - 7) : job.slot;
+                // (S-4: SceneVsPull = the v2 vertex shader's pulled form, not a "+7" slot)
+                const bool pull = job.slot == VariantSlot::SceneVsPull;
+                const VariantSlot v1 = pull ? VariantSlot::SceneVs : view ? static_cast<VariantSlot>(static_cast<std::uint8_t>(job.slot) - 7) : job.slot;
                 const bool lodVs = v1 == VariantSlot::SceneVsLod;
                 const bool pixel = v1 != VariantSlot::SceneVs && !lodVs;
-                provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "");
+                provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "") +
+                               (pull ? std::format("p{:08x}", shader::hlslPullHash()) : "");
                 const bool uberOn = ubershader_.load(std::memory_order_relaxed);
-                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn](const Shader& sh, shader::TranslateOptions& o) {
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn, pull](const Shader& sh, shader::TranslateOptions& o) {
                     if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
                     // S-1a: the plain scene pixel shader of a request the ubershader covers is built from it (the enhancement variants say so through their own hooks)
@@ -1976,6 +2025,7 @@ void Device::variantWorker() {
                     }
                     o.sceneRecord = true;
                     o.sceneView = view;
+                    o.pullVertices = pull;
                     return true;
                 };
             }
