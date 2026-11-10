@@ -683,6 +683,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             captureRequest_ = {};
             captureRequestRw_ = {};
             captureInstances_ = false;
+            obsBonePending_ = false;
             obsBone_ = boneOfCached(c);  // (14.13)
             bool loaded = false;
             const CoverQuery cq = coverOf(q);

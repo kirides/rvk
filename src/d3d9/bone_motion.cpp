@@ -302,6 +302,7 @@ bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
     }
     if (!boneFormsReady()) {
         ++(skinned ? boneStats.pending : boneStats.rigidPending);
+        obsBonePending_ = true;  // (no capture as a fallback: boneMotionCovered)
         return false;
     }
     ++(skinned ? boneStats.predicted : boneStats.rigidPredicted);

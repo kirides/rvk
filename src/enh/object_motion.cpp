@@ -119,7 +119,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     // 14.13 (native.bone_motion): the draw takes the bone-motion forms: its previous positions come from the bone table's history, no capture
     // (14.15 b, native.rigid_motion: a static mesh's draw with the object table's history likewise)
-    if ((q.kind == Kind::Skinned || q.kind == Kind::StaticMesh) && dev.boneMotionDraw()) {
+    if ((q.kind == Kind::Skinned || q.kind == Kind::StaticMesh) && dev.boneMotionCovered()) {
         ++boneDraws_;
         dev.noteCaptureAvoided(q.kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(q));
         return;

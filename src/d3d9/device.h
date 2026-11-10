@@ -980,6 +980,8 @@ public:
     int boneMotion() const { return boneMode_; }
     // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
     bool boneMotionDraw() const { return obsBone_; }
+    // ... or will be once its forms are built (14.15: while they compile the draw keeps the plain form, its motion that frame is the camera's: no capture as fallback)
+    bool boneMotionCovered() const { return obsBone_ || obsBonePending_; }
     // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
     // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
     void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
@@ -2153,6 +2155,7 @@ private:
     int boneMode_ = 0;              // 0 off, 1 on (the skinned solid draws' motion from the bone table's history), 2 compare (captures as before + a GPU compare)
     bool sceneBone_ = false;        // sceneDecide chose the bone-motion forms for the draw being prepared
     bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)
+    bool obsBonePending_ = false;   // ... would be, its forms are still being built (boneMotionCovered)
     CaptureSite obsSite_ = CaptureSite::Composed;  // the path showing the observers the draw (capture census)
     struct CaptureCensus {
         std::uint64_t n[static_cast<std::size_t>(CaptureBy::Count)][static_cast<std::size_t>(CaptureKind::Count)][static_cast<std::size_t>(CaptureSite::Count)] = {};

@@ -2244,7 +2244,9 @@ bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeight
     for (int o : {pos, bw, bi, tc}) {
         if (o < 0 || o > 252 || (o & 3) != 0) return false;
     }
-    for (std::uint32_t k = 0; k < 3; ++k) {
+    // (c31 is the morph weights only for a layout with morph streams: other skinned shaders leave it to whatever the register file holds)
+    const bool morphLayout = morph[0] >= 0 || morph[1] >= 0 || morph[2] >= 0;
+    for (std::uint32_t k = 0; k < 3 && morphLayout; ++k) {
         const bool active = std::fabs(morphWeights[k]) > 1e-6f;
         if (morph[k] < 0) {
             if (active) return false;  // (weights for a target the layout does not have: the vertex shader reads something else)
@@ -2320,7 +2322,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         ++(has ? iv_.solidWithSkin : iv_.solidNoSkin);
         // (F-VAR2: the skinning pass has this frame's pose of the character, nothing reads its capture: no request, so an owned solid draw stays owned)
         // (14.13: a bone-motion draw's motion needs no capture either: dev.boneMotionDraw)
-        if (has && (!characterMotion_ || dev.boneMotionDraw()) && !skinVerify_) {
+        if (has && (!characterMotion_ || dev.boneMotionCovered()) && !skinVerify_) {
             ++iv_.solidCaptureSkipped;
             dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidMotion, d3d9::Device::captureKindOf(q));
             return;
