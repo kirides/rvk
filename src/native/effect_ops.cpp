@@ -548,7 +548,9 @@ bool EffectOps::effectBegin(void* filterPtr) {
     } else if (unit == Unit::Chain || unit == Unit::Post) {
         technique.clear();  // the filter's own (set at configuration: SSAO, BlurSSAO, Blur; the post filters' from the graph data)
     }
+    finishOwnCompare();  // (S-7c: a compared unit whose effectEnd did not come)
     const Skip s = composeEffect(filter, technique, input0, target, screen);
+    unitTechName_ = unitName_;
     if (unit == Unit::Post) unitName_ = engine::readCString(filter + 0x10) + (unitName_.empty() ? std::string() : " " + unitName_);
     // S-7 / S-7b: a unit of one of the scene graph's groups (the luminance chain, the bloom chain, the DoF middle; own_post on: composed in the engine's order)
     int grp = -1, grpIdx = -1;
@@ -560,6 +562,7 @@ bool EffectOps::effectBegin(void* filterPtr) {
     ++stats_->counts.units;
     if (s != Skip::None) {
         if (grpOpen_ >= 0) flushLum();  // the engine's own draws of this unit come now: the held ones first
+        if (tmHeldValid_) flushToneMap();  // (S-7c: it might read the ToneMap image)
         ++stats_->skips[static_cast<std::size_t>(s)];
         drawCount_ = 0;
         unit_ = Unit::None;  // left to the engine
@@ -602,6 +605,23 @@ bool EffectOps::effectBegin(void* filterPtr) {
             grpHeld_ = 0;
         }
     }
+    // S-7c: the single draw units on our pixel shaders; a unit that samples the held ToneMap image and cannot fold it gets it drawn first
+    ownSwap_ = false;
+    {
+        const PostUnit pu = unit == Unit::Post && grp < 0 && drawCount_ == 1 && ownLumActive() ? OwnPost::unitOf(unitTechName_) : PostUnit::None;
+        if (tmHeldValid_ && pu != PostUnit::DofDown && pu != PostUnit::Dof) {
+            const d3d9::Texture* held = tmHeld_ && tmHeld_->rt0 != nullptr ? static_cast<const d3d9::Surface*>(tmHeld_->rt0)->texture() : nullptr;
+            for (std::size_t k = 0; k < drawCount_ && tmHeldValid_; ++k) {
+                for (const void* t : draws_[k]->textures) {
+                    if (t != nullptr && t == held) {
+                        flushToneMap();
+                        break;
+                    }
+                }
+            }
+        }
+        if (pu != PostUnit::None) ownUnitBegin(pu, hold);
+    }
     if (unitTake_) {
         predictAfter(false);
         if (leanUnit()) {
@@ -630,7 +650,114 @@ void EffectOps::setOwnPost(OwnPost::Mode mode) {
         mode = OwnPost::Mode::Off;
     }
     if (grpOpen_ >= 0) flushLum();
+    if (tmHeldValid_) flushToneMap();
     own_->setMode(mode);
+}
+
+// ---- S-7c: the single draw units on our pixel shaders ----
+
+void EffectOps::ownUnitBegin(PostUnit u, bool& hold) {
+    if (!ownPatched_) ownPatched_ = std::make_unique<fxc::EffectDraw>();
+    const fxc::EffectDraw& d = *draws_[0];
+    const bool on = own_->mode() == OwnPost::Mode::On;
+    const bool scene = postGraph_.rfind("scene", 0) == 0;
+    const auto targetOf = [](const fxc::EffectDraw* e) -> const d3d9::Texture* {
+        return e != nullptr && e->rt0 != nullptr ? static_cast<const d3d9::Surface*>(e->rt0)->texture() : nullptr;
+    };
+    if (u == PostUnit::ToneMap) {
+        if (!tmRec_) tmRec_ = std::make_unique<fxc::EffectDraw>();
+        *tmRec_ = d;
+        std::string why;
+        tmValid_ = scene && OwnPost::toneMapFusable(d, why);
+        if (!tmValid_ && !why.empty() && why != tmWhy_) {
+            tmWhy_ = why;
+            spdlog::info("native: own post: ToneMap is not folded into its consumers: {}", why);
+        }
+        if (on && unitTake_ && tmValid_ && own_->fuseReady()) {
+            // folded: not drawn; DoFDown / DoF tone-map the scene themselves (an unread ToneMap, the HDRI graph's, is never drawn)
+            if (!tmHeld_) tmHeld_ = std::make_unique<fxc::EffectDraw>();
+            *tmHeld_ = d;
+            tmHeldValid_ = true;
+            tmFusedUses_ = 0;
+            hold = true;
+            return;
+        }
+    }
+    const fxc::EffectDraw* tm = nullptr;
+    if (u == PostUnit::DofDown || u == PostUnit::Dof) {
+        if (on && tmHeldValid_ && d.textures[0] == targetOf(tmHeld_.get())) tm = tmHeld_.get();
+        // Compare: the fused ports are what On draws: measured against the engine's units
+        else if (!on && tmValid_ && own_->fuseReady() && d.textures[0] == targetOf(tmRec_.get())) tm = tmRec_.get();
+    }
+    if (on) {
+        if (!unitTake_) return;
+        bool ok = own_->unitDraw(u, d, tm, *ownPatched_);
+        if (!ok && tm != nullptr) {
+            flushToneMap();  // the consumer cannot fold it: the ToneMap image is drawn now, the plain port reads it
+            tm = nullptr;
+            ok = own_->unitDraw(u, d, nullptr, *ownPatched_);
+        }
+        if (ok && tm != nullptr) ++tmFusedUses_;
+        own_->countUnit(u, ok);
+        ownSwap_ = ok;
+        return;
+    }
+    // Compare: the engine draws the unit; ours goes into a scratch target like it (a copy of the target first when the draw blends or clips)
+    if (!own_->unitDraw(u, d, tm, *ownPatched_)) {
+        own_->countUnit(u, false);
+        return;
+    }
+    auto* target = static_cast<d3d9::Surface*>(const_cast<void*>(d.rt0));
+    const bool precopy = d.rs[d3d9::RS_ALPHABLENDENABLE] != 0 || u == PostUnit::OvStrips;
+    d3d9::Surface* scratch = own_->scratchFor(target, precopy);
+    if (scratch == nullptr) {
+        own_->countUnit(u, false);
+        return;
+    }
+    own_->countUnit(u, true);
+    ownPatched_->rt0 = scratch;
+    ownPatched_->depth = nullptr;
+    cmpUnit_ = u;
+    cmpFused_ = tm != nullptr;
+    cmpScratch_ = scratch;
+    cmpTarget_ = target;
+}
+
+void EffectOps::finishOwnCompare() {
+    if (cmpUnit_ == PostUnit::None) return;
+    const PostUnit u = cmpUnit_;
+    cmpUnit_ = PostUnit::None;
+    issueOne(*ownPatched_);
+    static constexpr const char* kNames[kPostUnitCount] = {"-", "tonemap", "hdri", "dofdown", "dof", "overlay color", "overlay radial colour", "overlay radial blur",
+                                                           "overlay image", "overlay strips"};
+    const char* name = u == PostUnit::DofDown && cmpFused_ ? "dofdown (fused)" : u == PostUnit::Dof && cmpFused_ ? "dof (fused)" : kNames[static_cast<std::size_t>(u)];
+    own_->compareUnit(name, cmpScratch_, cmpTarget_);
+}
+
+void EffectOps::flushToneMap() {
+    if (!tmHeldValid_) return;
+    tmHeldValid_ = false;
+    own_->countToneMap(1);
+    const bool ours = own_->unitDraw(PostUnit::ToneMap, *tmHeld_, nullptr, *tmHeld_);
+    own_->countUnit(PostUnit::ToneMap, ours);
+    issueOne(*tmHeld_);
+}
+
+void EffectOps::issueOne(const fxc::EffectDraw& d) {
+    captureDevice(*saved_);
+    d3d9::draws::Tag& tag = dev_.drawTag();
+    const d3d9::draws::Tag savedTag = tag;
+    const std::size_t savedIndex = issueIndex_;
+    const bool savedIssuing = issuing_;
+    issuing_ = true;
+    issueIndex_ = ~std::size_t{0};  // (ownDraw has no composition for it)
+    applyDevice(d);
+    if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
+    else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
+    issuing_ = savedIssuing;
+    issueIndex_ = savedIndex;
+    tag = savedTag;
+    applyDevice(*saved_);
 }
 
 // the held units are drawn now, in order, as issue() would have (the device state saved and restored around them)
@@ -663,6 +790,7 @@ void EffectOps::flushLum() {
 void EffectOps::effectEnd(void* filter) {
     if (unit_ != Unit::None && filter == unitFilter_) {
         if (afterPending_) checkAfter(false);
+        finishOwnCompare();  // S-7c: the engine's draw of the unit is done: ours into the scratch target, compared
         finishUnit();
         if (grpCompare_ >= 0) {
             const int g = grpCompare_;
@@ -960,7 +1088,7 @@ void EffectOps::issue(bool draw) {
     const d3d9::draws::Tag savedTag = tag;
     issuing_ = true;
     for (std::size_t k = 0; k < drawCount_; ++k) {
-        const fxc::EffectDraw& d = *draws_[k];
+        const fxc::EffectDraw& d = ownSwap_ && k == 0 ? *ownPatched_ : *draws_[k];  // (S-7c: our pixel shader)
         applyDevice(d);
         issueIndex_ = k;
         if (!draw) {
@@ -1018,12 +1146,15 @@ void EffectOps::ownDraw(const d3d9::DrawTapInfo& t) {
     if (stats_ == nullptr || issueIndex_ >= drawCount_) return;
     if (ownKind_.size() < drawCount_) ownKind_.resize(drawCount_);
     ownKind_[issueIndex_] = static_cast<std::uint8_t>(t.kind);
-    if (unitCompare_) compareDraw(*draws_[issueIndex_], t, true);
+    if (unitCompare_) compareDraw(ownSwap_ && issueIndex_ == 0 ? *ownPatched_ : *draws_[issueIndex_], t, true);
 }
 
 bool EffectOps::engineDraw(const d3d9::DrawTapInfo& t) {
     if (unit_ == Unit::None || unit_ == Unit::Copy) {
-        if (postDepth_ > 0 && !engine::scene::inSceneJob() && t.phase.view == d3d9::scene::View::Post) ++postDrawsOutside_;
+        if (postDepth_ > 0 && !engine::scene::inSceneJob() && t.phase.view == d3d9::scene::View::Post) {
+            ++postDrawsOutside_;
+            if (tmHeldValid_) own_->countToneMap(3);  // S-7c: an engine draw outside the units while the ToneMap image is not drawn (must stay 0)
+        }
         if (guiOn() && t.phase.view == d3d9::scene::View::Gui) ++guiOutside_;
         if (inMask_) {
             ++outsideDraws_;
@@ -1053,6 +1184,7 @@ void EffectOps::finishUnit() {
     drawCount_ = 0;
     taken_ = false;
     leanSkipped_ = false;
+    ownSwap_ = false;
 }
 
 // ---- the 1/4 depth copy (eCImageFilterCopy::OnUpdateOutput 0x665640) -------------------------------------------------------------

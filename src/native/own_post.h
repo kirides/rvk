@@ -77,9 +77,18 @@ struct PostGroupPush {
 static_assert(sizeof(PostGroupPush) == 32 && sizeof(PostGroupPush) <= shader::abi::kPushConstantBudget);
 
 inline constexpr int kBloomUnits = 4, kDofMidUnits = 4, kMaxGroupUnits = 8;
-// the groups of the scene graph's units (held and run as one kernel set when complete)
-enum class OwnGroup : int { Lum = 0, Bloom = 1, DofMid = 2, Count = 3 };
+// the groups of the scene graph's units (held and run as one kernel set when complete); Units = S-7c's single draw units (their compare statistics only)
+enum class OwnGroup : int { Lum = 0, Bloom = 1, DofMid = 2, Units = 3, Count = 4 };
 inline constexpr int kGroupCount = static_cast<int>(OwnGroup::Count);
+
+// ---- S-7c (frame-ownership.md 14.16): the post chain's single draw units on our own pixel shaders (own_post_units.cpp, shaders/post/post_*.frag.hlsl) ----
+// A unit keeps its composed draw (the engine's vertex shader, quad, target, states, constants, textures) and gets our port of its pixel shader in place of the
+// translated one. ToneMap can also be folded into its two consumers (DoFDown, DoF: "fused" ports that tone-map the HDR scene themselves): its 8-bit image is
+// then not drawn. Opt-in (RVK_OWNPOST_FUSE=1): measured slower than the plain ports on the RX 7900 XTX (14.16).
+enum class PostUnit : std::uint8_t { None, ToneMap, Hdri, DofDown, Dof, OvColor, OvRadialColor, OvRadialBlur, OvImage, OvStrips, Count };
+inline constexpr int kPostUnitCount = static_cast<int>(PostUnit::Count);
+// the pixel shader ports: one per unit (index = PostUnit - 1), then the fused DoFDown / DoF
+inline constexpr int kPortDofDownTm = kPostUnitCount - 1, kPortDofTm = kPostUnitCount, kPortCount = kPostUnitCount + 1;
 
 class OwnPost {
 public:
@@ -118,6 +127,27 @@ public:
     bool runLum(const std::array<const fxc::EffectDraw*, kLumUnits>& rec, bool write);
     void report();
 
+    // ---- S-7c: the single draw units ----
+    // the unit of a post technique ("ToneMap", "DoFDown", "OverlayMovieStripsAbs", ...), None for any other
+    static PostUnit unitOf(std::string_view technique);
+    static const char* unitName(PostUnit u);
+    // fusion of ToneMap into DoFDown / DoF wanted (RVK_OWNPOST_FUSE=1) and its two ports built
+    bool fuseReady();
+    // `tm` (a composed ToneMap draw) can be folded into its consumers: a full-target quad of point taps 1:1 on the scene. False + `why`
+    static bool toneMapFusable(const fxc::EffectDraw& tm, std::string& why);
+    // our version of unit `u`'s composed draw `d`: `out` = `d` with our pixel shader (fused when `tm` is given: DoFDown / DoF reading the HDR scene of that ToneMap
+    // draw; the extra inputs in s5 / s6 and c16..c20). False: the unit stays the engine's (the port is not built yet, the engine's pixel shader is not the expected
+    // one, a fused consumer's taps do not fit the ToneMap image)
+    bool unitDraw(PostUnit u, const fxc::EffectDraw& d, const fxc::EffectDraw* tm, fxc::EffectDraw& out);
+    // Compare: a scratch render target like `target` (size, format) for our version of a unit; `precopy`: it starts as a copy of the target's content (blended /
+    // clipped draws; recorded now, before the engine's draw)
+    d3d9::Surface* scratchFor(d3d9::Surface* target, bool precopy);
+    // Compare: our scratch result against the engine's target, read back with the frame (`name` = the compared image; the per-image line of report())
+    void compareUnit(const char* name, d3d9::Surface* ours, d3d9::Surface* engine);
+    // counters: draws of a unit on our shader / kept on the engine's / ToneMap units folded into their consumers, drawn late, unread (not drawn)
+    void countUnit(PostUnit u, bool own) { ++(own ? unitOwn_ : unitEngine_)[static_cast<std::size_t>(u)]; }
+    void countToneMap(int what) { ++tmCounts_[static_cast<std::size_t>(what)]; }  // 0 folded, 1 drawn late (a consumer could not fuse), 2 unread, 3 outside draw while held
+
     // counters (rvk.log `native: own post`)
     struct Stats {
         std::uint64_t runs = 0, refused = 0, compared = 0, differing = 0;
@@ -130,14 +160,33 @@ private:
     bool runBloom(const std::array<const fxc::EffectDraw*, kMaxGroupUnits>& rec, bool write);
     bool runDofMid(const std::array<const fxc::EffectDraw*, kMaxGroupUnits>& rec, bool write);
     // compare: copies `ours` (an RGBA8 scratch image) and the engine's target of the same size into this frame slot's readback buffer; evaluated when the slot is reused
-    void recordCompare(rhi::CommandList& cmd, const char* name, rhi::Texture& ours, rhi::Texture& engine);
+    void recordCompare(rhi::CommandList& cmd, const char* name, rhi::Texture& ours, rhi::Texture& engine, int group = -1, int channels = 4);
     void evalCompares(std::uint32_t slot);
     struct Pending {
         const char* name;
         std::uint32_t w, h, pitch, offOurs, offEngine;
-        bool engineBgra;
-        int group;
+        bool engineBgra, oursBgra;
+        int group, channels;
     };
+    // ---- S-7c ----
+    void buildPorts();
+    struct PortShader {
+        const d3d9::Shader* engine = nullptr;
+        std::shared_ptr<d3d9::Shader> ours;
+    };
+    std::array<std::future<rhi::ShaderModule>, kPortCount> portBuilding_;
+    std::array<rhi::ShaderModule, kPortCount> port_{};
+    std::array<std::uint8_t, kPortCount> portState_{};  // 0 not built, 1 building, 2 ready, 3 failed
+    std::array<std::vector<PortShader>, kPortCount> portShaders_;  // per engine pixel shader (a handful)
+    bool portReady(int port);
+    d3d9::Shader* portShader(int port, const d3d9::Shader* engine, bool fused);
+    std::unique_ptr<d3d9::Texture> scratch_[4];  // compare scratch targets (by size + format: ToneMap, DoFDown, the back buffer, an overlay copy)
+    std::array<std::uint64_t, kPostUnitCount> unitOwn_{}, unitEngine_{};
+    std::array<std::uint64_t, 4> tmCounts_{};
+    std::array<std::string, kPostUnitCount> unitWhy_;
+    std::uint64_t bigCompareFrame_ = 0;
+    bool noFuse_ = false;
+    bool noUnits_ = false;  // RVK_OWNPOST_UNITS=0: every single unit stays the engine's
     std::array<std::vector<Pending>, rhi::kFramesInFlight> cmpPending_;
     std::array<std::uint32_t, rhi::kFramesInFlight> cmpCursor_{};
     std::array<std::uint64_t, rhi::kFramesInFlight> cmpFrame_{};
