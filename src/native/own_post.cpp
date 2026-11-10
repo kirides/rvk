@@ -90,6 +90,13 @@ OwnPost::~OwnPost() {
     for (auto& f : kernBuilding_) {
         if (f.valid()) f.wait();
     }
+    for (std::size_t i = 0; i < portBuilding_.size(); ++i) {
+        if (portBuilding_[i].valid()) port_[i] = portBuilding_[i].get();
+        if (port_[i] != rhi::ShaderModule::None) dev_.game().destroyShaderModule(port_[i], true);
+    }
+    for (auto& t : scratch_) {
+        if (t) dev_.release(std::move(t));
+    }
     readback_.reset();
 }
 
@@ -132,6 +139,7 @@ void OwnPost::setMode(Mode m) {
             }
         }
     }
+    if (m != Mode::Off) buildPorts();
     spdlog::info("native: own post: {}", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
 }
 
@@ -357,7 +365,19 @@ void OwnPost::report() {
     if (mode_ == Mode::Off) return;
     spdlog::info("native: own post (5 s): luminance kernel runs {}, refused {}; compare {} frames, differing {} (rel > 1e-5), max rel {:.3g}, mean rel {:.3g}", stats_.runs,
                  stats_.refused, stats_.compared, stats_.differing, stats_.maxRel, stats_.compared != 0 ? stats_.sumRel / static_cast<double>(stats_.compared) : 0.0);
-    static constexpr const char* kNames[kGroupCount] = {"luminance", "bloom chain", "DoF middle"};
+    static constexpr const char* kNames[kGroupCount] = {"luminance", "bloom chain", "DoF middle", "single units (S-7c)"};
+    {
+        // S-7c: per unit, its draws on our pixel shader / on the engine's; the ToneMap fold
+        std::string s;
+        for (int u = 1; u < kPostUnitCount; ++u) {
+            const auto i = static_cast<std::size_t>(u);
+            if (unitOwn_[i] == 0 && unitEngine_[i] == 0) continue;
+            s += std::format("{}{} {} ours / {} engine", s.empty() ? "" : ", ", unitName(static_cast<PostUnit>(u)), unitOwn_[i], unitEngine_[i]);
+            if (unitEngine_[i] != 0 && !unitWhy_[i].empty()) s += std::format(" ({})", unitWhy_[i]);
+        }
+        spdlog::info("native: own post units (5 s): {}; ToneMap folded into DoFDown + DoF {}, drawn late {}, unread (not drawn) {}, outside draws while held {}{}",
+                     s.empty() ? std::string("none seen") : s, tmCounts_[0], tmCounts_[1], tmCounts_[2], tmCounts_[3], noFuse_ ? " (fold off: RVK_OWNPOST_FUSE=1 turns it on)" : " (RVK_OWNPOST_FUSE)");
+    }
     for (int g = 1; g < kGroupCount; ++g) {
         const GroupStats& gs = gstats_[static_cast<std::size_t>(g)];
         spdlog::info("native: own post (5 s): {} runs {}, refused {}; compare {} images, differing {} (max step > 3 or sum|d| / sum > 2e-3), max {} steps, max rel {:.3g}, mean rel {:.3g}, "

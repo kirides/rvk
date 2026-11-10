@@ -131,6 +131,14 @@ bool OwnPost::groupReady(int group) {
 }
 
 bool OwnPost::runGroup(int group, const std::array<const fxc::EffectDraw*, kMaxGroupUnits>& rec, bool write) {
+    {
+        // A/B of the groups: RVK_OWNPOST_GROUPS = bit mask (1 luminance, 2 bloom, 4 DoF middle; default all), the others stay the engine's draws
+        static const unsigned mask = [] {
+            char v[16] = {};
+            return GetEnvironmentVariableA("RVK_OWNPOST_GROUPS", v, sizeof(v)) != 0 ? static_cast<unsigned>(std::strtoul(v, nullptr, 0)) : 7u;
+        }();
+        if ((mask & (1u << group)) == 0) return false;
+    }
     switch (static_cast<OwnGroup>(group)) {
     case OwnGroup::Lum: {
         std::array<const fxc::EffectDraw*, kLumUnits> r{};
@@ -164,10 +172,11 @@ void OwnPost::finishCompare(int group) {
 
 // ---- the compare machinery ----
 
-void OwnPost::recordCompare(rhi::CommandList& cmd, const char* name, rhi::Texture& ours, rhi::Texture& engine) {
+void OwnPost::recordCompare(rhi::CommandList& cmd, const char* name, rhi::Texture& ours, rhi::Texture& engine, int group, int channels) {
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr) return;
-    constexpr std::uint64_t kSlotBytes = 8ull << 20;
+    // (S-7c: the full-resolution units, ToneMap and the back buffer, are 4 x 5.8 MB at 1600 x 900)
+    constexpr std::uint64_t kSlotBytes = 48ull << 20;
     if (!cmpBuf_) {
         cmpBuf_ = rdev->createBuffer({kSlotBytes * rhi::kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "own post compare 2"});
         if (!cmpBuf_) return;
@@ -185,6 +194,7 @@ void OwnPost::recordCompare(rhi::CommandList& cmd, const char* name, rhi::Textur
     if (e.width != e2.width || e.height != e2.height) return;
     const std::uint32_t pitch = rhi::bufferRowPitch(ours.desc().format, e.width);
     const std::uint32_t pitch2 = rhi::bufferRowPitch(engine.desc().format, e.width);
+    if (pitch != pitch2 || pitch < 4 * e.width) return;  // (8-bit RGBA / BGRA images only)
     const auto align = [](std::uint64_t v) { return (v + 511) & ~std::uint64_t{511}; };
     const std::uint64_t bytes = align(static_cast<std::uint64_t>(pitch) * e.height), bytes2 = align(static_cast<std::uint64_t>(pitch2) * e.height);
     if (cmpCursor_[slot] + bytes + bytes2 > kSlotBytes) return;
@@ -201,7 +211,9 @@ void OwnPost::recordCompare(rhi::CommandList& cmd, const char* name, rhi::Textur
     p.offOurs = static_cast<std::uint32_t>(base);
     p.offEngine = static_cast<std::uint32_t>(base + bytes);
     p.engineBgra = engine.desc().format == VK_FORMAT_B8G8R8A8_UNORM;
-    p.group = std::string_view(name) == "bloom" || std::string_view(name) == "bright" || std::string_view(name) == "glow" || std::string_view(name) == "streak"
+    p.oursBgra = ours.desc().format == VK_FORMAT_B8G8R8A8_UNORM;
+    p.channels = channels;
+    p.group = group >= 0 ? group : std::string_view(name) == "bloom" || std::string_view(name) == "bright" || std::string_view(name) == "glow" || std::string_view(name) == "streak"
                   ? static_cast<int>(OwnGroup::Bloom)
                   : static_cast<int>(OwnGroup::DofMid);
     cmpCursor_[slot] += static_cast<std::uint32_t>(bytes + bytes2);
@@ -223,9 +235,10 @@ void OwnPost::evalCompares(std::uint32_t slot) {
             const std::uint8_t* b = base + p.offEngine + static_cast<std::size_t>(y) * p.pitch;
             for (std::uint32_t x = 0; x < p.w; ++x) {
                 bool pixelOff = false;
-                for (int c = 0; c < 4; ++c) {
+                for (int c = 0; c < p.channels; ++c) {
                     const int ec = p.engineBgra ? (c == 0 ? 2 : c == 2 ? 0 : c) : c;  // the engine's memory order -> RGBA
-                    const int va = a[x * 4 + static_cast<std::uint32_t>(c)], vb = b[x * 4 + static_cast<std::uint32_t>(ec)];
+                    const int oc = p.oursBgra ? (c == 0 ? 2 : c == 2 ? 0 : c) : c;
+                    const int va = a[x * 4 + static_cast<std::uint32_t>(oc)], vb = b[x * 4 + static_cast<std::uint32_t>(ec)];
                     const std::uint32_t d = static_cast<std::uint32_t>(std::abs(va - vb));
                     sumDiff += d;
                     sumEng += vb;

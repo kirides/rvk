@@ -161,6 +161,25 @@ private:
     int grpCompare_ = -1;   // Compare: the group whose last unit's engine draw is compared at effectEnd
     std::array<std::uint64_t, kGroupCount> grpRuns_{};
     std::uint64_t grpFlushes_ = 0;
+    // ---- S-7c: the single draw units on our pixel shaders (own_post_units.cpp) ----
+    // the unit `u` (composed in draws_[0]) gets our pixel shader: On = ownPatched_ is what issue() draws; Compare = drawn into a scratch target at effectEnd
+    void ownUnitBegin(PostUnit u, bool& hold);
+    // the held ToneMap unit is drawn now (a consumer that cannot fuse it, own_post turned off): our port, else its composed draw
+    void flushToneMap();
+    void issueOne(const fxc::EffectDraw& d);  // one draw with the device state saved / restored around it (as flushLum)
+    // Compare: our version of the compared unit into its scratch target (after the engine's draw), then the images compared
+    void finishOwnCompare();
+    std::uint32_t tmFusedUses_ = 0;  // fused consumers of the held ToneMap this post run
+    std::string tmWhy_;
+    std::unique_ptr<fxc::EffectDraw> ownPatched_, tmRec_, tmHeld_;
+    bool ownSwap_ = false;      // issue() draws ownPatched_ for draw 0
+    bool tmValid_ = false;      // tmRec_ = this post run's ToneMap draw (the fused ports' inputs)
+    bool tmHeldValid_ = false;  // On + fused: the ToneMap draw was not drawn (tmHeld_), its consumers tone-map the scene themselves
+    PostUnit cmpUnit_ = PostUnit::None;  // Compare: the unit whose scratch draw runs at effectEnd
+    bool cmpFused_ = false;
+    d3d9::Surface* cmpScratch_ = nullptr;
+    d3d9::Surface* cmpTarget_ = nullptr;
+    std::string unitTechName_;  // the composed unit's technique name
 
     // ---- N5.7 post chain (effect_ops_post.cpp) ----
     bool verifyPost();

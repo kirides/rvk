@@ -2934,3 +2934,84 @@ Reading: **the jungle main z pass is 0.024 ms faster in every run** (0.610 -> 0.
 * **Ubershader.** The bone forms are always the translated program (a provider-based scene form is never built from the ubershader port, `Device::variantWorker`); with `debug.ubershader` the owned skinned SOLID draws use them while the z pass keeps the port, whose clip position is the translated one by construction (`RVK_UBER_TRPOS`, shader-permutations.md 12). Porting the second run into `ge_default.vert.hlsl` would need the port to take its bone window as a parameter; not built.
 
 **Open.** (1) The compare's residue (0.2 - 0.4 px max) is the clip-to-world reconstruction's noise (equal to the same shader's rerun on the same image); an exact comparison would need both paths to keep the world position before the view-projection in the SAME space the motion pixel shader uses (the operand of `c0..c3` is not it). (2) The capture arm's motion only on the first frame of a screenshot burst (pre-existing). (3) Rigid moving draws (`upscale.object_motion=all`) still use captures: the same scheme needs a previous world row in the object table. (4) Characters without a skinning job (27 - 72 solid draws per 5 s) keep the RT scene's capture and stay composed. (5) Compare mode is Vulkan only (the Readback buffer is reached by address).
+
+### 14.16 S-7c result: the rest of the post chain on our own pixel shaders; the ToneMap fold measured and left opt-in (2026-11-11, branch `worktree-agent-a86048c1bfb2499e6`; no new setting: `native.own_post` = off | on | compare as before, Debug, Full, default off)
+
+**Built: every post unit the game was seen to draw now has its own shader in Full + `native.own_post=on`.** The units still on translated shaders after 14.8b (ToneMap, DoFDown, DoF on the screen, the HDRI-only graph's HDRI screen pass, the overlay effects) are drawn with our own HLSL **pixel shaders** (`shaders/post/post_*.frag.hlsl`, shared code in `post_units.hlsli` / `post_dof.hlsli` / `post_overlay.hlsli`). These are ports of the `rvk_fxtool dump --listing` disassembly of post_hdr.fx / post_dof.fx / overlay_color.fx, written instruction for instruction (`_pp` is full precision, as in the translator). No compute kernel was needed: each unit keeps its composed draw (`native::EffectOps`), so its target, which may be the back buffer, stays a render target. The unit also keeps its quad, the engine's translated vertex shader (an `add o1, c0, v1` per tap), its blend / clip states, its constants and its textures. Only the pixel shader changes. `OwnPost::unitDraw` (`src/native/own_post_units.cpp`) builds a `d3d9::Shader` that holds our module and **a copy of the engine pixel shader's reflection**, so the device uploads the same register windows and binds the same stages. `issue()` / `issueLean()` draw the patched copy. In the lean path the composed state is restored right after the draw, so the O3 "after" prediction is unchanged. The own-draw compare checks the patched draw (0 differing).
+
+Units covered: **ToneMap, HDRI, DoFDown, DoF, TOverlayColor, OverlayRadialColor, OverlayRadialBlur (OverlayHit's hit effect), OverlayImage, OverlayMovieStrips / OverlayMovieStripsAbs**. A port is used only when the engine pixel shader's sampler set and outputs match its listing, and only once its module is built (in the background when the mode is switched on; until then the unit keeps the engine's shader). Together with S-7a / S-7b (luminance 8 units, bloom 4, DoF middle 4), all 22 units of the DoF graph + overlay run our shaders, and so do all units of the HDRI graph. rvk.log `native: own post units (5 s): <unit> N ours / M engine (why)`: the engine count was 0 in every run below.
+
+**Fusion (ToneMap folded into DoFDown + DoF): built, measured, opt-in (`RVK_OWNPOST_FUSE=1`).** `post_dofdown_tm` / `post_dof_tm` tone-map the HDR scene themselves:
+* The fused DoFDown reads 16 point texels per output pixel: each bilinear tap of the 8-bit ToneMap image at a texel corner becomes the mean of its 4 tone-mapped texels.
+* The fused DoF reads the centre texel plus 4 corner means.
+* The ToneMap draw's inputs go into the free stages s5 / s6 and registers c16..c20. The ToneMap unit is then held and not drawn.
+* Fallbacks: a consumer that cannot fold it gets it drawn late with our port (`drawn late`). Any other unit that samples the held image also gets it drawn first. An unread ToneMap is dropped at the post chain's end.
+* Self-checks: ToneMap must be 1:1 on its target with point / clamp sampling, and the consumers' VS offsets must lie on the ToneMap grid.
+
+In compare mode the fold is max 1 step against the engine (no pixel more than 1 step off). **On the RX 7900 XTX it is slower** (GPU table below), so it is off by default. Debug env (A/B aids): `RVK_OWNPOST_UNITS=0` (every single unit stays the engine's), `RVK_OWNPOST_GROUPS=<mask>` (1 luminance, 2 bloom, 4 DoF middle; default 7).
+
+**Compare mode extended.** In compare mode each single unit is drawn a second time after the engine's draw: with our shader, into a scratch render target of the same size and format. Blended or clipped units (overlays, the strips) start from a copy of the target. The scratch is read back against the engine's target (`native: own post (5 s): image '<unit>'`: max step, mean relative difference, share of pixels more than 1 step off). The readback slot is now 48 MiB. Full-resolution images are compared every 4th frame (CPU cost). X8R8G8B8 targets are compared on RGB only. Compare also works on D3D12.
+
+**Numbers (own_post=compare, 1600x900):**
+
+| unit | Vulkan (harbour_docks; pub_interior + jungle with `RVK_DOF_TEST=1`) | D3D12 (harbour_docks) |
+|---|---|---|
+| tonemap | max 1 step, mean rel 1e-8 (float rounding ties), 0 % > 1 step | **0 steps** |
+| dofdown | **0 steps** | **0 steps** |
+| dof (screen) | max 1 step, mean rel 6e-9 | **0 steps** |
+| hdri (`DefaultEffect="HDRI"`, harbour_docks) | max 1 step, mean rel 5e-8 | - |
+| overlay strips | **0 steps** | **0 steps** |
+| overlay radial blur (`rvk_rare -Param steps=hit`) | **0 steps** (12 frames compared) | - |
+| dofdown (fused) / dof (fused) | max 1 step, mean rel 0.0015 - 0.0023 / 0.0024 - 0.0046, 0 % > 1 step | - |
+
+TOverlayColor / OverlayRadialColor / OverlayImage were not met in any run (OverlayBlackScreen / WhiteScreen etc., triggers in engine-frame/README.md 16). They are ported and pass DXIL, but are not verified in the game.
+
+**Pictures** (`water-compare -Mode full`, off vs on, fused build; control = off vs off against the same left run; `tools/sbs_diff.py` whole-image luma change / mean |d|):
+
+| spot | on vs off | control |
+|---|---|---|
+| beach_sun | +1.0 % / 2.87 | +0.5 % / 2.92 |
+| harbour_docks | -1.5 % / 0.82 | +0.1 % / 0.29 |
+| jungle | -0.7 % / 2.38 | 0.0 % / 2.32 |
+| monastery_hall | -1.7 % / 1.21 | -1.2 % / 1.18 |
+| pub_interior | -1.6 % / 0.90 | -0.5 % / 0.67 |
+| sea_horizon | -0.2 % / 0.51 | -0.1 % / 0.39 |
+| sun_disc | 0.0 % / 0.22 | 0.0 % / 0.04 |
+
+The harbour_docks shift (about 0.6 of a level, uniform) **does not come from S-7c**:
+* `RVK_OWNPOST_UNITS=0` (only the S-7a / S-7b kernels) gives the same -1.5 % / 0.82. The unfused build gives -1.5 % too.
+* Single-group runs scatter between -2.3 % and 0.0 % at harbour_docks and between +1.7 % and +3.6 % at pub_interior. Separate sessions therefore differ more than the one control pair suggests (eye adaptation / particles at these spots).
+
+The same-frame compare numbers above are the proof that the ports are EQUAL. Still open: whether S-7a / S-7b drift at harbour_docks. A picture A/B inside one session would settle it.
+
+`shot-reviewer` (crops under `rvk-work/scratch/s7c/review`):
+* Unchanged within the control: sun disc, flare, haze and god rays (the sun_disc / beach_sun crops), hue everywhere, the DoF blur of far backgrounds, the letterbox bars.
+* No 1-pixel shift (best alignment (0, 0) at every spot), no seams.
+* A smooth -1 % around pub_interior's candle glow, not visible side by side.
+
+**GPU per pass** (perf-ab `native.own_post` off / on, 3 + 3 windows of 240 frames in one session per scene, `RisenTest.exe`, vsync off; run in the private copy because the shared copy's game exits at start):
+
+| pass / metric | fused, hold | fused, harbour_docks | unfused (default), hold | unfused (default), harbour_docks |
+|---|---|---|---|---|
+| 400x225 pass (DoFDown + DoF middle) | **+0.031 ms** (z 9.6) | **+0.020 ms** (z 10.3) | unchanged | unchanged |
+| 1600x900 post pass | +0.031 ms (ToneMap gone, DoF fused) | +0.015 ms | **-0.011 ms** (z -2.9) | **-0.027 ms** (z -2.7) |
+| GPU frame | +0.011 ms | +0.018 ms | -0.019 ms (z -2.3) | -0.058 ms (z -1.5) |
+
+* The unfused arms include S-7a / S-7b's kernels. The share of our pixel shaders alone cannot be resolved: they do the engine's ALU work.
+* CPU: in the noise.
+* Plainly: **the fusion brings nothing on the XTX**. It is slower, because 16 FP16 texels + 16 tone maps per DoFDown pixel cost more than the ToneMap pass they save. On a bandwidth-bound iGPU its 17 MB less traffic might weigh more [I, unmeasured on the 680M], hence opt-in rather than removed.
+
+**Gates.**
+* `rvk_tests` 330 / 0. `dxil-check embedded`: all 11 new pixel shaders PASS.
+* `rvk_rhitest --validation`: PASS (both backends, abi probe 55 / 55). No new case: the ports only run through the D3D9 draw path, and the compare mode proves them against the translated shaders in the game on both backends.
+* `rvk_d3d9test --validation`: Vulkan PASS (0 failures / 0 validation errors), D3D12 PASS. The Vulkan run then exits with 0xC0000005 after one leaked VkBuffer at `vkDestroyDevice`. **Pre-existing**: main's build does the same.
+* Game runs (private copy `risen-test-vk-s7c`, instance 62, lock `rvk-s7c`):
+  * Compare + `-Validation` + GPU-assisted: 0 messages.
+  * On + `native.scene_ops_compare` + `native.lean_check=10` + GPU-assisted, fused build: 0 messages. Effect draw compares 0 mismatches; own draws checked 6,284, differing 0; lean check after / store / fields 0 differing. The fold ran every frame: 6,284 ToneMaps folded, 0 drawn late, 0 outside draws while held.
+  * D3D12 compare and On, `-Validation` (`RVK_NO_GBV=1`): only the baseline DSV-format warning.
+  * FSR quality + frame generation + `-SyncValidation`: only AMD's own `rw_*` format warnings. The units are ours under FSR.
+
+**Left on engine shaders: nothing the game was seen to draw.**
+* Not ported, because never met: post_radialBlur (RadialBlur graph), post_wobble, post_edgesmooth.
+* Not shaders: Indicator and OverlayHit's CopyCurrentRTToImage are copy filters; they stay the engine's HAL copy.
+* Unchanged: the GUI sprite batches (effect_ops_gui) and the units' vertex shaders (translated, one add per tap).
