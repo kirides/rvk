@@ -211,8 +211,8 @@ void StaticOps::leanMaskRef(const std::uint8_t* shader) {
     if (shader == nullptr || get<std::uint8_t>(shader, 0x58) == 0x50) return;
     using NotifyFn = void (*)(const void* self, const void* property, int);
     U8* vt = ptr(shader, 0);
-    const auto enter = reinterpret_cast<NotifyFn>(ptr(vt, 0xb0));
-    const auto exit = reinterpret_cast<NotifyFn>(ptr(vt, 0xb8));
+    const auto enter = reinterpret_cast<NotifyFn>(const_cast<std::uint8_t*>(ptr(vt, 0xb0)));
+    const auto exit = reinterpret_cast<NotifyFn>(const_cast<std::uint8_t*>(ptr(vt, 0xb8)));
     if (enter == nullptr || exit == nullptr) return;
     enter(shader, maskRefProperty_, 0);
     const std::uint8_t v = 0x50;
@@ -236,7 +236,7 @@ bool StaticOps::leanParticlePre(const std::uint8_t* ps) {
     } else if (instanced == 0) {
         if (get<std::int32_t>(ps, 0x390) == 0) {
             using OnProcessFn = void (*)(const void* self);
-            const auto onProcess = reinterpret_cast<OnProcessFn>(ptr(ptr(ps, 0), 0x248));
+            const auto onProcess = reinterpret_cast<OnProcessFn>(const_cast<std::uint8_t*>(ptr(ptr(ps, 0), 0x248)));
             if (onProcess == nullptr) {
                 leanBlock_ |= kBlockEdge;
                 return true;
@@ -269,7 +269,7 @@ void StaticOps::leanParticleStates(const std::uint8_t* ps) {
     const bool had = ptr(ps, 0x440) != nullptr;
     particleCreateImage_(ps);
     using SetImageFn = void (*)(const void* self, const void* image);
-    if (const auto setImage = reinterpret_cast<SetImageFn>(ptr(ptr(sampMat, 0), 0)); setImage != nullptr) setImage(sampMat, ptr(ps, 0x440));
+    if (const auto setImage = reinterpret_cast<SetImageFn>(const_cast<std::uint8_t*>(ptr(ptr(sampMat, 0), 0))); setImage != nullptr) setImage(sampMat, ptr(ps, 0x440));
     if (!had && ptr(ps, 0x440) != nullptr) ++leanWindow_.particleCreates;
 }
 

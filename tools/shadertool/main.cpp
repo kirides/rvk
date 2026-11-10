@@ -392,14 +392,14 @@ int cmdHlsl(int argc, char** argv) {
         }
     }
     if (!rvk::shader::dxc::available()) {
-        std::printf("DXC unavailable: %s\n", std::string(rvk::shader::dxc::unavailableReason()).c_str());
+        std::printf("DXC unavailable: %s\r\n", std::string(rvk::shader::dxc::unavailableReason()).c_str());
         return 2;
     }
     const auto res = rvk::shader::dxc::compile(r);
-    if (!res.log.empty()) std::printf("%s\n", res.log.c_str());
+    if (!res.log.empty()) std::printf("%s\r\n", res.log.c_str());
     if (!res.ok()) return 1;
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
-    tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char* m) { std::printf("spirv-val: %s\n", m); });
+    tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char* m) { std::printf("spirv-val: %s\r\n", m); });
     if (!tools.Validate(res.words)) return 1;
     if (!out.empty()) {
         std::ofstream f(out, std::ios::binary);
@@ -408,14 +408,14 @@ int cmdHlsl(int argc, char** argv) {
     if (!dxilOut.empty()) {
         r.target = rvk::shader::dxc::Target::Dxil;
         const auto dx = rvk::shader::dxc::compile(r);
-        if (!dx.log.empty()) std::printf("%s\n", dx.log.c_str());
+        if (!dx.log.empty()) std::printf("%s\r\n", dx.log.c_str());
         if (!dx.ok()) return 1;
-        std::printf("DXIL %s, %s\n", dx.dxilSigned ? "signed" : "NOT SIGNED", rvk::shader::dxc::dxilContractViolation(dx.bytes).empty() ? "fits the fixed root signature" : "root signature violation");
-        if (const std::string v = rvk::shader::dxc::dxilContractViolation(dx.bytes); !v.empty()) std::printf("  %s\n", v.c_str());
+        std::printf("DXIL %s, %s\r\n", dx.dxilSigned ? "signed" : "NOT SIGNED", rvk::shader::dxc::dxilContractViolation(dx.bytes).empty() ? "fits the fixed root signature" : "root signature violation");
+        if (const std::string v = rvk::shader::dxc::dxilContractViolation(dx.bytes); !v.empty()) std::printf("  %s\r\n", v.c_str());
         std::ofstream f(dxilOut, std::ios::binary);
         f.write(reinterpret_cast<const char*>(dx.bytes.data()), static_cast<std::streamsize>(dx.bytes.size()));
     }
-    std::printf("ok %s (%zu words%s)\n", name.c_str(), res.words.size(), res.fromCache ? ", cached" : "");
+    std::printf("ok %s (%zu words%s)\r\n", name.c_str(), res.words.size(), res.fromCache ? ", cached" : "");
     return 0;
 }
 

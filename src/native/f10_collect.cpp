@@ -142,8 +142,8 @@ bool readLive(const void* e, Cache& c) {
     c.cls = c.ctxHead ? static_cast<std::uint32_t>(rd<std::uintptr_t>(rdp(e, 0xf0), 0) - g_base) : 0u;
     const auto vt = static_cast<const void* const*>(rdp(e, 0));
     using GetFn = const float* (*)(const void*);
-    const float* box = reinterpret_cast<GetFn>(vt[0x260 / 8])(e);
-    const float* sph = reinterpret_cast<GetFn>(vt[0x268 / 8])(e);
+    const float* box = reinterpret_cast<GetFn>(const_cast<void*>(vt[0x260 / 8]))(e);
+    const float* sph = reinterpret_cast<GetFn>(const_cast<void*>(vt[0x268 / 8]))(e);
     std::memcpy(c.box, box, sizeof(c.box));
     std::memcpy(c.sph, sph, sizeof(c.sph));
     return true;
@@ -273,7 +273,7 @@ struct EngineGraph {
         if (slot < g_scene.size() && g_scene[slot].stamp != 0 && g_scene[slot].entity == e && (g_scene[slot].flags & 0x20000u) == 0) return g_scene[slot].box;
         const auto vt = static_cast<const void* const*>(rdp(e, 0));
         using GetFn = const float* (*)(const void*);
-        std::memcpy(tmp, reinterpret_cast<GetFn>(vt[0x260 / 8])(e), 24);
+        std::memcpy(tmp, reinterpret_cast<GetFn>(const_cast<void*>(vt[0x260 / 8]))(e), 24);
         return tmp;
     }
     // ExtractFromEntity(e, status 1): the gate (contexts, flags 0x8026 set / 8 clear), once per entity
@@ -403,7 +403,7 @@ void portalWalk(const void* db, const Filter& f, float factor, bool noRange, std
             const float* b = g.boxOf(ent, box);
             const auto vt = static_cast<const void* const*>(rdp(ent, 0));
             using GetFn = const float* (*)(const void*);
-            const float* sph = reinterpret_cast<GetFn>(vt[0x268 / 8])(ent);
+            const float* sph = reinterpret_cast<GetFn>(const_cast<void*>(vt[0x268 / 8]))(ent);
             if (cullCameraFull(fo, b, sph[0], sph + 1, noRange ? 0.0f : rd<float>(ent, 0xcc) * factor) != kCulled) ++occVisible;
         }
     }
@@ -437,7 +437,7 @@ void portalWalk(const void* db, const Filter& f, float factor, bool noRange, std
             const float* b = g.boxOf(ent, box);
             const auto vt = static_cast<const void* const*>(rdp(ent, 0));
             using GetFn = const float* (*)(const void*);
-            const float* sph = reinterpret_cast<GetFn>(vt[0x268 / 8])(ent);
+            const float* sph = reinterpret_cast<GetFn>(const_cast<void*>(vt[0x268 / 8]))(ent);
             culled = cullCameraFull(f, b, sph[0], sph + 1, noRange ? 0.0f : rd<float>(ent, 0xcc) * factor) == kCulled;
         }
         if (culled) {
