@@ -4570,6 +4570,25 @@ mov o2, v2
     bt.setHistory(false);
 }
 
+// The backend's teardown with game-mode resources alive: vertex capture chunks in both frame slots (D3D12: D3DBuffers in the capture pool) and the GPU
+// timestamp read-back. Nothing is checked here; main() destroys the device after the last case with these still allocated and counts the errors logged
+// during it (D3D12 crashed at the game's exit: the capture pool's buffers outlived the queue / fence / heap allocator, ~D3D12DeviceImpl's member order).
+void testTeardownWithCaptures(Fixture& f) {
+    Device& dev = f.dev;
+    const bool ts = dev.game().enableTimestamps();
+    int got = 0;
+    for (int k = 0; k < 4; ++k) {
+        f.reset();
+        for (int i = 0; i < 3; ++i) {
+            const rhi::RingAlloc a = dev.game().allocCapture((6ull << 20) + 256 * i, 16);  // (several chunks per slot)
+            if (!a.ref.null() || a.gpuVa != 0) ++got;
+        }
+        dev.present();
+    }
+    std::printf("  teardown with captures: %d capture allocations alive (timestamps %s); the device teardown at the end checks them\n", got, ts ? "on" : "unavailable");
+    if (got == 0) std::printf("  (this backend has no capture pool: nothing to tear down)\n");
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool validation = true, syncValidation = false;
@@ -4634,6 +4653,7 @@ int main(int argc, char** argv) {
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
         {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"bone motion (14.13)", testBoneMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)
     };
     for (const auto& [name, fn] : cases) {
         if (!only.empty() && std::none_of(only.begin(), only.end(), [&](const std::string& part) { return std::string_view(name).find(part) != std::string_view::npos; })) continue;
