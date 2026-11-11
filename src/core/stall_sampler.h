@@ -22,6 +22,8 @@ class StallSampler;
 // the process is suspended in turn and its stack logged ("diag: hang: thread ..."), again every 5 s while it lasts (3 times). Used
 // with [debug] perf to find a deadlock (frame generation swapchain F3).
 void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* user);
+// every other thread's stack (suspended in turn, symbolized after), one line per thread: "thread <id>: f0 < f1 < ..." (14.26: the shutdown watchdog)
+std::string allThreadStacks();
 // an extra report of the hang watchdog (after the stacks; e.g. vk::fgtrace::dump)
 void setHangReporter(void (*report)(const char* why));
 

@@ -30,6 +30,14 @@ void installUnhandledExceptionFilter();
 bool installExitDiagnostics(bool traceExitCall);
 // true once ExitProcess was called (the hook above)
 bool exiting();
+// 14.26: our device shutdown runs on this thread (HalDevice::~HalDevice): a NtTerminateProcess of this process from another thread (the game ends the process that
+// way) waits for deviceShutdownEnd (at most 45 s; installed with the exit diagnostics). terminateWaits = how many such calls waited
+// (also from WM_CLOSE until the shutdown ends while a device exists: deviceCreated after the HAL device's creation, windowClosing from the window procedure)
+void deviceCreated();
+void windowClosing();
+void deviceShutdownBegin();
+void deviceShutdownEnd();
+int terminateWaits();
 
 constexpr int kMaxDumps = 4;
 

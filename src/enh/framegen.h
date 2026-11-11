@@ -110,6 +110,10 @@ public:
     void apply(const Settings& s);
     // the generator's context goes (synchronously) and the swapchain backend is released: before the overlay and the device are torn down
     void shutdown();
+    // 14.26: the game window got WM_CLOSE (the window is destroyed before the engine releases the device): AMD's swapchain is released now, while the window
+    // exists (its presenter thread acquired on the real swapchain of the destroyed window without end: the shutdown hung in WaitForPresents); no frame
+    // generation after it
+    void windowClosing();
     // frame generation is meant to present through AMD's swapchain (mode on, not manual, not failed): the HAL keeps exclusive
     // fullscreen off then
     bool active() const { return on_ && !failed_; }
@@ -148,6 +152,7 @@ private:
     Settings s_;
     bool on_ = false;          // passes registered
     bool failed_ = false;      // the DLL / the context / a pipeline is not available: off for the session
+    bool closing_ = false;     // 14.26: the window is closing (windowClosing): off for the rest of the session
     bool gameplay_ = true, paused_ = false;
     std::shared_ptr<rhi::FrameGenerator> fg_;  // retired with the frame that last used it
     VkExtent2D ctxDisplay_{};

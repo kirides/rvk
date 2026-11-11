@@ -31,6 +31,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
+#include "enh/material_variant.h"
 #include "enh/rt_scene.h"
 #include "gpuscene/bone_table.h"
 #include "gpuscene/row_table.h"
@@ -4902,6 +4903,275 @@ mov o2, v2
     dev.release(std::move(ib));
 }
 
+// 14.26: the bone-motion forms of an instance-list draw (Device::rigidListPredict, the push form) into a G-buffer motion target. Two instances of one draw key (an
+// instanced-mesh draw: tag source Mesh, render-op node 0xffffff; VS window 2 uploaded, no object record): A moves 0.2 in x every frame (alternating), B stands still.
+// With the instances' identities (setInstanceIdentity, as StaticOps names them) A gets its own motion (the previous rows block: uv motion -0.1 / +0.1 in x), B none; without
+// them (two placements under one key: the old list path) A gets camera motion only (0): the negative control. The motion target (R16G16F, the G-buffer's format) is read
+// through a visualisation draw (motion x 4 + 0.5 into the back buffer)
+void testListMotion(Fixture& f) {
+    Device& dev = f.dev;
+    if (!dev.game().gameCaps().vertexStores && g_backend == rhi::Backend::Vulkan) {
+        std::printf("  (list motion: needs vertex stores: skipped)\n");
+        return;
+    }
+    static const char* kVsRigid = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_position o0
+dcl_color o1
+dcl_texcoord o2
+dp4 o0.x, v0, c33
+dp4 o0.y, v0, c34
+dp4 o0.z, v0, c35
+mov o0.w, v0.w
+mov o1, v1
+mov o2, v2
+)";
+    static const char* kPsShow = R"(
+ps_3_0
+def c0, 4, 4, 0, 0
+def c1, 0.5, 0.5, 0, 1
+dcl_texcoord v0.xy
+dcl_2d s0
+texld r0, v0, s0
+mad oC0, r0, c0, c1
+)";
+    const auto vs = shaderFrom(dev, kVsRigid);
+    static const char* kPsMat = R"(
+ps_3_0
+dcl_color v0
+mov r0, v0
+mov oC0, r0
+)";
+    const auto ps = shaderFrom(dev, kPsMat);  // (marked as an engine material shader below)
+    const auto show = shaderFrom(dev, kPsShow);
+    if (!vs || !ps || !show) {
+        std::printf("  FAIL list motion: shader\n");
+        ++g_failures;
+        return;
+    }
+    // (the material flag makes the G-buffer variants apply: gbufferLit / materialVariantOptions)
+    const std::uint32_t psFlagsBefore = ps->semantics.flags;
+    ps->semantics.flags |= ShaderSemantics::Material;
+    const std::uint32_t bw = dev.backBuffer()->width(), bh = dev.backBuffer()->height();
+    TextureDesc md;
+    md.width = bw;
+    md.height = bh;
+    md.format = rhi::d3dfmt::G16R16F;
+    md.usage = USAGE_RENDERTARGET;
+    md.pool = POOL_DEFAULT;
+    auto motionTex = dev.createTexture(md);
+    if (!motionTex) {
+        std::printf("  FAIL list motion: motion target\n");
+        ++g_failures;
+        ps->semantics.flags = psFlagsBefore;
+        return;
+    }
+    using GO = enh::GbufferOutputs;
+    dev.setVariantProvider(VariantSlot::GbufferM, {enh::materialVariantTag("gbuf_m"), [](const Shader& s, shader::TranslateOptions& o) {
+                                                       return enh::materialVariantOptions(s, enh::MaterialVariant::Gbuffer, o, GO::Motion);
+                                                   }});
+    dev.setVariantProvider(VariantSlot::GbufferMotionM, {enh::materialVariantTag("gbufm_m"), [](const Shader& s, shader::TranslateOptions& o) {
+                                                             return enh::materialVariantOptions(s, enh::MaterialVariant::GbufferMotion, o, GO::Motion);
+                                                         }});
+    dev.setBoneMotion(1);
+    dev.setRigidMotion(true);
+    dev.setRigidMotionWanted(true);
+    Texture* hdr = dev.backBuffer()->texture();
+    dev.tagImage(hdr, scene::ImageRole::SceneHdr);
+    Device::GbufferTargets gt{nullptr, &motionTex->rhi(), bw, bh, true};
+    dev.setGbuffer(gt);
+    const Vertex verts[4] = {{-0.15f, 0.15f, 0.5f, 1, 0xFFFFFFFF, 0, 0}, {0.15f, 0.15f, 0.5f, 1, 0xFFFFFFFF, 1, 0}, {-0.15f, -0.15f, 0.5f, 1, 0xFFFFFFFF, 0, 1}, {0.15f, -0.15f, 0.5f, 1, 0xFFFFFFFF, 1, 1}};
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(sizeof(verts), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts, sizeof(verts));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    scene::CameraInput cam;
+    cam.view = cam.projection = cam.viewProjection = cam.inverseView = scene::Mat4::identity();
+    cam.engineFar = 1000.0f;
+    alignas(16) static unsigned char entity[0x100];
+    static int instA = 0, instB = 0;
+    const float ax = -0.5f, ay = 0.4f, bx = 0.4f, by = -0.4f;
+    bool sceneForm = false;  // the scene form (native.owned_instances: an instance-list draw's scene record, prevVs = the previous rows block) instead of the push form
+    const auto frame = [&](int k, bool identities, bool showMotion) -> Pixels {
+        f.reset();
+        dev.setMainCamera(cam);
+        dev.beginMainView();
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setRenderTarget(0, dev.backBuffer());
+        dev.setVertexShader(vs);
+        dev.setPixelShader(ps);
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.drawTag().opDesc = 0xffffff00u;  // (an instanced batch's render-op node: Kind::InstancedMesh)
+        dev.drawTag().entity = entity;
+        OwnedWindows ow;  // (window 2 uploaded: no object record)
+        dev.setOwnedWindows(&ow);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+        const auto place = [&](float tx, float ty, const void* id, std::uint32_t color) {
+            const float c31[4] = {0, 0, 0, 0}, c32[4] = {0, 0, 0, 1};
+            const float rows[3][4] = {{1, 0, 0, tx}, {0, 1, 0, ty}, {0, 0, 1, 0}};
+            dev.setVertexShaderConstantF(31, c31, 1);
+            dev.setVertexShaderConstantF(32, c32, 1);
+            dev.setVertexShaderConstantF(33, rows[0], 3);
+            (void)color;
+            dev.setInstanceIdentity(identities ? id : nullptr);
+            dev.setSceneIssue(sceneForm);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+            dev.setSceneIssue(false);
+        };
+        // (the list re-sorted every frame: B first on odd frames; with identities the order does not matter)
+        const float atx = ax + ((k & 1) != 0 ? 0.2f : 0.0f);
+        if ((k & 1) != 0) {
+            place(bx, by, &instB, 0);
+            place(atx, ay, &instA, 0);
+        } else {
+            place(atx, ay, &instA, 0);
+            place(bx, by, &instB, 0);
+        }
+        dev.setInstanceIdentity(nullptr);
+        dev.setOwnedWindows(nullptr);
+        dev.drawTag() = {};
+        dev.phases().pop();
+        Pixels p;
+        if (showMotion) {
+            dev.setRenderTarget(0, dev.backBuffer());
+            dev.setDepthStencil(nullptr);
+            dev.setVertexShader(f.vs);
+            dev.setPixelShader(show);
+            dev.setTexture(0, motionTex.get());
+            dev.setSamplerState(0, SAMP_MAGFILTER, TEXF_POINT);
+            dev.setSamplerState(0, SAMP_MINFILTER, TEXF_POINT);
+            dev.setVertexDecl(f.decl.get());
+            f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+            dev.setTexture(0, nullptr);
+            p = capture(dev, sceneForm ? "listmotion_scene" : identities ? "listmotion_id" : "listmotion_noid");
+        }
+        dev.boneMotionFrame();
+        dev.present();
+        return p;
+    };
+    // the pixel of a placement's centre (D3D9 clip space y up -> rows from the top)
+    const auto px = [&](float x, float y) { return std::pair<std::uint32_t, std::uint32_t>{static_cast<std::uint32_t>((x * 0.5f + 0.5f) * bw), static_cast<std::uint32_t>((0.5f - y * 0.5f) * bh)}; };
+    const auto red = [](std::uint32_t c) { return static_cast<int>((c >> 16) & 0xFF); };
+    const auto green = [](std::uint32_t c) { return static_cast<int>((c >> 8) & 0xFF); };
+    const auto run = [&](bool identities, std::uint64_t& moved, Pixels& last) {
+        const Device::BoneMotionStats s0 = dev.boneStats;
+        // (the variants build in the background and the G-buffer arms after a frame that found its pipelines: up to ~10 s)
+        // (the scene form: until both placements of a frame were scene draws, i.e. the scene bone pipelines exist; a draw whose pipeline is pending falls back)
+        int sceneFrames = 0;
+        for (int k = 0; k < 1200; ++k) {
+            const std::uint64_t sd0 = dev.sceneStats().sceneDraws;
+            frame(k, identities, false);
+            sceneFrames = dev.sceneStats().sceneDraws - sd0 == 2 ? sceneFrames + 1 : 0;
+            if (dev.gbufferArmed() && (!identities || dev.boneStats.listMoving - s0.listMoving >= 8) && k >= 8 && (!sceneForm || sceneFrames >= 4)) break;
+            if (k > 4) Sleep(5);
+        }
+        frame(0, identities, false);  // (A at ax: the previous frame of the odd one)
+        // an odd frame: A at ax + 0.2 now, ax last frame (moved +0.2: previous - current = -0.2 in x = -0.1 in uv: red 0.5 - 0.4 = 0.1); then an even frame (+0.1 in uv)
+        last = frame(1, identities, true);
+        moved = dev.boneStats.listMoving - s0.listMoving;
+        frame(1, identities, false);  // (a read-back submits the frame: the frame value moves twice, so the next frame finds no rows of "the last frame" and draws A without motion)
+        return frame(2, identities, true);
+    };
+    std::uint64_t movedId = 0, movedNo = 0;
+    Pixels oddId, oddNo;
+    const Pixels evenId = run(true, movedId, oddId);
+    const Device::BoneMotionStats sMid = dev.boneStats;
+    const Pixels evenNo = run(false, movedNo, oddNo);
+    // the scene form: the same with scene draws on (setSceneInstances: the instance-list draw takes the scene bone forms, its record's prevVs = the block)
+    std::uint64_t movedSc = 0, sceneDrawsSc = 0, predictedSc = 0;
+    Pixels oddSc, evenSc;
+    dev.setSceneDraws(true, 0);
+    const bool sceneOk = dev.sceneDrawsActive();
+    if (sceneOk) {
+        dev.setSceneInstances(true);
+        dev.setSceneViews(true);  // (an instance-list draw is a scene candidate only with the v2 ABI on; without a view table its scene form is v1)
+        sceneForm = true;
+        const auto sc0 = dev.sceneStats();
+        const std::uint64_t pr0 = dev.boneStats.rigidPredicted;
+        evenSc = run(true, movedSc, oddSc);
+        sceneDrawsSc = dev.sceneStats().sceneDraws - sc0.sceneDraws;
+        predictedSc = dev.boneStats.rigidPredicted - pr0;
+        sceneForm = false;
+        dev.setSceneInstances(false);
+        dev.setSceneViews(false);
+    }
+    dev.setSceneDraws(false, 0);
+    const auto [aOx, aOy] = px(ax + 0.2f, ay);
+    const auto [aEx, aEy] = px(ax, ay);
+    const auto [bX, bY] = px(bx, by);
+    std::printf("  list motion: armed %d, moved forms with identities %llu (by identity %llu) / without %llu; A odd r %d g %d, A even r %d g %d, B r %d g %d; control A odd r %d, even r %d\n",
+                dev.gbufferArmed() ? 1 : 0, static_cast<unsigned long long>(movedId), static_cast<unsigned long long>(sMid.instMoving), static_cast<unsigned long long>(movedNo),
+                red(oddId.at(aOx, aOy)), green(oddId.at(aOx, aOy)), red(evenId.at(aEx, aEy)), green(evenId.at(aEx, aEy)), red(evenId.at(bX, bY)), green(evenId.at(bX, bY)),
+                red(oddNo.at(aOx, aOy)), red(evenNo.at(aEx, aEy)));
+    const auto within = [](int v, int want, int tol) { return std::abs(v - want) <= tol; };
+    const bool okId = movedId >= 2 && sMid.instMoving >= 2 && within(red(oddId.at(aOx, aOy)), 26, 10) && within(red(evenId.at(aEx, aEy)), 230, 10) &&
+                      within(green(oddId.at(aOx, aOy)), 128, 6) && within(red(evenId.at(bX, bY)), 128, 6) && within(green(evenId.at(bX, bY)), 128, 6);
+    const bool okNo = within(red(oddNo.at(aOx, aOy)), 128, 6) && within(red(evenNo.at(aEx, aEy)), 128, 6);
+    if (!dev.gbufferArmed() || !okId) {
+        std::printf("  FAIL list motion: the moving instance of a two-instance list has no motion of its own (or the still one moves)\n");
+        ++g_failures;
+    }
+    if (!okNo) {
+        std::printf("  FAIL list motion: the negative control (no identities: an ambiguous list) shows motion\n");
+        ++g_failures;
+    }
+    if (!sceneOk) {
+        std::printf("  (list motion: scene draws not available here: the scene form skipped)\n");
+    } else {
+        std::printf("  list motion, scene form: %llu scene draws, %llu predicted with the scene bone forms; A odd r %d, A even r %d, B r %d\n", static_cast<unsigned long long>(sceneDrawsSc),
+                    static_cast<unsigned long long>(predictedSc), red(oddSc.at(aOx, aOy)), red(evenSc.at(aEx, aEy)), red(evenSc.at(bX, bY)));
+        if (sceneDrawsSc == 0 || predictedSc < 2 || !within(red(oddSc.at(aOx, aOy)), 26, 10) || !within(red(evenSc.at(aEx, aEy)), 230, 10) || !within(red(evenSc.at(bX, bY)), 128, 6)) {
+            std::printf("  FAIL list motion: the scene form of the moving instance has no motion of its own\n");
+            ++g_failures;
+        }
+    }
+    // a soak of both forms (GPU-assisted validation runs: hundreds of moved draws through the previous rows block)
+    {
+        const std::uint64_t m0 = dev.boneStats.listMoving;
+        for (int k = 0; k < 300; ++k) frame(k, true, false);
+        std::uint64_t mScene = 0;
+        dev.setSceneDraws(true, 0);
+        if (dev.sceneDrawsActive()) {
+            dev.setSceneInstances(true);
+            dev.setSceneViews(true);
+            sceneForm = true;
+            const std::uint64_t s1 = dev.boneStats.listMoving;
+            for (int k = 0; k < 300; ++k) frame(k, true, false);
+            mScene = dev.boneStats.listMoving - s1;
+            sceneForm = false;
+            dev.setSceneInstances(false);
+            dev.setSceneViews(false);
+        }
+        dev.setSceneDraws(false, 0);
+        const std::uint64_t mAll = dev.boneStats.listMoving - m0;
+        std::printf("  list motion soak: %llu moved draws (scene form %llu)\n", static_cast<unsigned long long>(mAll), static_cast<unsigned long long>(mScene));
+        const std::uint64_t want = mScene > 0 ? 580u : 290u;  // (300 frames per form, A moves in every one)
+        if (mAll < want) {
+            std::printf("  FAIL list motion: the soak drew %llu moved forms (expected at least %llu)\n", static_cast<unsigned long long>(mAll), static_cast<unsigned long long>(want));
+            ++g_failures;
+        }
+    }
+    dev.setGbuffer({});
+    dev.tagImage(hdr, scene::ImageRole::None);
+    dev.setBoneMotion(0);
+    dev.setRigidMotion(false);
+    dev.setRigidMotionWanted(false);
+    dev.setVariantProvider(VariantSlot::GbufferM, {});
+    dev.setVariantProvider(VariantSlot::GbufferMotionM, {});
+    ps->semantics.flags = psFlagsBefore;
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+    dev.release(std::move(motionTex));
+}
+
 }  // namespace
 
 // --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
@@ -5416,7 +5686,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)
     };
     for (const auto& [name, fn] : cases) {

@@ -1,9 +1,17 @@
 #include "vk/fg_swapchain.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <format>
+#include <mutex>
+#include <set>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
@@ -151,6 +159,128 @@ bool sharedEventsWanted() {
     return n > 0 && buf[0] != '0';
 }
 
+// ---- AMD's semaphores (frame-ownership.md 14.26) ----
+// The swapchain of amd_fidelityfx_framegeneration_vk.dll (SDK 2.4.0) can leave its "AMD FSR FrameRenderedSemaphore <n>" semaphores alive when it is destroyed (two in
+// some sessions: the validation layer's leaked-objects report at vkDestroyDevice). Its swapchain part imports vkCreateSemaphore / vkDestroySemaphore /
+// vkGetDeviceProcAddr from vulkan-1.dll (FgSwapchain::load points those imports at the trackers below; the device proc address the contexts get serves the effect's
+// backend table and is the tracker too: vk/framegen.cpp takes fgTrackedDeviceProcAddr). The trackers record the semaphores the DLL creates and the names it gives them
+// (vkSetDebugUtilsObjectNameEXT through the tracked proc lookups). Once the swapchain context and the swapchain are destroyed, a semaphore named "AMD FSR
+// FrameRenderedSemaphore ..." that is still alive belongs to no live swapchain and is destroyed by us (any other live semaphore is left alone: the generator's own
+// objects); a later vkDestroySemaphore of the DLL on such a handle is ignored (no double destroy). RVK_FG_KEEP_SEMAPHORES=1 (Win32 environment) leaves them to the
+// DLL: the A/B arm.
+std::mutex g_semMutex;
+std::unordered_map<VkSemaphore, std::string> g_semLive;  // created through the wrapper, not destroyed yet -> its debug name ("" = none)
+std::unordered_set<VkSemaphore> g_semReclaimed;          // destroyed by us after the swapchain went
+PFN_vkCreateSemaphore g_vkCreateSemaphore = nullptr;
+PFN_vkDestroySemaphore g_vkDestroySemaphore = nullptr;
+PFN_vkSetDebugUtilsObjectNameEXT g_vkSetName = nullptr;
+std::atomic<std::uint64_t> g_semCreated{0}, g_semDestroyed{0}, g_procLookups{0};  // (through the wrapper, this process)
+constexpr std::string_view kSwapchainSemaphore = "AMD FSR FrameRenderedSemaphore";
+std::set<std::string> g_procNames;  // (the names the DLL looked up: diagnostics)
+
+VKAPI_ATTR VkResult VKAPI_CALL trackedCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo* ci, const VkAllocationCallbacks* a, VkSemaphore* out) {
+    const VkResult r = g_vkCreateSemaphore(device, ci, a, out);
+    if (r == VK_SUCCESS && out != nullptr && *out != VK_NULL_HANDLE) {
+        const std::lock_guard lock(g_semMutex);
+        g_semLive[*out].clear();
+        g_semReclaimed.erase(*out);
+        ++g_semCreated;
+    }
+    return r;
+}
+
+VKAPI_ATTR void VKAPI_CALL trackedDestroySemaphore(VkDevice device, VkSemaphore sem, const VkAllocationCallbacks* a) {
+    {
+        const std::lock_guard lock(g_semMutex);
+        if (g_semReclaimed.erase(sem) != 0) return;  // (already destroyed by reclaimSemaphores)
+        if (g_semLive.erase(sem) != 0) ++g_semDestroyed;
+    }
+    g_vkDestroySemaphore(device, sem, a);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL trackedSetName(VkDevice device, const VkDebugUtilsObjectNameInfoEXT* info) {
+    if (info != nullptr && info->objectType == VK_OBJECT_TYPE_SEMAPHORE && info->pObjectName != nullptr) {
+        const std::lock_guard lock(g_semMutex);
+        const auto it = g_semLive.find(reinterpret_cast<VkSemaphore>(info->objectHandle));
+        if (it != g_semLive.end()) it->second = info->pObjectName;
+    }
+    return g_vkSetName != nullptr ? g_vkSetName(device, info) : VK_SUCCESS;
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL trackedDeviceProcAddr(VkDevice device, const char* name);
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL trackedDeviceProcAddr(VkDevice device, const char* name) {
+    ++g_procLookups;
+    if (name == nullptr) return vkGetDeviceProcAddr(device, name);
+    {
+        const std::lock_guard lock(g_semMutex);
+        g_procNames.insert(name);
+    }
+    if (std::strcmp(name, "vkGetDeviceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(&trackedDeviceProcAddr);  // (the DLL's later lookups stay ours)
+    if (std::strcmp(name, "vkCreateSemaphore") == 0) {
+        if (g_vkCreateSemaphore == nullptr) g_vkCreateSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(vkGetDeviceProcAddr(device, name));
+        return g_vkCreateSemaphore != nullptr ? reinterpret_cast<PFN_vkVoidFunction>(&trackedCreateSemaphore) : nullptr;
+    }
+    if (std::strcmp(name, "vkDestroySemaphore") == 0) {
+        if (g_vkDestroySemaphore == nullptr) g_vkDestroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(vkGetDeviceProcAddr(device, name));
+        return g_vkDestroySemaphore != nullptr ? reinterpret_cast<PFN_vkVoidFunction>(&trackedDestroySemaphore) : nullptr;
+    }
+    if (std::strcmp(name, "vkSetDebugUtilsObjectNameEXT") == 0) {
+        if (g_vkSetName == nullptr) g_vkSetName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(vkGetDeviceProcAddr(device, name));
+        return g_vkSetName != nullptr ? reinterpret_cast<PFN_vkVoidFunction>(&trackedSetName) : nullptr;
+    }
+    return vkGetDeviceProcAddr(device, name);
+}
+
+bool keepSemaphoresWanted() {
+    char buf[8] = {};
+    const DWORD n = GetEnvironmentVariableA("RVK_FG_KEEP_SEMAPHORES", buf, sizeof(buf));
+    return n > 0 && buf[0] != '0';
+}
+
+// after the swapchain context and the swapchain are destroyed: the swapchain's semaphores the DLL left alive
+void reclaimSemaphores(Context& ctx) {
+    std::vector<VkSemaphore> left;
+    std::size_t others = 0;
+    {
+        const std::lock_guard lock(g_semMutex);
+        for (auto it = g_semLive.begin(); it != g_semLive.end();) {
+            if (std::string_view(it->second).starts_with(kSwapchainSemaphore)) {
+                left.push_back(it->first);
+                it = g_semLive.erase(it);
+            } else {
+                ++others;
+                ++it;
+            }
+        }
+    }
+    std::size_t names = 0;
+    bool askedCreate = false;
+    {
+        const std::lock_guard lock(g_semMutex);
+        names = g_procNames.size();
+        askedCreate = g_procNames.contains("vkCreateSemaphore");
+        std::string all;
+        for (const std::string& n : g_procNames) all += (all.empty() ? "" : " ") + n;
+        spdlog::info("fg swapchain: names the DLL looked up: {}", all);
+    }
+    spdlog::info("fg swapchain: semaphores of the DLL: {} created, {} destroyed by it, {} of the swapchain left alive after it, {} others alive; {} proc lookups of {} "
+                 "names (vkCreateSemaphore {})",
+                 g_semCreated.load(), g_semDestroyed.load(), left.size(), others, g_procLookups.load(), names, askedCreate ? "asked" : "never asked");
+    if (left.empty()) return;
+    if (keepSemaphoresWanted() || g_vkDestroySemaphore == nullptr) {
+        spdlog::info("fg swapchain: {} semaphores of the swapchain left alive by the DLL (RVK_FG_KEEP_SEMAPHORES)", left.size());
+        return;
+    }
+    // (the swapchain's destroy waited for its presents and its queues; the callers waited the device idle before: Swapchain::create / releaseFrameGen / destroy)
+    {
+        const std::lock_guard lock(g_semMutex);
+        for (const VkSemaphore s : left) g_semReclaimed.insert(s);
+    }
+    for (const VkSemaphore s : left) g_vkDestroySemaphore(ctx.device(), s, nullptr);
+    spdlog::info("fg swapchain: {} semaphores of the swapchain destroyed", left.size());
+}
+
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 dstStage,
                   VkAccessFlags2 dstAccess) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -172,6 +302,8 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImag
 constexpr VkAccessFlags2 kAnyAccess = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
 
 }  // namespace
+
+PFN_vkGetDeviceProcAddr fgTrackedDeviceProcAddr() { return &trackedDeviceProcAddr; }
 
 FgSwapchain::~FgSwapchain() {
     stopSampler();
@@ -251,6 +383,16 @@ bool FgSwapchain::load(const std::filesystem::path& dll) {
                                      reinterpret_cast<void**>(&g_createEventW))) {
             spdlog::warn("fg swapchain: the frame generation DLL's CreateEventW import was not found: its events stay named");
         }
+        // 14.26: the swapchain part of the DLL imports its Vulkan functions from vulkan-1.dll (the device proc address of the contexts serves only the effect's
+        // backend table): its semaphore calls and its own proc lookups (the debug names) go through the trackers
+        if (!keepSemaphoresWanted()) {
+            int n = 0;
+            n += iat::patchImport(fx, "vulkan-1.dll", "vkCreateSemaphore", reinterpret_cast<void*>(&trackedCreateSemaphore), reinterpret_cast<void**>(&g_vkCreateSemaphore)) ? 1 : 0;
+            n += iat::patchImport(fx, "vulkan-1.dll", "vkDestroySemaphore", reinterpret_cast<void*>(&trackedDestroySemaphore), reinterpret_cast<void**>(&g_vkDestroySemaphore)) ? 1 : 0;
+            PFN_vkGetDeviceProcAddr realGdpa = nullptr;
+            n += iat::patchImport(fx, "vulkan-1.dll", "vkGetDeviceProcAddr", reinterpret_cast<void*>(&trackedDeviceProcAddr), reinterpret_cast<void**>(&realGdpa)) ? 1 : 0;
+            spdlog::info("fg swapchain: {} of 3 vulkan-1 imports of the frame generation DLL tracked (its semaphores)", n);
+        }
         if (fgtrace::enabled()) {
             fgtrace::install(fx, VK_NULL_HANDLE);
             diag::setHangReporter(&fgtrace::dump);
@@ -274,7 +416,7 @@ bool FgSwapchain::create(Context& ctx, const VkSwapchainCreateInfoKHR& ci, std::
     VkDeviceContext dc{};
     dc.vkDevice = ctx.device();
     dc.vkPhysicalDevice = ctx.physicalDevice();
-    dc.vkDeviceProcAddr = vkGetDeviceProcAddr;
+    dc.vkDeviceProcAddr = trackedDeviceProcAddr;  // (14.26: tracks the swapchain's semaphores, reclaimSemaphores)
     std::vector<FrameGenVersion> versions;
     {
         std::uint64_t count = 0;
@@ -382,16 +524,19 @@ void FgSwapchain::destroy() {
         return;
     }
     stopSampler();
+    spdlog::info("fg swapchain: destroying (waiting for the presents)");
     waitForPresents();
     destroyViews();
     {
         const std::lock_guard lock(mutex_);
+        spdlog::info("fg swapchain: destroying the swapchain context");
         ffxContext c = swapchainContext_;
         fn_->api.DestroyContext(&c, nullptr);  // documented order: the swapchain context first ...
         swapchainContext_ = nullptr;
         fn_->rf.pOutDestroySwapchainFFXAPI(ctx_->device(), swapchain_, nullptr, nullptr);  // ... then the swapchain
         swapchain_ = VK_NULL_HANDLE;
     }
+    if (ctx_ != nullptr) reclaimSemaphores(*ctx_);
     spdlog::info("fg swapchain: destroyed");
 }
 

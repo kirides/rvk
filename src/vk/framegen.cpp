@@ -1,4 +1,5 @@
 #include "vk/framegen.h"
+#include "vk/fg_swapchain.h"
 
 #include <algorithm>
 #include <chrono>
@@ -93,7 +94,7 @@ VkDeviceContext deviceContextOf(Context& ctx) {
     VkDeviceContext dc{};
     dc.vkDevice = ctx.device();
     dc.vkPhysicalDevice = ctx.physicalDevice();
-    dc.vkDeviceProcAddr = vkGetDeviceProcAddr;
+    dc.vkDeviceProcAddr = fgTrackedDeviceProcAddr();  // (14.26: the DLL's semaphores tracked, vk/fg_swapchain.cpp)
     return dc;
 }
 

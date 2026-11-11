@@ -303,6 +303,7 @@ if ($GracefulExit) {
         } else {
             Write-Host 'graceful exit: did NOT exit within 60 s of the close request; killed'
             $p.Kill()
+            $null = $p.WaitForExit(30000)  # (the kill is asynchronous: the next run's d3d9.dll copy failed on the still-mapped file)
             $code = 3
         }
     }
