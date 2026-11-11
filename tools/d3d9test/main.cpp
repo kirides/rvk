@@ -2587,25 +2587,226 @@ mov oC0, r0
                 }
                 bad(refO, pr, "a pending run queued before the next normal draw");
             }
-            std::printf("  owned ordered: four blended draws in A B A B order: ordered flush = the normal draws, unordered (merged) flush differs in %u bytes\n", nd);
-            // GPU safety (the device loss of 2026-11-11, frame-ownership.md 14.20): a blended draw with a stream bound at instance rate (the alpha list's herbs: stream 3 at
-            // 0x80000001) must NOT get the ordered scene forms: the indirect draw's firstInstance is its record index, the instance-rate attribute would be read there
+            // F6-2 regression (the device loss of 2026-11-11 08:41, frame-ownership.md 14.23): a pending run, then a BATCHABLE composed scene draw (an opaque solid-pass draw:
+            // its record joins sceneRecs_ and the packet waits in the batch). The run must be queued before that record is pushed: queued from submitInterned (after
+            // toScenePacket), its flush recorded the batch and emptied sceneRecs_, and the waiting packet kept an index into the emptied list (the run dropped by the guard,
+            // or with a refilled list another draw's record: a null window read on the GPU)
             {
+                const auto opaque = [&] {
+                    dev.setRenderState(RS_ALPHABLENDENABLE, 0);
+                    dev.setRenderState(RS_ZWRITEENABLE, 1);
+                    dev.setPixelShader(psOf(3));
+                };
+                const auto opaqueState = [&] {
+                    dev.phases().push(scene::View::Main, scene::Pass::Solid);
+                    opaque();
+                };
+                // (the order: opaque quad 3 (waits in the batch), the ordered run of the blended quads 0..2, opaque quad 3 again: the last one covers the blend, so a lost draw shows)
+                beginO();
+                opaqueState();
+                dev.drawIndexedPrimitive(PT_TRIANGLELIST, 12, 0, 4, 0, 2);
+                dev.setRenderState(RS_ALPHABLENDENABLE, 1);
+                dev.setRenderState(RS_ZWRITEENABLE, 0);
+                for (std::uint32_t k = 0; k < 3; ++k) {
+                    dev.setPixelShader(psOf(k));
+                    dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+                }
+                opaque();
+                dev.drawIndexedPrimitive(PT_TRIANGLELIST, 12, 0, 4, 0, 2);
+                dev.phases().pop();
+                const Pixels refP = end("ownedo_pending_scene_ref");
+                Device::CachedDraw cq;
+                bool readyQ = false;
+                for (int i = 0; i < 1200 && !readyQ; ++i) {
+                    beginO();
+                    dev.setSceneIssue(true);
+                    opaqueState();
+                    dev.beginCapture(&cq);
+                    dev.drawIndexedPrimitive(PT_TRIANGLELIST, 12, 0, 4, 0, 2);
+                    dev.endCapture();
+                    dev.phases().pop();
+                    end("ownedo_pending_scene_capture");
+                    readyQ = cq.valid && cq.packet.batchable && cq.scenePipeline != GamePipeline::None;
+                    if (!readyQ) Sleep(50);
+                }
+                if (!readyQ) {
+                    std::printf("  FAIL owned ordered (pending run + scene draw): the opaque draw never got its batchable scene form\n");
+                    ++g_failures;
+                } else {
+                    struct Run {
+                        Device* dev = nullptr;
+                        std::vector<Device::OwnedItem> items;
+                        Device::OwnedArena arena;
+                        int calls = 0;
+                        bool ok = false;
+                    } run;
+                    run.dev = &dev;
+                    beginO();
+                    dev.setSceneIssue(true);
+                    for (std::uint32_t k = 0; k < 3; ++k) {
+                        dev.setPixelShader(psOf(k));
+                        Device::DeriveIn in;
+                        in.streams[0] = vbo.get();
+                        in.strides[0] = sizeof(Vertex);
+                        in.indices = ib.get();
+                        std::memcpy(in.psC5, regs[0].ps5, sizeof(in.psC5));
+                        Device::OwnedPersist out;
+                        if (dev.ownedDerive(cdo[k], in, windowsOf(3), tab.blockRef(oslots[k]), tab.zeroRef(), true, out) != 0) {
+                            std::printf("  FAIL owned ordered (pending run + scene draw): quad %u derive refused\n", k);
+                            ++g_failures;
+                            continue;
+                        }
+                        tab.write(oslots[k], out.rec, out.blk);
+                        run.items.push_back({&cdo[k], out.bucketKey, oslots[k]});
+                    }
+                    const bool reserved = dev.ownedReserve(4, run.arena);
+                    dev.setOrderedHook(
+                        [](void* ctx) {
+                            Run& r = *static_cast<Run*>(ctx);
+                            ++r.calls;
+                            r.ok = r.dev->ownedFlush(r.items, r.arena, 3, gpuscene::drawrecords().recordsRef(), gpuscene::drawrecords().recordsShadow(), gpuscene::DrawRecordTable::kCapacity, true);
+                        },
+                        &run);
+                    const std::uint64_t dropped0 = dev.sceneStats().fbNullAddress;
+                    opaqueState();
+                    dev.setSceneIssue(true);
+                    // (packet-cache replays, the game's path of a composed draw: replayDraw makes the scene packet without prepareDraw)
+                    Device::ReplayInputs rin;
+                    rin.streams[0] = vbo.get();
+                    rin.strides[0] = sizeof(Vertex);
+                    rin.indices = ib.get();
+                    const bool r1 = dev.replayDraw(cq, rin);  // (a batchable scene draw: it waits in the batch with its record)
+                    dev.setOrderedPending(reserved);
+                    const bool r2 = dev.replayDraw(cq, rin);  // (another one: the run must be queued before its record joins the list)
+                    if (!r1 || !r2) {
+                        std::printf("  FAIL owned ordered (pending run + scene draw): a replay was refused (%d %d)\n", r1, r2);
+                        ++g_failures;
+                    }
+                    dev.phases().pop();
+                    const Pixels pq = end("ownedo_pending_scene");
+                    dev.setOrderedHook(nullptr, nullptr);
+                    const std::uint64_t dropped = dev.sceneStats().fbNullAddress - dropped0;
+                    if (run.calls != 1 || !run.ok || dev.orderedPending() || dropped != 0) {
+                        std::printf("  FAIL owned ordered (pending run + scene draw): the hook ran %d times, flush ok %d, still pending %d, scene runs dropped %llu\n", run.calls, run.ok, dev.orderedPending(),
+                                    static_cast<unsigned long long>(dropped));
+                        ++g_failures;
+                    }
+                    bad(refP, pq, "a pending run, then a batchable composed scene draw");
+                    std::printf("  owned ordered: pending run + a batchable composed scene draw: run queued first, 0 scene runs dropped, = the normal draws\n");
+                }
+            }
+            std::printf("  owned ordered: four blended draws in A B A B order: ordered flush = the normal draws, unordered (merged) flush differs in %u bytes\n", nd);
+            // GPU safety (the device loss of 2026-11-11, frame-ownership.md 14.22) and F6-2 / 14.23 item 2: the alpha list's herbs bind stream 3 at instance rate (0x80000001) while
+            // stream 0 is not instanced (one instance: the attribute reads element 0). The device binds such a stream per vertex with stride 0 (Device::instRateAsVertex): the
+            // draw gets the ordered scene forms, and an ordered flush that puts it at list position 2 (firstInstance 2: an instance-rate binding would read element 2 of a
+            // one-element buffer) must equal the normal draws byte for byte. A truly instanced draw (stream 0 INDEXEDDATA) keeps its instance-rate binding and gets NO ordered form.
+            {
+                const float off[4] = {0.15f, -0.1f, 0.0f, 0.0f};
+                auto instBuf = dev.createBuffer(16, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+                std::memcpy(instBuf->lock(0, 0, 0), off, sizeof(off));
+                instBuf->unlock();
+                const auto herbState = [&] {
+                    dev.setVertexDecl(f.instDecl.get());
+                    dev.setVertexShader(f.vsInst);
+                    dev.setStreamSource(1, instBuf.get(), 0, 16);
+                    dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1u);
+                };
+                const auto plainState = [&] {
+                    dev.setStreamSourceFreq(1, 1u);
+                    dev.setStreamSource(1, nullptr, 0, 0);
+                    dev.setVertexDecl(f.decl.get());
+                    dev.setVertexShader(vsV);
+                };
+                // the reference: quads 0, 1 and the herb-like quad (quad 2's vertices + the instance offset), drawn normally with the instance-rate binding (ordered off)
+                dev.setSceneOrdered(false);
+                beginO();
+                for (std::uint32_t k = 0; k < 2; ++k) {
+                    dev.setPixelShader(psOf(k));
+                    dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+                }
+                herbState();
+                dev.setPixelShader(psOf(2));
+                dev.drawIndexedPrimitive(PT_TRIANGLELIST, 8, 0, 4, 0, 2);
+                plainState();
+                const Pixels refH = end("ownedo_herb_ref");
+                dev.setSceneOrdered(true);
+                Device::CachedDraw ci;
+                bool readyH = false;
+                for (int i = 0; i < 1200 && !readyH; ++i) {
+                    beginO();
+                    dev.setSceneIssue(true);
+                    herbState();
+                    dev.setPixelShader(psOf(2));
+                    dev.beginCapture(&ci);
+                    dev.drawIndexedPrimitive(PT_TRIANGLELIST, 8, 0, 4, 0, 2);
+                    dev.endCapture();
+                    plainState();
+                    end("ownedo_herb_capture");
+                    readyH = ci.valid && ci.ordered && ci.scenePipeline2 != GamePipeline::None;
+                    if (!readyH) Sleep(50);
+                }
+                bool perInst = false, stride0 = false;
+                for (std::uint32_t bnd = 0; bnd < ci.vi.bindingCount && bnd < rhi::kMaxVertexBindings; ++bnd) {
+                    perInst = perInst || ci.vi.bindings[bnd].perInstance != 0;
+                    stride0 = stride0 || (ci.vi.bindings[bnd].stride == 0 && ci.vi.buffers[bnd] != 0);
+                }
+                if (!readyH || perInst || (ci.vi.dynamicLayout && !stride0)) {
+                    std::printf("  FAIL owned ordered: the herb-like draw (an instance-data stream, stream 0 not instanced) got no ordered form or kept an instance-rate binding (ordered %d, v2 %llu, per instance %d, stride 0 %d)\n",
+                                ci.ordered, static_cast<unsigned long long>(ci.scenePipeline2), perInst, stride0);
+                    ++g_failures;
+                } else {
+                    beginO();
+                    dev.setSceneIssue(true);
+                    std::vector<Device::OwnedItem> items;
+                    for (std::uint32_t k = 0; k < 3; ++k) {
+                        Device::DeriveIn in;
+                        in.streams[0] = vbo.get();
+                        in.strides[0] = sizeof(Vertex);
+                        if (k == 2) {
+                            in.streams[1] = instBuf.get();
+                            in.strides[1] = 16;
+                            herbState();
+                        }
+                        dev.setPixelShader(psOf(k));
+                        in.indices = ib.get();
+                        std::memcpy(in.psC5, regs[0].ps5, sizeof(in.psC5));
+                        Device::OwnedPersist out;
+                        const Device::CachedDraw& cd = k == 2 ? ci : cdo[k];
+                        const int rc = dev.ownedDerive(cd, in, windowsOf(3), tab.blockRef(oslots[k]), tab.zeroRef(), true, out);
+                        if (rc != 0) {
+                            std::printf("  FAIL owned ordered (herb): item %u derive returned %d\n", k, rc);
+                            ++g_failures;
+                            continue;
+                        }
+                        tab.write(oslots[k], out.rec, out.blk);
+                        items.push_back({&cd, out.bucketKey, oslots[k]});
+                    }
+                    Device::OwnedArena arena;
+                    if (!dev.ownedReserve(static_cast<std::uint32_t>(items.size()), arena) ||
+                        !dev.ownedFlush(items, arena, 3, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity, true)) {
+                        std::printf("  FAIL owned ordered (herb): the flush was refused\n");
+                        ++g_failures;
+                    }
+                    plainState();
+                    bad(refH, end("ownedo_herb_owned"), "an ordered flush with the herb-like draw at list position 2 (instance data per vertex, stride 0)");
+                    std::printf("  owned ordered: herb-like draw (instance-data stream 1, stream 0 not instanced): bound per vertex with stride 0, ordered flush at position 2 = the normal draws\n");
+                }
+                // a hardware-instanced draw (stream 0 with INDEXEDDATA): its instance-rate binding stays, no ordered form
                 beginO();
                 dev.setSceneIssue(true);
-                dev.setStreamSource(3, vbo.get(), 0, sizeof(Vertex));
-                dev.setStreamSourceFreq(3, STREAMSOURCE_INSTANCEDATA | 1u);
+                herbState();
+                dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | 1u);
                 dev.setPixelShader(psOf(0));
-                Device::CachedDraw ci;
-                dev.beginCapture(&ci);
+                Device::CachedDraw cn;
+                dev.beginCapture(&cn);
                 dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
                 dev.endCapture();
-                dev.setStreamSourceFreq(3, 1u);
-                dev.setStreamSource(3, nullptr, 0, 0);
+                dev.setStreamSourceFreq(0, 1u);
+                plainState();
                 end("ownedo_instrate");
-                if (ci.ordered || ci.scenePipeline2 != GamePipeline::None) {
-                    std::printf("  FAIL owned ordered: a draw with an instance-rate stream got the ordered scene forms (ordered %d, v2 pipeline %llu)\n", ci.ordered,
-                                static_cast<unsigned long long>(ci.scenePipeline2));
+                if (cn.ordered || cn.scenePipeline2 != GamePipeline::None) {
+                    std::printf("  FAIL owned ordered: a hardware-instanced draw got the ordered scene forms (ordered %d, v2 pipeline %llu)\n", cn.ordered,
+                                static_cast<unsigned long long>(cn.scenePipeline2));
                     ++g_failures;
                 }
                 // and the flush's own guard refuses such an item even if it were marked ordered

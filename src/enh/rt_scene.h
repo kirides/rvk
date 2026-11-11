@@ -300,6 +300,7 @@ private:
     // the record / segment material fields of `m` (bindless slots of this frame); returns whether the opacity has a texture
     struct MaterialFields {
         std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0, packWord = 0;
+        std::uint32_t packLod = 0;  // the record alpha's bits 16-23 (abi::kRtAlphaPackLodShift; 0 = no map)
         float uvMap[2][4]{};
     };
     MaterialFields materialFields(const RtMaterial* m) const;

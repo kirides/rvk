@@ -290,7 +290,7 @@ RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, float3 dir, float coneWi
         float4 t = float4(1.0, 1.0, 1.0, 0.0);
         if (slot != 0u) {
             float lod = o.lod;
-            if (r.albedoTex != 0u && (r.uvSet & RVK_RT_UV_NO_TEXTURE) == 0u) lod += log2(float(max(rvkSize2D(r.albedoTex).x, 1)) / float(max(rvkSize2D(slot).x, 1)));
+            if (r.albedoTex != 0u && (r.uvSet & RVK_RT_UV_NO_TEXTURE) == 0u) lod += rvkRtPackLodOffset(r, slot);
             t = rvkSample2DLod(slot, r.albedoSampler, o.uv, max(lod, 0.0));
         }
         if (slot == 0u && orm) {  // a derived word (enh::matpack::kWordDerived): roughness in bits 16-23

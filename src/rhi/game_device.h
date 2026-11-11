@@ -255,6 +255,7 @@ struct DrawPacket {
     std::uint64_t indirectBuffer = 0;  // DrawIndexedIndirect: rhi Buffer handle of the argument records (a ring block)
     std::uint64_t indirectOffset = 0;
     std::uint32_t scene = 0;        // d3d9 model only: 1 + the index of the draw's DrawRecord while a scene draw waits in the batch (0 = not a scene draw)
+    std::uint32_t sceneGen = 0;     // d3d9 model only: the generation of the record list `scene` indexes (a flush starts a new one: F6-2 guard against a stale index)
 };
 inline constexpr std::uint32_t kIndirectStride = 20;  // sizeof(VkDrawIndexedIndirectCommand) = D3D12_DRAW_INDEXED_ARGUMENTS
 

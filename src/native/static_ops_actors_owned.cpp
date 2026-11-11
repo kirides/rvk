@@ -63,12 +63,41 @@ inline void column(const float m[16], std::uint32_t k, float out[4]) {
 
 }  // namespace
 
+bool StaticOps::f62On() {
+    static const bool off = [] {
+        char b[8];
+        return GetEnvironmentVariableA("RVK_F62_OFF", b, sizeof(b)) != 0;
+    }();
+    return !off;
+}
+
+bool StaticOps::switchVariantsOn() const { return f62On() && ownedActors_ && !ownedActorsTripped_ && gpuscene::materialtable().active(); }
+
+bool StaticOps::actorOrderedNow(const Op* op) const {
+    return op != nullptr && f62On() && ownedOrderedOn() && ownedActorsOn() && viewKind_ == ViewKind::Main && !inNonOp_ && op->kind == OpKind::Animation &&
+           (op->list == List::Solid || op->list == List::Alpha) && g_ == &groups_[static_cast<std::size_t>(Group::Actors)];
+}
+
+// the fade a bone key / stamp names: 1 (the z pass, the cascades, an opaque op) or "fading" (any fade < 1: the value itself is the bone image's c32.w, served per frame)
+static float fadeClass(float fade) { return fade >= 1.0f ? 1.0f : 0.5f; }
+
 void StaticOps::ActorOwnedStats::add(const ActorOwnedStats& o) {
     selected += o.selected; drawn += o.drawn; refusedWindow += o.refusedWindow; recordsBuilt += o.recordsBuilt; imageBuilds += o.imageBuilds; imageShared += o.imageShared;
     verified += o.verified; verifyDiffers += o.verifyDiffers; offeredDraws += o.offeredDraws; composedDraws += o.composedDraws;
     for (std::size_t i = 0; i < orec::kExclCount; ++i) excl[i] += o.excl[i];
     notRetained += o.notRetained; notOffered += o.notOffered; notComposable += o.notComposable; template_ += o.template_; notCached += o.notCached; rebuilds += o.rebuilds;
     for (std::size_t i = 0; i < 3; ++i) { byView[i] += o.byView[i]; seenByView[i] += o.seenByView[i]; }
+    for (std::size_t v = 0; v < 3; ++v) {
+        for (std::size_t l = 0; l < 4; ++l) {
+            cenOwned[v][l] += o.cenOwned[v][l];
+            for (std::size_t k = 0; k < std::size(cenWhy[v][l]); ++k) cenWhy[v][l][k] += o.cenWhy[v][l][k];
+        }
+    }
+    ordSeen += o.ordSeen;
+    pickSwaps += o.pickSwaps;
+    pickMisses += o.pickMisses;
+    pickKept += o.pickKept;
+    ordOwned += o.ordOwned;
     morphOps += o.morphOps; morphPickChanged += o.morphPickChanged; imageNs += o.imageNs; stampNs += o.stampNs;
     drawsBuilt += o.drawsBuilt; drawNoScene += o.drawNoScene; drawCdInvalid += o.drawCdInvalid; morphActive += o.morphActive; stampRebuilds += o.stampRebuilds;
 }
@@ -195,9 +224,15 @@ orec::Excl StaticOps::recExclusionActor(const Op& op) {
         return ex;
     }
     if (in.bones > gpuscene::kBoneMaxBones) reason(orec::Excl::NotComposed);
-    if (in.flags != 0 || (get<std::uint32_t>(in.entity, 0x28) & 0xe00000u) != 0) reason(orec::Excl::Overlay);
-    if (!(op.raw.fade >= 1.0f)) reason(orec::Excl::Fade);
-    if (op.list == List::Solid) {
+    // F6-2: the overlay flags change only the solid / alpha passes (GetPasses: the highlight passes; the z pass is the special pass without them): with the ordered path
+    // those draws are drawn at the op's place; the flags are in the stamp (entityFlags), a change rebuilds the record
+    const bool f62 = f62On();
+    const bool ordered = f62 && ownedOrderedOn() && op.list != List::ZPass && viewKind_ == ViewKind::Main;
+    if ((in.flags != 0 || (get<std::uint32_t>(in.entity, 0x28) & 0xe00000u) != 0) && !(f62 && (op.list == List::ZPass || ordered))) reason(orec::Excl::Overlay);
+    // F6-2: a fade < 1 is c32.w of the bone image (served per frame) + the pass states (blended: the ordered path); the stamp holds its class (fadeClass)
+    if (!(op.raw.fade >= 1.0f) && !(f62 && (op.list == List::ZPass || ordered))) reason(orec::Excl::Fade);
+    if (op.list == List::Alpha && !ordered) reason(orec::Excl::NotComposed);
+    if (op.list == List::Solid || op.list == List::Alpha) {
         U8* illumPs = ptr(in.entity, 0xf8);
         U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
         if (illum == nullptr || ptr(illum, 0) == nullptr) reason(orec::Excl::NoList);
@@ -213,10 +248,10 @@ orec::Excl StaticOps::recExclusionActor(const Op& op) {
             b.hasOpacity = get<std::uint8_t>(shader, 0x330) != 0;
             b.refracted = get<std::uint8_t>(shader, 0x420) != 0;
             b.tradeAlphaAsSolid = get<std::uint8_t>(shader, 0x79) != 0;
-            if (sc::blendsAtFadeOne(b) || sc::isBlended(b)) reason(orec::Excl::Blended);
+            if ((sc::blendsAtFadeOne(b) || sc::isBlended(b)) && !ordered) reason(orec::Excl::Blended);
         }
         // (+0x2b8 is non-zero for every skinned material shader: the sort id of the static meshes' composition has no meaning for the actors' passes)
-        if (get<std::uint8_t>(shader, 0x78) != 0) reason(orec::Excl::DepthBias);
+        if (get<std::uint8_t>(shader, 0x78) != 0 && !ordered) reason(orec::Excl::DepthBias);  // (F6-2: an ordered op reads its list's depth-bias view slot)
     }
     return ex;
 }
@@ -236,7 +271,8 @@ bool StaticOps::recStampActor(const Op& op, orec::Stamp& st) {
     st.light = mix(mix(mixPtr(mixPtr(0, illum), list), get<std::uint8_t>(list, 0) | (get<std::uint8_t>(illum, 0xc) << 8) | (get<std::uint8_t>(illum, 0xd) << 16)),
                    get<std::uint8_t>(list, 0x34));
     st.switchValue = in.variant;
-    st.fadeBits = std::bit_cast<std::uint32_t>(op.raw.fade);
+    // (F6-2: the fade's class: the value itself is the bone image's c32.w, written per frame; the pass states depend only on fade < 1)
+    st.fadeBits = std::bit_cast<std::uint32_t>(f62On() ? fadeClass(op.list == List::ZPass ? 1.0f : op.raw.fade) : op.raw.fade);
     st.lightmaps = 0;
     {
         U8* hres = ptr(in.hra, 0);
@@ -250,7 +286,9 @@ bool StaticOps::recStampActor(const Op& op, orec::Stamp& st) {
         h = mix(h, get<std::uint16_t>(in.prim, 0x18) | (static_cast<std::uint64_t>(get<std::uint16_t>(in.prim, 0x1a)) << 16));
         h = mix(h, get<std::uint32_t>(in.hra, 0x48 + 0x14 * static_cast<std::size_t>(in.lod)));  // the LOD's vertex count (the morph stream offsets)
         for (std::uint32_t i = 0; i < in.bones && i < gpuscene::kBoneMaxBones; ++i) h = mix(h, get<std::uint16_t>(in.remap, 2 * (static_cast<std::size_t>(in.boneStart) + i), 0xffff));
-        if (in.targets != 0) h = mix(mix(mix(h, in.pick[0]), in.pick[1]), in.pick[2]);
+        // (F6-2: the pick is the stamp's `lightmaps` field (an actor has no lightmaps): a pick seen before swaps its retained draws in, actorPickSwap)
+        if (in.targets != 0 && !f62On()) h = mix(mix(mix(h, in.pick[0]), in.pick[1]), in.pick[2]);
+        if (in.targets != 0 && f62On()) st.lightmaps = mix(mix(mix(0x51ed270b27f3c6a1ull, in.pick[0]), in.pick[1]), in.pick[2]);
         U8* m = in.material;
         U8* sh = in.shader;
         h = mixPtr(mixPtr(mixPtr(h, m), sh), ptr(sh, 0));  // material, shader, its vtable (the class)
@@ -278,7 +316,8 @@ gpuscene::BoneKey StaticOps::actorKeyOf(const Op& op, const ActorIn& in) const {
     gpuscene::BoneKey k;
     k.wrapper = in.wrapper;
     k.prim = in.primIdx;
-    k.fadeBits = std::bit_cast<std::uint32_t>(op.list == List::ZPass ? 1.0f : op.raw.fade);
+    const float fade = op.list == List::ZPass ? 1.0f : op.raw.fade;
+    k.fadeBits = std::bit_cast<std::uint32_t>(f62On() ? fadeClass(fade) : fade);
     return k;
 }
 
@@ -308,6 +347,9 @@ bool StaticOps::actorImage(const Op& op, const ActorIn& in, float (*regs)[4], st
 void StaticOps::actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Win& out, bool& served) {
     served = false;
     ++actorCur_.draws;
+    const std::uint64_t bit = ownedDrawIndex_ < 64 ? 1ull << ownedDrawIndex_ : 0;
+    actorCur_.drawMask |= bit;
+    actorCur_.offeredMask &= ~bit;
     if (!actorCur_.valid || actorCur_.bones > gpuscene::kBoneMaxBones) return;
     // (what the composition wrote into the register pool, not the draw's snapshot: a shader that does not read c31 / c32 has no live copy of them)
     static thread_local float regs[gpuscene::kBoneRegs][4];
@@ -322,10 +364,11 @@ void StaticOps::actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Wi
     gpuscene::BoneKey key;
     key.wrapper = actorCur_.wrapper;
     key.prim = actorCur_.prim;
-    key.fadeBits = std::bit_cast<std::uint32_t>(actorCur_.fade);
+    key.fadeBits = std::bit_cast<std::uint32_t>(f62On() ? fadeClass(actorCur_.fade) : actorCur_.fade);
     if (gpuscene::bonetable().serve(key, regs, 2 + 3 * actorCur_.bones, out, actorCur_.histTag) == gpuscene::BoneWhy::Served) {
         served = true;
         ++actorCur_.offered;
+        actorCur_.offeredMask |= bit;
         ++actorW_.offeredDraws;
     } else {
         ++actorW_.composedDraws;
@@ -397,6 +440,75 @@ void StaticOps::actorVerify(const Op& op, const orec::OpRecord& rec, bool& diffe
     }
 }
 
+namespace {
+constexpr const char* kCenExtraNames[] = {"check / warm-up / gated view", "record refused at selection", "no record yet", "alpha list (not recorded)", "refracted (empty slot)", "view not recorded"};
+std::size_t cenList(List l) { return l == List::ZPass ? 0 : l == List::Solid ? 1 : l == List::Alpha ? 2 : 3; }
+}  // namespace
+
+void StaticOps::actorCensusOwned(const Op& op) {
+    const std::size_t v = viewKind_ == ViewKind::Main ? 0 : viewKind_ == ViewKind::Cascade ? 1 : 2;
+    ++actorW_.cenOwned[v][cenList(op.list)];
+}
+
+void StaticOps::actorCensus(const Op& op) {
+    if (!ownedActors_ || !recs_) return;
+    const std::size_t v = viewKind_ == ViewKind::Main ? 0 : viewKind_ == ViewKind::Cascade ? 1 : 2;
+    const std::size_t l = cenList(op.list);
+    std::size_t why = orec::kExclCount;
+    if (op.list == List::Refracted) {
+        why += kCenRefractedEmpty;
+    } else if (!ownedView_.active) {
+        why += kCenCheck;
+    } else if (op.list == List::Alpha && !actorOrderedNow(&op)) {
+        why += kCenAlphaList;
+    } else if (v == 2 || (v == 1 && !ownedShadows_)) {
+        why += kCenNotRecordedView;
+    } else if (recs_->map.find(orec::Key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), ownedViewKey_}) != recs_->map.end()) {
+        why += kCenRecordRefused;
+    } else {
+        const orec::Excl ex = recExclusionActor(op);
+        why = ex == orec::Excl::Count ? orec::kExclCount + kCenNoRecord : static_cast<std::size_t>(ex);
+    }
+    ++actorW_.cenWhy[v][l][why];
+}
+
+// F6-2: the record's draws for the pick `pick` (its stamp's `lightmaps`): swapped in from the pick sets when this pick was seen before; true = the record now holds them
+bool StaticOps::actorPickSwap(orec::OpRecord& rec, std::uint64_t pick) {
+    if (!rec.actor || !f62On() || rec.stamp.lightmaps == pick) return false;
+    for (orec::OpRecord::PickSet& ps : rec.pickSets) {
+        if (ps.pick != pick) continue;
+        std::swap(ps.draws, rec.draws);
+        ps.pick = rec.stamp.lightmaps;
+        ps.used = dev_.stats().frames;
+        rec.stamp.lightmaps = pick;
+        ++actorW_.pickSwaps;
+        return true;
+    }
+    ++actorW_.pickMisses;
+    return false;
+}
+
+// F6-2: a record rebuilt for a new pick keeps the old one's draws (and its other pick sets) for the picks they were made for
+void StaticOps::actorPickKeep(orec::OpRecord& fresh, orec::OpRecord& old) {
+    if (!fresh.actor || !old.actor || !f62On() || old.stamp.lightmaps == fresh.stamp.lightmaps || old.draws.size() != fresh.draws.size()) return;
+    orec::Stamp a = old.stamp, b = fresh.stamp;
+    a.lightmaps = b.lightmaps = 0;
+    a.view = a.materials = b.view = b.materials = 0;
+    if (orec::firstDifference(a, b) >= 0 || old.stamp.view != fresh.stamp.view || old.stamp.materials != fresh.stamp.materials) return;  // (only the pick differs)
+    fresh.pickSets = std::move(old.pickSets);
+    std::erase_if(fresh.pickSets, [&](const orec::OpRecord::PickSet& p) { return p.pick == fresh.stamp.lightmaps || p.draws.size() != fresh.draws.size(); });
+    if (fresh.pickSets.size() >= orec::OpRecord::kPickSets) {
+        const auto lru = std::min_element(fresh.pickSets.begin(), fresh.pickSets.end(), [](const auto& x, const auto& y) { return x.used < y.used; });
+        fresh.pickSets.erase(lru);
+    }
+    orec::OpRecord::PickSet ps;
+    ps.pick = old.stamp.lightmaps;
+    ps.draws = std::move(old.draws);
+    ps.used = dev_.stats().frames;
+    fresh.pickSets.push_back(std::move(ps));
+    ++actorW_.pickKept;
+}
+
 void StaticOps::actorReport() {
     if (!ownedActorsOn() && actorW_.drawn == 0 && actorW_.offeredDraws == 0) return;
     ActorOwnedStats& w = actorW_;
@@ -411,6 +523,35 @@ void StaticOps::actorReport() {
                  "check frames: {} images compared, DIFFERING {}; images of morph actors {} (active weights {}); records built {} ({} draws: not a scene draw {}, not replayable {}), rebuilt by a stamp difference {}; CPU: image {:.1f} us per 5 s window",
                  views.empty() ? "none" : views, w.imageBuilds, w.imageShared, w.refusedWindow, w.offeredDraws, w.composedDraws, w.verified, w.verifyDiffers, w.morphOps, w.morphActive, w.recordsBuilt, w.drawsBuilt, w.drawNoScene, w.drawCdInvalid, w.stampRebuilds,
                  static_cast<double>(w.imageNs) / 1000.0);
+    {
+        static const char* const kV[3] = {"main", "cascades", "other"};
+        static const char* const kL[4] = {"z", "solid", "alpha", "refracted"};
+        std::string cen;
+        for (std::size_t v = 0; v < 3; ++v) {
+            for (std::size_t l = 0; l < 4; ++l) {
+                std::uint64_t composed = 0;
+                std::string why;
+                for (std::size_t k = 0; k < std::size(w.cenWhy[v][l]); ++k) {
+                    const std::uint64_t n = w.cenWhy[v][l][k];
+                    if (n == 0) continue;
+                    composed += n;
+                    why += std::format("{}{} {}", why.empty() ? "" : ", ", k < orec::kExclCount ? orec::kExclNames[k] : kCenExtraNames[k - orec::kExclCount], n);
+                }
+                const std::uint64_t all = composed + w.cenOwned[v][l];
+                if (all == 0) continue;
+                cen += std::format("{}{} {}: {} ops, owned {} ({:.1f} %), composed {}{}{}{}", cen.empty() ? "" : "; ", kV[v], kL[l], all, w.cenOwned[v][l], 100.0 * static_cast<double>(w.cenOwned[v][l]) / static_cast<double>(all),
+                                   composed, why.empty() ? "" : " (", why, why.empty() ? "" : ")");
+            }
+        }
+        std::string ex;
+        for (std::size_t k = 0; k < orec::kExclCount; ++k) {
+            if (w.excl[k] != 0) ex += std::format("{}{} {}", ex.empty() ? "" : ", ", orec::kExclNames[k], w.excl[k]);
+        }
+        if (!cen.empty()) {
+            spdlog::info("native: actor census (5 s): {}; not recorded after the composition: {}; records not built: draws not offered the bone table {}, packets not retained {}; ordered (drawn at their place): {} of {}; morph picks: {} swapped in from earlier picks, {} new (composed), {} kept for later",
+                         cen, ex.empty() ? "none" : ex, w.notOffered, w.notRetained, w.ordOwned, w.ordSeen, w.pickSwaps, w.pickMisses, w.pickKept);
+        }
+    }
     if (w.verifyDiffers != 0) {
         ownedActorsTripped_ = true;
         ownedActors_ = false;

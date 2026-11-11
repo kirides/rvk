@@ -1030,9 +1030,11 @@ public:
     // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
     bool boneMotionDraw() const { return obsBone_; }
     // ... or will be once its forms are built (14.15: while they compile the draw keeps the plain form, its motion that frame is the camera's: no capture as fallback)
-    bool boneMotionCovered() const { return obsBone_ || ((obsBonePending_ || obsRigidStill_) && !nocapOld()); }
+    bool boneMotionCovered() const { return obsBone_ || obsNoMotion_ || ((obsBonePending_ || obsRigidStill_) && !nocapOld()); }
     // 14.22: a rigid draw whose VS window 2 is an instance row image (F2f): no motion of its own (the record's stamp holds the instance's matrix, a moved instance remakes it)
     bool rigidRowWindow() const;
+    // F6-2 (frame-ownership.md 14.23): a skinned main-solid draw that writes no G-buffer motion (the highlighted focus NPC's additive overlay passes, a fading actor's blended
+    bool noMotionNow(draws::Kind kind, const scene::Phase& phase) const;
     // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
     // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
     void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
@@ -2247,6 +2249,27 @@ private:
     bool sceneActors_ = false;
     bool sceneInstances_ = false;
     bool sceneOrdered_ = false;   // F9 / F14 (setSceneOrdered)
+    // F6-2 / 14.23 item 2: while the ordered owned path is on, a stream bound at instance rate (D3DSTREAMSOURCE_INSTANCEDATA) of a draw that is NOT instanced (stream 0 without
+    // INDEXEDDATA: one instance, the attribute reads element 0) is bound per vertex with stride 0 (the same element for every vertex: the same values, and an indirect draw's
+    // firstInstance = its record index no longer moves it). `-Environment 'RVK_F62_INSTRATE_OLD=1'` keeps the instance-rate binding (A/B)
+    std::uint32_t instConstStreams_ = 0;  // (computeVertexInput: the streams bound that way for the current draw, bit = stream)
+public:
+    bool instRateAsVertex() const;
+    // the draw's streams are instanced for the owned windows (c32 + 4 i): a stream 0 with INDEXEDDATA, or an instance-data stream that is not bound per vertex (instRateAsVertex)
+    template <class S>
+    bool streamsInstanced(const S& streams) const {
+        bool indexed = false, instData = false, other = false;
+        for (const auto& st : streams) {
+            if (st.buffer == nullptr || st.freq == 1) continue;
+            if ((st.freq & STREAMSOURCE_INDEXEDDATA) != 0) indexed = true;
+            else if (st.freq == (STREAMSOURCE_INSTANCEDATA | 1u)) instData = true;
+            else other = true;
+        }
+        return indexed || other || (instData && !instRateAsVertex());
+    }
+    struct InstConstStats { std::uint64_t draws = 0; };
+    InstConstStats instConstStats;
+private:
     bool orderedNow_ = false;     // prepareDraw: the draw being prepared is an ordered scene candidate (not batchable, the ordered path may own it)
     void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk,
                      rhi::ShaderModule fsBeforeDrop);
@@ -2276,6 +2299,7 @@ private:
     bool sceneBone_ = false;        // sceneDecide chose the bone-motion forms for the draw being prepared
     bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)
     bool obsBonePending_ = false;   // ... would be, its forms are still being built (boneMotionCovered)
+    bool obsNoMotion_ = false;      // F6-2: ... or it writes no G-buffer motion (noMotionOf / noMotionNow)
     rhi::GpuRef bonePushPrev_;      // 14.15 b: the draw being prepared takes the bone-motion PUSH form (an instanced-mesh op): its object record's history base
     bool obsRigidStill_ = false;    // 14.22: the draw is rigid and has no motion of its own (boneMotionCovered: no capture)
     rhi::GpuRef rigidPrev_;         // 14.22: the draw's previous-frame window 2 block (a per-frame ring block): the bone forms' prevVs instead of historyOf
@@ -2302,6 +2326,7 @@ private:
     bool bonePipe(GamePipeline p) const { return boneMode_ == 1 && !bonePipes_.empty() && bonePipes_.contains(static_cast<std::uint64_t>(p)); }
     bool boneFormsReady();          // the current shaders' bone-motion forms (v1 + v2 VS, the motion PS's scene forms) exist (requested when not)
     bool bonePredict(draws::Kind kind, const scene::Phase& phase, const DrawGeom* geom = nullptr);  // prepareDraw, before the observers: the draw will take the bone-motion forms
+    bool noMotionOf(const CachedDraw& c) const;  // (F6-2: see noMotionNow)
     bool boneOfCached(const CachedDraw& c) const { return c.boneMotion && boneMode_ == 1 && gbuf_.active && gbuf_.motion != nullptr; }
     std::unique_ptr<rhi::Buffer> boneCmp_;  // compare mode: kBoneCmpSlots x 16 bytes the capture vertex shaders accumulate into (Readback)
     std::uint64_t boneCmpFrame_ = 0;
@@ -2350,6 +2375,7 @@ private:
     shader::abi::DrawBlock probeBlock_{};              // the DrawBlock of the draw being prepared / replayed (a copy while the probe is set)
     std::uint64_t variantEpoch_ = 1;                   // bumped by every setter that changes a draw's variant / scene decision
     std::vector<shader::abi::DrawRecord> sceneRecs_;  // the batch's records (DrawPacket::scene - 1)
+    std::uint32_t sceneRecGen_ = 1;                    // (F6-2: the list's generation, moved by every clear: a packet's sceneGen must be the current one at its run's flush)
     std::vector<std::uint32_t> sceneRun_, batchOrder_;
     struct SceneRefStream {
         std::uint64_t buffer = 0, offset = 0;

@@ -739,7 +739,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
         for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtRange, rs.rtShadowSync, rs.shadowsEnabled, rs.shadowsFilter,
-                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange}) {
+                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.rtReflectionTweaks}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
@@ -1222,6 +1222,7 @@ void HalDevice::applyShadows() {
         r.sync = rs.rtShadowSync->asBool();
         const std::string_view q = rs.shadowsRtQuality->asEnum();
         r.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
+        r.opaqueFirst = rs.rtReflectionTweaks != nullptr && (rs.rtReflectionTweaks->asInt() & 128) != 0;
         rtShadows_->apply(r);
     }
     // the engine's cascades (engine/shadow_maps.h): "auto" = the enhanced defaults while the enhanced mask is on

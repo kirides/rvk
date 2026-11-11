@@ -269,7 +269,8 @@ void StaticOps::recEnter(const Op& op) {
     // F6-1 (native.owned_actors): the skinned actors' ops are recorded too (the Actors group in the main view; the cascades' z ops with owned_shadows)
     const bool actorOp = op.kind == OpKind::Animation && ownedActorsOn();
     // F9 / F14 (native.owned_ordered): the main view's alpha / refracted mesh ops (the Mesh group) are recorded too
-    const bool orderedOp = orderedGroupNow(&op);
+    // (F6-2: and the Actors group's alpha list ops: the fading actors)
+    const bool orderedOp = orderedGroupNow(&op) || (actorOp && op.list == List::Alpha && actorOrderedNow(&op));
     if ((viewKind_ == ViewKind::Main ? g_ != &groups_[static_cast<std::size_t>(actorOp ? Group::Actors : Group::Static)] && !orderedOp : !shadowRec) || (op.kind != OpKind::Mesh && !actorOp) || inNonOp_ ||
         (op.list != List::ZPass && op.list != List::Solid && !orderedOp)) {
         return;
@@ -288,7 +289,7 @@ void StaticOps::recEnter(const Op& op) {
     }
     if (ex != orec::Excl::Count) {
         ++w.excluded[static_cast<std::size_t>(ex)];
-        if (orderedOp || (op.list == List::Solid && ownedOrderedOn())) ++ordW_.excluded[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2][static_cast<std::size_t>(ex)];
+        if (!actorOp && (orderedOp || (op.list == List::Solid && ownedOrderedOn()))) ++ordW_.excluded[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2][static_cast<std::size_t>(ex)];
         R.map.erase(R.key);
         w.stampNs += ns(t0, tnow());
         return;
@@ -308,7 +309,12 @@ void StaticOps::recEnter(const Op& op) {
         rec.lastSeen = dev_.stats().frames;
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
-        const int d = orec::firstDifference(a, st);
+        int d = orec::firstDifference(a, st);
+        if (d == 4 && rec.actor && actorPickSwap(rec, st.lightmaps)) {  // (F6-2: a morph pick seen before: its draws swapped in, the record holds)
+            a = rec.stamp;
+            a.view = a.materials = 0;
+            d = orec::firstDifference(a, st);
+        }
         if (d < 0) {
             const int live = recLiveWhy(rec);
             if (live < 0) {
@@ -414,10 +420,11 @@ void StaticOps::recComposed(const Op& op, Skip s) {
     orec::Stats& w = R.stats(R.key.view != 0);
     const auto t0 = tnow();
     const std::size_t oli = op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2;
-    const bool orderedOk = ownedOrderedOn() && op.list != List::ZPass && R.key.view == 0;  // (F9 / F14)
+    const bool orderedOk = ownedOrderedOn() && op.list != List::ZPass && R.key.view == 0 && (op.kind != OpKind::Animation || actorOrderedNow(&op));  // (F9 / F14; F6-2 actors)
     const auto exclude = [&](orec::Excl e) {
         ++w.excluded[static_cast<std::size_t>(e)];
-        if (orderedOk && (op.list != List::Solid || R.ordered || e == orec::Excl::Blended)) ++ordW_.excluded[oli][static_cast<std::size_t>(e)];
+        if (op.kind == OpKind::Animation) ++actorW_.excl[static_cast<std::size_t>(e)];  // (F6-2 census: an actor op not recorded after its composition)
+        if (orderedOk && op.kind != OpKind::Animation && (op.list != List::Solid || R.ordered || e == orec::Excl::Blended)) ++ordW_.excluded[oli][static_cast<std::size_t>(e)];
         R.map.erase(R.key);
         R.active = false;
         R.cur = nullptr;
@@ -640,6 +647,14 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     };
     const std::string cdv = std::format("[cd: gate {} staticOk {} wanted {} giDraw {} drawn {} scenePending {}, ambient from the record {}]", r.cd->v.gate, r.cd->v.staticOk, r.cd->v.wanted, r.cd->v.giDraw,
                                         r.cd->v.drawn, r.cd->v.scenePending, in.ambientLit);
+    if (!dv.scene && pv.valid && r.cd->scenePipeline == d3d9::GamePipeline::None) {
+        // (F6-2 / 14.23: the record was built while the draw's scene form was still being made (its retained packet has none); the composition has it now: the record is
+        // out of date, not wrong: remade from this composition (an ordered fading herb's record built in its first frames gave "scene form: derived false vs composed true")
+        ++w.refused[9];
+        R.refused = true;
+        w.deriveNs += ns(t0, tnow());
+        return;
+    }
     if (dv.scene && !pv.valid && pv.capture) {
         // (the composed draw went with a capture variant: an observer wanted the vertex outputs of this very draw: no scene draw by design, nothing to compare; the owned path refuses
         // such a draw at its observers' turn and the op is composed)
@@ -803,9 +818,20 @@ void StaticOps::recEnd(const Op& op) {
     // F6-1: an actor record needs every draw's window 2 served from the bone table (the owned draw reads it from there) and the op's inputs readable
     ActorIn ain;
     const bool actorRec = op.kind == OpKind::Animation;
-    if (actorRec && (actorCur_.draws != drawCount_ || actorCur_.offered != drawCount_ || actorRead(op, ain, true) != 0)) {
+    // (F6-2: by draw index: a draw whose packet replay was refused is set up a second time on the fresh path, the counts would be off)
+    const std::uint64_t allDraws = drawCount_ >= 64 ? ~0ull : (1ull << drawCount_) - 1;
+    if (actorRec && (drawCount_ > 64 || actorCur_.drawMask != allDraws || actorCur_.offeredMask != allDraws || actorRead(op, ain, true) != 0)) {
         ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
         ++actorW_.notOffered;
+        {
+            static int loggedN = 0;
+            if (loggedN < 12 && dev_.stats().frames > 900) {
+                ++loggedN;
+                ActorIn t;
+                spdlog::info("native: owned actors: {} no record: draws {} / setOwnedFor calls {} / served from the bone table {}, actor read {}, valid {}, bones {}", describe(op), drawCount_, actorCur_.draws,
+                             actorCur_.offered, actorRead(op, t, true), actorCur_.valid, actorCur_.bones);
+            }
+        }
         R.map.erase(R.key);
         R.active = false;
         w.buildNs += ns(t0, tnow());
@@ -829,6 +855,15 @@ void StaticOps::recEnd(const Op& op) {
         // (the entry must be the packet of THIS draw: an entry of an earlier description - a morph pick that moved - would give the record the old vertex input)
         if (pe == packets_.end() || !pe->second.cd.valid || !pe->second.desc || !packetSameDesc(d, *pe->second.desc)) {
             ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
+            if (actorRec) {
+                ++actorW_.notRetained;
+                static int loggedA = 0;
+                if (loggedA < 8 && dev_.stats().frames > 600) {
+                    ++loggedA;
+                    spdlog::info("native: owned actors: {} draw {} not retained: packet {}, valid {}, same description {}, material '{}'", describe(op), k, pe != packets_.end(),
+                                 pe != packets_.end() && pe->second.cd.valid, pe != packets_.end() && pe->second.desc && packetSameDesc(d, *pe->second.desc), d.tagMaterialName != nullptr ? d.tagMaterialName : "");
+                }
+            }
             if (R.ordered) ++ordW_.notRetained[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2];
             if (R.ordered) {
                 // (diagnostics: each material once, after the first world frames: water's draws are the enhanced water's replacer by design)
@@ -875,8 +910,7 @@ void StaticOps::recEnd(const Op& op) {
         r.psSet = d.psSet;
         {
             // (setOwnedFor's rule: no window 1 / 2 for a draw with an instance-rate stream on ANY stream; F9 / F14: the alpha list's herbs carry one on stream 1)
-            bool inst = false;
-            for (const auto& st : d.streams) inst = inst || (st.buffer != nullptr && st.freq != 1);
+            const bool inst = dev_.streamsInstanced(d.streams);  // (F6-2 / 14.23: an instance-data stream of a draw that is not instanced is bound per vertex)
             r.vs1Offered = actorRec ? true : ownedObjects_ && op_ != nullptr && op_->entity != nullptr && !inst;
         }
         r.tagSubMesh = d.tagSubMesh;
@@ -1016,7 +1050,9 @@ void StaticOps::recEnd(const Op& op) {
         }
     }
     R.readLog = {};
-    const bool existed = R.map.find(R.key) != R.map.end();
+    const auto oldIt = R.map.find(R.key);
+    const bool existed = oldIt != R.map.end();
+    if (existed && rec->actor) actorPickKeep(*rec, *oldIt->second);  // (F6-2: the previous pick's draws kept for its next appearance)
     if (existed) {
         ++w.rebuilt;
         ++w.rebuiltWhy[R.rebuildWhy >= 0 ? static_cast<std::size_t>(R.rebuildWhy) : R.auditBad ? orec::kStampFields + 1 : orec::kStampFields + 2];
