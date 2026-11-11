@@ -5710,8 +5710,11 @@ mov oC0, r0
         const Device::BoneMotionStats s0 = dev.boneStats;
         // (the variants build in the background and the G-buffer arms after a frame that found its pipelines: up to ~10 s)
         // (the scene form: until both placements of a frame were scene draws, i.e. the scene bone pipelines exist; a draw whose pipeline is pending falls back)
+        // (bounded by time, not by frame count: a frame is ~0.1 ms while the forms are pending, so 1200 frames were ~7 s, and the DXC compiles of the variant forms take
+        // longer than that on a starved CPU (another game, parallel test runs): the case then ran its reads before the forms existed: all pixels 0.5 = no motion)
         int sceneFrames = 0;
-        for (int k = 0; k < 1200; ++k) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+        for (int k = 0; std::chrono::steady_clock::now() < deadline; ++k) {
             const std::uint64_t sd0 = dev.sceneStats().sceneDraws;
             frame(k, identities, false);
             sceneFrames = dev.sceneStats().sceneDraws - sd0 == 2 ? sceneFrames + 1 : 0;
