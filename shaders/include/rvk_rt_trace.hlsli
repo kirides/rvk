@@ -86,6 +86,43 @@ RvkRtHit rvkRtTraceClosest(RvkFrame f, float3 origin, float3 dir, float tMin, fl
     return h;
 }
 
+// rvkRtTraceClosest in two queries, the same hit: first everything but the cut-outs (no candidate loop work), then only the
+// cut-outs (the alpha-tested instances = exactly the non-opaque ones, mask RVK_RT_MASK_ALPHA_TESTED) up to that hit. One query
+// runs the alpha test of every cut-out candidate the traversal meets before it finds the closest opaque hit (vegetation in
+// front of the shore behind it, foliage far behind a wall); the second query's interval ends at the opaque hit, so a cut-out
+// behind it is never tested (frame-ownership.md 14.20: masked herbs / ferns along a shore cost the water reflections +0.7 ms).
+RvkRtHit rvkRtTraceClosestOpaqueFirst(RvkFrame f, float3 origin, float3 dir, float tMin, float tMax, float coneWidth0, float coneSpread, uint flags) {
+    if ((flags & (RVK_RT_TRACE_OPAQUE | RVK_RT_TRACE_NO_CUTOUTS | RVK_RT_TRACE_GLASS)) != 0u) {
+        return rvkRtTraceClosest(f, origin, dir, tMin, tMax, coneWidth0, coneSpread, flags);
+    }
+    RvkRtHit h = rvkRtTraceClosest(f, origin, dir, tMin, tMax, coneWidth0, coneSpread, flags | RVK_RT_TRACE_NO_CUTOUTS);
+    if (!rvkRtValid(f)) return h;
+    uint mask = rvkRtTraceMask(flags) & RVK_RT_MASK_ALPHA_TESTED;
+    if (mask == 0u) return h;
+    RayQuery<RAY_FLAG_NONE> rq;
+    rq.TraceRayInline(rvkRtTlas(f), RAY_FLAG_NONE, mask, rvkRay(origin, tMin, dir, h.hit ? h.t : tMax));
+    while (rq.Proceed()) {
+        if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+        uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();
+        RvkRtRecord r = rvkRtRecord(f, index);
+        float t = rq.CandidateTriangleRayT();
+        if (rvkRtCandidatePasses(r, rq.CandidatePrimitiveIndex(), rq.CandidateTriangleBarycentrics(), rq.CandidateObjectToWorld3x4(),
+                                 coneWidth0 + coneSpread * t)) {
+            rq.CommitNonOpaqueTriangleHit();
+        }
+    }
+    if (rq.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return h;
+    h.hit = true;
+    h.t = rq.CommittedRayT();
+    h.record = rq.CommittedInstanceID() + rq.CommittedGeometryIndex();
+    h.primitive = rq.CommittedPrimitiveIndex();
+    h.bary = rq.CommittedTriangleBarycentrics();
+    h.frontFace = rq.CommittedTriangleFrontFace();
+    h.objectToWorld = rq.CommittedObjectToWorld3x4();
+    h.worldToObject = rq.CommittedWorldToObject3x4();
+    return h;
+}
+
 // visibility along a ray (1 = nothing in [tMin, tMax]: shadow rays); the first confirmed hit ends the query. Alpha-tested
 // candidates as in rvkRtTraceClosest (RVK_RT_TRACE_OPAQUE: solid, the cheap shadow)
 float rvkRtVisibility(RvkFrame f, float3 origin, float3 dir, float tMin, float tMax, float coneWidth0, float coneSpread, uint flags) {
@@ -94,6 +131,29 @@ float rvkRtVisibility(RvkFrame f, float3 origin, float3 dir, float tMin, float t
     uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | ((flags & RVK_RT_TRACE_OPAQUE) != 0u ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE);
     RayQuery<RAY_FLAG_NONE> rq;
     rq.TraceRayInline(rvkRtTlas(f), rayFlags, mask, rvkRay(origin, tMin, dir, tMax));
+    while (rq.Proceed()) {
+        if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+        uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();
+        RvkRtRecord r = rvkRtRecord(f, index);
+        float t = rq.CandidateTriangleRayT();
+        if (rvkRtCandidatePasses(r, rq.CandidatePrimitiveIndex(), rq.CandidateTriangleBarycentrics(), rq.CandidateObjectToWorld3x4(),
+                                 coneWidth0 + coneSpread * t)) {
+            rq.CommitNonOpaqueTriangleHit();
+        }
+    }
+    return rq.CommittedStatus() == COMMITTED_NOTHING ? 1.0 : 0.0;
+}
+
+// rvkRtVisibility in two queries, the same answer: the opaque instances first (any hit ends it, no candidate loop work), then
+// the cut-outs only (as rvkRtTraceClosestOpaqueFirst): a ray an opaque surface blocks never runs the alpha test of a cut-out
+float rvkRtVisibilityOpaqueFirst(RvkFrame f, float3 origin, float3 dir, float tMin, float tMax, float coneWidth0, float coneSpread, uint flags) {
+    if ((flags & (RVK_RT_TRACE_OPAQUE | RVK_RT_TRACE_NO_CUTOUTS | RVK_RT_TRACE_GLASS)) != 0u) {
+        return rvkRtVisibility(f, origin, dir, tMin, tMax, coneWidth0, coneSpread, flags);
+    }
+    if (rvkRtVisibility(f, origin, dir, tMin, tMax, coneWidth0, coneSpread, flags | RVK_RT_TRACE_NO_CUTOUTS) == 0.0) return 0.0;
+    if ((rvkRtTraceMask(flags) & RVK_RT_MASK_ALPHA_TESTED) == 0u) return 1.0;
+    RayQuery<RAY_FLAG_NONE> rq;
+    rq.TraceRayInline(rvkRtTlas(f), RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RVK_RT_MASK_ALPHA_TESTED, rvkRay(origin, tMin, dir, tMax));
     while (rq.Proceed()) {
         if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
         uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();

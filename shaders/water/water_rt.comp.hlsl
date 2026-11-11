@@ -75,7 +75,7 @@ float3 shadeHit(WaterRtParams p, RvkFrame f, RvkRtHit h, float3 dir, float width
     float shadow = 1.0;
     if (nl > 0.0 && p.trace.y != 0u && dot(p.sunColor.rgb, float3(1.0, 1.0, 1.0)) > 1e-3) {
         // towards the sun from just off the surface (cut-outs solid at medium, alpha-tested at high)
-        shadow = rvkRtVisibility(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, p.trace.y == 1u ? RVK_RT_TRACE_OPAQUE : 0u);
+        shadow = rvkRtVisibilityOpaqueFirst(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, p.trace.y == 1u ? RVK_RT_TRACE_OPAQUE : 0u);
     }
     float3 l = max(lerp(p.indoor.rgb, sh, outdoor), float3(0.0, 0.0, 0.0)) + p.sunColor.rgb * (nl * shadow);
     float3 c = albedo * dpow3(l, 0.45);
@@ -125,7 +125,7 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
         float width0 = pixelAngle * tBest;
         float spread = pixelAngle + p.reach.y;
         float maxD = p.reach.x;
-        RvkRtHit h = rvkRtTraceClosest(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
+        RvkRtHit h = rvkRtTraceClosestOpaqueFirst(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
         if (h.hit) {
             float3 hp = o + dir * h.t;
             float cover = 1.0 - smoothstep(0.85 * maxD, maxD, h.t);
