@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <format>
+#include <string>
 
 #include "d3d9/device.h"
 #include "d3d9/scene_hash.h"
@@ -34,29 +36,37 @@ bool Device::treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch
 
 // every observer of the main view's tree draws can be served by ownedTreeObserve (the RT scene without captures: no animated trees) and reads no more than the
 // world rows + the material windows; anything else (a register reader, a capture wanter) keeps the trees composed
-bool Device::ownedTreeObserversOk() const {
+bool Device::ownedTreeObserversOk(std::string* why) const {
+    const auto gate = [&](const DrawObserver* o, const char* what) {
+        if (why != nullptr) *why = std::format("observer '{}' {}", o->observerName(), what);
+        return false;
+    };
     for (const DrawObserver* o : observers_) {
         const DrawObserver::Registers r = o->registersRead();
-        if (r == DrawObserver::Registers::All) return false;
-        if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return false;  // (F-VAR: the template's lighting window composes its CPU image for the observer)
+        if (r == DrawObserver::Registers::All) return gate(o, "declares no register reads (Registers::All)");
+        if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return gate(o, "reads the lighting registers and native.lighting_images is off");  // (F-VAR: the template's lighting window composes its CPU image for the observer)
         // (F4-4: the cascades' tree draws are served the same way, so an observer of those must accept owned trees too)
         if (o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::Solid}) ||
             o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass}) ||
             o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Shadow, scene::Pass::ShadowDepth})) {
-            if (!o->ownedTreesOk()) return false;
+            if (!o->ownedTreesOk()) return gate(o, "observes the tree draws and cannot be served owned trees (ownedTreesOk)");
         }
     }
     return true;
 }
 
-bool Device::ownedVegObserversOk() const {
+bool Device::ownedVegObserversOk(std::string* why) const {
+    const auto gate = [&](const DrawObserver* o, const char* what) {
+        if (why != nullptr) *why = std::format("observer '{}' {}", o->observerName(), what);
+        return false;
+    };
     for (const DrawObserver* o : observers_) {
         if (o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::Solid}) || o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass})) {
             // (F-VAR2: an observer that reads the material / lighting registers only and never asks for a capture is shown each owned batch through ownedVegObserve)
-            if (!o->ownedVegOk()) return false;
+            if (!o->ownedVegOk()) return gate(o, "observes the grass draws and cannot be served owned batches (ownedVegOk)");
             const DrawObserver::Registers r = o->registersRead();
-            if (r == DrawObserver::Registers::All) return false;
-            if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return false;
+            if (r == DrawObserver::Registers::All) return gate(o, "declares no register reads (Registers::All)");
+            if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return gate(o, "reads the lighting registers and native.lighting_images is off");
         }
     }
     return true;

@@ -921,10 +921,22 @@ private:
     static std::uint64_t ownedKeyOf(ViewKind k, std::int32_t cascade) { return k == ViewKind::Cascade && cascade >= 0 && cascade < 4 ? static_cast<std::uint64_t>(cascade) + 1 : 0; }
     static std::uint32_t ownedSlotOfKey(std::uint64_t viewKey, bool solid);
     bool ownedBegin(void* desc, ViewKind kind, std::int32_t cascade);
+    // why a view is not owned (ownedBegin's readiness; the first unmet condition): counted per 5 s window, logged once per change, named in the stage line
+    enum class OwnedGate : std::uint8_t { Records, SceneDraws, Windows, ObjectsOff, ObjectsPending, LightingOff, LightingPending, MaterialTable, TableLighting, Observer, NotVerified, Count };
+    static constexpr std::size_t kGateCount = static_cast<std::size_t>(OwnedGate::Count);
+    static constexpr const char* kGateNames[kGateCount] = {"native.owned_records off", "scene draws off (native.scene_draws)", "owned windows off (native.owned_windows)",
+                                                           "native.owned_objects off", "object table not ready", "native.lighting_images off", "lighting images pending",
+                                                           "native.material_table off", "table lighting off (lighting.clustered + lighting.full_lit)", "observer", "static ops not verified"};
+    int ownedGateCur_[2] = {-2, -2};  // per view kind (main, cascades): the last gate logged (-1 = open, -2 = none yet)
+    std::string ownedGateObs_;        // the gating observer's reason (OwnedGate::Observer)
+    std::uint64_t ownedGateSince_[2] = {};
+    struct OwnedStats;
+    std::string ownedGateText(const OwnedStats& w) const;  // "" = no view gated in the window
     struct OwnedStats {
         static constexpr std::size_t kFallback = 8;
         std::uint64_t views = 0, owned = 0, drawnOps = 0, draws = 0, lateOps = 0, lateDraws = 0, undrawn = 0;
         std::uint64_t checkViews = 0, warmupViews = 0, gatedViews = 0, leanFrames = 0;
+        std::uint64_t gated[kGateCount] = {};                     // gated views by reason
         std::uint64_t seen = 0;                                   // ops of the lists that were looked at (mesh ops)
         std::uint64_t leftExcl[orec::kExclCount] = {};            // not eligible, by reason
         std::uint64_t leftStamp[orec::kStampFields] = {};         // the record's stamp differs, by first field

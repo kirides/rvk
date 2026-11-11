@@ -347,6 +347,7 @@ struct Store {
     d3d9::Device::SceneView probe;           // the scene view of the draw being issued (filled by the device)
     std::vector<ret::ReadRec> log;
     ret::ReadLog readLog;
+    bool logging = false;                    // the current op's composition was logged into readLog (a record rebuilt for a post-composition stamp was not: it takes no reads)
     std::vector<d3d9::Device::SceneView> probes;
     std::vector<std::uint64_t> pkeys;
     // F2d measurement (RVK_F2D_MEASURE=1): the wall time from an op's entry to the next op's entry (composition + issue), by exclusion class (kExclCount = eligible)

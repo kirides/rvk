@@ -134,6 +134,7 @@ bool StaticOps::bbStamp(const Op& op, orec::Stamp& st, const void*& psOut, const
 void StaticOps::bbEnter(const Op& op) {
     if (!ownedBb_ || !bb_) return;
     bbrec::Store& B = *bb_;
+    B.readLog = {};  // (a fresh log per op: a record rebuilt after the composition must not take an earlier op's reads; see recEnter)
     B.active = B.building = B.auditBad = B.diffInOp = B.refused = false;
     B.cur = nullptr;
     B.postDone = false;

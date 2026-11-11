@@ -4,7 +4,7 @@
 # several "picture A/B" verdicts compared a stage with itself. Every 5 s rvk.log now holds one line per window:
 #   native: stages (5 s): owned_static=active(...) owned_trees=inactive(setting on, code off) ... ubershader=inactive(setting off)
 #   native: own post state (5 s): active (setting 1, code 1)
-# state = active(<what it did>) | inactive(setting off) | inactive(setting on, code off) | inactive(armed, nothing owned in the window) | INCONSISTENT(...)
+# state = active(<what it did>) | inactive(setting off) | inactive(setting on, code off[: needs <keys>]) | inactive(armed, nothing owned in the window) | inactive(armed, gated: <reason>) | INCONSISTENT(...)
 # An A/B script calls Assert-ArmStages after each arm: a stage the arm claims on must be `active`, one it claims off `inactive`, and no stage may be INCONSISTENT.
 #   . "$PSScriptRoot\lib\stage-state.ps1"
 #   Assert-ArmStages -Log <rvk.log> -Settings @('native.owned_trees=true') -Arm 'enh'   # throws on a failed assertion

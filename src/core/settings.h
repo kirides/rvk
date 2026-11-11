@@ -278,6 +278,8 @@ public:
     // "" when every prerequisite of `s` is met (transitively: a met prerequisite that is itself greyed counts as unmet), else
     // "Needs <label> = <value>" lines joined by "; " (the overlay's greyed reason)
     std::string needsReason(const Setting& s) const;
+    // the same by key: "key=value" / "key!=value" of every unmet prerequisite (direct ones only), ", " joined; "" = all met (the stage line)
+    std::string unmetNeedKeys(const Setting& s) const;
     // the keys of the settings that list `key` as a prerequisite (the overlay indents them under it)
     std::vector<std::string> dependentsOf(std::string_view key) const;
     // "key=value" / "key!=value" lines of a spec's needs, newline separated (the tool API)

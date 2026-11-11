@@ -5,11 +5,16 @@
 // the constants, the draw tag's water class, the image touches). native.retained_check composes fresh as well and compares.
 
 #include <windows.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <format>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include <spdlog/spdlog.h>
 
@@ -22,6 +27,49 @@
 namespace rvk::native {
 
 namespace ret {
+
+bool sitesOn() {
+    static const bool on = [] {
+        char v[8] = {};
+        return GetEnvironmentVariableA("RVK_AUDIT_SITES", v, sizeof(v)) != 0 && v[0] == '1';
+    }();
+    return on;
+}
+
+namespace {
+// the interned call chains of the reading sites (diagnostics only: RVK_AUDIT_SITES=1); a ReadRec's `pc` points at one of them
+struct Site {
+    void* f[6] = {};
+    bool operator==(const Site&) const = default;
+};
+std::mutex g_siteMutex;
+std::deque<Site> g_sites;
+std::unordered_map<std::uint64_t, const Site*> g_siteIndex;
+}  // namespace
+
+__declspec(noinline) const void* sitePc() {
+    Site s;
+    CaptureStackBackTrace(2, 6, s.f, nullptr);  // (skips sitePc and the log function: the reader and its callers)
+    std::uint64_t h = 0;
+    for (void* p : s.f) h = (h ^ reinterpret_cast<std::uintptr_t>(p)) * 0x9E3779B97F4A7C15ull;
+    const std::lock_guard lock(g_siteMutex);
+    if (const auto it = g_siteIndex.find(h); it != g_siteIndex.end() && *it->second == s) return it->second;
+    const Site* at = &g_sites.emplace_back(s);
+    g_siteIndex[h] = at;
+    return at;
+}
+
+std::string siteText(const void* site) {
+    HMODULE self = nullptr;
+    if (site == nullptr || GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&sitePc), &self) == 0) return {};
+    std::string out;
+    for (void* p : static_cast<const Site*>(site)->f) {
+        if (p == nullptr) break;
+        const auto off = reinterpret_cast<std::uintptr_t>(p) - reinterpret_cast<std::uintptr_t>(self);
+        out += off < 0x10000000 ? std::format("{}{:#x}", out.empty() ? "" : " < ", off) : std::string(out.empty() ? "?" : " < ?");
+    }
+    return out;
+}
 
 std::uint64_t hashBytes(const void* p, std::size_t n) {
     const auto* b = static_cast<const std::uint8_t*>(p);

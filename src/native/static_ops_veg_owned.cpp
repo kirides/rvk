@@ -597,7 +597,18 @@ void StaticOps::vegViewBegin(bool ownedFrame, ViewKind kind) {
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     const bool ready = ownedPersistent_ && !ownedTripped_ && ownedStatic_ && tableLit_ && tab.ready() && gpuscene::viewtable().ready() && dev_.sceneViewsReady() && dev_.ownedVegObserversOk() &&
                        lean_ && !V.tripped && vegAdmin_ != nullptr && vegEnsureStand() && packetMode_ != 0;
-    if (!ready) return;
+    if (!ready) {
+        std::string obs;
+        std::string why = !ownedPersistent_ ? "native.owned_persistent off" : ownedTripped_ ? "owned path tripped" : !ownedStatic_ ? "owned static off" : !tableLit_ ? "table lighting off"
+                        : !tab.ready() ? "draw record table not ready" : !(gpuscene::viewtable().ready() && dev_.sceneViewsReady()) ? "view table not ready"
+                        : !dev_.ownedVegObserversOk(&obs) ? obs : !lean_ ? "native.lean off" : V.tripped ? "vegetation tripped (DIFFERING)" : vegAdmin_ == nullptr ? "no vegetation admin"
+                        : packetMode_ == 0 ? "native.packet_cache off" : "no stream-1 stand-in";
+        if (why != V.gate) spdlog::info("native: owned vegetation draws: gated: {}", why);
+        V.gate = std::move(why);
+        return;
+    }
+    if (!V.gate.empty()) spdlog::info("native: owned vegetation draws: gate open (was: {})", V.gate);
+    V.gate.clear();
     V.active = true;
     ++V.window.ownedViews;
 }
