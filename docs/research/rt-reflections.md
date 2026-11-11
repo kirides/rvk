@@ -365,6 +365,54 @@ session's first activation ~300 ms: the driver's build kernels); medium <-> high
 * Cost at the jungle lake (+1.6 ms medium) is mostly the alpha-tested fronds' candidate loop: opacity micromaps (not on
   this GPU) or a cheaper cut-out rule for far candidates would help.
 
+#### 3.3.1 Opaque-first traces, the batch material, and two platform defects (2026-11-11) [C]
+
+**Opaque-first traces** (`rvkRtTraceClosestOpaqueFirst` / `rvkRtVisibilityOpaqueFirst`, `shaders/include/rvk_rt_trace.hlsli`; water.rt's
+reflection and shadow rays; frame-ownership.md 14.19.1): one query of everything but the cut-outs, then one of the cut-outs only
+(mask `RVK_RT_MASK_ALPHA_TESTED` = exactly the non-opaque instances in the RT scene), bounded by the first hit (closest) or skipped when
+an opaque surface already blocks (visibility). Same candidates, same alpha test, so the same closest hit up to **exact-t ties** (a
+cut-out at exactly the opaque hit's t on another triangle: the second query's interval includes its end, so opaque-first returns the
+cut-out; the one query returns whichever the traversal committed first, which is implementation-defined and differs between the backends).
+
+* **rhitest `opaque-first traces`** (`tools/rhitest/parity_opaquefirst.inl`, `shaders/test/rhi_rt_opaquefirst.comp.hlsl`, both backends,
+  in `--validation` runs): one quad BLAS in nine instances (opaque wall; cut-outs in front, behind, between, tilted through the layers,
+  coplanar with the wall; a character; two instances that break the mask contract: non-opaque with mask cut-out | dynamic, non-opaque
+  with mask opaque), checker alpha through the production `rvkRtCandidatePasses` (four texture sizes), 14,336 rays x flags 0 /
+  NO_DYNAMIC (grid +z / -z, oblique, sky rays, tMin > 0, tMax inside the stack, tMax exactly at the wall): hit / t bits / record /
+  primitive / barycentrics compared exactly: **0 differing, visibility 0 differing** on Vulkan and D3D12; exact ties 576 (Vulkan) / 36
+  (D3D12), all records 0 / 4 (the coplanar pair); Vulkan vs D3D12 opaque-first answers (hit, t, visibility) within 2.9e-6.
+* **In game** `rt.reflection_tweaks` 16 = the one-query forms (session-wide: `-Environment 'RVK_RT_ONEQUERY=1'`), 32 = both forms on
+  the same ray (reflection: magenta = differing hit / t, yellow = exact tie; shadow ray: cyan), 16 + 32 = the one query against itself (the
+  control); on Vulkan the differing rays are read back (`enh: water.rt: compare: N differing rays in 60 frames` + the first 16 rays with
+  both hits, the opaque-only hit and the one-query hit's record). Result after the fixes below, rt.reflections=high, Wrapper: swamp_pond
+  and harbour_docks **0 differing rays** in every 60-frame window (control 0); D3D12 swamp_pond: no compare colour in the picture.
+
+**Defect 1 (Vulkan, AMD RX 7900 XTX): the size of a lane-varying bindless texture.** `GetDimensions` (SPIR-V `OpImageQuerySizeLod`;
+DXC decorates index, access chain and load `NonUniform`) returns the FIRST lane's texture's size for every lane of the wave (rhitest:
+10,458 of 14,336 lanes wrong outside the candidate loop, 4,002 of 8,136 inside; a `WaveReadLaneFirst` waterfall did not help; D3D12
+0 wrong). The alpha test's ray-cone LOD used it, so a candidate's mip depended on which other lanes shared its wave: the two forms
+(other waves around the same candidate) disagreed on ~32 reflection rays per frame at swamp_pond (deterministic; the one query against
+itself 0), and every RT alpha test / hit LOD on Vulkan used a wrong size. Isolated by experiments: LOD 0 -> 0 differing, identity
+object matrix -> still differing, constant size -> 0. **Fix:** the RT records carry their textures' sizes: `uvSet` bits 16-23 = log2(albedo
+width x height) x 8, bits 24-31 = the same of the alpha test's texture (`RtScene::materialFields`, also in the segments; 0 = unknown);
+`rvkRtTexArea` reads them (fallback: the size query), used by `rvkRtCandidatePasses` and the hit surface's LOD. `rvkSize2D` is documented
+for wave-uniform indices only. Open: the material pack map's LOD offset at hits (`rvk_rt_trace.hlsli`, `rvkSize2D(slot)`) still queries.
+
+**Defect 2 (D3D12, same GPU): the committed t of a cut-out with TMin > 0.** When the candidate loop reads `CandidateTriangleRayT` (the ray
+cone does) before `CommitNonOpaqueTriangleHit`, the committed t is wrong (826 of 826 rays with tMin > 0, 198 of them exactly t + TMin; the
+candidate's t is right) and the traversal keeps it as its interval end, so a cut-out loses to an opaque surface behind it. Without the
+read (rhitest `RVK_OF_PLAINREAD` unset: 0 wrong) or with TMin = 0 it is right; Vulkan is right. **Fix:** `rvkRay` starts D3D12 rays at their
+tMin point (TMin 0) and the queries add tMin back to their t values (`rvkRayT0`; Vulkan rays unchanged). Every D3D12 RT consumer with
+tMin > 0 (water.rt 1 / 2 units, RT shadows, GI) could lose a cut-out to an opaque surface within tMin behind it [I: inferred from the
+rhitest, not measured in game].
+
+**The batch material** (frame-ownership.md 14.19.1): a hardware batch (`eCMeshResource2::ExecuteRenderInstances`, render-op node 0xffffff)
+draws without `eCSubMesh::Render`, so the draw tag had no material; in Full (lean: the engine's shader constants not executed, the
+active shader stale) its RT material fell back to the bytecode heuristic and masked vegetation (`Nat_Veg_Herbs_01 / _02`,
+`Nat_Veg_Ferns_01`, `Nat_Vegetation_Ivy_01`) entered the TLAS opaque (dark quads in reflections and RT shadows). `RtScene::batchMaterial`
+takes the op's sub-mesh material. Wrapper was not affected (the engine's `ExecuteShaderConstants` set the active shader). A/B:
+`rt.reflection_tweaks` bit 64. Cost and pictures: frame-ownership.md 14.19.1.
+
 ## 4. GD3D11's D3D12 RT path (survey 2026-10-22; root `E:\git\github\GD3D11\D3D11Engine\`)
 
 * Scene (`D3D12RayTracing.cpp`): masks World / Vob / Dynamic / Carrier; caps 12,288 instances, 16,384 geometry records,

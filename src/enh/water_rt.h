@@ -98,6 +98,8 @@ private:
     bool held_ = false, failed_ = false;
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_;
+    std::unique_ptr<rhi::Buffer> diag_;  // tweak 32: the rays whose one-query and opaque-first hits differ (rvk.log `enh: water.rt: compare`)
+    std::uint64_t diagFrame_ = 0, diagRays_ = 0;
     std::future<std::unique_ptr<rhi::Pipeline>> building_;  // the compute pipeline, built in the background (no hitch when the tier is turned on)
     struct Seen {
         Body body;
