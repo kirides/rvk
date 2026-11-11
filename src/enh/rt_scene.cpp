@@ -2191,27 +2191,30 @@ void RtScene::setAnimated(const void* consumer, bool on, float rangeUnits) {
 void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const rt::Registry::Instance& in, const rt::Rows& rows, TreeBatch& batch,
                           std::uint32_t index, std::uint32_t count) {
     ++iv_.treeDraws;
-    if (batch.failed || b.state != BlasState::Built || b.maxVertex == 0 || b.maxVertex >= (1u << 20) || b.triangles == 0 || q.indexBuffer == nullptr) return;
+    const bool replay = dev.ownedReplayActive();
+    const auto skip = [&](int why) {
+        if (replay) ++tw_.ownedSkip[why];  // (owned runs: why an observed instance got no job)
+    };
+    if (batch.failed || b.state != BlasState::Built || b.maxVertex == 0 || b.maxVertex >= (1u << 20) || b.triangles == 0 || q.indexBuffer == nullptr) return skip(0);
     const d3d9::scene::CameraBlock& cam = dev.camera().valid ? dev.camera() : dev.lastCamera();
-    if (!cam.valid) return;
+    if (!cam.valid) return skip(1);
     const float dx = rows[3] - cam.position[0], dy = rows[7] - cam.position[1], dz = rows[11] - cam.position[2];
     if (dx * dx + dy * dy + dz * dz > animRange_ * animRange_) {
         ++iv_.treeFar;
-        return;
+        return skip(2);
     }
     const std::uint64_t frame = dev.frameValue();
     rollDyn(frame);
-    if (dynTrees_ >= kMaxAnimatedTrees || dyn_.size() >= 512) return;
+    if (dynTrees_ >= kMaxAnimatedTrees || dyn_.size() >= 512) return skip(3);
     for (const DynDraw& d : dyn_) {
-        if (d.key == in.key && d.main) return;
+        if (d.key == in.key && d.main) return skip(4);
     }
     const bool index32 = b.key.index32 != 0;
     const rhi::GpuAddr indices = b.key.strip != 0 ? addrOf(*b.listIndices) : b.ibAddress.plus(static_cast<std::int64_t>(b.key.first) * (index32 ? 4u : 2u));
-    if (indices.null()) return;
+    if (indices.null()) return skip(5);
     const std::uint32_t slots = b.maxVertex + 1;
     // F4-5 (native.tree_wind): the instance's positions by the compute pass; the capture only for a compare (composed draws: an owned run has no draw to capture)
     // or when the compute cannot take the declaration (composed: the capture as before; owned: the rest pose, counted)
-    const bool replay = dev.ownedReplayActive();
     const TreeLayoutEntry* tl = treeWind_ != 0 && treeWindReady() ? &treeLayout(q) : nullptr;
     const bool compute = tl != nullptr && tl->ok && index < kMaxBatch && kInstanceDataBase + 4 * index + 3 < kInstanceDataEnd;
     if (tl != nullptr && !compute) ++tw_.refused;
@@ -3560,9 +3563,10 @@ void RtScene::logStats(bool force) {
                               tw_.windRegisterStale);
         }
         spdlog::info("rt: tree wind (5 s): {}, {} tree instances by compute ({} from owned runs, {} from composed draws), {} vertices, {} dispatches, captures requested {}, "
-                     "declarations refused {}, ring full {}, dropped {}; tree batches with the identity instance stream assumed {} (readable but not 0, 1, 2, ...: {}){}",
+                     "declarations refused {}, ring full {}, dropped {}; tree batches with the identity instance stream assumed {} (readable but not 0, 1, 2, ...: {}); "
+                     "owned-run instances without a job: BLAS not built {}, no camera {}, beyond the range {}, cap {}, already taken {}, no indices {}{}",
                      treeWind_ == 0 ? "off" : treeWindReady_ ? (treeWind_ == 2 ? "compare" : "on") : "on (pipeline pending)", tw_.jobs, tw_.owned, tw_.composed, tw_.vertices,
-                     tw_.dispatches, iv_.treeCaptured, tw_.refused, tw_.ringFull, tw_.dropped, tw_.rampAssumed, tw_.rampMismatch, cmp);
+                     tw_.dispatches, iv_.treeCaptured, tw_.refused, tw_.ringFull, tw_.dropped, tw_.rampAssumed, tw_.rampMismatch, tw_.ownedSkip[0], tw_.ownedSkip[1], tw_.ownedSkip[2], tw_.ownedSkip[3], tw_.ownedSkip[4], tw_.ownedSkip[5], cmp);
         tw_ = {};
     }
     if (iv_.holes > 0) {

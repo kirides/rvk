@@ -433,6 +433,7 @@ private:
         std::uint64_t jobs = 0, vertices = 0, dispatches = 0, owned = 0, composed = 0, compareJobs = 0, refused = 0, ringFull = 0, dropped = 0;
         std::uint64_t compared = 0, missing = 0, over01 = 0, over1 = 0, windFromWindow = 0, windRegisterStale = 0, rampAssumed = 0, rampMismatch = 0;
         float clsMax[3] = {0.0f, 0.0f, 0.0f};
+        std::uint64_t ownedSkip[6] = {};  // owned runs: BLAS not built / no camera / beyond the range / cap / seen / no indices
         float maxErr = 0.0f;
     } tw_;
     void destroyTreeWind();
