@@ -127,7 +127,7 @@ inline constexpr const char* kAuditNames[] = {"ctx", "mesh resource", "entity", 
 inline constexpr std::size_t kAuditCount = std::size(kAuditNames);
 
 inline constexpr const char* kDeriveWhy[] = {"derived", "stale module", "phase", "consumers", "variant gate", "env", "stream / index binding", "texture", "jitter flags", "scene form",
-                                             "draw count", "no packet"};
+                                             "draw count", "no packet", "bone form (remade)"};
 inline constexpr std::size_t kDeriveWhyCount = std::size(kDeriveWhy);
 
 // F2c-4a (native.owned_persistent): the draw's slot in gpuscene::drawrecords(), returned (deferred) when the draw record goes away

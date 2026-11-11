@@ -1294,14 +1294,14 @@ public:
         float alphaRef = 0.0f;
         float psC5[4]{};                                // pixel window 1 (c5) as the draw's pass sets it (.w only when it sets the mask)
         bool ambientLit = false;                        // the draw's ambient registers (c15..c21 of its lighting) are not all zero, composed from the record's illumination
-        // 14.35: the draw's VS window 2 as the owned path serves it now (a skinned part's bone image; null = unknown: the bone-motion decision is not re-checked). A skinned
-        // main solid draw takes the bone-motion forms when that image has a history: a record retained in a frame without one (or with one it has lost) is refused (4)
+        // 14.35: the draw's VS window 2 as the owned path serves it now (a skinned part's bone image, a static mesh's object record; null = unknown: the bone-motion decision
+        // is not re-checked). A main solid draw whose bone-motion decision now differs from the retained one is refused (4): its record is remade from the composition
         rhi::GpuRef vsWin2{};
-        bool vsWin2Bones = false;                       // ... and it is a bone table image (OwnedWindows::Kind::Bones)
+        OwnedWindows::Kind vsWin2Kind = OwnedWindows::Kind::None;
     };
     // 14.35: the composition's bone-motion decision for a retained skinned main solid draw with this VS window 2 now (sceneDecide + bonePredict's skinned branch, read only):
     // 1 = the bone forms, 0 = not, -1 = not decidable here (not such a draw / the window unknown)
-    int boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, bool win2Bones, bool gbufTaken) const;
+    int boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, OwnedWindows::Kind win2Kind, bool gbufTaken) const;
     struct BoneDeriveStats {
         std::uint64_t refusedGained = 0, refusedLost = 0;  // records without the forms whose window has a history now / with the forms whose window has none
     } boneDeriveStats;

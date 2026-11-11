@@ -509,20 +509,21 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out,
             return GetEnvironmentVariableA("RVK_BONE_DERIVE_OFF", v, sizeof(v)) != 0;
         }();
         rhi::GpuRef win2 = in.vsWin2;
-        bool win2Bones = in.vsWin2Bones;
-        if (win2.null() && ow != nullptr && ow->w[0][2].kind == OwnedWindows::Kind::Bones) {
+        OwnedWindows::Kind win2Kind = in.vsWin2Kind;
+        if (win2.null() && ow != nullptr) {
             win2 = ow->w[0][2].base;
-            win2Bones = true;
+            win2Kind = ow->w[0][2].kind;
         }
-        const int boneNow = off ? -1 : boneFormsNow(c, win2, win2Bones, gbufTaken);
+        const int boneNow = off ? -1 : boneFormsNow(c, win2, win2Kind, gbufTaken);
         if (boneNow >= 0 && (boneNow == 1) != c.boneMotion) {
             ++(boneNow == 1 ? boneDeriveStats.refusedGained : boneDeriveStats.refusedLost);
-            static std::atomic<int> logged{0};
-            if (logged.fetch_add(1, std::memory_order_relaxed) < 12) {
-                spdlog::info("d3d9: retained skinned draw refused: the composition {} the bone-motion forms now (retained boneMotion {}, boneObs {}, scenePending {}, gbufWanted {}; "
-                             "pipelines v1 {} v2 {})",
-                             boneNow == 1 ? "takes" : "no longer takes", c.boneMotion, c.boneObs, c.v.scenePending, c.v.gbufWanted, static_cast<std::uint32_t>(c.scenePipeline),
-                             static_cast<std::uint32_t>(c.scenePipeline2));
+            static std::atomic<int> logged[2]{};
+            if (logged[boneNow].fetch_add(1, std::memory_order_relaxed) < 8) {
+                spdlog::info("d3d9: retained {} draw refused: the composition {} the bone-motion forms now (retained boneMotion {}, boneObs {}, scenePending {}, gbufWanted {}; "
+                             "pipelines v1 {} v2 {}; window 2 kind {}, history {}, scene active {}, rigid {}, gbuf taken {})",
+                             draws::name(c.kind), boneNow == 1 ? "takes" : "no longer takes", c.boneMotion, c.boneObs, c.v.scenePending, c.v.gbufWanted,
+                             static_cast<std::uint32_t>(c.scenePipeline), static_cast<std::uint32_t>(c.scenePipeline2), static_cast<int>(win2Kind), !historyOf(win2).null(), sceneActive(),
+                             rigidMotionOn(), gbufTaken);
             }
             return variantRefusal(9, c);
         }

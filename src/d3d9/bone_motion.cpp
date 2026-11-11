@@ -443,15 +443,22 @@ bool f62NoMotion() {
 }
 }  // namespace
 
-int Device::boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, bool win2Bones, bool gbufTaken) const {
-    if (boneMode_ != 1 || c.kind != draws::Kind::Skinned || c.phase.view != scene::View::Main || c.phase.pass != scene::Pass::Solid || win2.null() || !win2Bones ||
-        c.vs == nullptr || c.ps == nullptr) {
-        return -1;
+int Device::boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, OwnedWindows::Kind win2Kind, bool gbufTaken) const {
+    if (boneMode_ != 1 || c.phase.view != scene::View::Main || c.phase.pass != scene::Pass::Solid || win2.null() || c.vs == nullptr || c.ps == nullptr) return -1;
+    const bool skinned = c.kind == draws::Kind::Skinned;
+    // (a retained draw that was told "still" / "declined" (boneObs 1 / 3) is replayed as it is by the composition (replayDraw): not re-decided here)
+    if (!c.boneMotion && (c.boneObs == 1 || c.boneObs == 3)) return -1;
+    if (skinned) {
+        if (win2Kind != OwnedWindows::Kind::Bones) return -1;
+    } else {
+        // 14.15 b rigid: a static mesh whose window 2 is an object record. (Instance-list draws are not decided here: their composition is served the instance's row image
+        // or an object record, and 14.22's per-frame previous rows, while the owned path reads the row image: the records' check compares the composed form instead)
+        if (c.kind != draws::Kind::StaticMesh || win2Kind != OwnedWindows::Kind::Object) return -1;
     }
-    // (bonePredict's skinned branch + sceneDecide's `bone`: the G-buffer's material pass with its motion target, scene draws + the actors' scene forms, a palette-indexing
-    // vertex shader, a bone image with a history, the forms built)
-    if (!gbufTaken || gbuf_.motion == nullptr || !sceneActive() || !sceneActors_ || !sceneV2_ || !c.vs->reflection.relativeConstants) return 0;
-    if (gpuscene::bonetable().prevOf(win2).null()) return 0;
+    // (bonePredict + sceneDecide's `bone`: the G-buffer's material pass with its motion target, scene draws (+ the actors' scene forms), a vertex shader whose addressing
+    // matches its window's table, a window with a history, the forms built)
+    if (!gbufTaken || gbuf_.motion == nullptr || !sceneActive() || !sceneV2_ || c.vs->reflection.relativeConstants != skinned) return 0;
+    if (skinned ? (!sceneActors_ || gpuscene::bonetable().prevOf(win2).null()) : (!rigidMotionOn() || gpuscene::objecttable().prevOf(win2).null())) return 0;
     const VariantSlot fs = sceneSlotOf(gbufferSlot(true));
     if (fs == VariantSlot::Count) return 0;
     const auto built = [](const Shader& s, VariantSlot v) { return s.variantState[static_cast<std::size_t>(v)].load(std::memory_order_acquire) == 2; };
