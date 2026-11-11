@@ -26,7 +26,7 @@ struct WaterRtParams {
     uint4 tex;        // x depth map (t2D), y refraction copy (t2D), z linear clamp sampler, w point clamp sampler
     uint4 info;       // x output width, y output height, z pixels per output pixel (1 / 2), w bodies
     uint4 trace;      // x RVK_RT_TRACE_* of the reflection ray, y shadow rays (0 none, 1 cut-outs solid, 2 alpha-tested), z tweaks
-                      // (8 unshaded), w 1 = the source view (shaded hits: negative alpha), 2 = every hit shaded
+                      // (8 unshaded, 16 one-query traces, 32 compare one-query vs opaque-first), w 1 = the source view (shaded hits: negative alpha), 2 = every hit shaded
     float4 reach;     // x reach (world units), y extra cone spread (rad), z shadow ray reach, w unused
     float4 fogColor;  // c3
     float4 fogParams; // c4 (x offset, y per unit, z maximum)
@@ -75,7 +75,14 @@ float3 shadeHit(WaterRtParams p, RvkFrame f, RvkRtHit h, float3 dir, float width
     float shadow = 1.0;
     if (nl > 0.0 && p.trace.y != 0u && dot(p.sunColor.rgb, float3(1.0, 1.0, 1.0)) > 1e-3) {
         // towards the sun from just off the surface (cut-outs solid at medium, alpha-tested at high)
-        shadow = rvkRtVisibilityOpaqueFirst(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, p.trace.y == 1u ? RVK_RT_TRACE_OPAQUE : 0u);
+        const uint sflags = p.trace.y == 1u ? RVK_RT_TRACE_OPAQUE : 0u;
+        if ((p.trace.z & 16u) != 0u) {
+            shadow = rvkRtVisibility(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, sflags);  // tweak 16: one query (A/B of the split)
+        } else {
+            shadow = rvkRtVisibilityOpaqueFirst(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, sflags);
+            // tweak 32: both forms on the same ray, a differing answer = cyan
+            if ((p.trace.z & 32u) != 0u && rvkRtVisibility(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, sflags) != shadow) return float3(0.0, 1.0, 1.0);
+        }
     }
     float3 l = max(lerp(p.indoor.rgb, sh, outdoor), float3(0.0, 0.0, 0.0)) + p.sunColor.rgb * (nl * shadow);
     float3 c = albedo * dpow3(l, 0.45);
@@ -125,8 +132,39 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
         float width0 = pixelAngle * tBest;
         float spread = pixelAngle + p.reach.y;
         float maxD = p.reach.x;
-        RvkRtHit h = rvkRtTraceClosestOpaqueFirst(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
-        if (h.hit) {
+        // tweak 16: the one-query trace (A/B of the opaque-first split); tweak 32: both on the same ray (16 + 32: the one query against itself =
+        // the control): a differing hit (hit / t) = magenta, an exact tie (the same t on another triangle) = yellow; the differing rays are counted
+        // and the first 16 of every 60 frames logged (`pc.pad` = the read-back buffer, Vulkan: rvk.log `enh: water.rt: compare`; rt-reflections.md 3.3.1)
+        RvkRtHit h;
+        if ((p.trace.z & 16u) != 0u) h = rvkRtTraceClosest(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
+        else h = rvkRtTraceClosestOpaqueFirst(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
+        float4 differs = float4(0.0, 0.0, 0.0, 0.0);
+        if ((p.trace.z & 32u) != 0u) {
+            RvkRtHit g = rvkRtTraceClosest(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
+            if (g.hit != h.hit || (h.hit && asuint(g.t) != asuint(h.t))) {
+                differs = float4(1.0, 0.0, 1.0, 1.0);
+                // (the opaque instances alone: which of the two forms missed what)
+                RvkRtHit o1 = rvkRtTraceClosest(f, o, dir, 1.0, maxD, width0, spread, p.trace.x | RVK_RT_TRACE_NO_CUTOUTS);
+                if (any(pc.pad != uint2(0u, 0u))) {
+                    uint slot = rvkBufAdd(pc.pad, 0u, 1u);
+                    if (slot < 16u) {
+                        uint at = 64u + slot * 128u;
+                        float vals[16] = {o.x, o.y, o.z, dir.x, dir.y, dir.z, width0, spread, maxD, g.t, h.t, o1.t,
+                                          g.bary.x, g.bary.y, h.bary.x, h.bary.y};
+                        for (uint k = 0u; k < 16u; ++k) RVK_BUF_STORE(pc.pad, at + k * 4u, asuint(vals[k]));
+                        RvkRtRecord rg = rvkRtRecord(f, g.record);
+                        bool again = g.hit && rvkRtCandidatePasses(rg, g.primitive, g.bary, g.objectToWorld, width0 + spread * g.t);
+                        uint ids[16] = {g.hit ? 1u : 0u, g.record, g.primitive, h.hit ? 1u : 0u, h.record, h.primitive, o1.hit ? 1u : 0u, o1.record,
+                                        o1.primitive, rg.flags, rg.uvSet, rg.alpha, again ? 1u : 0u, p.trace.x, rg.segmentCount, rg.instanceId};
+                        for (uint k = 0u; k < 16u; ++k) RVK_BUF_STORE(pc.pad, at + 64u + k * 4u, ids[k]);
+                    }
+                }
+            }
+            else if (h.hit && (g.record != h.record || g.primitive != h.primitive)) differs = float4(1.0, 1.0, 0.0, 1.0);
+        }
+        if (differs.w > 0.0) {
+            result = differs;
+        } else if (h.hit) {
             float3 hp = o + dir * h.t;
             float cover = 1.0 - smoothstep(0.85 * maxD, maxD, h.t);
             // screen reuse: the hit is on screen and the depth map shows it there (not below the water's surface: the

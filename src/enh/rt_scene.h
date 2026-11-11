@@ -72,6 +72,8 @@ public:
     const rt::Limits& limits() const { return limits_; }
     // which views feed it (diagnostics, rt.scene_views): bit 1 main view, bit 2 sun cascades; instances of the other are dropped
     void setViews(std::uint8_t mask);
+    // rt.reflection_tweaks bit 64 (A/B only): hardware batches take the bytecode fallback material again (the pre-fix behaviour, frame-ownership.md 14.19.1)
+    void setBatchHeuristic(bool on) { batchHeuristic_ = on; }
     // diagnostics: what record `index` of the TLAS built in frame `frame` (Device::frameValue) was (kept for 4 frames)
     std::string describe(std::uint64_t frame, std::uint32_t index) const;
     void keepContents(bool on) {
@@ -174,6 +176,8 @@ private:
         const void* material = nullptr;
     };
     static bool engineSubMeshes(const d3d9::ReplaceQuery& q, std::vector<EngineSub>& out);
+    // a hardware-batched draw's material (eCMeshResource2::ExecuteRenderInstances draws without eCSubMesh::Render, so the tag has none): the op's sub-mesh
+    static const void* batchMaterial(const d3d9::ReplaceQuery& q);
 
     enum class BlasState : std::uint8_t { Pending, Built, Failed };
     struct Blas {
@@ -296,6 +300,7 @@ private:
     // the record / segment material fields of `m` (bindless slots of this frame); returns whether the opacity has a texture
     struct MaterialFields {
         std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0, packWord = 0;
+        std::uint32_t packLod = 0;  // the record alpha's bits 16-23 (abi::kRtAlphaPackLodShift; 0 = no map)
         float uvMap[2][4]{};
     };
     MaterialFields materialFields(const RtMaterial* m) const;
@@ -573,6 +578,7 @@ private:
     bool active_ = false;
     bool failed_ = false;
     std::uint8_t views_ = 3;
+    bool batchHeuristic_ = false;
     bool keepContents_ = false;
     std::uint32_t passId_ = 0, passId2_ = 0;
     std::uint64_t builtFrame_ = 0;  // the frame whose TLAS is built (once: at the z pre-pass, else at AfterOpaque)
@@ -621,7 +627,7 @@ private:
         double buildCpuMs = 0.0, passCpuMs = 0.0, observeMs = 0.0, gpuMs = 0.0;
         std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, segments = 0, speedTree = 0;  // records of the last frame
         std::uint64_t dynamic = 0;  // characters in the last frame's TLAS
-        std::uint64_t engineSegments = 0, engineMerged = 0;
+        std::uint64_t engineSegments = 0, engineMerged = 0, batchMaterials = 0;
         std::uint64_t gpuSamples = 0;
     } iv_;
     std::deque<std::pair<std::uint64_t, std::vector<Entry>>> contents_;  // frame value -> the TLAS's instances (last 4)

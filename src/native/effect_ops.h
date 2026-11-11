@@ -67,6 +67,8 @@ public:
     bool postOn() const { return postTake_ || postCompare_; }
     // S-7 (native/own_post): `native.own_post`; On needs the post chain taken over, Compare needs it composed
     void setOwnPost(OwnPost::Mode mode);
+    // F12 / F13 (frame-ownership.md 14.24): `native.own_sky` / `native.own_gui` (the device gates them on the take-over of their groups)
+    void setOwnScene(OwnPost::Scene which, OwnPost::Mode mode) { own_->setSceneMode(which, mode); }
     bool guiOn() const { return guiTake_ || guiCompare_; }
     bool active() const { return maskOn() || setupOn() || postOn() || guiOn(); }
 

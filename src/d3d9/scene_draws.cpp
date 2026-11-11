@@ -380,6 +380,9 @@ const VertexInputValues* Device::internPullVi(bool dynamicLayout, std::uint64_t 
 
 // a finished packet (pipeline, vertex input, dynamic state, push block set) becomes a scene packet: its push data goes into a DrawRecord
 bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t viewSlot, std::uint32_t c5w) {
+    // F6-2 (frame-ownership.md 14.23): a pending run of ordered owned draws is queued BEFORE the draw's record joins sceneRecs_: the run's flush records the pending batch
+    // and empties the list (queued later, from submitInterned, it left this packet's index pointing into an emptied list: the device loss of 2026-11-11 08:41)
+    if (orderedPending_) orderedFlushPending();
     // guard: every address a scene shader can read (the eight window bases, the DrawBlock, the frame block) must be set; else the normal path draws it
     // (scene ABI v2: the view windows come from the view table, whose base and slot are checked instead of the record's three view window bases)
     const bool v2 = viewSlot >= 0;
@@ -412,6 +415,7 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t vi
     sceneRecSlots_.resize(sceneRecs_.size(), 0);
     sceneRecSlots_.back() = v2 ? static_cast<std::uint32_t>(viewSlot) + 1 : 0;
     p.scene = static_cast<std::uint32_t>(sceneRecs_.size());
+    p.sceneGen = sceneRecGen_;
     p.pipeline = pipeline;
     p.vi = internSceneVi(*p.vi, viewSlot);
     if (probe_ != nullptr) {
@@ -766,6 +770,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             obsBonePending_ = false;
             obsRigidStill_ = boneMode_ == 1 && !c.boneMotion && (c.boneObs == 1 || c.boneObs == 3);  // (14.22)
             obsBone_ = boneOfCached(c);  // (14.13)
+            obsNoMotion_ = !obsBone_ && noMotionOf(c);  // (F6-2)
             bool loaded = false;
             const CoverQuery cq = coverOf(q);
             for (DrawObserver* o : observers_) {
@@ -864,9 +869,9 @@ void Device::sceneFlushRun(const std::vector<std::uint32_t>& run, const std::fun
     if (n == 0) return;
     for (const std::uint32_t at : run) {
         // (a scene packet always has its record: a stale index would make the shader read somebody else's addresses)
-        if (batch_[at].scene == 0 || batch_[at].scene > sceneRecs_.size()) {
+        if (batch_[at].scene == 0 || batch_[at].scene > sceneRecs_.size() || batch_[at].sceneGen != sceneRecGen_) {
             ++sceneStats_.fbNullAddress;
-            spdlog::error("d3d9: scene run dropped: packet without a record (index {} of {})", batch_[at].scene, sceneRecs_.size());
+            spdlog::error("d3d9: scene run dropped: packet without a record (index {} of {}, list generation {} / {})", batch_[at].scene, sceneRecs_.size(), batch_[at].sceneGen, sceneRecGen_);
             return;
         }
     }
@@ -949,6 +954,7 @@ void Device::sceneBeginFrame() {
     sceneRef_.valid = false;
     lastSceneVi_ = nullptr;
     sceneRecs_.clear();
+    ++sceneRecGen_;
     sceneRecSlots_.clear();
     for (SceneRefStream& r : sceneRefV2_) r.valid = false;
     sceneCollectCheck();

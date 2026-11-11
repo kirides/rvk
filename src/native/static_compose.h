@@ -415,6 +415,8 @@ struct DrawDesc {
     float maskValue = 0.0f;
     // F4-3 (native.owned_trees): the bucket key of a SpeedTree batch's draw (StaticOps::treeBucketKey; 0 = not a tree draw / not retainable)
     std::uint64_t treeKey = 0;
+    // F12 (frame-ownership.md 14.24, native.own_sky): the sky dome's draw (eCShaderSkyDome: main view and cube faces): drawn with the sky dome port
+    bool skyDome = false;
 };
 
 // the lowest set bit of a non-zero word (bsf: an intrinsic, inlined in every build configuration)

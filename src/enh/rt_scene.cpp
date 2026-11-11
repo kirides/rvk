@@ -297,11 +297,45 @@ bool RtScene::engineSubMeshes(const d3d9::ReplaceQuery& q, std::vector<EngineSub
     return !out.empty();
 }
 
+// A hardware batch (eCMeshResource2::ExecuteRenderInstances(sub) 0x7607b0, render-op node 0xffffff, desc & 0xff = the
+// sub-mesh): the engine draws it without eCSubMesh::Render, so the draw tag has no material and the RT material fell back to
+// the bytecode heuristic (never masked: the masked vegetation batches entered the TLAS opaque; frame-ownership.md 14.19.1).
+// The op's sub-mesh +0x38 is the material the per-instance path (eCSubMesh::Render) tags; the draw's index range must lie
+// inside the sub-mesh's (+0x28 first index, +0x2c count).
+const void* RtScene::batchMaterial(const d3d9::ReplaceQuery& q) {
+    if (q.tag == nullptr || !q.instanced || q.tag->source != d3d9::draws::Source::Mesh || q.tag->material != nullptr || q.tag->context == nullptr ||
+        (q.tag->opDesc >> 8) != 0xffffffu || q.primitiveType != 4) {
+        return nullptr;
+    }
+    const std::uint32_t sub = q.tag->opDesc & 0xffu;
+    const void* mesh = nullptr;
+    const std::uint8_t* subs = nullptr;
+    std::int32_t count = 0;
+    if (!engine::readAt(q.tag->context, 0x28, mesh) || mesh == nullptr || !engine::readAt(mesh, 0x58, subs) || subs == nullptr ||
+        !engine::readAt(mesh, 0x60, count) || count <= 0 || count > 4096 || static_cast<std::int32_t>(sub) >= count) {
+        return nullptr;
+    }
+    const std::uint8_t* s = subs + static_cast<std::size_t>(sub) * 0x48;
+    std::uint32_t range[2]{};
+    const void* material = nullptr;
+    if (!engine::safeRead(s + 0x28, range, sizeof(range)) || !engine::readAt(s, 0x38, material) || material == nullptr) return nullptr;
+    const std::uint64_t first = q.first, end = first + 3ull * q.primitives;
+    if (first < range[0] || end > static_cast<std::uint64_t>(range[0]) + range[1]) return nullptr;
+    return material;
+}
+
 // a depth-only draw's materials from the engine's sub-meshes: one sub-mesh over the whole range = the draw's material
 // (`tagOut` gets it); several (a merged range) = per-triangle materials of the BLAS (engine segments, resolved once)
 void RtScene::learnEngineMaterials(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, d3d9::draws::Tag& tagOut, bool& single) {
     single = false;
     if (q.tag == nullptr || q.tag->material != nullptr) return;
+    if (const void* batch = batchHeuristic_ ? nullptr : batchMaterial(q); batch != nullptr) {
+        tagOut = *q.tag;
+        tagOut.material = batch;
+        single = true;
+        ++iv_.batchMaterials;
+        return;
+    }
     const bool depthOnly = q.phase.view == View::Shadow || q.phase.pass == Pass::DepthPrepass;
     if (!depthOnly) return;
     const std::uint64_t frame = dev.frameValue();
@@ -410,7 +444,17 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 if (b != nullptr && b->state != BlasState::Failed && q.phase.pass == Pass::Solid) {
                     std::uint8_t rank = 0;
                     bool overlay = false;
-                    const std::uint32_t id = materialOf(dev, q, *b, rank, overlay);
+                    // a hardware batch fading in (blended, ExecuteRenderInstances: no material in the tag) takes its sub-mesh's material as the
+                    // opaque batches do (learnEngineMaterials), not the bytecode heuristic (rt-reflections.md 3.3.2)
+                    d3d9::draws::Tag batchTag;
+                    d3d9::ReplaceQuery qb = q;
+                    if (const void* batch = batchHeuristic_ ? nullptr : batchMaterial(q); batch != nullptr) {
+                        batchTag = *q.tag;
+                        batchTag.material = batch;
+                        qb.tag = &batchTag;
+                        ++iv_.batchMaterials;
+                    }
+                    const std::uint32_t id = materialOf(dev, qb, *b, rank, overlay);
                     // an untextured blended layer (a wet-sand specular layer with a cube as the diffuse, seen unblended in the
                     // cascades / z pre-pass): the range's untextured materials are overlays on another surface (a textured
                     // object fading in is drawn blended too: not this)
@@ -1315,6 +1359,14 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     f.opacityTex = (m->uvSet & abi::kRtUvOpacityTexture) != 0 ? slotOf(m->opacity) : f.albedoTex;
     f.albedoSampler = m->sampler;
     f.uvSet = m->uvSet | (f.albedoTex == 0 ? abi::kRtUvNoTexture : 0u);
+    // the textures' sizes as log2(area) x 8 (the shaders' texture LOD: a size query of a lane-varying index is wrong on Vulkan, rt-reflections.md 3.3.1)
+    const auto area8 = [](const d3d9::Texture* t) -> std::uint32_t {
+        if (t == nullptr || t->isNull()) return 0u;
+        const double a = static_cast<double>(std::max(t->desc().width, 1u)) * static_cast<double>(std::max(t->desc().height, 1u));
+        return std::clamp(static_cast<std::uint32_t>(std::lround(std::log2(a) * 8.0)), 1u, 255u);
+    };
+    if (f.albedoTex != 0) f.uvSet |= area8(m->albedo) << abi::kRtUvAlbedoAreaShift;
+    if (f.opacityTex != 0) f.uvSet |= area8((m->uvSet & abi::kRtUvOpacityTexture) != 0 ? m->opacity : m->albedo) << abi::kRtUvOpacityAreaShift;
     for (int row = 0; row < 2; ++row) {
         for (int c = 0; c < 3; ++c) f.uvMap[row][c] = m->uvMap[row][c];
     }
@@ -1323,7 +1375,14 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     if (pack_ != nullptr && !m->name.empty()) {
         // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
         const auto hit = pack_->lookup(m->name);
-        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
+        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
+            f.packWord = hit.word;
+            // the map's mip offset against the albedo (the hit shading's lod: log2 of the width ratio, as the raster's derivatives give it)
+            if (hit.texture != nullptr && !hit.texture->isNull() && f.albedoTex != 0 && m->albedo != nullptr && !m->albedo->isNull()) {
+                const double d = std::log2(static_cast<double>(std::max(m->albedo->desc().width, 1u)) / static_cast<double>(std::max(hit.texture->desc().width, 1u)));
+                f.packLod = static_cast<std::uint32_t>(std::clamp(128l + std::lround(d * 8.0), 1l, 255l));
+            }
+        }
         else if (hit.word == 0) f.packWord = pack_->deriveWord(m->spec);  // no entry: the roughness the engine's specular data implies (materials.derive_from_specular)
     }
     return f;
@@ -3310,7 +3369,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         r.texcoord6 = b.layout.texcoord6;
         r.color0 = b.layout.color0;
         r.instanceId = in.id;
-        r.alpha = recordAlpha(in.flags, in.data, m);
+        r.alpha = recordAlpha(in.flags, in.data, m) | (mf.packLod << abi::kRtAlphaPackLodShift);
         r.albedoTex = mf.albedoTex;
         r.albedoSampler = mf.albedoSampler;
         r.packWord = mf.packWord;
@@ -3335,7 +3394,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                     e.primitiveCount = seg.primitiveCount;
                     e.albedoTex = sf.albedoTex;
                     e.albedoSampler = sf.albedoSampler;
-                    e.alpha = r.alpha;
+                    e.alpha = (r.alpha & 0xFFFFu) | (sf.packLod << abi::kRtAlphaPackLodShift);
                     e.uvSet = sf.uvSet;
                     e.packWord = sf.packWord;
                     std::memcpy(e.uvMap, sf.uvMap, sizeof(e.uvMap));
@@ -3610,10 +3669,10 @@ void RtScene::logStats(bool force) {
     const RtMaterials::Counters mc = materials_.takeCounters();
     spdlog::info("rt: scene: materials {} (per frame: {:.1f} resolves, {:.3f} ms; interval: {} uv evaluations, graph {} (pool image {}) / bytecode s9 {} / "
                  "no texture {}, approximate {}, failed {}, active shader != material's {}); records: textured {}, untextured {}, cut-out {}, segmented {} ({} segments; "
-                 "engine sub-mesh segments {}, merged ranges resolved {}), SpeedTree {}",
+                 "engine sub-mesh segments {}, merged ranges resolved {}, batch sub-mesh materials {}), SpeedTree {}",
                  materials_.size(), static_cast<double>(mc.resolves) / f, mc.ms / f, mc.evaluations, mc.graph, mc.pool, mc.heuristic, mc.noTexture,
                  mc.approx, mc.failed, mc.shaderMismatch, iv_.textured, iv_.untextured, iv_.cutOut, iv_.segmented, iv_.segments,
-                 iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
+                 iv_.engineSegments, iv_.engineMerged, iv_.batchMaterials, iv_.speedTree);
     if (bandsValid_) {
         // the last frame's TLAS by distance band (docs/research/rt-lod.md): instances, triangles traced (original in brackets when a
         // proxy stands in), by kind (meshes / SpeedTree branches / other), the BLAS storage whose nearest instance lies in the band

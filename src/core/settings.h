@@ -518,6 +518,8 @@ struct RendererSettings {
     Setting* nativeVertexPull = nullptr;       // native.vertex_pull: S-4 vertex pulling of the persistent owned draws (no vertex input: one indirect command per pipeline x state x index binding)
     Setting* nativeDepthZ = nullptr;          // native.depth_z: depth-only z passes (S-6: no pixel shader / colour attachment where nothing reads them; the R32F depth map derived from the hardware depth)
     Setting* nativeOwnPost = nullptr;         // native.own_post: the post chain on our own shaders (S-7: the luminance chain in one dispatch)
+    Setting* nativeOwnSky = nullptr;          // native.own_sky: the sky dome (main view + sky cube faces) on our own shaders (frame-ownership.md 14.24, F12)
+    Setting* nativeOwnGui = nullptr;          // native.own_gui: the GUI sprite batches on our own shaders (frame-ownership.md 14.24, F13)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)

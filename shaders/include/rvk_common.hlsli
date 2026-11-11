@@ -7,6 +7,10 @@
 float4 rvkSample2D(uint tex, uint smp, float2 uv) { return RVK_TEX2D(tex).Sample(RVK_SAMP(smp), uv); }
 float4 rvkSample2DLod(uint tex, uint smp, float2 uv, float lod) { return RVK_TEX2D(tex).SampleLevel(RVK_SAMP(smp), uv, lod); }
 float4 rvkFetch2D(uint tex, int2 p) { return RVK_TEX2D(tex).Load(int3(p, 0)); }
+// CAUTION (Vulkan, AMD RX 7900 XTX, measured 2026-11-11 by rvk_rhitest "opaque-first traces"): with an index that differs between the lanes of
+// a wave the size is the FIRST lane's texture's for every lane (OpImageQuerySizeLod; DXC decorates index, access chain and load NonUniform; a
+// WaveReadLaneFirst waterfall does not help either); D3D12 is right. Only for an index uniform across the wave; the RT scene's records carry
+// their textures' sizes instead (rvkRtTexArea, rvkRtPackLodOffset; rt-reflections.md 3.3.1 / 3.3.2: the audit of every size query).
 int2 rvkSize2D(uint tex) {
     uint w, h;
     RVK_TEX2D(tex).GetDimensions(w, h);

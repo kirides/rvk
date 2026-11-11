@@ -8,6 +8,8 @@
 //                     lightmap, directional + ambient light) and the enhancement hooks (gbuffer + gi: the frame block, derivatives, three render targets)
 //   references        shaders/test/parity_refs.comp.hlsl: rvkGiLookup (frame block -> volume header -> probes / depth moments) and the RT geometry record
 //                     fetch (rvk_rt.hlsli: records, 16 / 32-bit indices at 2-byte alignment, vertex attributes, material segments)
+//   opaque-first      shaders/test/rhi_rt_opaquefirst.comp.hlsl: water.rt's two-query traces against the one-query forms on a synthetic TLAS
+//                     (parity_opaquefirst.inl)
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1223,6 +1225,7 @@ void testOceanMips(Harness& h) {
 
 #include "parity_post.inl"
 #include "parity_post2.inl"
+#include "parity_opaquefirst.inl"
 
 }  // namespace
 
@@ -1260,6 +1263,7 @@ int run(rhi::Device& dev) {
     testWaterDraw(h);
     testScene(h);
     testReferences(h);
+    testOpaqueFirst(h);
     return failures;
 }
 

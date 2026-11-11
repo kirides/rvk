@@ -40,12 +40,23 @@ struct RvkRtHit {
 
 float3x4 rvkIdentity3x4() { return float3x4(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0); }
 
+// D3D12 (measured 2026-11-11, RX 7900 XTX, rvk_rhitest "opaque-first traces"): when the candidate loop reads CandidateTriangleRayT (the alpha
+// test's ray cone does) before CommitNonOpaqueTriangleHit, the committed t is wrong with TMin > 0 (826 of 826 rays, often exactly t + TMin; the
+// candidate's own t is right) and the traversal keeps it as its interval end: a cut-out hit loses to an opaque surface behind it and reports a
+// t too far. Without that read, or with TMin = 0, it is right; Vulkan is right. So on D3D12 every ray starts at its tMin point (TMin = 0) and the
+// query's t values get tMin back (rvkRayT0: the t of the shifted origin; 0 on Vulkan, where the rays are unchanged).
+#ifdef __spirv__
+float rvkRayT0(float tMin) { return 0.0; }
+#else
+float rvkRayT0(float tMin) { return tMin; }
+#endif
 RayDesc rvkRay(float3 origin, float tMin, float3 dir, float tMax) {
+    float t0 = rvkRayT0(tMin);
     RayDesc ray;
-    ray.Origin = origin;
-    ray.TMin = tMin;
+    ray.Origin = origin + dir * t0;
+    ray.TMin = tMin - t0;
     ray.Direction = dir;
-    ray.TMax = tMax;
+    ray.TMax = tMax - t0;
     return ray;
 }
 
@@ -68,7 +79,7 @@ RvkRtHit rvkRtTraceClosest(RvkFrame f, float3 origin, float3 dir, float tMin, fl
         if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
         uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();
         RvkRtRecord r = rvkRtRecord(f, index);
-        float t = rq.CandidateTriangleRayT();
+        float t = rq.CandidateTriangleRayT() + rvkRayT0(tMin);
         if (rvkRtCandidatePasses(r, rq.CandidatePrimitiveIndex(), rq.CandidateTriangleBarycentrics(), rq.CandidateObjectToWorld3x4(),
                                  coneWidth0 + coneSpread * t)) {
             rq.CommitNonOpaqueTriangleHit();
@@ -76,7 +87,7 @@ RvkRtHit rvkRtTraceClosest(RvkFrame f, float3 origin, float3 dir, float tMin, fl
     }
     if (rq.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return h;
     h.hit = true;
-    h.t = rq.CommittedRayT();
+    h.t = rq.CommittedRayT() + rvkRayT0(tMin);
     h.record = rq.CommittedInstanceID() + rq.CommittedGeometryIndex();
     h.primitive = rq.CommittedPrimitiveIndex();
     h.bary = rq.CommittedTriangleBarycentrics();
@@ -105,7 +116,7 @@ RvkRtHit rvkRtTraceClosestOpaqueFirst(RvkFrame f, float3 origin, float3 dir, flo
         if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
         uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();
         RvkRtRecord r = rvkRtRecord(f, index);
-        float t = rq.CandidateTriangleRayT();
+        float t = rq.CandidateTriangleRayT() + rvkRayT0(tMin);
         if (rvkRtCandidatePasses(r, rq.CandidatePrimitiveIndex(), rq.CandidateTriangleBarycentrics(), rq.CandidateObjectToWorld3x4(),
                                  coneWidth0 + coneSpread * t)) {
             rq.CommitNonOpaqueTriangleHit();
@@ -113,7 +124,7 @@ RvkRtHit rvkRtTraceClosestOpaqueFirst(RvkFrame f, float3 origin, float3 dir, flo
     }
     if (rq.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return h;
     h.hit = true;
-    h.t = rq.CommittedRayT();
+    h.t = rq.CommittedRayT() + rvkRayT0(tMin);
     h.record = rq.CommittedInstanceID() + rq.CommittedGeometryIndex();
     h.primitive = rq.CommittedPrimitiveIndex();
     h.bary = rq.CommittedTriangleBarycentrics();
@@ -135,7 +146,7 @@ float rvkRtVisibility(RvkFrame f, float3 origin, float3 dir, float tMin, float t
         if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
         uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();
         RvkRtRecord r = rvkRtRecord(f, index);
-        float t = rq.CandidateTriangleRayT();
+        float t = rq.CandidateTriangleRayT() + rvkRayT0(tMin);
         if (rvkRtCandidatePasses(r, rq.CandidatePrimitiveIndex(), rq.CandidateTriangleBarycentrics(), rq.CandidateObjectToWorld3x4(),
                                  coneWidth0 + coneSpread * t)) {
             rq.CommitNonOpaqueTriangleHit();
@@ -158,7 +169,7 @@ float rvkRtVisibilityOpaqueFirst(RvkFrame f, float3 origin, float3 dir, float tM
         if (rq.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
         uint index = rq.CandidateInstanceID() + rq.CandidateGeometryIndex();
         RvkRtRecord r = rvkRtRecord(f, index);
-        float t = rq.CandidateTriangleRayT();
+        float t = rq.CandidateTriangleRayT() + rvkRayT0(tMin);
         if (rvkRtCandidatePasses(r, rq.CandidatePrimitiveIndex(), rq.CandidateTriangleBarycentrics(), rq.CandidateObjectToWorld3x4(),
                                  coneWidth0 + coneSpread * t)) {
             rq.CommitNonOpaqueTriangleHit();
@@ -257,7 +268,7 @@ RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, float3 dir, float coneWi
     o.instanceId = r.instanceId;
     o.lod = 0.0;
     if (r.albedoTex != 0u && (r.uvSet & RVK_RT_UV_NO_TEXTURE) == 0u) {
-        o.lod = max(rvkRtTextureLod(tri, h.objectToWorld, rvkSize2D(r.albedoTex), coneWidth0 + coneSpread * h.t, abs(dot(g, dir))), 0.0);
+        o.lod = max(rvkRtTextureLod(tri, h.objectToWorld, rvkRtTexArea(r.uvSet, RVK_RT_UV_ALBEDO_AREA_SHIFT, r.albedoTex), coneWidth0 + coneSpread * h.t, abs(dot(g, dir))), 0.0);
     }
     o.albedo = rvkRtAlbedo(r, o.uv, o.lod);
     if ((r.flags & RVK_RT_LAYER) != 0u) o.albedo = rvkRtBlendLayers(f, h, o.position - dir * h.t, dir, o.lod, o.albedo);
@@ -279,7 +290,7 @@ RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, float3 dir, float coneWi
         float4 t = float4(1.0, 1.0, 1.0, 0.0);
         if (slot != 0u) {
             float lod = o.lod;
-            if (r.albedoTex != 0u && (r.uvSet & RVK_RT_UV_NO_TEXTURE) == 0u) lod += log2(float(max(rvkSize2D(r.albedoTex).x, 1)) / float(max(rvkSize2D(slot).x, 1)));
+            if (r.albedoTex != 0u && (r.uvSet & RVK_RT_UV_NO_TEXTURE) == 0u) lod += rvkRtPackLodOffset(r, slot);
             t = rvkSample2DLod(slot, r.albedoSampler, o.uv, max(lod, 0.0));
         }
         if (slot == 0u && orm) {  // a derived word (enh::matpack::kWordDerived): roughness in bits 16-23

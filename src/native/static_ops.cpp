@@ -1,5 +1,6 @@
 #include <chrono>
 
+#include "native/own_post.h"
 #include "native/static_ops.h"
 
 #include <type_traits>
@@ -540,6 +541,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.alphaRef = 0;
     d.maskSet = false;
     d.maskValue = 0.0f;
+    d.skyDome = false;
     return d;
 }
 
@@ -892,10 +894,26 @@ std::uint32_t StaticOps::bindLightmaps(const std::uint8_t* res) {
 }
 
 // eCShaderBase::ExecutePass's SetSwitch: the shader's switch elements, last first
-void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& skip) {
+void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& skip, bool variant) {
+    if (variant) {
+        passSw_.clear();
+        passSwShader_ = nullptr;
+        passSwHash_ = 0;
+    }
     const std::int32_t count = get<std::int32_t>(shader, 0x250);
     U8* elements = ptr(shader, 0x248);
     if (count <= 0) return;
+    // F6-2: the writes of this switch value, for the draw's variant record (checkMaterial)
+    const auto note = [&](int kind, std::uint32_t idx, const float* v, const void* image) {
+        gpuscene::materialtable().noteSwitchWrite(shader, kind, idx, variant);
+        if (!variant) return;
+        gpuscene::MaterialTable::SwitchWrite w;
+        w.kind = static_cast<std::uint8_t>(kind);
+        w.idx = idx;
+        if (v != nullptr) std::memcpy(w.v, v, 16);
+        w.image = image;
+        passSw_.push_back(w);
+    };
     Mirror::ShaderPools* pools = poolsOf(shader);
     for (std::int32_t i = count - 1; i >= 0; --i) {
         U8* e = ptr(elements, 8 * static_cast<std::size_t>(i));
@@ -915,7 +933,7 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
             if (pool == nullptr || reg < 0) continue;
             if (pool == shader + 0xc8 && static_cast<std::uint32_t>(reg) >= pools->psFirst && static_cast<std::uint32_t>(reg) - pools->psFirst < 16) {
                 std::memcpy(pools->ps[reg - pools->psFirst], v, 16);
-                gpuscene::materialtable().noteSwitchWrite(shader, 1, static_cast<std::uint32_t>(reg) - pools->psFirst);
+                note(1, static_cast<std::uint32_t>(reg) - pools->psFirst, v, nullptr);
                 if (rec_ != nullptr) {
                     RetSwitchWrite w;
                     w.kind = 1;
@@ -925,7 +943,7 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
                 }
             } else if (pool == shader + 0x98 && static_cast<std::uint32_t>(reg) >= pools->vsFirst && static_cast<std::uint32_t>(reg) - pools->vsFirst < 32) {
                 std::memcpy(pools->vs[reg - pools->vsFirst], v, 16);
-                gpuscene::materialtable().noteSwitchWrite(shader, 0, static_cast<std::uint32_t>(reg) - pools->vsFirst);
+                note(0, static_cast<std::uint32_t>(reg) - pools->vsFirst, v, nullptr);
                 if (rec_ != nullptr) {
                     RetSwitchWrite w;
                     w.kind = 0;
@@ -952,7 +970,7 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
                 return;
             }
             pools->slotImage[static_cast<std::size_t>(slot)] = image;
-            gpuscene::materialtable().noteSwitchWrite(shader, 2, static_cast<std::uint32_t>(slot));
+            note(2, static_cast<std::uint32_t>(slot), nullptr, image);
             if (rec_ != nullptr) {
                 RetSwitchWrite w;
                 w.kind = 2;
@@ -964,6 +982,15 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
         }
         skip = Skip::Switch;
         return;
+    }
+    if (variant && !passSw_.empty()) {
+        std::uint64_t hh = 0xcbf29ce484222325ull;
+        for (const auto& w : passSw_) {
+            const auto* b = reinterpret_cast<const std::uint8_t*>(&w);
+            for (std::size_t i = 0; i < sizeof(w); ++i) hh = (hh ^ b[i]) * 0x100000001B3ull;
+        }
+        passSwShader_ = shader;
+        passSwHash_ = hh;
     }
 }
 
@@ -1222,12 +1249,15 @@ void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const 
     if (!mt.active()) return;
     const bool verify = gpuscene::verifyFrame();
     MatMemo* memo = nullptr;
+    // F6-2: a switch variant of the pass (passDraw's SetSwitch writes on this owner)
+    const bool swv = passSwShader_ != nullptr && passSwShader_ == owner && !zPass && !passSw_.empty();
+    const std::uint64_t swHash = swv ? passSwHash_ : 0;
     if (!verify) {
         // 7.27: not a check frame: the slot, once per (owner, pixel shader, pass) and frame; the table's once-per-frame poll and graph note run at its first draw, the
         // compare of the composed registers / textures with the record is left to the check frames
         const std::uint64_t frame = dev_.stats().frames;
         memo = &matMemo_[((reinterpret_cast<std::uintptr_t>(owner) >> 4) ^ (reinterpret_cast<std::uintptr_t>(d.ps) >> 5) ^ (zPass ? 0x55u : 0u)) & (matMemo_.size() - 1)];
-        if (memo->frame == frame && memo->owner == owner && memo->ps == d.ps && memo->zPass == zPass) {
+        if (memo->frame == frame && memo->owner == owner && memo->ps == d.ps && memo->zPass == zPass && memo->sw == swHash) {
             d.matSlot = memo->slot;
             return;
         }
@@ -1239,9 +1269,14 @@ void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const 
     md.zPass = zPass;
     md.tex = &StaticOps::materialTexture;
     md.texCtx = this;
+    if (swv) {
+        md.sw = passSw_.data();
+        md.swCount = static_cast<std::uint32_t>(passSw_.size());
+        md.swHash = swHash;
+    }
     if (!verify) {
         d.matSlot = mt.checkDraw(md, false);
-        if (d.matSlot != gpuscene::MaterialTable::kNoSlot) *memo = {owner, md.ps, dev_.stats().frames, d.matSlot, zPass};
+        if (d.matSlot != gpuscene::MaterialTable::kNoSlot) *memo = {owner, md.ps, dev_.stats().frames, d.matSlot, zPass, swHash};
         return;
     }
     gpuscene::MaterialDraw& m = md.draw;
@@ -1290,8 +1325,8 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
         const bool actorDraw = ownedActorsOn() && op_ != nullptr && op_->kind == OpKind::Animation && !inNonOp_ &&
                                (g_ == &groups_[static_cast<std::size_t>(Group::Actors)] ||
                                 (ownedShadowsOn() && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
-        bool instanced = false;
-        for (const auto& s : d.streams) instanced = instanced || (s.buffer != nullptr && s.freq != 1);
+        // (F6-2 / 14.23: the alpha list's herbs' instance-data stream 3 of a draw that is not instanced is bound per vertex: such a draw is a plain mesh draw for the windows)
+        const bool instanced = dev_.streamsInstanced(d.streams);
         if (actorDraw && !instanced) {
             d3d9::OwnedWindows::Win bw;
             bool served = false;
@@ -1477,8 +1512,11 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     }
     Skip skip = Skip::None;
     const std::size_t sw0 = rec_ != nullptr ? rec_->sw.size() : 0;
-    applySwitch(shader, pass.switchValue, skip);
-    if (skip != Skip::None) return skip;
+    applySwitch(shader, pass.switchValue, skip, switchVariantsOn());
+    if (skip != Skip::None) {
+        passSwShader_ = nullptr;
+        return skip;
+    }
     if (vsElem == nullptr || psElem == nullptr) {
         skipWhy_ = std::format("pass flags {:#x}: vs {} ({}) / ps {} ({}) not compiled", pass.flags, vsIdx, static_cast<const void*>(vsElem), psIdx,
                                static_cast<const void*>(psElem));
@@ -1535,6 +1573,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     if (const Skip s = materialSamplers(d, owner, psElem); s != Skip::None) return s;
     checkMaterial(d, owner, owner == shader ? geometry.material : nullptr, false, get<std::uint16_t>(psElem, 0x38), b.mode,
                   b.mode == 1 && recMask && rs.alphaRef == b.maskRef ? static_cast<std::int32_t>(b.maskRef) : -1);
+    passSwShader_ = nullptr;  // (F6-2: the variant belongs to this pass's draw)
     if (rec_ != nullptr) {
         RetPass rp;
         rp.owner = owner;
@@ -2257,7 +2296,11 @@ void StaticOps::opEnterImpl(const Op& op) {
     leanBegin(group);
     if (f2c::on() && group == Group::Static && viewKind_ == ViewKind::Main) f2cClassify(op);
     if (ownedBb_ && bbReplay(op)) return;  // F4-1: an owned billboard op: drawn from its record
-    if (ownedOrdered_ && orderedPlace(op)) return;  // F9 / F14: an ordered op drawn from its records at its place (the slot is skipped)
+    if (ownedOrdered_ && orderedPlace(op)) {  // F9 / F14: an ordered op drawn from its records at its place (the slot is skipped)
+        if (op.kind == OpKind::Animation) actorCensusOwned(op);  // (F6-2 census)
+        return;
+    }
+    if (op.kind == OpKind::Animation) actorCensus(op);  // F6-2 census: an actor op that is composed
     recEnter(op);
     bbEnter(op);
     const Skip s = composeOp(op);
@@ -2415,6 +2458,13 @@ void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
         scratch_->streams[cs].offset = composed.streams[cs].offset;
     }
     if (!composed.indexBytes.empty() && scratch_->indices == ownIb_.get()) scratch_->indices = composed.indices;
+    if (composed.skyDome) {
+        // F12 (native.own_sky = on): the dome drawn with the ports of the composed shaders
+        if (OwnPost* own = ownPost()) {
+            if (scratch_->vs != nullptr && scratch_->vs == own->fxPort(composed.vs)) scratch_->vs = composed.vs;
+            if (scratch_->ps != nullptr && scratch_->ps == own->fxPort(composed.ps)) scratch_->ps = composed.ps;
+        }
+    }
     sc::Diff diff = sc::compare(composed, *scratch_);
     if (!bytesOk) {
         diff.fields.set(static_cast<std::size_t>(sc::Field::GeometryData));
@@ -2791,6 +2841,8 @@ void StaticOps::issue() {
         ownedDrawIndex_ = static_cast<std::uint32_t>(k);
         if (owned) setOwnedFor(d);
         setTag(d);
+        // F12 (native.own_sky): the sky dome on its ports (On), or its compare draw into a scratch image first (Compare)
+        const bool skyPorted = d.skyDome && skyOwnBefore(d);
         issueIndex_ = k;
         const bool capturing = cacheable && (pe == nullptr || verifyFrame || stale);
         if (capturing) {
@@ -2803,6 +2855,7 @@ void StaticOps::issue() {
         } else {
             dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
         }
+        if (d.skyDome) skyOwnAfter(d, skyPorted);
         if (capturing) {
             if (!dev_.endCapture()) {
                 ++pktWindow_.notBuilt;

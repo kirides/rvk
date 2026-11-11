@@ -48,6 +48,8 @@ static const uint RVK_RT_UV_OPACITY_SHIFT = 8u;        // bits 8-9: the opacity'
 static const uint RVK_RT_UV_OPACITY_OPAQUE = 0x400u;   // the opacity is no texture
 static const uint RVK_RT_UV_OPACITY_TEXTURE = 0x800u;  // the opacity's own texture: bindless slot in uvMap1.w
 static const uint RVK_RT_UV_EMISSIVE = 0x1000u;        // a textured self-illumination role: the diffuse colour is emitted (GI)
+static const uint RVK_RT_UV_ALBEDO_AREA_SHIFT = 16u;   // bits 16-23: log2(albedo width x height) x 8 (0 = unknown; rvkRtTexArea)
+static const uint RVK_RT_UV_OPACITY_AREA_SHIFT = 24u;  // bits 24-31: the same of the alpha test's texture
 
 // one geometry of one TLAS instance in memory (112 bytes = 7 x uint4; mirror of abi.h RtGeometryRecord)
 struct RvkRtRecordData {
@@ -264,14 +266,32 @@ RvkRtMaterialTri rvkRtMaterialTriangle(RvkRtRecord r, uint primitive) {
     t.uv2 = rvkRtMaterialUv(r, i.z);
     return t;
 }
+// The texel count (width x height) of a record's texture: from the record's uvSet word (bits `shift`: log2(area) x 8, filled by the RT scene),
+// else the size query (whose answer is wrong on Vulkan when the index differs between the lanes of a wave: rvkSize2D, rt-reflections.md 3.3.1)
+float rvkRtTexArea(uint uvSet, uint shift, uint tex) {
+    uint q = (uvSet >> shift) & 0xFFu;
+    if (q != 0u) return exp2(float(q) * 0.125);
+    int2 s = rvkSize2D(tex);
+    return float(s.x) * float(s.y);
+}
+
+// The material-pack map's mip offset against the albedo's (log2 of the width ratio): from the record's alpha word (bits 16-23: 128 + 8 x the offset,
+// written by the RT scene), else the size queries (wrong on Vulkan for a lane-varying index: rvkSize2D, rt-reflections.md 3.3.1)
+static const uint RVK_RT_ALPHA_PACK_LOD_SHIFT = 16u;  // abi.h kRtAlphaPackLodShift
+float rvkRtPackLodOffset(RvkRtRecord r, uint slot) {
+    uint q = (r.alpha >> RVK_RT_ALPHA_PACK_LOD_SHIFT) & 0xFFu;
+    if (q != 0u) return (float(q) - 128.0) * 0.125;
+    return log2(float(max(rvkSize2D(r.albedoTex).x, 1)) / float(max(rvkSize2D(slot).x, 1)));
+}
+
 float2 rvkRtMaterialTriUv(RvkRtMaterialTri t, float2 bary) { return t.uv0 + bary.x * (t.uv1 - t.uv0) + bary.y * (t.uv2 - t.uv0); }
 
 // Ray-cone mip level (Akenine-Moeller et al., "Improved shader and texture level of detail using ray cones"; as in GD3D11's
 // RtScene.hlsl TextureLod): the texel-to-world area ratio of the triangle (world space: the instance's scale counts) plus
-// the cone's width at the hit over the incidence cosine.
-float rvkRtTextureLod(RvkRtMaterialTri t, float3x4 objectToWorld, int2 texSize, float coneWidth, float cosine) {
+// the cone's width at the hit over the incidence cosine. `texArea` = the texture's width x height (rvkRtTexArea).
+float rvkRtTextureLod(RvkRtMaterialTri t, float3x4 objectToWorld, float texArea, float coneWidth, float cosine) {
     float2 d1 = t.uv1 - t.uv0, d2 = t.uv2 - t.uv0;
-    float ta = abs(d1.x * d2.y - d2.x * d1.y) * float(texSize.x) * float(texSize.y);
+    float ta = abs(d1.x * d2.y - d2.x * d1.y) * texArea;
     float3x3 m = (float3x3)objectToWorld;
     float pa = length(cross(mul(m, t.p1 - t.p0), mul(m, t.p2 - t.p0)));
     return 0.5 * log2(max(ta, 1e-12) / max(pa, 1e-12)) + log2(max(coneWidth, 1e-4) / max(cosine, 0.1));
@@ -309,7 +329,7 @@ bool rvkRtCandidatePasses(RvkRtRecord r, uint primitive, float2 bary, float3x4 o
     uint tex = (r.uvSet & RVK_RT_UV_OPACITY_TEXTURE) != 0u ? asuint(r.uvMap1.w) : r.albedoTex;
     if (tex == 0u) return true;
     RvkRtMaterialTri t = rvkRtMaterialTriangle(r, primitive);
-    float lod = max(rvkRtTextureLod(t, objectToWorld, rvkSize2D(tex), coneWidth, 1.0), 0.0);
+    float lod = max(rvkRtTextureLod(t, objectToWorld, rvkRtTexArea(r.uvSet, RVK_RT_UV_OPACITY_AREA_SHIFT, tex), coneWidth, 1.0), 0.0);
     return rvkRtAlphaTest(r, rvkRtOpacity(r, rvkRtMaterialTriUv(t, bary), lod));
 }
 

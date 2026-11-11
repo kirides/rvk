@@ -308,7 +308,7 @@ struct RtGeometryRecord {
     std::uint32_t instanceId;    // stable id of the instance in the registry (debug colours, temporal reuse)
     std::uint32_t albedoTex;     // bindless t2D slot of the diffuse texture (0 = none: kRtUvNoTexture's colour)
     std::uint32_t albedoSampler; // bindless sampler (the draw's sampler states of that slot)
-    std::uint32_t alpha;         // alpha test: D3DCMPFUNC | reference (0..255) << 8 (func 8 = always)
+    std::uint32_t alpha;         // alpha test: D3DCMPFUNC | reference (0..255) << 8 (func 8 = always); bits 16-23 kRtAlphaPackLodShift
     std::uint32_t uvSet;         // kRtUv*: which vertex uv set the albedo's coordinate follows from + flags
     // affine map of that uv set to the pixel shader's diffuse coordinate: u' = dot(uvMap[0].xy, uv) + uvMap[0].z, v' with
     // [1]; uvMap[0].w = the constant colour (RGBA8 bits) of kRtUvNoTexture, uvMap[1].w = the opacity texture's bindless slot
@@ -356,6 +356,13 @@ inline constexpr std::uint32_t kRtUvHeuristic = 0x10u;       // slot from the by
 inline constexpr std::uint32_t kRtUvOpacityShift = 8;        // bits 8-9: the opacity's channel (0 r .. 3 a) of its texture
 inline constexpr std::uint32_t kRtUvOpacityOpaque = 0x400u;  // the opacity is no texture: never cut out
 inline constexpr std::uint32_t kRtUvOpacityTexture = 0x800u; // the opacity has its own texture (bindless slot in uvMap[1].w)
+// bits 16-23 / 24-31: log2(width x height) x 8 of the albedo / the alpha test's texture (0 = unknown: the shader queries the size). The
+// records carry them because a size query of a lane-varying bindless index is wrong on Vulkan (rt-reflections.md 3.3.1)
+inline constexpr std::uint32_t kRtUvAlbedoAreaShift = 16;
+inline constexpr std::uint32_t kRtUvOpacityAreaShift = 24;
+// RtGeometryRecord / RtMaterialSegment .alpha bits 16-23: the material-pack map's mip offset against the albedo, 128 + 8 x log2(albedo width / map width)
+// (0 = unknown; rvkRtPackLodOffset: a size query of a lane-varying index is wrong on Vulkan, rt-reflections.md 3.3.1)
+inline constexpr std::uint32_t kRtAlphaPackLodShift = 16;
 inline constexpr std::uint32_t kRtUvEmissive = 0x1000u;       // the material has a textured SelfIllumination role: the GI treats its diffuse colour as light it emits
 // TLAS instance masks
 inline constexpr std::uint32_t kRtMaskOpaque = 0x01u;
