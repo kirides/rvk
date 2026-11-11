@@ -167,6 +167,23 @@ public:
     std::uint64_t acts() const { return acts_ + stats_.runs + gstats_[1].runs + gstats_[2].runs; }
     void countAct() { ++acts_; }
 
+    // ---- F12 / F13 (frame-ownership.md 14.24): the sky dome (main view + the sky cube's faces) and the GUI sprite batches on the effect ports ----
+    // `native.own_sky` / `native.own_gui` (Full, Debug): On = the composed draws are drawn with the ports (shaders/post/fx/sky_dome.*, gui_main.*); Compare = they
+    // are drawn a second time with the ports into a scratch copy of their target before the composed draw, and the two images are compared (`image 'sky_dome.frag'`,
+    // `image 'gui_main.frag'`). The ports are built whenever one of own_post / own_sky / own_gui is not off.
+    enum class Scene : int { Sky = 0, Gui = 1, Count = 2 };
+    void setSceneMode(Scene which, Mode m);
+    Mode sceneMode(Scene which) const { return sceneMode_[static_cast<std::size_t>(which)]; }
+    // a composed draw of the class: drawn with our shaders (`ours`) or kept on the engine's (`why`)
+    void countScene(Scene which, bool ours, const char* why);
+    std::uint64_t sceneActs(Scene which) const { return sceneActs_[static_cast<std::size_t>(which)]; }
+    // Compare: a 2D scratch image of `src`'s size and format (any face / level: the sky cube's faces), `tag` keeps two scratch images of one size apart; `copy` = it
+    // starts as a copy of `src` (recorded now)
+    d3d9::Surface* scratchOf(d3d9::Surface* src, int tag, bool copy);
+    // draws skipped so far (a shader still compiling, a D3D12 PSO still building): a compare whose two draws ran while it moved is dropped (counted)
+    std::uint64_t drawSkips();
+    void countDroppedCompare() { ++droppedCompares_; }
+
     // counters (rvk.log `native: own post`)
     struct Stats {
         std::uint64_t runs = 0, refused = 0, compared = 0, differing = 0;
@@ -189,6 +206,19 @@ private:
         int kind = 0;   // 0 8-bit unorm x4 (RGBA / BGRA), 1 float16 x comps, 2 float32 x comps (S-7d: the mask chain's float images)
         int comps = 4;
     };
+    // ---- F12 / F13 ----
+    std::array<Mode, 2> sceneMode_{};
+    std::array<std::uint64_t, 2> sceneActs_{};
+    struct SceneCounts {
+        std::uint64_t draws = 0, ours = 0, left = 0;
+        std::string why;
+    };
+    std::array<SceneCounts, 2> sceneW_{};
+    std::unique_ptr<d3d9::Texture> sceneScratch_[8];
+    int sceneScratchTag_[8]{};
+    std::uint32_t sceneScratchNext_ = 0;
+    std::uint64_t droppedCompares_ = 0;
+    void reportScene();
     // ---- S-7d ----
     void buildFxPorts();
     void reportFx();
@@ -275,5 +305,10 @@ private:
 // the owned stages' state line (static_ops_stages.cpp): the device's OwnPost mode (0 off, 1 on, 2 compare) and its acted count (0 without one)
 int ownPostMode();
 std::uint64_t ownPostActs();
+// F12 / F13: the device's OwnPost (null before the HAL device made it); the stage line's modes / acted counts of own_sky / own_gui
+OwnPost* ownPost();
+void registerOwnPost(OwnPost* p, OwnPost* only = nullptr);  // (OwnPost's constructor / destructor; `only`: cleared only while it is that one)
+int ownSceneMode(OwnPost::Scene which);
+std::uint64_t ownSceneActs(OwnPost::Scene which);
 
 }  // namespace rvk::native

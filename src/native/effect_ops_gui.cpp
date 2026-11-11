@@ -329,26 +329,94 @@ void EffectOps::issueSprite(bool lean) {
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
     issuing_ = true;
-    for (std::size_t k = 0; k < drawCount_; ++k) {
-        fxc::EffectDraw& d = *draws_[k];
-        const SpriteGeom& g = spriteGeom_[k];
-        if (g.vbOffset + g.vertices.size() > spriteVb_->size()) continue;
-        // DISCARD of just the range the draw reads (the fresh GPU copy takes only those bytes)
-        if (void* p = spriteVb_->lock(g.vbOffset, static_cast<std::uint32_t>(g.vertices.size()), d3d9::LOCK_DISCARD)) {
-            std::memcpy(p, g.vertices.data(), g.vertices.size());
-            spriteVb_->unlock();
+    // F13 (frame-ownership.md 14.24, native.own_gui): the batches on our own shaders (shaders/post/fx/gui_main.*, the port of the sprite effect). The scissor rect
+    // (the GUI's clip rects) is the engine's device state at Flush's entry: the composition does not set it, and a render target change resets it (D3D9), so it is
+    // put back after any target change below
+    const OwnPost::Mode gm = own_->sceneMode(OwnPost::Scene::Gui);
+    std::int32_t scissor[4];
+    std::memcpy(scissor, dev_.scissorRect(), sizeof(scissor));
+    const auto keepScissor = [&] {
+        if (std::memcmp(dev_.scissorRect(), scissor, sizeof(scissor)) != 0) dev_.setScissorRect(scissor[0], scissor[1], scissor[2], scissor[3]);
+    };
+    const auto portsOf = [&](const fxc::EffectDraw& d, const d3d9::Shader*& vs, const d3d9::Shader*& ps, const char*& why) {
+        why = nullptr;
+        vs = own_->fxPort(d.vs, &why);
+        ps = own_->fxPort(d.ps, &why);
+        return vs != nullptr && ps != nullptr;
+    };
+    // pass 0: Compare = the flush drawn with the ports into a scratch copy of its target first (the same blending onto the same start content); pass 1: the flush
+    const auto drawAll = [&](bool ours, d3d9::Surface* rtOverride) {
+        for (std::size_t k = 0; k < drawCount_; ++k) {
+            fxc::EffectDraw& d = *draws_[k];
+            const SpriteGeom& g = spriteGeom_[k];
+            if (g.vbOffset + g.vertices.size() > spriteVb_->size()) continue;
+            // DISCARD of just the range the draw reads (the fresh GPU copy takes only those bytes)
+            if (void* p = spriteVb_->lock(g.vbOffset, static_cast<std::uint32_t>(g.vertices.size()), d3d9::LOCK_DISCARD)) {
+                std::memcpy(p, g.vertices.data(), g.vertices.size());
+                spriteVb_->unlock();
+            }
+            // our buffers for this draw (the composition keeps the engine's for the engine draws' comparison)
+            const fxc::Stream engineStream = d.streams[0];
+            const void* engineIndices = d.indices;
+            const void* engineRt = d.rt0;
+            d.streams[0].buffer = spriteVb_.get();
+            d.indices = spriteIb_.get();
+            if (rtOverride != nullptr) d.rt0 = rtOverride;
+            applyDevice(d);
+            keepScissor();
+            const d3d9::Shader* pvs = nullptr;
+            const d3d9::Shader* pps = nullptr;
+            const char* why = nullptr;
+            const bool port = ours && portsOf(d, pvs, pps, why);
+            if (port) {
+                dev_.setVertexShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(pvs)));
+                dev_.setPixelShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(pps)));
+                if (unitCompare_ && rtOverride == nullptr) {
+                    // (the own-draw compare of check frames: the composition as drawn, with the ports)
+                    if (!portPatched_) portPatched_ = std::make_unique<fxc::EffectDraw>();
+                    *portPatched_ = d;
+                    portPatched_->vs = pvs;
+                    portPatched_->ps = pps;
+                    portActive_ = true;
+                }
+            }
+            if (gm != OwnPost::Mode::Off && (rtOverride != nullptr || gm == OwnPost::Mode::On)) own_->countScene(OwnPost::Scene::Gui, port, why);
+            issueIndex_ = rtOverride != nullptr ? ~std::size_t{0} : k;  // (a compare draw has no composition of its own)
+            dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
+            portActive_ = false;
+            if (rtOverride == nullptr) ++stats_->issuedDraws;
+            if (port) {
+                dev_.setVertexShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(static_cast<const d3d9::Shader*>(d.vs))));
+                dev_.setPixelShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(static_cast<const d3d9::Shader*>(d.ps))));
+            }
+            d.streams[0] = engineStream;
+            d.indices = engineIndices;
+            d.rt0 = engineRt;
         }
-        // our buffers for this draw (the composition keeps the engine's for the engine draws' comparison)
-        const fxc::Stream engineStream = d.streams[0];
-        const void* engineIndices = d.indices;
-        d.streams[0].buffer = spriteVb_.get();
-        d.indices = spriteIb_.get();
-        applyDevice(d);
-        issueIndex_ = k;
-        dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
-        ++stats_->issuedDraws;
-        d.streams[0] = engineStream;
-        d.indices = engineIndices;
+    };
+    d3d9::Surface* cmpScratch = nullptr;
+    std::uint64_t cmpSkips = 0;
+    auto* cmpTarget = static_cast<d3d9::Surface*>(const_cast<void*>(draws_[0]->rt0));
+    if (gm == OwnPost::Mode::Compare && cmpTarget != nullptr) {
+        bool same = true, ported = true;
+        for (std::size_t k = 0; k < drawCount_; ++k) {
+            const d3d9::Shader* a = nullptr;
+            const d3d9::Shader* b = nullptr;
+            const char* why = nullptr;
+            same &= draws_[k]->rt0 == cmpTarget;
+            ported &= portsOf(*draws_[k], a, b, why);
+        }
+        if (same && ported) {
+            dev_.orderedFlushPending();  // (a pending ordered owned run belongs to the target before the copy)
+            cmpSkips = own_->drawSkips();
+            cmpScratch = own_->scratchOf(cmpTarget, 1, true);
+        }
+        if (cmpScratch != nullptr) drawAll(true, cmpScratch);
+    }
+    drawAll(gm == OwnPost::Mode::On, nullptr);
+    if (cmpScratch != nullptr) {
+        if (own_->drawSkips() != cmpSkips) own_->countDroppedCompare();  // (a draw of the two passes was skipped while its shader / pipeline built)
+        else own_->compareUnit("gui_main.frag", cmpScratch, cmpTarget);
     }
     issuing_ = false;
     tag = savedTag;

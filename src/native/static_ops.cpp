@@ -1,5 +1,6 @@
 #include <chrono>
 
+#include "native/own_post.h"
 #include "native/static_ops.h"
 
 #include <type_traits>
@@ -539,6 +540,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.alphaRef = 0;
     d.maskSet = false;
     d.maskValue = 0.0f;
+    d.skyDome = false;
     return d;
 }
 
@@ -2408,6 +2410,13 @@ void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
         scratch_->streams[cs].offset = composed.streams[cs].offset;
     }
     if (!composed.indexBytes.empty() && scratch_->indices == ownIb_.get()) scratch_->indices = composed.indices;
+    if (composed.skyDome) {
+        // F12 (native.own_sky = on): the dome drawn with the ports of the composed shaders
+        if (OwnPost* own = ownPost()) {
+            if (scratch_->vs != nullptr && scratch_->vs == own->fxPort(composed.vs)) scratch_->vs = composed.vs;
+            if (scratch_->ps != nullptr && scratch_->ps == own->fxPort(composed.ps)) scratch_->ps = composed.ps;
+        }
+    }
     sc::Diff diff = sc::compare(composed, *scratch_);
     if (!bytesOk) {
         diff.fields.set(static_cast<std::size_t>(sc::Field::GeometryData));
@@ -2779,6 +2788,8 @@ void StaticOps::issue() {
         ownedDrawIndex_ = static_cast<std::uint32_t>(k);
         if (owned) setOwnedFor(d);
         setTag(d);
+        // F12 (native.own_sky): the sky dome on its ports (On), or its compare draw into a scratch image first (Compare)
+        const bool skyPorted = d.skyDome && skyOwnBefore(d);
         issueIndex_ = k;
         const bool capturing = cacheable && (pe == nullptr || verifyFrame || stale);
         if (capturing) {
@@ -2791,6 +2802,7 @@ void StaticOps::issue() {
         } else {
             dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
         }
+        if (d.skyDome) skyOwnAfter(d, skyPorted);
         if (capturing) {
             if (!dev_.endCapture()) {
                 ++pktWindow_.notBuilt;

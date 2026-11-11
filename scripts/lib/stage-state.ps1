@@ -28,6 +28,8 @@ $script:StageOfSetting = [ordered]@{
     'native.own_foliage'           = 'own_foliage'
     'native.bone_motion'           = 'bone_motion'
     'native.tree_wind'             = 'tree_wind'
+    'native.own_sky'               = 'own_sky'
+    'native.own_gui'               = 'own_gui'
 }
 
 # stages whose input can legitimately be absent from a whole run (frame-ownership.md 14.22): bone_motion acts only on skinned solid draws that move (a frozen

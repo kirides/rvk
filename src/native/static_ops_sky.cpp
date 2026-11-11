@@ -19,6 +19,7 @@
 #include "engine/memread.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "native/own_post.h"
 #include "native/static_ops.h"
 #include "gpuscene/material_table.h"
 
@@ -264,6 +265,7 @@ StaticOps::Skip StaticOps::skyDomeDraw(const std::uint8_t* shader, const std::ui
     g.primCount = dd.primitiveCount;
     sc::DrawDesc& d = drawFrom(g);
     d.drawClass = sc::DrawClass::Sky;
+    d.skyDome = true;
     d.primType = static_cast<std::uint32_t>(dd.type);
     d.baseVertex = dd.baseVertexIndex;
     d.vs = vs;
@@ -452,6 +454,97 @@ StaticOps::Skip StaticOps::composeSkyDraws(const std::uint8_t* sky, const std::u
     // the camera restored: view = the saved one, Invert, view-projection; projection = the saved one, view-projection; Execute
     setCamera(view, proj, dbProj);
     return skyDomeDraw(dome, domeVisual);
+}
+
+// ---- F12 (frame-ownership.md 14.24, native.own_sky): the sky dome on our own shaders ----
+
+bool StaticOps::skyOwnBefore(const sc::DrawDesc& d) {
+    skyCmpScratch_ = skyCmpTarget_ = nullptr;
+    OwnPost* own = ownPost();
+    if (own == nullptr) return false;
+    const OwnPost::Mode m = own->sceneMode(OwnPost::Scene::Sky);
+    if (m == OwnPost::Mode::Off) return false;
+    const char* why = nullptr;
+    const d3d9::Shader* vs = own->fxPort(d.vs, &why);
+    const d3d9::Shader* ps = own->fxPort(d.ps, &why);
+    const bool ported = vs != nullptr && ps != nullptr;
+    own->countScene(OwnPost::Scene::Sky, ported, why);
+    if (!ported) return false;
+    using d3d9::Shader;
+    using d3d9::ShaderRef;
+    if (m == OwnPost::Mode::On) {
+        dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(vs)));
+        dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(ps)));
+        return true;
+    }
+    // compare: the port's draw into a scratch copy of the target (a main view's scene image, or a sky cube face), the other targets unbound (the dome blends:
+    // drawn twice they would differ), depth tested as the dome's draw (it writes none), the viewport / scissor as the device has them
+    d3d9::Surface* target = dev_.renderTarget(0);
+    if (target == nullptr) return false;
+    // (a pending run of ordered owned draws (F9 / F14) belongs to the target before the copy: queued by the next recorded command, it would land in the scratch)
+    dev_.orderedFlushPending();
+    skyCmpSkips_ = own->drawSkips();
+    d3d9::Surface* scratch = own->scratchOf(target, 2, true);
+    if (scratch == nullptr) return false;
+    const d3d9::Viewport vp = dev_.viewport();
+    std::int32_t sc[4];
+    std::memcpy(sc, dev_.scissorRect(), sizeof(sc));
+    d3d9::Surface* more[3] = {dev_.renderTarget(1), dev_.renderTarget(2), dev_.renderTarget(3)};
+    const std::uint32_t zwrite = dev_.renderState(d3d9::RS_ZWRITEENABLE), stencilMask = dev_.renderState(d3d9::RS_STENCILWRITEMASK);
+    const ShaderRef vsSaved = dev_.vertexShaderRef(), psSaved = dev_.pixelShaderRef();
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        if (more[i] != nullptr) dev_.setRenderTarget(i + 1, nullptr);
+    }
+    dev_.setRenderTarget(0, scratch);
+    dev_.setViewport(vp);
+    dev_.setScissorRect(sc[0], sc[1], sc[2], sc[3]);
+    if (zwrite != 0) dev_.setRenderState(d3d9::RS_ZWRITEENABLE, 0);
+    if (stencilMask != 0) dev_.setRenderState(d3d9::RS_STENCILWRITEMASK, 0);
+    dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(vs)));
+    dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(ps)));
+    const bool savedIssuing = issuing_;
+    const std::size_t savedIndex = issueIndex_;
+    issuing_ = true;
+    issueIndex_ = ~std::size_t{0};  // (the compare draw has no composition of its own: the own-draw check skips it)
+    if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
+    else dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
+    issuing_ = savedIssuing;
+    issueIndex_ = savedIndex;
+    dev_.setVertexShaderRef(vsSaved);
+    dev_.setPixelShaderRef(psSaved);
+    if (zwrite != 0) dev_.setRenderState(d3d9::RS_ZWRITEENABLE, zwrite);
+    if (stencilMask != 0) dev_.setRenderState(d3d9::RS_STENCILWRITEMASK, stencilMask);
+    dev_.setRenderTarget(0, target);
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        if (more[i] != nullptr) dev_.setRenderTarget(i + 1, more[i]);
+    }
+    dev_.setViewport(vp);
+    dev_.setScissorRect(sc[0], sc[1], sc[2], sc[3]);
+    skyCmpScratch_ = scratch;
+    skyCmpTarget_ = target;
+    return false;
+}
+
+void StaticOps::skyOwnAfter(const sc::DrawDesc& d, bool ported) {
+    if (ported) {
+        dev_.setVertexShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(static_cast<const d3d9::Shader*>(d.vs))));
+        dev_.setPixelShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(static_cast<const d3d9::Shader*>(d.ps))));
+    }
+    if (skyCmpScratch_ == nullptr) return;
+    OwnPost* own = ownPost();
+    d3d9::Surface* target = skyCmpTarget_;
+    d3d9::Surface* ours = skyCmpScratch_;
+    skyCmpScratch_ = skyCmpTarget_ = nullptr;
+    if (own == nullptr) return;
+    if (own->drawSkips() != skyCmpSkips_) {
+        own->countDroppedCompare();  // (one of the two draws was skipped: its shader / pipeline was still building)
+        return;
+    }
+    // (a face / level other than the first: the engine's result copied into a second scratch image of that size first; the compare reads level 0, layer 0)
+    const bool cube = target->face() != 0 || target->level() != 0 || target->texture()->desc().type != d3d9::TextureType::Tex2D;
+    d3d9::Surface* engine = cube ? own->scratchOf(target, 3, true) : target;
+    if (engine == nullptr) return;
+    own->compareUnit(cube ? "sky_dome.frag (cube face)" : "sky_dome.frag", ours, engine);
 }
 
 }  // namespace rvk::native

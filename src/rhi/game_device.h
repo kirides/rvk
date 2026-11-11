@@ -564,6 +564,9 @@ public:
     // cannot time (no query pool / no timing queue): the renderer keeps its marks out
     virtual bool enableTimestamps() = 0;
     virtual bool timestampsEnabled() const = 0;
+    // draws skipped so far because their pipeline was still being built (D3D12's background PSOs; 0 where pipelines are built at first use): a compare of two
+    // images drawn in this window is not valid when it moved (frame-ownership.md 14.24)
+    virtual std::uint64_t pipelineSkips() const { return 0; }
     // starts recording a slot; `details` keeps the labels of the main stream's marks for TimestampResult::segments
     virtual void timestampStart(std::uint32_t slot, bool details) = 0;
     virtual bool timestampDetails(std::uint32_t slot) const = 0;

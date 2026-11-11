@@ -484,6 +484,13 @@ private:
     // object's array), renderCount: the billboards drawn (0: the record's primitive count / 2)
     Skip skyObjectDraws(const std::uint8_t* object, const float* world, const std::uint8_t* bb, std::uint32_t renderCount);
     Skip skyDomeDraw(const std::uint8_t* shader, const std::uint8_t* visual);
+    // F12 (frame-ownership.md 14.24, native.own_sky): around the issue of a sky dome draw (the device state set, before / after the draw): On = the ports' shaders
+    // set (true: restore them after the draw); Compare = the dome drawn with the ports into a scratch copy of the target first, compared after the draw
+    bool skyOwnBefore(const sc::DrawDesc& d);
+    void skyOwnAfter(const sc::DrawDesc& d, bool ported);
+    d3d9::Surface* skyCmpScratch_ = nullptr;
+    d3d9::Surface* skyCmpTarget_ = nullptr;
+    std::uint64_t skyCmpSkips_ = 0;
     int blendModeOf(const std::uint8_t* owner) const;
     // N5.6 (static_ops_fx.cpp): particles, strips, light streaks, precipitation
     bool verifyFx();

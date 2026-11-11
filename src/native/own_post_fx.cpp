@@ -48,6 +48,102 @@ constexpr const char* kFxKindNames[OwnPost::kFxKinds] = {"shadow mask", "SSAO ch
 
 int ownPostMode() { return g_ownPost != nullptr ? static_cast<int>(g_ownPost->mode()) : 0; }
 std::uint64_t ownPostActs() { return g_ownPost != nullptr ? g_ownPost->acts() : 0; }
+OwnPost* ownPost() { return g_ownPost; }
+void registerOwnPost(OwnPost* p, OwnPost* only) {
+    if (only == nullptr || g_ownPost == only) g_ownPost = p;
+}
+int ownSceneMode(OwnPost::Scene which) { return g_ownPost != nullptr ? static_cast<int>(g_ownPost->sceneMode(which)) : 0; }
+std::uint64_t ownSceneActs(OwnPost::Scene which) { return g_ownPost != nullptr ? g_ownPost->sceneActs(which) : 0; }
+
+// ---- F12 / F13 (frame-ownership.md 14.24) ----
+
+void OwnPost::setSceneMode(Scene which, Mode m) {
+    Mode& cur = sceneMode_[static_cast<std::size_t>(which)];
+    if (cur == m) return;
+    cur = m;
+    if (m != Mode::Off) buildFxPorts();
+    spdlog::info("native: own {}: {}", which == Scene::Sky ? "sky" : "gui", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
+}
+
+std::uint64_t OwnPost::drawSkips() { return dev_.stats().skippedCompiling + dev_.stats().skippedNoShader + dev_.game().pipelineSkips(); }
+
+void OwnPost::countScene(Scene which, bool ours, const char* why) {
+    SceneCounts& c = sceneW_[static_cast<std::size_t>(which)];
+    ++c.draws;
+    if (ours) {
+        ++c.ours;
+        ++sceneActs_[static_cast<std::size_t>(which)];
+    } else {
+        ++c.left;
+        if (why != nullptr && c.why.empty()) c.why = why;
+    }
+}
+
+void OwnPost::reportScene() {
+    static constexpr const char* kNames[2] = {"sky", "gui"};
+    static constexpr const char* kWhat[2] = {"sky dome draws (main view + sky cube faces)", "sprite batch draws (GUI, text, cursor, loading screens)"};
+    for (std::size_t k = 0; k < 2; ++k) {
+        SceneCounts& c = sceneW_[k];
+        if (sceneMode_[k] != Mode::Off || c.draws != 0) {
+            spdlog::info("native: own {} (5 s): {}: {} {}: ours {} / engine's shaders {}{}{}", kNames[k], sceneMode_[k] == Mode::Off ? "off" : sceneMode_[k] == Mode::On ? "on" : "compare",
+                         c.draws, kWhat[k], c.ours, c.left, c.why.empty() ? std::string() : std::format(" (first reason: {})", c.why),
+                         k == 1 ? std::format("; compares dropped (a draw skipped while its shader / pipeline built, run) {}", droppedCompares_) : std::string());
+        }
+        c = {};
+    }
+}
+
+d3d9::Surface* OwnPost::scratchOf(d3d9::Surface* src, int tag, bool copy) {
+    if (src == nullptr || src->texture() == nullptr) return nullptr;
+    d3d9::Texture* t = src->texture();
+    const std::uint32_t w = src->width(), h = src->height();
+    const auto fmt = t->desc().format;
+    std::unique_ptr<d3d9::Texture>* slot = nullptr;
+    for (std::size_t i = 0; i < std::size(sceneScratch_); ++i) {
+        auto& s = sceneScratch_[i];
+        if (s && sceneScratchTag_[i] == tag && s->desc().width == w && s->desc().height == h && s->desc().format == fmt) slot = &s;
+    }
+    if (slot == nullptr) {
+        const std::size_t i = sceneScratchNext_++ % std::size(sceneScratch_);
+        slot = &sceneScratch_[i];
+        if (*slot) dev_.release(std::move(*slot));
+        d3d9::TextureDesc desc;
+        desc.width = w;
+        desc.height = h;
+        desc.format = fmt;
+        desc.usage = d3d9::USAGE_RENDERTARGET;
+        desc.pool = d3d9::POOL_DEFAULT;
+        // (the same VkFormat as the source: with own_post = on a small A8R8G8B8 render target is made RGBA8 for storage (S-7b), the sky cube's faces are
+        // BGRA8; a copy between the two keeps the bytes, not the channels)
+        const bool storageWas = d3d9::Texture::smallStorage();
+        for (const bool storage : {false, true}) {
+            d3d9::Texture::setSmallStorage(storage);
+            *slot = dev_.createTexture(desc);
+            if (*slot && (*slot)->rhi().desc().format == t->rhi().desc().format) break;
+            if (*slot) dev_.release(std::move(*slot));
+        }
+        d3d9::Texture::setSmallStorage(storageWas);
+        sceneScratchTag_[i] = tag;
+        if (!*slot) return nullptr;
+    }
+    d3d9::Texture* s = slot->get();
+    if (copy) {
+        bool ok = false;
+        const std::uint32_t level = src->level(), face = src->face();
+        dev_.runPassNow("own scene (compare copy)", [&](d3d9::PassContext& ctx) {
+            rhi::CommandList& cmd = ctx.cmd;
+            cmd.transition(t->rhi(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cmd.transition(s->rhi(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            rhi::TextureCopy region{};
+            region.src = {level, face};
+            region.extent = {w, h, 1};
+            cmd.copyTexture(s->rhi(), t->rhi(), std::span<const rhi::TextureCopy>(&region, 1));
+            ok = true;
+        });
+        if (!ok) return nullptr;
+    }
+    return s->surface(0, 0);
+}
 
 void OwnPost::buildFxPorts() {
     g_ownPost = this;
