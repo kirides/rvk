@@ -98,6 +98,7 @@ void tro::Stats::add(const Stats& o) {
     derived += o.derived; reused += o.reused; refused += o.refused; tableFull += o.tableFull;
     checkOps += o.checkOps; checkInst += o.checkInst; checkRowDiff += o.checkRowDiff; checkKeyDiff += o.checkKeyDiff; checkCountDiff += o.checkCountDiff; checkDraws += o.checkDraws;
     checkTplDiff += o.checkTplDiff; checkMiss += o.checkMiss; checkMissCompared += o.checkMissCompared;
+    emptyOps += o.emptyOps;
     planNs += o.planNs; tplNs += o.tplNs; rowNs += o.rowNs; flushNs += o.flushNs; sideNs += o.sideNs; takeNs += o.takeNs;
 }
 
@@ -299,8 +300,7 @@ void StaticOps::treeCompEnd(const Op& op) {
     pend->matSlot = matSlot;
     pend->matHash = mix(mix(0, matSlot), mt.structVersion(matSlot));
     pend->viewStamp = recViewStamp();
-    const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
-                                  (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
+    const std::uint64_t viewKey = packetViewKey();
     const std::size_t cacheGroup = static_cast<std::size_t>(g_ - groups_.data());
     tro::OpRec* old = nullptr;
     if (const auto it = T.ops.find(pend->key); it != T.ops.end()) old = it->second.get();
@@ -607,8 +607,21 @@ static bool treeShadowEnvOff() {
 std::uint8_t StaticOps::treeViewKey() const { return tro_ ? tro_->viewKey : 255; }
 
 std::uint32_t StaticOps::treeSlot(bool solid) const {
-    if (tro_ && tro_->viewKey != 0 && tro_->viewKey != 255) return kViewSlotTreeCascade0 + static_cast<std::uint32_t>(tro_->viewKey - 1);
+    if (tro_ && tro_->viewKey != 0 && tro_->viewKey != 255) return treeSlotOfKey(tro_->viewKey, solid);  // (F4-4 cascades 8..11, F3-4 terrain map / atlas cells)
     return solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
+}
+
+// F3-4: the terrain map's / atlas cells' templates are dropped (native.owned_shadow_views went off)
+void StaticOps::treeDropLightViews() {
+    if (!tro_) return;
+    for (auto it = tro_->ops.begin(); it != tro_->ops.end();) {
+        if (it->first.view >= kKeyTerrain || it->second->empty) it = tro_->ops.erase(it);  // (the cascades' empty records belong to this stage too)
+        else ++it;
+    }
+    if (tro_->shadowView && tro_->viewKey >= kKeyTerrain && tro_->viewKey != 255) {
+        tro_->active = false;
+        for (auto& v : tro_->taken) v.clear();
+    }
 }
 
 void StaticOps::treeDropShadow() {
@@ -623,7 +636,7 @@ void StaticOps::treeDropShadow() {
     }
 }
 
-void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade) {
+void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade, std::int32_t cell) {
     if (!ownedTrees_ || !tro_) return;
     tro::State& T = *tro_;
     for (auto& v : T.taken) {
@@ -632,8 +645,11 @@ void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t casca
     }
     T.active = false;
     T.shadowView = kind != ViewKind::Main;
+    T.lightView = kind == ViewKind::Terrain || kind == ViewKind::PointAtlas;
     T.cascade = cascade;
-    T.viewKey = kind == ViewKind::Main ? 0 : (kind == ViewKind::Cascade && ownedKeyOf(kind, cascade) != 0 && ownedShadowsOn() && !T.shadowTripped && !treeShadowEnvOff()) ? static_cast<std::uint8_t>(ownedKeyOf(kind, cascade)) : 255;
+    // (F3-4: the terrain map / an atlas cell too while native.owned_shadow_views is on: their own keys and view slots)
+    const std::uint64_t key = ownedKeyOf(kind, cascade, cell);
+    T.viewKey = kind == ViewKind::Main ? 0 : (ownedShadowKind(kind) && key != 0 && key < 255 && !T.shadowTripped && !treeShadowEnvOff()) ? static_cast<std::uint8_t>(key) : 255;
     if (T.viewKey == 255) return;  // (a view the trees are not owned in: the terrain map, point-light cells, cascades with owned_shadows off)
     ++T.win().views;
     if (!ownedFrame) {
@@ -663,6 +679,36 @@ void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t casca
     T.gate.clear();
     T.active = true;
     ++T.win().ownedViews;
+}
+
+// F3-4 (frame-ownership.md 14.29): a shadow view's fronds op that draws nothing (RenderFrondsZPass 0x6f0cc0: leaf card vertices rb +0x3c > frond vertices rb +0x3a) gets an
+// empty record: the owned frames take it out of the list like a drawn op and run only the slot's side effect (the queue sort); the rule is read again at the pass
+void StaticOps::treeEmptyRecord(const Op& op, const std::uint8_t* res, const std::uint8_t* rb) {
+    tro::State& T = *tro_;
+    const tro::OpKey key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), treeViewKey()};
+    auto& slot = T.ops[key];
+    if (slot && slot->empty && slot->stamp.res == res && slot->stamp.rb == rb) return;  // (unchanged)
+    auto r = std::make_unique<tro::OpRec>();
+    r->key = key;
+    r->type = 1;
+    r->stamp.res = res;
+    r->stamp.rb = rb;
+    r->empty = true;
+    r->builtFrame = dev_.stats().frames;
+    slot = std::move(r);
+    ++T.win().built;
+}
+
+bool StaticOps::treeEmptyHolds(const Op& op, const tro::OpRec& rec, const std::uint8_t*& rb) const {
+    rb = nullptr;
+    if (op.list != List::ZPass || ((op.raw.desc >> 16) & 0x10u) == 0 || (op.raw.desc & 0xffffu) != 1u) return false;
+    U8* ps = ptr(op.raw.context, 0x18);
+    U8* res = ptr(ps, 0x38);
+    U8* b = ptr(res, 0x78);
+    if (res == nullptr || b == nullptr || res != rec.stamp.res || b != rec.stamp.rb) return false;
+    if (get<std::uint16_t>(b, 0x3c) <= get<std::uint16_t>(b, 0x3a)) return false;
+    rb = b;
+    return true;
 }
 
 bool StaticOps::treeSelect(const Op& op) {
@@ -835,7 +881,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
     std::vector<Op>& ops = T.taken[solid ? 1 : 0];
     if (ops.empty()) return 0;
     tro::Stats& W = T.win();
-    if (!inView_ || viewKind_ != (T.shadowView ? ViewKind::Cascade : ViewKind::Main) || (T.shadowView && cascade_ != T.cascade) || !T.active) {
+    if (!inView_ || (viewKind_ != ViewKind::Main) != T.shadowView || (T.shadowView && ownedKeyNow() != T.viewKey) || !T.active) {
         W.opsLate += ops.size();
         ops.clear();
         return 0;
@@ -957,6 +1003,20 @@ std::uint32_t StaticOps::treePass(bool solid) {
             continue;
         }
         tro::OpRec& rec = *it->second;
+        if (rec.empty) {
+            // F3-4: an empty record (a shadow fronds op that draws nothing): the rule holds = the slot's only effect, the queue sort; else the composition decides
+            const std::uint8_t* erb = nullptr;
+            if (!treeEmptyHolds(op, rec, erb)) {
+                composeLate(op, W.lateStamp);
+                continue;
+            }
+            const auto tSide = tnow();
+            leanTreeSort(erb, true);
+            W.sideNs += ns(tSide, tnow());
+            drawnOps.push_back(static_cast<std::uint32_t>(oi));
+            ++W.emptyOps;
+            continue;
+        }
         tro::Stamp st;
         std::uint32_t type = 0;
         const std::uint8_t *rb = nullptr, *wrapper = nullptr, *shader = nullptr;
@@ -1288,6 +1348,8 @@ void StaticOps::treeReport() {
     treeReportOne(T.window, T.total, "main view", false);
     if (T.shadowWindow.views != 0 || T.shadowWindow.opsSeen != 0 || T.shadowWindow.compBatches != 0) treeReportOne(T.shadowWindow, T.shadowTotal, "cascades", true);
     else T.shadowWindow = {};
+    if (T.lightWindow.views != 0 || T.lightWindow.opsSeen != 0 || T.lightWindow.compBatches != 0) treeReportOne(T.lightWindow, T.lightTotal, "terrain map / atlas cells", true);  // F3-4
+    else T.lightWindow = {};
 }
 
 void StaticOps::treeReportOne(tro::Stats& q, tro::Stats& total, const char* what, bool shadow) {
@@ -1297,12 +1359,12 @@ void StaticOps::treeReportOne(tro::Stats& q, tro::Stats& total, const char* what
     // (checkKeyDiff is reported, not fatal: the engine draws a whole batch with its FIRST instance's start index, the plan gives each instance its own LOD: ~0.25 % of the instances, frame-ownership.md 7.25)
     // (a template that differs from the next composition of its bucket is replaced and counted, not fatal: inputs outside the stamps move rarely, e.g. a texture streaming in)
     const std::uint64_t differing = q.checkRowDiff + q.checkCountDiff + q.checkMiss;
-    spdlog::info("native: owned trees [{}] (5 s): {} views ({} owned), tree ops looked at {}, taken {}, drawn from templates {}, composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
+    spdlog::info("native: owned trees [{}] (5 s): {} views ({} owned), tree ops looked at {}, taken {}, drawn from templates {} (of them empty records {}), composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
                  "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (not retained {}, bad ops {}: batch draws {} / draw level {} / depth bias {} / lean+retain {} / switch {} / material {} / none {}); persistent blocks derived {} reused {} refused {} (table full {}); "
                  "check frames: {} ops / {} instances compared, {} draws against templates: DIFFERING {} (rows {}, counts {}, templates {}; per-instance LOD start differs from the engine batch's first instance {}), MISS {} of {} compared; "
                  "observers shown {} instances; GPU commands: {} commands ({} records, {} indirect calls) per {} flushes = {:.1f} / flush, the engine's composed batches {:.1f} / composed view ({} views); "
                  "CPU per owned view: take {:.1f} us, side effects {:.1f} us, plan {:.1f} us, templates {:.1f} us, rows {:.1f} us, flush {:.1f} us",
-                 what, q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
+                 what, q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.emptyOps, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
                  q.instances, q.items, q.flushes, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff,
                  q.checkCountDiff, q.checkTplDiff, q.checkKeyDiff, q.checkMiss, q.checkMissCompared, q.observed, q.items, q.records, q.packets, q.flushes,
                  static_cast<double>(q.items) / static_cast<double>(std::max<std::uint64_t>(1, q.flushes)), static_cast<double>(q.compBatches) / static_cast<double>(std::max<std::uint64_t>(1, q.compViews)), q.compViews, static_cast<double>(q.takeNs) / nv / 1000.0, static_cast<double>(q.sideNs) / nv / 1000.0, static_cast<double>(q.planNs) / nv / 1000.0,

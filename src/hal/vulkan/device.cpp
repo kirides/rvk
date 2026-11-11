@@ -338,6 +338,7 @@ void HalDevice::applyStaticOps() {
             const bool shadows = on(rs.nativeOwnedShadows) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
             dev_.setSceneShadows(shadows);  // (the cascades' z draws get their scene forms: the retained draws the owned path replays)
             staticOps_->setOwnedShadows(shadows);
+            staticOps_->setOwnedShadowViews(shadows && on(rs.nativeOwnedShadowViews));  // F3-4 (frame-ownership.md 14.29): the terrain map + the point-light atlas cells too
         }
         staticOps_->setOwnedVegetation(on(rs.nativeOwnedVegetation) && renderMode() == RenderMode::Full && staticOps_->active());
         staticOps_->setOwnFoliage(on(rs.nativeOwnFoliage) && renderMode() == RenderMode::Full && staticOps_->active());  // S-5 (frame-ownership.md 14.14)
@@ -776,7 +777,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

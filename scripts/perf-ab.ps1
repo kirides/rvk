@@ -13,7 +13,8 @@
     start Settle frames after a toggle. Restart-only settings (Flag::Restart in src/core/settings.cpp, or -Restart) fall back to one session per
     arm and pair with a single window each (the old way, shorter holds).
 
-    Scenes: 'hold' = rvk_perfsave at -QuickSave (the hero stands at the savegame's place); any other name = an rvkcompare spot (time frozen).
+    Scenes: 'hold' = rvk_perfsave at -QuickSave (the hero stands at the savegame's place); 'point' = rvk_pointshadow (the point-light atlas renders;
+    anchor load1, give -Lead the scenario's 30 s); any other name = an rvkcompare spot (time frozen).
 
 .EXAMPLE
     .\scripts\perf-ab.ps1 -Key native.vertex_pull -SettingsFile B:\DevDrive\rvk-work\scratch\uberfix\all_settings.txt -Setting 'debug.ubershader=true' -PlayerDefaults
@@ -89,6 +90,11 @@ function Invoke-Session([string]$Scene, [string]$Tag, [string[]]$Settings, [stri
         $h.Mods = 'rvk_perfsave'; $h.Scenario = 'rvk_perfsave'; $h.QuickSave = $QuickSave
         $h.Param = @('hold=240')   # (ended by the schedule's quit)
         $h.Setting += @('lod.view=2', 'lod.trees=2', 'lod.meshes=2')
+    } elseif ($Scene -eq 'point') {
+        # rvk_pointshadow (frame-ownership.md 14.29): a light with CastShadows at night = the point-light atlas renders; spawned ~30 s after the new game's
+        # loading screen (anchor load1): give -Lead room for that (e.g. -Lead 9000 at ~150 fps); the hold is ended by the schedule's quit
+        $h.Mods = 'rvk_pointshadow'; $h.Scenario = 'rvk_pointshadow'
+        $h.Param = @('hold=900')
     } else {
         $h.Mods = 'rvkcompare'; $h.Scenario = 'rvkcompare'
         $h.Param = @("tag=pab", "spots=$Scene", 'burst=1', 'freeze_wait=100000', 'start_wait=10')
@@ -125,7 +131,7 @@ function Invoke-Session([string]$Scene, [string]$Tag, [string[]]$Settings, [stri
 $total = [Diagnostics.Stopwatch]::StartNew()
 $logs = @()
 foreach ($scene in $Scenes) {
-    $anchor = if ($scene -eq 'hold') { 'load2' } else { 'freeze' }
+    $anchor = if ($scene -eq 'hold') { 'load2' } elseif ($scene -eq 'point') { 'load1' } else { 'freeze' }
     if (-not $Restart) {
         $cmds = @()
         $t = $Lead

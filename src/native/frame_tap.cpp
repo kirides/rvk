@@ -600,8 +600,10 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     bool ownedFrame = kind == ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_ && statics_->ownedViewBegin(db, desc);
     if (kind == ViewKind::Main) dev_.setMainViewOwned(ownedFrame);  // (frame-ownership.md 7.47: the picture check)
     // F3-1 (native.owned_shadows): a cascade's z list, the same machinery (op records keyed per cascade, view table slot 4 + cascade)
-    if (kind == ViewKind::Cascade && statics_ != nullptr && staticsWanted_ && !observeWanted_) ownedFrame = statics_->ownedShadowViewBegin(db, kind, cascade);
-    if (statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame, kind, cascade);  // F4-3 / F4-4: the tree ops' own frame kind
+    // (F3-4, native.owned_shadow_views: the terrain map and the point-light atlas's cells too: the cell = the view's index among the frame's views of its kind)
+    const std::int32_t cell = static_cast<std::int32_t>(desc_.view) - 1;
+    if (kind != ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_) ownedFrame = statics_->ownedShadowViewBegin(db, kind, cascade, cell);
+    if (statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame, kind, cascade, cell);  // F4-3 / F4-4: the tree ops' own frame kind
     if (statics_ != nullptr && staticsWanted_) statics_->vegViewBegin(ownedFrame, kind);  // F7-2: the vegetation ops' own frame kind
     for (std::size_t l = 0; l < kListCount; ++l) {
         const std::uint8_t* data = nullptr;
@@ -733,9 +735,9 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
 }
 
 std::uint32_t FrameTap::passBegin(bool solid) {
-    if (!executing_ || (desc_.kind != ViewKind::Main && desc_.kind != ViewKind::Cascade) || statics_ == nullptr || !staticsWanted_) return 0;
+    if (!executing_ || desc_.kind == ViewKind::OtherShadow || statics_ == nullptr || !staticsWanted_) return 0;
     const std::uint32_t n = statics_->ownedPass(solid);
-    if (desc_.kind == ViewKind::Cascade) {
+    if (desc_.kind != ViewKind::Main) {  // (F3-1 cascades; F3-4 the terrain map / atlas cells: their ops left the list only while they are owned shadow views)
         const std::uint32_t ntc = statics_->treePass(solid);  // F4-4: the cascade's SpeedTree ops
         if ((n != 0 || ntc != 0) && coverage_) {
             for (std::uint32_t i = 0; i < n; ++i) cov_.ours(d3d9::scene::View::Shadow, d3d9::scene::Pass::ShadowDepth, d3d9::draws::Kind::StaticMesh);

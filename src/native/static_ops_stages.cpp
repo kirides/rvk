@@ -69,6 +69,15 @@ void StaticOps::stagesReport() {
     line += stage("owned_shadows", settingOn(rs.nativeOwnedShadows), ownedShadowsOn(), ownedShadowW_.owned, std::format("{} cascade ops owned", ownedShadowW_.owned),
                   ownedShadowsTripped_ ? std::string("a reset (tripped by a MISS / DIFFERING)") : needsOf(rs.nativeOwnedShadows, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}),
                   !gateCasc.empty() ? gateCasc : gateMain);
+    // F3-4 (native.owned_shadow_views): acted = the terrain map's + the atlas cells' ops drawn from records (meshes / actors) + their tree ops taken in the window
+    {
+        const std::uint64_t mesh = ownedLightW_[0].owned + ownedLightW_[1].owned, trees = tro_ ? tro_->lightWindow.opsTaken : 0;
+        const std::string gateLight = ownedGateText(ownedLightW_[1]).empty() ? ownedGateText(ownedLightW_[0]) : ownedGateText(ownedLightW_[1]);
+        line += stage("owned_shadow_views", settingOn(rs.nativeOwnedShadowViews), ownedShadowViewsOn(), mesh + trees,
+                      std::format("terrain map {} ops, atlas cells {} ops, their trees {} ops", ownedLightW_[0].owned, ownedLightW_[1].owned, trees),
+                      ownedShadowsTripped_ ? std::string("a reset (tripped by a MISS / DIFFERING)") : needsOf(rs.nativeOwnedShadowViews, {rs.nativeOwnedShadows, rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}),
+                      !gateLight.empty() ? gateLight : gateMain);
+    }
     line += stage("owned_actors", settingOn(rs.nativeOwnedActors), ownedActorsOn(), actorW_.drawn, std::format("{} draws; F6-2 {}: {} ordered ops, {} morph pick swaps", actorW_.drawn, f62On() ? "on" : "off (RVK_F62_OFF)", actorW_.ordOwned, actorW_.pickSwaps),
                   needsOf(rs.nativeOwnedActors, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedObjects}), gateAny);
     // F2f (native.owned_instances): acted = render-instance ops drawn from their records in the window

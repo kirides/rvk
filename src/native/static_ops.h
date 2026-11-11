@@ -146,7 +146,18 @@ public:
     // false = nothing leaves its list (setting / prerequisites / a check frame / a cascade the view table has no slot for)
     void setOwnedShadows(bool on);
     bool ownedShadowsOn() const { return ownedShadows_ && !ownedShadowsTripped_; }
-    bool ownedShadowViewBegin(void* db, ViewKind kind, std::int32_t cascade);
+    // `cell` = the view's index among the views of its kind in the frame (0-based; a point-light atlas cell, the terrain map)
+    bool ownedShadowViewBegin(void* db, ViewKind kind, std::int32_t cascade, std::int32_t cell);
+    // native.owned_shadow_views (frame-ownership.md 14.29, F3-4): the terrain shadow map and the point-light atlas's cells are owned like the cascades (op records keyed per
+    // view: key 5 = the terrain map, 8 + i = atlas cell i of the frame; view table slots 32 / 33 + i, the trees' 47 / 48 + i), with their actor and SpeedTree ops.
+    // Needs native.owned_shadows (its machinery and its MISS / DIFFERING switch-off)
+    void setOwnedShadowViews(bool on);
+    bool ownedShadowViewsOn() const { return ownedShadowViews_ && ownedShadowsOn(); }
+    // the view kinds whose z lists the owned shadow path takes (the cascades with owned_shadows, the terrain map / atlas cells with owned_shadow_views)
+    bool ownedShadowKind(ViewKind k) const { return ownedShadowsOn() && (k == ViewKind::Cascade || (ownedShadowViews_ && (k == ViewKind::Terrain || k == ViewKind::PointAtlas))); }
+    static constexpr std::int32_t kAtlasCells = 14;  // atlas cells per frame with a view slot of their own (a later cell stays composed: `cells beyond the slots`)
+    static constexpr std::uint64_t kKeyTerrain = 5, kKeyAtlas0 = 8;
+    static constexpr std::uint32_t kSlotTerrain = 32, kSlotAtlas0 = 33, kSlotTreeTerrain = 47, kSlotTreeAtlas0 = 48;
     // native.owned_actors (frame-ownership.md 7.40, F6-1; static_ops_actors_owned.cpp): the skinned actors' z / solid ops (main view) and z ops (cascades, with owned_shadows) get op
     // records and are drawn from persistent DrawRecords; the per-frame part is the bone table's image of the part
     void setOwnedActors(bool on);
@@ -212,10 +223,10 @@ public:
     void setOwnedTrees(bool on);
     bool ownedTreesOn() const { return ownedTrees_; }
     // a view begins (frame tap; every kind): the frame kind, the prerequisites. F4-4: a sun cascade's z list takes its SpeedTree ops too while native.owned_shadows is on
-    void treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade);
+    void treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade, std::int32_t cell = 0);
     void stagesReport();  // frame-ownership.md 7.47: every owned stage's state (setting / armed / acted) in one 5 s line
     void vertexPullReport();  // S-4 (frame-ownership.md 14.12): the `native: vertex pull (5 s)` line
-    bool treeKindOk(ViewKind kind) const { return ownedTrees_ && (kind == ViewKind::Main || (kind == ViewKind::Cascade && ownedShadowsOn())); }
+    bool treeKindOk(ViewKind kind) const { return ownedTrees_ && (kind == ViewKind::Main || ownedShadowKind(kind)); }
     bool treeSelect(const Op& op);            // compaction: this tree op leaves the list
     void treeTake(List list, std::vector<Op>&& ops, std::uint64_t ns);
     std::uint32_t treePass(bool solid);       // BeginZPass / DoBeginRenderSolid returned: the taken ops are drawn; returns the draws made
@@ -1071,9 +1082,31 @@ private:
     std::uint64_t shadowFrameSerial_ = 0, shadowFrameSeen_ = ~0ull;
     bool ownedShadowCheck_ = false;
     std::uint64_t ownedViewKey_ = 0;
-    static std::uint64_t ownedKeyOf(ViewKind k, std::int32_t cascade) { return k == ViewKind::Cascade && cascade >= 0 && cascade < 4 ? static_cast<std::uint64_t>(cascade) + 1 : 0; }
+    // the op records' view key of a view: 0 main, 1 + c sun cascade c, kKeyTerrain the terrain map, kKeyAtlas0 + i atlas cell i (F3-4: only while owned_shadow_views is on); 0 = not owned
+    std::uint64_t ownedKeyOf(ViewKind k, std::int32_t cascade, std::int32_t cell = 0) const {
+        if (k == ViewKind::Cascade) return cascade >= 0 && cascade < 4 ? static_cast<std::uint64_t>(cascade) + 1 : 0;
+        if (!ownedShadowViews_) return 0;
+        if (k == ViewKind::Terrain) return cell == 0 ? kKeyTerrain : 0;
+        if (k == ViewKind::PointAtlas) return cell >= 0 && cell < kAtlasCells ? kKeyAtlas0 + static_cast<std::uint64_t>(cell) : 0;
+        return 0;
+    }
+    std::uint64_t ownedKeyNow() const { return ownedKeyOf(viewKind_, cascade_, cell_); }
+    // the packet cache's view part of a draw key (the same entity is drawn into several cascades / maps; F3-4: the atlas cells share one map object, so with
+    // owned_shadow_views the cell is part of the key and each cell's records find their own packets)
+    std::uint64_t packetViewKey() const {
+        return (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
+               (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull) ^ (ownedShadowViews_ && viewKind_ == ViewKind::PointAtlas ? static_cast<std::uint64_t>(cell_ + 1) << 52 : 0u);
+    }
+    // (F3-4: the retained compositions' key of an atlas cell, while owned_shadow_views is on: each cell keeps its own)
+    std::uint64_t retainCellBits() const { return ownedShadowViews_ && viewKind_ == ViewKind::PointAtlas ? static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell_ + 1) & 0xffu) << 48 : 0u; }
+    // the view kind of a record key (Main for 0)
+    static ViewKind kindOfKey(std::uint64_t key) { return key == 0 ? ViewKind::Main : key < kKeyTerrain ? ViewKind::Cascade : key == kKeyTerrain ? ViewKind::Terrain : ViewKind::PointAtlas; }
     static std::uint32_t ownedSlotOfKey(std::uint64_t viewKey, bool solid);
-    bool ownedBegin(void* desc, ViewKind kind, std::int32_t cascade);
+    static std::uint32_t treeSlotOfKey(std::uint64_t viewKey, bool solid);
+    bool ownedBegin(void* desc, ViewKind kind, std::int32_t cascade, std::int32_t cell = 0);
+    bool ownedShadowViews_ = false;
+    std::int32_t cell_ = 0;  // the view's index among the frame's views of its kind (FrameDesc::view - 1)
+    std::uint64_t atlasBeyond_ = 0;  // (atlas cells of the window beyond kAtlasCells: composed)
     // why a view is not owned (ownedBegin's readiness; the first unmet condition): counted per 5 s window, logged once per change, named in the stage line
     enum class OwnedGate : std::uint8_t { Records, SceneDraws, Windows, ObjectsOff, ObjectsPending, LightingOff, LightingPending, MaterialTable, TableLighting, Observer, NotVerified, Count };
     static constexpr std::size_t kGateCount = static_cast<std::size_t>(OwnedGate::Count);
@@ -1101,7 +1134,10 @@ private:
         std::uint64_t compactNs = 0, selectNs = 0, buildNs = 0, submitNs = 0, sideNs = 0, matNs = 0, prepNs = 0;
         void add(const OwnedStats& o);
     } ownedW_, ownedT_, ownedShadowW_, ownedShadowT_;
-    OwnedStats& ownedStats() { return ownedCur_ == ViewKind::Main ? ownedW_ : ownedShadowW_; }
+    // F3-4: the terrain map's [0] and the point-light atlas's [1] views
+    OwnedStats ownedLightW_[2], ownedLightT_[2];
+    static std::size_t lightIndex(ViewKind k) { return k == ViewKind::Terrain ? 0 : 1; }
+    OwnedStats& ownedStats() { return ownedCur_ == ViewKind::Main ? ownedW_ : ownedCur_ == ViewKind::Cascade ? ownedShadowW_ : ownedLightW_[lightIndex(ownedCur_)]; }
     // F15-1 (frame-ownership.md 14.20): the root reason of the refusal being made (set where an owned op is refused, read by composeLate) and the 1 s census
     int lateDetail_ = 0;
     struct LateSecond {
@@ -1128,10 +1164,14 @@ private:
         std::uint64_t sigNs = 0, deriveNs = 0, observeNs = 0, flushNs = 0, windowNs = 0, items = 0, bulkNs = 0;
         void add(const PersistStats& o);
     } persistW_, persistT_, persistShadowW_, persistShadowT_;
-    PersistStats& persistStats() { return ownedCur_ == ViewKind::Main ? persistW_ : persistShadowW_; }
-    std::uint64_t persistEnvLast_[8] = {};
+    PersistStats persistLightW_[2], persistLightT_[2];  // F3-4: terrain map / atlas cells
+    PersistStats& persistOfKind(ViewKind k) { return k == ViewKind::Main ? persistW_ : k == ViewKind::Cascade ? persistShadowW_ : persistLightW_[lightIndex(k)]; }
+    PersistStats& persistStats() { return persistOfKind(ownedCur_); }
+    std::uint64_t persistEnvLast_[64] = {};
     void ownedShadowsOff(const char* why, std::uint64_t n);
     void ownedShadowReport();
+    void ownedShadowReportOne(ViewKind kind, OwnedStats& w, OwnedStats& t, PersistStats& q, PersistStats& qt);
+    void dropLightViewRecords();  // F3-4: the terrain map's / atlas cells' records and tree templates (owned_shadow_views went off)
     std::uint64_t persistMissReported_ = 0, persistInjectSeen_ = 0, persistInjectEvery_ = 0, persistMissLogged_ = 0;
     std::uint64_t persistScrubTick_ = 0;
     std::uint32_t persistPassDraw_ = 0;
@@ -1300,6 +1340,9 @@ private:
     std::uint8_t treeViewKey() const;                  // the view in progress: 0 main, 1 + c a sun cascade, 255 none
     std::uint32_t treeSlot(bool solid) const;          // its tree view table slot (main 14 / 15, cascade c: 8 + c)
     void treeDropShadow();                             // the cascades' templates are dropped (native.owned_shadows went off)
+    void treeDropLightViews();                         // F3-4: the terrain map's / atlas cells' templates are dropped (native.owned_shadow_views went off)
+    void treeEmptyRecord(const Op& op, const std::uint8_t* res, const std::uint8_t* rb);  // F3-4: a shadow view's fronds op that draws nothing: an empty record (tro::OpRec::empty)
+    bool treeEmptyHolds(const Op& op, const tro::OpRec& rec, const std::uint8_t*& rb) const;  // ... its rule still holds (the owned pass)
     bool treeSceneIssue() const { return ownedTrees_ && g_ == &groups_[static_cast<std::size_t>(Group::Trees)]; }
     static std::uint64_t treeBucketKey(std::uint32_t type, bool zpass, bool sun, std::uint32_t a, std::uint32_t b, std::uint32_t c);
     bool treeEnsureRamp();

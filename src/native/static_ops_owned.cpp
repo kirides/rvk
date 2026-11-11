@@ -134,16 +134,50 @@ void StaticOps::ownedAutoOff(std::uint64_t differing) {
 }
 
 std::uint32_t StaticOps::ownedSlotOfKey(std::uint64_t viewKey, bool solid) {
-    return viewKey == 0 ? (solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ) : shader::abi::kViewSlotCascade0 + static_cast<std::uint32_t>(viewKey - 1);
+    if (viewKey == 0) return solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ;
+    if (viewKey < kKeyTerrain) return shader::abi::kViewSlotCascade0 + static_cast<std::uint32_t>(viewKey - 1);
+    if (viewKey == kKeyTerrain) return kSlotTerrain;  // F3-4: the terrain map
+    return kSlotAtlas0 + static_cast<std::uint32_t>(viewKey - kKeyAtlas0);  // F3-4: atlas cell (key - kKeyAtlas0); keys stop at kKeyAtlas0 + kAtlasCells
 }
+
+// the SpeedTree templates' view slot of a key (F4-4: the cascades 8..11; F3-4: the terrain map 47, atlas cell i 48 + i)
+std::uint32_t StaticOps::treeSlotOfKey(std::uint64_t viewKey, bool solid) {
+    if (viewKey == 0) return solid ? 15u : 14u;
+    if (viewKey < kKeyTerrain) return 8u + static_cast<std::uint32_t>(viewKey - 1);
+    if (viewKey == kKeyTerrain) return kSlotTreeTerrain;
+    return kSlotTreeAtlas0 + static_cast<std::uint32_t>(viewKey - kKeyAtlas0);
+}
+static_assert(StaticOps::kSlotAtlas0 + StaticOps::kAtlasCells <= StaticOps::kSlotTreeTerrain && StaticOps::kSlotTreeAtlas0 + StaticOps::kAtlasCells <= gpuscene::ViewTable::kCapacity,
+              "F3-4: the shadow views' view slots must fit the view table");
 
 bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) { return ownedBegin(desc, ViewKind::Main, -1); }
 
-// F3-1 (7.36): a cascade view. Nothing happens (not even the event drain: the main view's begin does it) while the setting is off
-bool StaticOps::ownedShadowViewBegin(void* /*db*/, ViewKind kind, std::int32_t cascade) {
+// F3-1 (7.36): a cascade view; F3-4 (14.29): the terrain map / an atlas cell. Nothing happens (not even the event drain: the main view's begin does it) while the setting is off
+bool StaticOps::ownedShadowViewBegin(void* /*db*/, ViewKind kind, std::int32_t cascade, std::int32_t cell) {
     if (!ownedShadows_ || ownedShadowsTripped_ || !ownedStatic_ || !ownedPersistent_) return false;
-    if (kind != ViewKind::Cascade || ownedKeyOf(kind, cascade) == 0) return false;
-    return ownedBegin(nullptr, kind, cascade);
+    if (!ownedShadowKind(kind)) return false;
+    if (ownedKeyOf(kind, cascade, cell) == 0) {
+        if (kind == ViewKind::PointAtlas) ++atlasBeyond_;
+        return false;
+    }
+    return ownedBegin(nullptr, kind, cascade, cell);
+}
+
+void StaticOps::dropLightViewRecords() {
+    if (recs_) {
+        for (auto it = recs_->map.begin(); it != recs_->map.end();) {
+            if (it->first.view >= kKeyTerrain) it = recs_->map.erase(it);
+            else ++it;
+        }
+    }
+    treeDropLightViews();
+}
+
+void StaticOps::setOwnedShadowViews(bool on) {
+    if (on == ownedShadowViews_) return;
+    ownedShadowViews_ = on;
+    spdlog::info("native: owned shadow views (terrain map, point-light atlas cells) {}", on ? "on" : "off");
+    if (!on) dropLightViewRecords();
 }
 
 void StaticOps::setOwnedShadows(bool on) {
@@ -183,10 +217,10 @@ void StaticOps::ownedShadowsOff(const char* why, std::uint64_t n) {
     spdlog::error("native: owned shadows turned off: {} {}", n, why);
 }
 
-bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade) {
+bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade, std::int32_t cell) {
     ownedCur_ = vkind;
     ownedShadowCheck_ = false;
-    ownedViewKey_ = ownedKeyOf(vkind, cascade);
+    ownedViewKey_ = ownedKeyOf(vkind, cascade, cell);
     OwnedStats& W = ownedStats();
     depDrain();  // F2e-1: the engine's events since the last view mark their records (before any stamp is looked at)
     for (auto& v : ownedOps_) {
@@ -745,7 +779,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                     ++PS.passes;
                     persistPassDraw_ = 0;
                     dev_.ownedBulkBegin(solid, mainView);  // F2c-4b: the bulk observers' list of this pass (a cascade's pass: the per-draw observers' loop)
-                    const std::size_t kk = std::min<std::size_t>(viewSlotP, 7);
+                    const std::size_t kk = std::min<std::size_t>(viewSlotP, std::size(persistEnvLast_) - 1);
                     if (epoch != persistEnvLast_[kk]) {
                         ++PS.envChanges;
                         persistEnvLast_[kk] = epoch;
@@ -1258,7 +1292,7 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     if (!ownedPersistent_ || !ownedStatic_ || k >= rec.draws.size()) return;  // (owned_static tripped by a MISS: the slots are not used any more)
     const orec::DrawRec& r = rec.draws[k];
     orec::Persist& P = r.persist;
-    PersistStats& S = rec.key.view != 0 ? persistShadowW_ : persistW_;
+    PersistStats& S = persistOfKind(kindOfKey(rec.key.view));
     if (!P.valid || !P.handle.has()) return;  // (no persistent derivation of this draw yet)
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     gpuscene::ViewTable& vt = gpuscene::viewtable();
@@ -1430,17 +1464,45 @@ void StaticOps::ownedReport() {
     w = {};
 }
 
-// F3-1 (7.36): the cascades' owned ops, 5 s
+// F3-1 (7.36): the cascades' owned ops, 5 s; F3-4 (14.29): the terrain map's and the atlas cells' in lines of their own
 void StaticOps::ownedShadowReport() {
-    OwnedStats& w = ownedShadowW_;
-    PersistStats& q = persistShadowW_;
-    if (w.views == 0 && q.passes == 0 && q.checkCompared == 0 && !(recs_ && recs_->shadowWindow.opsAll != 0)) {
-        ownedShadowW_ = {};
-        persistShadowW_ = {};
-        return;
+    ownedShadowReportOne(ViewKind::Cascade, ownedShadowW_, ownedShadowT_, persistShadowW_, persistShadowT_);
+    for (const ViewKind k : {ViewKind::Terrain, ViewKind::PointAtlas}) {
+        const std::size_t i = lightIndex(k);
+        ownedShadowReportOne(k, ownedLightW_[i], ownedLightT_[i], persistLightW_[i], persistLightT_[i]);
     }
-    ownedShadowT_.add(w);
-    persistShadowT_.add(q);
+    if (atlasBeyond_ != 0) spdlog::info("native: owned shadows [point-light atlas] (5 s): {} cells beyond the {} cells with a view slot (composed)", atlasBeyond_, kAtlasCells);
+    atlasBeyond_ = 0;
+    std::uint64_t miss = 0;
+    for (const PersistStats* q : {&persistShadowW_, &persistLightW_[0], &persistLightW_[1]}) miss += q->scrubMiss + q->checkMiss;
+    if (recs_) {
+        // the shadow views' records age out: a cascade / cell sees other ops as the camera moves, a record that was not looked at for 1,200 frames gives its slots back
+        const std::uint64_t now = dev_.stats().frames;
+        std::uint64_t swept = 0;
+        for (auto it = recs_->map.begin(); it != recs_->map.end();) {
+            if (it->first.view != 0 && it->second->lastSeen + 1200 < now && it->second->builtFrame + 1200 < now) {
+                it = recs_->map.erase(it);
+                ++swept;
+            } else {
+                ++it;
+            }
+        }
+        if (swept != 0) spdlog::info("native: owned shadows: {} shadow view records not seen for 1200 frames dropped", swept);
+    }
+    ownedShadowW_ = {};
+    persistShadowW_ = {};
+    for (std::size_t i = 0; i < 2; ++i) {
+        ownedLightW_[i] = {};
+        persistLightW_[i] = {};
+    }
+    if (miss != 0) ownedShadowsOff("MISS (a shadow view's persistent draw judged valid differs from a fresh derivation)", miss);
+}
+
+void StaticOps::ownedShadowReportOne(ViewKind kind, OwnedStats& w, OwnedStats& t, PersistStats& q, PersistStats& qt) {
+    const bool cascades = kind == ViewKind::Cascade;
+    if (w.views == 0 && q.passes == 0 && q.checkCompared == 0 && !(cascades && recs_ && recs_->shadowWindow.opsAll != 0)) return;
+    t.add(w);
+    qt.add(q);
     const auto list = [](const std::uint64_t* v, const char* const* names, std::size_t n) {
         std::string out;
         for (std::size_t i = 0; i < n; ++i) {
@@ -1459,40 +1521,23 @@ void StaticOps::ownedShadowReport() {
     std::uint64_t shadowRecs = 0, shadowDraws = 0;
     if (recs_) {
         for (const auto& kv : recs_->map) {
-            if (kv.first.view == 0) continue;
+            if (kv.first.view == 0 || kindOfKey(kv.first.view) != kind) continue;
             ++shadowRecs;
             shadowDraws += kv.second->draws.size();
         }
     }
     const auto gateList = [this](const OwnedStats& s) { const std::string g = ownedGateText(s); return g.empty() ? g : std::format(": {}", g); };
     const double nv = static_cast<double>(std::max<std::uint64_t>(1, w.views));
-    const std::uint64_t miss = q.scrubMiss + q.checkMiss;
-    spdlog::info("native: owned shadows (5 s): {} cascade views ({} compacted, {} check frames, {} warm-up, {} gated off{}), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
+    const char* head = cascades ? "native: owned shadows (5 s)" : kind == ViewKind::Terrain ? "native: owned shadows [terrain map] (5 s)" : "native: owned shadows [point-light atlas] (5 s)";
+    const char* what = cascades ? "cascade" : kind == ViewKind::Terrain ? "terrain map" : "atlas cell";
+    spdlog::info("{}: {} {} views ({} compacted, {} check frames, {} warm-up, {} gated off{}), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
                  "(fallbacks: {}; root reasons: {}), undrawn {}; left to the engine path: {}; persistent: {} passes ({} env epoch changes, {} flush failures, {} reserve failures), {} draws: reused {} ({:.1f} %), derived {} ({} rewrote the slot), refused {} "
-                 "(table full {}, observer {}), rolling scrub {} draws MISS {}; check frames: {} compared, {} skipped, MISS {}; {} cascade records / {} draws; CPU per cascade view: compaction {:.1f} us, view + windows {:.1f} us, "
+                 "(table full {}, observer {}), rolling scrub {} draws MISS {}; check frames: {} compared, {} skipped, MISS {}; {} {} records / {} draws; CPU per {} view: compaction {:.1f} us, view + windows {:.1f} us, "
                  "material polls {:.1f} us, build {:.1f} us, side effects {:.1f} us, submit {:.1f} us, flush {:.1f} us",
-                 w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, gateList(w), w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
+                 head, w.views, what, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, gateList(w), w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
                  w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), list(w.late, kLateNames, kLateCount), w.undrawn, left, q.passes, q.envChanges, q.flushFailed, q.arenaFailed, q.draws, q.reused,
                  q.draws != 0 ? 100.0 * static_cast<double>(q.reused) / static_cast<double>(q.draws) : 0.0, q.derived + q.scrubbed, q.derivedChanged, q.refused, q.tableFull, q.observerRefused, q.scrubbed, q.scrubMiss,
-                 q.checkCompared, q.checkSkipped, q.checkMiss, shadowRecs, shadowDraws, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
+                 q.checkCompared, q.checkSkipped, q.checkMiss, shadowRecs, what, shadowDraws, what, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
                  static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);
-    if (recs_) {
-        // the cascades' records age out: a cascade sees other ops as the camera moves, a record that was not looked at for 1,200 frames gives its slots back
-        const std::uint64_t now = dev_.stats().frames;
-        std::uint64_t swept = 0;
-        for (auto it = recs_->map.begin(); it != recs_->map.end();) {
-            if (it->first.view != 0 && it->second->lastSeen + 1200 < now && it->second->builtFrame + 1200 < now) {
-                it = recs_->map.erase(it);
-                ++swept;
-            } else {
-                ++it;
-            }
-        }
-        if (swept != 0) spdlog::info("native: owned shadows: {} cascade records not seen for 1200 frames dropped", swept);
-    }
-    ownedShadowW_ = {};
-    persistShadowW_ = {};
-    if (miss != 0) ownedShadowsOff("MISS (a cascade's persistent draw judged valid differs from a fresh derivation)", miss);
 }
-
 }  // namespace rvk::native

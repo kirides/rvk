@@ -2400,9 +2400,14 @@ private:
         bool valid = false;
     } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
     SceneRefStream sceneRefV2_[kSceneRefSlots];  // scene ABI v2: (i, slot) per view slot, ring blocks of this frame
-    std::uint64_t treeEnvHash_[8] = {}, treeEnvEpoch_[8] = {}, treeEnvCounter_ = 0;  // F4-3 (per tree view slot: 14 / 15 main z / solid, 8..11 the cascades' z: treeEnvIndex)
-    static std::size_t treeEnvIndex(bool solid, std::uint32_t viewSlot) { return viewSlot >= 8 && viewSlot < 12 ? 2 + (viewSlot - 8) : viewSlot == 12 || viewSlot == 13 ? 6 + (viewSlot - 12) : (solid ? 1 : 0); }
-    static constexpr std::size_t kOwnedEnvSlots = 8;
+    // F4-3 (per tree view slot: 14 / 15 main z / solid, 8..11 the cascades' z, 12 / 13 the grass; F3-4: 47 the terrain map, 48.. the atlas cells: treeEnvIndex)
+    static constexpr std::size_t kTreeEnvSlots = 64;
+    std::uint64_t treeEnvHash_[kTreeEnvSlots] = {}, treeEnvEpoch_[kTreeEnvSlots] = {}, treeEnvCounter_ = 0;
+    static std::size_t treeEnvIndex(bool solid, std::uint32_t viewSlot) {
+        if (viewSlot >= 8 && viewSlot < kTreeEnvSlots) return viewSlot;  // (one memo per slot: the cascades, the grass, the main view's 14 / 15, the shadow views' 47..)
+        return solid ? 1 : 0;
+    }
+    static constexpr std::size_t kOwnedEnvSlots = 64;  // (F3-4: one memo per view table slot: the atlas cells' 33.. too)
     struct OrderedEnv {  // F9 / F14: the recent (hash, epoch) pairs of an ordered segment's env index
         std::uint64_t hash[4] = {}, epoch[4] = {};
         std::uint32_t next = 0;

@@ -225,6 +225,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (shadow && type == 1 && get<std::uint16_t>(rb, 0x3c) > get<std::uint16_t>(rb, 0x3a)) {
         ++st.shadowFrondsSkipped;
         ++st.zeroOps;
+        // F3-4 (frame-ownership.md 14.29): an owned shadow view keeps an empty record of the op, so its owned frames take it out of the list too (its slot does nothing but the sort)
+        if (ownedTrees_ && tro_ != nullptr && ownedShadowViews_ && ownedShadowKind(viewKind_) && tro_->viewKey == ownedKeyNow() && tro_->viewKey != 255) treeEmptyRecord(op, res, rb);
         return Skip::None;
     }
     // the queue (solid +0xb8 / +0xc0, z +0xd0 / +0xd8; entries 0x18: tree PS, illumination, depth key), sorted at the first Render /
@@ -285,8 +287,9 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     g.meshResource = nullptr;
     // F4-2 / F4-3: a main-view tree op is retained (templates per bucket) / planned for the check; our identity ramp replaces the engine's stream 1 (the same values)
     // (F4-4: a sun cascade's z op too, while native.owned_shadows is on and the cascades' trees are not tripped)
-    const bool trOn = ownedTrees_ && tro_ != nullptr && hardware && ((viewKind_ == ViewKind::Main && !shadow) || (viewKind_ == ViewKind::Cascade && shadow)) &&
-                      tro_->viewKey == ownedKeyOf(viewKind_, cascade_);
+    // (F3-4: the terrain map's / an atlas cell's z op too, while native.owned_shadow_views is on)
+    const bool trOn = ownedTrees_ && tro_ != nullptr && hardware && ((viewKind_ == ViewKind::Main && !shadow) || (ownedShadowKind(viewKind_) && shadow)) &&
+                      tro_->viewKey == ownedKeyNow();
     if (trOn && tro_->ramp != nullptr && g.streams[1].buffer != nullptr && g.streams[1].freq == 0x80000001u && g.streams[1].stride == 4u) {
         g.streams[1].buffer = tro_->ramp.get();
         g.streams[1].offset = 0;

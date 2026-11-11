@@ -87,6 +87,9 @@ struct OpRec {
     std::vector<const void*> touches;             // the engine resources the slot's code touches
     std::unordered_map<std::uint64_t, std::unique_ptr<Tpl>> tpls;
     std::uint64_t builtFrame = 0;
+    // F3-4 (frame-ownership.md 14.29): a shadow view's fronds op that draws nothing by the engine's rule (RenderFrondsZPass 0x6f0cc0: the leaf cards' vertex count rb +0x3c >
+    // the fronds' rb +0x3a): no templates; the owned pass checks the rule again and only runs the slot's side effect (the queue sort)
+    bool empty = false;
 };
 
 // one planned instance (queue order, leaves: LOD-major as the composition draws them)
@@ -103,7 +106,7 @@ struct Stats {
     std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, instances = 0, items = 0, records = 0, observed = 0, flushes = 0, compBatches = 0, compViews = 0, packets = 0;
     // why an op taken from the list was composed late
     std::uint64_t lateNoRec = 0, lateStamp = 0, lateView = 0, lateMaterial = 0, latePlan = 0, lateSpecial = 0, lateNoTemplate = 0, lateTemplate = 0, lateFlush = 0, lateRows = 0;
-    std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0;
+    std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0, emptyOps = 0;  // (emptyOps: F3-4 shadow fronds ops that draw nothing, taken on their empty record)
     std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, no draws, other
     std::uint64_t derived = 0, reused = 0, refused = 0, tableFull = 0;
     // check frames: the composition against the plan and the templates
@@ -119,8 +122,10 @@ struct State {
     bool shadowTripped = false;         // a DIFFERING in the cascades: their trees stay the engine's
     bool shadowView = false;            // the view in progress is a sun cascade (statistics + view slot)
     std::int32_t cascade = -1;
-    std::uint8_t viewKey = 255;         // 0 main, 1 + c cascade c, 255 = a view the trees are not owned in
-    Stats& win() { return shadowView ? shadowWindow : window; }
+    std::uint8_t viewKey = 255;         // 0 main, 1 + c cascade c, 5 terrain map, 8 + i atlas cell i (F3-4), 255 = a view the trees are not owned in
+    Stats lightWindow, lightTotal;      // F3-4: the terrain map's and the point-light atlas cells' views
+    bool lightView = false;             // the view in progress is the terrain map / an atlas cell
+    Stats& win() { return shadowView ? (lightView ? lightWindow : shadowWindow) : window; }
     bool active = false;                // this view is an owned frame for trees
     std::array<std::vector<Op>, 2> taken;  // z / solid ops that left the lists
     std::unique_ptr<d3d9::Buffer> ramp;
