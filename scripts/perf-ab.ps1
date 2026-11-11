@@ -51,6 +51,8 @@ param(
     # a window of an arm that claims the key on may show its stage armed but idle (nothing of its kind in view)
     [switch]$AllowIdle,
     [switch]$NoLock,
+    # overlay command template of the toggle instead of `set <Key> <value>` (e.g. 'debug pull {0}'); stage states are not asserted then
+    [string]$CommandTemplate = '',
     [string]$Out = '',
     [int]$Seconds = 300
 )
@@ -138,13 +140,13 @@ foreach ($scene in $Scenes) {
         for ($k = 0; $k -lt 2 * $Pairs; $k++) {
             $arm = if ($k % 2 -eq 0) { 'A' } else { 'B' }
             $value = if ($arm -eq 'A') { $A } else { $B }
-            $cmds += "${anchor}+${t}: set $Key $value"
+            $cmds += "${anchor}+${t}: " + $(if ($CommandTemplate -ne '') { $CommandTemplate -f $value } else { "set $Key $value" })
             $cmds += "${anchor}+$($t + $Settle): perf window $Window ${arm}_$([math]::Floor($k / 2) + 1)"
             # (+ 4: the next toggle comes after the window's end report: a toggle in the present that closes the window would show in its stage line)
             $t += $Settle + $Window + 4
         }
         $cmds += "${anchor}+$($t + 60): quit"
-        $logs += , @($scene, (Invoke-Session $scene "$scene" ($base + "$Key=$A") $cmds))
+        $logs += , @($scene, (Invoke-Session $scene "$scene" ($base + $(if ($CommandTemplate -ne "") { @() } else { "$Key=$A" })) $cmds))
     } else {
         for ($p = 1; $p -le $Pairs; $p++) {
             foreach ($arm in 'A', 'B') {
@@ -165,6 +167,7 @@ foreach ($l in $logs) {
     if ($wins.Count -eq 0) { $failures += "$($l[0]): no perf window in $($l[1]) (did the schedule's anchor fire? see 'overlay: [debug] command' lines)" }
     foreach ($w in $wins) {
         $value = if ($w.Tag -like 'A_*') { $A } else { $B }
+        if ($CommandTemplate -ne '') { continue }
         try { Assert-WindowStages -Window $w -Settings @("$Key=$value") -Arm "$($l[0]) $($w.Tag)" -Quiet -AllowIdle:$AllowIdle }
         catch { $failures += $_.Exception.Message }
     }

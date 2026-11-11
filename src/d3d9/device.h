@@ -67,6 +67,10 @@ using rhi::kMaxVertexAttributes;
 using rhi::GamePipeline;
 using rhi::kChunkPackets;
 
+// S-4 per view kind (frame-ownership.md 14.30): which owned shadow views draw vertex-pulled (bit 0 = the sun cascades, bit 1 = the terrain map + the point-light atlas cells);
+// a view with its bit clear keeps the input-assembler form (same clip position). Default 1 = the cascades pulled, the terrain map + atlas cells on the input assembler (perf-ab: atlas pass -0.006 .. -0.011 ms, 4 of 4 pairs); env RVK_PULL_VIEWS=<mask> at start, overlay command `debug pull <mask>`.
+std::atomic<std::uint32_t>& pullViewMask();
+
 class Device;
 
 // ---- resources -------------------------------------------------------------------------------------------------------

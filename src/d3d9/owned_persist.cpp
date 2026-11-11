@@ -5,6 +5,7 @@
 //   the device's state of the pass (ownedEnvEpoch), the draw's own inputs (ownedDrawSig), the retained draw itself (its op record is rebuilt = new draw records).
 // A frame then writes a ref list + argument block (the CPU knows every count) and queues ONE indirect draw per bucket (ownedFlush).
 
+#include <windows.h>
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -284,6 +285,16 @@ int Device::ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWind
     }
     out.bucketKey = ownedBucketKey(c, ow.viewSlot);
     return 0;
+}
+
+std::atomic<std::uint32_t>& pullViewMask() {
+    static std::atomic<std::uint32_t> mask = [] {
+        char v[16];
+        std::uint32_t m = 1;
+        if (GetEnvironmentVariableA("RVK_PULL_VIEWS", v, sizeof(v)) != 0) m = static_cast<std::uint32_t>(std::strtoul(v, nullptr, 0));
+        return m;
+    }();
+    return mask;
 }
 
 int Device::ownedDerive(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& ow, rhi::GpuRef blockAddress, rhi::GpuRef zeroBlock, bool checkView, OwnedPersist& out) {
@@ -655,7 +666,11 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     pulledOf.assign(n, 0);
     std::uint32_t pulledN = 0;
     rhi::GpuRef fetchRef;
-    if (vertexPull_) {
+    // (14.30: a shadow view whose bit of the mask is clear keeps the input assembler)
+    const std::uint32_t pullMask = pullViewMask().load(std::memory_order_relaxed);
+    const bool viewPulls = viewSlot >= 32 ? (pullMask & 2u) != 0
+                         : (viewSlot >= shader::abi::kViewSlotCascade0 && viewSlot < shader::abi::kViewSlotDynamicFirst ? (pullMask & 1u) != 0 : true);
+    if (vertexPull_ && viewPulls) {
         gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
         const shader::abi::VertexFetch* fs = tab.fetchShadow();
         fetchRef = tab.fetchRef();
