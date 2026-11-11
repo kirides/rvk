@@ -676,6 +676,7 @@ public:
     void prewarmOncePipeline(const PipelineDesc& desc) override { record_.prewarmOncePipeline(desc); }
     void preparePipelineShader(ShaderModule module, VkShaderStageFlagBits stage) override { record_.prepareShader(module, stage); }
     void savePipelineCache() override { record_.saveCache(); }
+    void stopPipelineBuilds() override { record_.stopPipelineBuilds(); }
     PipelineStats pipelineStats() override { return record_.stats(); }
     void beginScope(const RenderingInfo& info, bool secondary) override { record_.beginScope(info, secondary); }
     void endScope() override { record_.endScope(); }

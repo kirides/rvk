@@ -10,13 +10,17 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
+#include <thread>
 
 #include <wrl/client.h>
 
@@ -407,7 +411,61 @@ std::vector<std::string> arguments(const Request& r) {
     return a;
 }
 
+namespace {
+
+thread_local const std::atomic<bool>* t_cancel = nullptr;
+
+Result compileNow(const Request& request);
+
+Result cancelledResult(const Request& request) {
+    Result r;
+    r.cancelled = true;
+    r.log = std::format("{}: compile cancelled", request.file);
+    return r;
+}
+
+// the compile on a helper thread (same priority as the caller), waited for until done or cancelled; an abandoned helper keeps the shared state alive
+Result compileCancellable(const Request& request, const std::atomic<bool>& cancel) {
+    if (cancel.load(std::memory_order_acquire)) return cancelledResult(request);
+    struct Shared {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+        Result result;
+    };
+    auto st = std::make_shared<Shared>();
+    const int priority = GetThreadPriority(GetCurrentThread());
+    std::thread([st, request, priority] {
+        SetThreadDescription(GetCurrentThread(), L"rvk dxc compile");
+        if (priority != THREAD_PRIORITY_ERROR_RETURN) SetThreadPriority(GetCurrentThread(), priority);
+        Result r = compileNow(request);
+        {
+            const std::lock_guard lock(st->m);
+            st->result = std::move(r);
+            st->done = true;
+        }
+        st->cv.notify_all();
+    }).detach();
+    std::unique_lock lock(st->m);
+    while (!st->done) {
+        if (cancel.load(std::memory_order_acquire)) return cancelledResult(request);
+        st->cv.wait_for(lock, std::chrono::milliseconds(20));
+    }
+    return std::move(st->result);
+}
+
+}  // namespace
+
+void setThreadCancel(const std::atomic<bool>* flag) { t_cancel = flag; }
+
 Result compile(const Request& request) {
+    if (const std::atomic<bool>* cancel = t_cancel; cancel != nullptr) return compileCancellable(request, *cancel);
+    return compileNow(request);
+}
+
+namespace {
+
+Result compileNow(const Request& request) {
     RVK_ZONE("shader::dxc compile");
     Result result;
     Library& lib = library();
@@ -504,6 +562,8 @@ Result compile(const Request& request) {
     if (!cacheFile.empty()) storeCache(cacheFile, handler->includes(), data, size);
     return result;
 }
+
+}  // namespace
 
 std::uint32_t dxilPushBytes(std::span<const std::uint8_t> dxil) {
     Library& lib = library();

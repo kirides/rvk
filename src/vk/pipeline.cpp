@@ -171,12 +171,16 @@ void PipelineCache::saveAsync() {
     });
 }
 
+void PipelineCache::stopWorkers() {
+    stopPrewarm();
+    stopLibraries();
+}
+
 void PipelineCache::destroy() {
     if (ctx_ == nullptr) {
         return;
     }
-    stopPrewarm();
-    stopLibraries();
+    stopWorkers();
     save();
     for (auto& [d, p] : pipelines_) {
         if (p != VK_NULL_HANDLE) {
@@ -200,6 +204,7 @@ std::size_t PipelineCache::size() const {
 void PipelineCache::prewarm(const PipelineDesc& desc, bool urgent) {
     {
         const std::lock_guard lock(prewarmMutex_);
+        if (prewarmQuit_) return;  // stopped (device teardown): no new workers, no queue
         if (prewarmThreads_.empty()) {
             // a few threads: the driver compiles in parallel; the render thread keeps its core
             const unsigned n = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);

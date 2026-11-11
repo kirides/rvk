@@ -24,6 +24,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/particle_gpu.h"
 #include "shader/embedded.h"
+#include "shader/dxc.h"
 #include "engine/exposure.h"
 #include "d3d9/memeq.h"
 #include "d3d9/target_names.h"
@@ -739,8 +740,20 @@ void Device::destroy() {
         return;
     }
     destroying_.store(true, std::memory_order_release);
+    const auto w0 = std::chrono::steady_clock::now();
     stopVariantWorker();
+    const auto w1 = std::chrono::steady_clock::now();
     stopShaderWorkers();
+    const auto w2 = std::chrono::steady_clock::now();
+    // the backend's background pipeline builders (prewarm workers fed by the variant workers' prewarmVariantKeys and the draws' prewarmOncePipeline, the library
+    // optimiser, D3D12's PSO threads) before any shader module goes: they were stopped only by game_.reset() at the end, so a worker still in
+    // vkCreateGraphicsPipelines met the modules destroyed below (VK_ERROR from the driver, an access violation in amdvlk64, or a hang of the exit)
+    game_->stopPipelineBuilds();
+    const auto w3 = std::chrono::steady_clock::now();
+    {
+        const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        spdlog::info("d3d9: device teardown: worker pools joined (shader variants {:.0f} ms, shader compiles {:.0f} ms, pipeline builds {:.0f} ms)", ms(w0, w1), ms(w1, w2), ms(w2, w3));
+    }
     game_->waitIdle();
     // the pipeline cache and its threads are the backend's (the backend's GameRecord), destroyed with the device
     processReleases();
@@ -1632,6 +1645,7 @@ rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& tex
     if (dxil.empty()) {
         auto compiled = shader::compileHlslDxil(stage, text, name, half16);
         if (!compiled.ok()) {
+            if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (teardown: a variant worker's compile cancelled)
             spdlog::error("d3d9: shader {:016x} does not compile to DXIL: {}", hash, compiled.log.substr(0, 1500));
             return rhi::ShaderModule::None;
         }
@@ -2074,6 +2088,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
     if (spirv.empty()) {
         auto compiled = shader::compileHlsl(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", half16);
         if (!compiled.ok()) {
+            if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (teardown: the compile was cancelled)
             if (ubershadersFailed_.fetch_add(1) < 12) {
                 spdlog::warn("d3d9: GLSL material shader of {:016x} ({} {} variant {}) does not compile: {}", s.hash, src.file, src.entry, tag,
                              compiled.log.substr(0, 600));
@@ -2107,6 +2122,7 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
             }
             // S-1a: a request the ubershader cannot build stays on the translated shader of the same form (counted)
             ++uberFallbacks_;
+            if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (device teardown: no second compile)
         }
     }
     const auto dec = shader::decode(s.bytecode);
@@ -2137,6 +2153,7 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
     if (spirv.empty()) {
         auto compiled = shader::compileHlsl(dec.program.version.stage, glsl.hlsl);
         if (!compiled.ok()) {
+            if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (teardown: the compile was cancelled)
             spdlog::error("d3d9: {} variant of shader {:016x} does not compile:\n{}", tag, s.hash, compiled.log);
             return rhi::ShaderModule::None;
         }
@@ -2278,6 +2295,9 @@ unsigned Device::variantThreadCount() {
 void Device::variantWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk shader variants");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    // device teardown cancels this worker's DXC compiles (destroy() sets destroying_ before it joins): a cold ubershader variant compiles for up to ~20 s and DXC has
+    // no cancel, so the join waited for all 12 in flight (18 s of a testdemo exit); an abandoned compile ends on its helper thread or with the process
+    shader::dxc::setThreadCancel(&destroying_);
     for (;;) {
         VariantJob job;
         VariantProvider provider;
@@ -2348,7 +2368,8 @@ void Device::variantWorker() {
         rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion), &viaUber);
         // 14.22: the engine's request arrived while this variant was being built from the bytecode alone (a shader the engine created before it asked the pool for it):
         // the variant is built again with the request (the ubershader form when it covers it). Variants already built are reset by sourceAttached
-        if (!viaUber && !hadSource && ubershader_.load(std::memory_order_relaxed) && job.shader->source.load(std::memory_order_acquire) != nullptr) {
+        if (!viaUber && !hadSource && ubershader_.load(std::memory_order_relaxed) && job.shader->source.load(std::memory_order_acquire) != nullptr &&
+            !destroying_.load(std::memory_order_acquire)) {  // (device teardown: the worker ends after its compile)
             shader::TranslateOptions o2;
             if (provider.options(*job.shader, o2) && o2.uber) {
                 bool via2 = false;
@@ -2366,7 +2387,7 @@ void Device::variantWorker() {
         }
         if (m == rhi::ShaderModule::None) {
             ++variantsFailed_;
-            spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);
+            if (!destroying_.load(std::memory_order_acquire)) spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);
             job.shader->variantState[i].store(3, std::memory_order_release);
             done();
             continue;
@@ -2381,7 +2402,7 @@ void Device::variantWorker() {
         job.shader->variantState[i].store(2, std::memory_order_release);
         const auto t1 = std::chrono::steady_clock::now();
         done();
-        prewarmVariantKeys(job.shader->hash, job.slot);  // F15-1
+        if (!destroying_.load(std::memory_order_acquire)) prewarmVariantKeys(job.shader->hash, job.slot);  // F15-1 (not at teardown: the pipeline builders stop next)
         const auto t2 = std::chrono::steady_clock::now();
         // 14.26: where a variant worker's time goes (the module: translation + DXC or the disk cache; the known pipeline keys it unblocked)
         const std::uint64_t built = variantTimes_.n.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -2408,6 +2429,10 @@ void Device::stopVariantWorker() {
     {
         const std::lock_guard lock(variantMutex_);
         variantStop_ = true;
+        if (variantBusy_ > 0 || !variantJobs_.empty()) {
+            // (a compile in flight cannot be cancelled (DXC): the join waits for it; a cold variant cache = seconds, a warm one = nothing)
+            spdlog::info("d3d9: shader variants: stopping: {} queued dropped, {} in flight (finished first)", variantJobs_.size(), variantBusy_);
+        }
         for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
         variantJobs_.clear();
     }

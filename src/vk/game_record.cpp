@@ -84,6 +84,10 @@ void GameRecord::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits s
     pipelines_.prepareShader(module, stage);
 }
 
+void GameRecord::stopPipelineBuilds() {
+    pipelines_.stopWorkers();
+}
+
 void GameRecord::saveCache() {
     pipelines_.saveAsync();
 }

@@ -46,6 +46,7 @@
     void prewarmOncePipeline(const PipelineDesc& desc) override { resolvePipeline(desc, nullptr); }
     void preparePipelineShader(ShaderModule, VkShaderStageFlagBits) override {}
     void savePipelineCache() override {}
+    void stopPipelineBuilds() override;
     PipelineStats pipelineStats() override;
     void beginScope(const RenderingInfo& info, bool secondary) override;
     void endScope() override;

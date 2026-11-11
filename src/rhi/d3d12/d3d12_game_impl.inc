@@ -685,7 +685,7 @@ ID3D12PipelineState* D3D12DeviceImpl::psoFor(PsoEntry& e, const DynamicStateValu
 }
 
 void D3D12DeviceImpl::startPsoThreads() {
-    if (!psoThreads_.empty()) return;
+    if (!psoThreads_.empty() || psoStopped_) return;
     const std::uint32_t hw = std::max(2u, std::thread::hardware_concurrency());
     const std::uint32_t n = std::clamp(hw / 3, 2u, 6u);
     psoQuit_ = false;
@@ -713,6 +713,11 @@ void D3D12DeviceImpl::startPsoThreads() {
         });
     }
     spdlog::info("d3d12: {} PSO build threads", n);
+}
+
+void D3D12DeviceImpl::stopPipelineBuilds() {
+    psoStopped_ = true;  // (no restart by a late request)
+    stopPsoThreads();
 }
 
 void D3D12DeviceImpl::stopPsoThreads() {

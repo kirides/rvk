@@ -59,6 +59,9 @@ public:
     void prewarmOnce(const PipelineDesc& desc);
     // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
+    // device teardown, before the shader modules are destroyed: the prewarm workers and the library optimiser joined (queues dropped, a build in flight
+    // finished); later prewarm requests are ignored. Idempotent (destroy() calls it too)
+    void stopWorkers();
     // writes the VkPipelineCache blob (at shutdown)
     void save();
     // the same while running, when pipelines were built since the last save: the blob is read on the calling thread, the

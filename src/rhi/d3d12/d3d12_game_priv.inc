@@ -73,6 +73,7 @@ public:
     std::mutex psoMutex_;
     std::condition_variable psoCv_;
     bool psoQuit_ = false;
+    bool psoStopped_ = false;  // stopPipelineBuilds (device teardown): no new PSO threads
     std::atomic<std::uint32_t> psoPending_{0};
     std::atomic<std::uint64_t> psoSkipped_{0};
     std::uint64_t pipelineSkips() const override { return psoSkipped_.load(std::memory_order_relaxed); }

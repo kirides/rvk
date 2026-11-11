@@ -409,6 +409,7 @@ HalDevice::~HalDevice() {
         std::erase(g_liveDevices, this);
     }
     spdlog::info("hal: device released by the engine: shutting down");
+    const auto shutdownT0 = std::chrono::steady_clock::now();
     // 14.26: a NtTerminateProcess of another thread waits for this shutdown (the game ends the process that way; it cut the shutdown half-way before)
     crashdump::deviceShutdownBegin();
     struct ShutdownMark {
@@ -464,9 +465,13 @@ HalDevice::~HalDevice() {
     frameTap_.reset();
     // the process-wide GPU scene tables (static / leaked singletons) hold buffers and pipelines of the device: released before it (cluster store's worker included);
     // left alive they were leaked at vkDestroyDevice and the static ones' destructors at process exit retired them through the freed backend
+    const auto enhT1 = std::chrono::steady_clock::now();
     gpuscene::releaseGpuObjects(dev_);
     dev_.destroy();
-    spdlog::info("hal: device shutdown complete ({} process terminations of other threads waited for it)", crashdump::terminateWaits());
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    const auto shutdownT2 = std::chrono::steady_clock::now();
+    spdlog::info("hal: device shutdown complete in {:.0f} ms (features + native frame {:.0f} ms, device {:.0f} ms; {} process terminations of other threads waited for it)",
+                 ms(shutdownT0, shutdownT2), ms(shutdownT0, enhT1), ms(enhT1, shutdownT2), crashdump::terminateWaits());
 }
 
 bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartParameters& p) {
