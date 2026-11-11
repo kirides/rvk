@@ -148,6 +148,16 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     const rhi::ShaderModule vsM = v2only ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : vsSlot1);
     // (S-6: a draw that left its pixel shader out needs no scene form of it)
     const rhi::ShaderModule fsM = v2only || psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneFs);
+    // F15-1 (frame-ownership.md 14.20): every form the draw will need is requested at its first sight, not one after the other (v1 modules -> v1 pipeline -> v2 modules
+    // -> v2 pipeline -> pulled module -> pulled pipeline took six round trips through the build queues, each one composition later). variant() only queues a build;
+    // the decision below is unchanged. The pipelines whose modules exist are requested as well (earlyPipelines, below)
+    const bool wantsV2 = sceneV2_ && (kind == draws::Kind::StaticMesh || v2only || actor);
+    const bool wantsPull = wantsV2 && vertexPull_ && pullFetch_.valid == shader::abi::kVertexFetchValid && !lodVs && !v2only;
+    if (wantsV2 && earlyForms_) {
+        (void)variant(vs_, vsSlot2);
+        if (!psDropped_) (void)variant(ps_, sceneView2Of(sceneFs));
+        if (wantsPull) (void)variant(vs_, vsSlotPull);
+    }
     if (!v2only && (vsM == rhi::ShaderModule::None || (fsM == rhi::ShaderModule::None && !psDropped_))) {
         const bool failed = vs_->variantState[static_cast<std::size_t>(vsSlot1)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
         if (failed) {
@@ -176,11 +186,46 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         ++sceneStats_.fbNoRoom;
         return;
     }
+    // F15-1: the v2 / pulled pipelines of the draw requested while its v1 pipeline is still being built (their modules permitting): the same descriptions the steps
+    // below make once the v1 pipeline exists
+    const auto earlyPipelines = [&] {
+        if (!wantsV2 || !earlyForms_) return;
+        const std::uint8_t sv = vs_->variantState[static_cast<std::size_t>(vsSlot2)].load(std::memory_order_acquire);
+        const std::uint8_t sf = psDropped_ ? 2 : ps_->variantState[static_cast<std::size_t>(sceneView2Of(sceneFs))].load(std::memory_order_acquire);
+        if (sv != 2 || sf != 2) return;
+        PipelineDesc e2 = sd;
+        e2.vs = vs_->variants[static_cast<std::size_t>(vsSlot2)].load(std::memory_order_acquire);
+        e2.fs = psDropped_ ? rhi::ShaderModule::None : ps_->variants[static_cast<std::size_t>(sceneView2Of(sceneFs))].load(std::memory_order_acquire);
+        if (findPipeline(e2) == GamePipeline::None) {
+            game_->prewarmOncePipeline(e2);
+            recordBackgroundKey(e2);
+            ++sceneStats_.earlyPipelines;
+        }
+        if (wantsPull && vs_->variantState[static_cast<std::size_t>(vsSlotPull)].load(std::memory_order_acquire) == 2) {
+            PipelineDesc e3 = e2;
+            e3.vs = vs_->variants[static_cast<std::size_t>(vsSlotPull)].load(std::memory_order_acquire);
+            if (!workVi_.dynamicLayout) {
+                std::memset(e3.bindings, 0, sizeof(e3.bindings));
+                std::memset(e3.attributes, 0, sizeof(e3.attributes));
+                e3.bindings[0] = {8, 1};
+                e3.attributes[0] = {shader::abi::kSceneRefLocation, 0, VK_FORMAT_R32G32_UINT, 0};
+                e3.bindingCount = 1;
+                e3.attributeCount = 1;
+            }
+            if (findPipeline(e3) == GamePipeline::None) {
+                game_->prewarmOncePipeline(e3);
+                recordBackgroundKey(e3);
+                ++sceneStats_.earlyPipelines;
+            }
+        }
+    };
     if (!v2only) {
         const GamePipeline sp = findPipeline(sd);
         if (sp == GamePipeline::None) {
             game_->prewarmOncePipeline(sd);
+            recordBackgroundKey(sd);
             ++sceneStats_.fbPipelinePending;
+            earlyPipelines();
             pending();
             return;
         }
@@ -214,6 +259,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         const GamePipeline sp2 = findPipeline(sd2);
         if (sp2 == GamePipeline::None) {
             game_->prewarmOncePipeline(sd2);
+            recordBackgroundKey(sd2);
             ++sceneStats_.fbPipelinePending;
             pending();
             return;
@@ -246,6 +292,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
                 const GamePipeline pp = findPipeline(sp3);
                 if (pp == GamePipeline::None) {
                     game_->prewarmOncePipeline(sp3);
+                    recordBackgroundKey(sp3);
                     ++vertexPullStats_.pipelinesPending;
                     pending();
                 } else {
@@ -259,7 +306,8 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         }
     }
     if (scenePipe2_ != GamePipeline::None || scenePipe_ != GamePipeline::None) {
-        const UberWhy why = uberWhyOf(*ps_, scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs);
+        // (F15-1: a depth-only form has no pixel shader: its own column, not "failed")
+        const UberWhy why = psDropped_ ? UberWhy::NoPixel : uberWhyOf(*ps_, scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs);
         const std::uint8_t vsForm = uberVsFormOf(*vs_, scenePipe2_ != GamePipeline::None ? vsSlot2 : lodVs ? VariantSlot::SceneVsLod : vsSlot1);
         if (capture_ != nullptr) {
             lastVariant_.uberPs = static_cast<std::uint8_t>(why);
@@ -382,6 +430,8 @@ void Device::currentPosFix(float out[4], float& jx, float& jy) {
 
 // F-VAR: why a derivation refused with 4 (variant): the first few are logged with the draw's variant record (diagnostics: which of the decisions moved)
 int Device::variantRefusal(int site, const CachedDraw& c) {
+    lastVariantSite_ = site;
+    lastVariantPending_ = c.v.scenePending;
     static std::atomic<int> logged{0}, calls{0};
     if (calls.fetch_add(1) > 4000 && logged.load(std::memory_order_relaxed) < 24 && logged.fetch_add(1) < 24) {
         spdlog::info("d3d9: owned variant refusal site {} kind {} phase {}/{}: gate {} wanted {} staticOk {} giOn {} (now {}) gbufGate {} (now {}) gbufStatic {} gbufWanted {} scopeGbuf {} scenePending {} biasFor {} (now {}) pack {}",
@@ -928,18 +978,28 @@ void Device::sceneReport() {
     spdlog::info(
         "native: scene draws (5 s): {} static main-view draws seen, {} scene draws ({} of them replayed from the packet cache), {} indirect calls, {} records, mean batch {:.1f}, max batch {} "
         "(run total); runs cut in one pipeline: vertex input {}, dynamic state {}, index binding {}, frame block {}, run size {}; pipeline groups {}; fallbacks: not batchable / no scope {}, variant kind {}, "
-        "variant failed {}, variant pending {}, pipeline pending {}, no room {}, ring full {}, null address / bad record {}; check: {} read-backs, {} KiB, DIFFERING {}, skipped {}",
+        "variant failed {}, variant pending {}, pipeline pending {} (early v2 / pulled pipeline requests {}), no room {}, ring full {}, null address / bad record {}; check: {} read-backs, {} KiB, DIFFERING {}, skipped {}",
         s.candidates - l.candidates, s.sceneDraws - l.sceneDraws, s.replayedSceneDraws - l.replayedSceneDraws, calls, recs, calls != 0 ? static_cast<double>(recs) / static_cast<double>(calls) : 0.0, s.maxRun,
         s.breaks[0] - l.breaks[0], s.breaks[1] - l.breaks[1], s.breaks[2] - l.breaks[2], s.breaks[3] - l.breaks[3], s.breaks[4] - l.breaks[4], s.groups - l.groups, s.fbNotBatchable - l.fbNotBatchable,
-        s.fbVariantKind - l.fbVariantKind, s.fbVariantFailed - l.fbVariantFailed, s.fbVariantPending - l.fbVariantPending, s.fbPipelinePending - l.fbPipelinePending, s.fbNoRoom - l.fbNoRoom,
+        s.fbVariantKind - l.fbVariantKind, s.fbVariantFailed - l.fbVariantFailed, s.fbVariantPending - l.fbVariantPending, s.fbPipelinePending - l.fbPipelinePending, s.earlyPipelines - l.earlyPipelines, s.fbNoRoom - l.fbNoRoom,
         s.fbRingFull - l.fbRingFull, s.fbNullAddress - l.fbNullAddress, s.checks, s.checkedBytes / 1024, s.checkDiffering, s.checkSkipped);
+    // F15-1 (frame-ownership.md 14.20): the pipelines of earlier runs with variant modules (scene forms): loaded, requested at a shader's creation, built (run totals)
+    std::size_t keyCount = 0;
+    {
+        const std::lock_guard lock(keysMutex_);
+        keyCount = keys_.size();
+    }
+    spdlog::info("native: pipeline keys (run total): {} of {} known keys with variant modules, {} variant modules requested from keys, {} waits, {} variant-key pipelines + {} base pipelines prewarmed, "
+                 "{} keys recorded this run; early forms {}",
+                 keyStats_.variantKeysLoaded.load(), keyCount, keyStats_.variantRequests.load(), keyStats_.waits.load(), keyStats_.variantPrewarmed.load(), keyStats_.basePrewarmed.load(),
+                 keyStats_.recorded.load(), earlyForms_ ? "on" : "off (RVK_F15_BASELINE)");
     if (ubershader_.load(std::memory_order_relaxed)) {
         // S-1a (frame-ownership.md 14.6): the pixel shader form of the scene draws per draw kind: decisions (new scene forms) and owned items (per flush) of this window.
-        // columns: ubershader / other translated (not a material shader) / leaf (S-1b) / class skipped / request unknown / build failed
+        // columns: ubershader / other translated (not a material shader) / leaf (S-1b) / class skipped / request unknown / build failed / none (F15-1: depth-only, no pixel shader)
         std::string line;
         for (std::size_t k = 0; k < static_cast<std::size_t>(draws::Kind::Count); ++k) {
-            std::uint64_t d[6], o[6], dt = 0, ot = 0;
-            for (std::size_t w = 0; w < 6; ++w) {
+            std::uint64_t d[7], o[7], dt = 0, ot = 0;
+            for (std::size_t w = 0; w < 7; ++w) {
                 d[w] = s.uberDecided[k][w] - l.uberDecided[k][w];
                 o[w] = s.uberOwned[k][w] - l.uberOwned[k][w];
                 dt += d[w];
@@ -951,8 +1011,8 @@ void Device::sceneReport() {
                 vo[w] = s.uberVsOwned[k][w] - l.uberVsOwned[k][w];
                 vd[w] = s.uberVsDecided[k][w] - l.uberVsDecided[k][w];
             }
-            line += std::format(" [{}: owned {} = uber {} other {} leaf {} skipped {} unknown {} failed {}; decided {} = uber {} other {} leaf {} skipped {} unknown {} failed {}]", draws::name(static_cast<draws::Kind>(k)), ot,
-                                o[1], o[0], o[2], o[3], o[4], o[5], dt, d[1], d[0], d[2], d[3], d[4], d[5]);
+            line += std::format(" [{}: owned {} = uber {} other {} leaf {} skipped {} unknown {} failed {} none {}; decided {} = uber {} other {} leaf {} skipped {} unknown {} failed {} none {}]",
+                                draws::name(static_cast<draws::Kind>(k)), ot, o[1], o[0], o[2], o[3], o[4], o[5], o[6], dt, d[1], d[0], d[2], d[3], d[4], d[5], d[6]);
             line += std::format(" [{} vertex: owned uber {} translated {} failed {}; decided uber {} translated {} failed {}]", draws::name(static_cast<draws::Kind>(k)), vo[1], vo[0], vo[2], vd[1], vd[0], vd[2]);
         }
         spdlog::info("native: owned shaders (5 s): HLSL ubershader on, translated builds after an ubershader failure {} (run total):{}", uberFallbacks_.load(), line.empty() ? std::string(" no scene draws") : line);

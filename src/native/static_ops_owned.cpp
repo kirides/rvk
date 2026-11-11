@@ -63,6 +63,38 @@ enum Fallback : int { kFbView = 0, kFbMaterials, kFbObject, kFbRefused, kFbNoRec
 constexpr const char* kFallbackNames[] = {"view windows", "material stamp / poll", "object window", "a draw refused", "record gone", "view not composed", "not composable (lost this frame)", "read log changed"};
 static_assert(std::size(kFallbackNames) == kFbCount);
 
+// F15-1 (frame-ownership.md 14.20): the ROOT reason of a composed-late op. The first block follows the Fallback codes; a refused draw is split by the refusal site and,
+// for the derivation's codes, by what was not ready (the scene forms / pipelines still being built when the record was composed, a variant module that arrived since)
+enum Late : int {
+    kLateOther = 0, kLateMaterials, kLateView, kLateObject, kLateNoRecord, kLateNoView, kLateLost, kLateAudit,
+    kLateModule, kLateNotAllowed, kLateTableFull, kLateObserver, kLateFlush,
+    kLatePending, kLateNoForm, kLateArrived, kLateDecision, kLateTexture, kLateEnv, kLateScene, kLateCount
+};
+constexpr const char* kLateNames[] = {"other", "material stamp / poll", "view windows", "object window", "record gone", "view not composed", "lost", "read log changed",
+                                      "shader module changed", "replay not allowed", "record table full", "observer capture", "flush failed",
+                                      "forms pending at the record's composition", "no v2 form", "variant module arrived since", "variant decision moved", "texture not sampleable",
+                                      "phase / env / binding / jitter / view", "scene off / scope / windows / guard"};
+static_assert(std::size(kLateNames) == kLateCount);
+static_assert(kLateCount <= 20);  // (StaticOps::OwnedStats::kLate)
+
+// a derivation's refusal code (Device::replayOwned / ownedDerive) -> Late
+int lateOfCode(const d3d9::Device& dev, const d3d9::Device::CachedDraw& c, int rc) {
+    switch (rc) {
+        case 1: case 11: return kLateModule;
+        case 3: return kLateNotAllowed;
+        case 4: {
+            const int site = dev.lastVariantSite();
+            if (site == 1 && dev.lastVariantPending()) return kLatePending;
+            if (site == 3 || site == 5) return kLateArrived;
+            return kLateDecision;
+        }
+        case 7: return kLateTexture;
+        case 16: return c.v.scenePending ? kLatePending : kLateNoForm;
+        case 2: case 5: case 6: case 8: case 17: case 18: case 19: return kLateEnv;
+        default: return kLateScene;
+    }
+}
+
 }  // namespace
 
 void StaticOps::OwnedStats::add(const OwnedStats& o) {
@@ -72,6 +104,7 @@ void StaticOps::OwnedStats::add(const OwnedStats& o) {
     for (std::size_t i = 0; i < orec::kStampFields; ++i) leftStamp[i] += o.leftStamp[i];
     leftNoRecord += o.leftNoRecord; leftView += o.leftView; leftAudit += o.leftAudit; leftNotOwnable += o.leftNotOwnable; leftScene += o.leftScene;
     for (std::size_t i = 0; i < kFallback; ++i) fallback[i] += o.fallback[i];
+    for (std::size_t i = 0; i < kLate; ++i) late[i] += o.late[i];
     touches += o.touches; lightmaps += o.lightmaps; stream3 += o.stream3;
     compactNs += o.compactNs; selectNs += o.selectNs; buildNs += o.buildNs; submitNs += o.submitNs; sideNs += o.sideNs; matNs += o.matNs; prepNs += o.prepNs;
 }
@@ -162,6 +195,8 @@ bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade) {
     ownedView_ = {};
     if (!ownedStatic_) return false;
     ++W.views;
+    ++late1s_.views[vkind == ViewKind::Main ? 0 : 1];
+    lateSecondReport();
     if (f2c4::enabled() && vkind == ViewKind::Main) {
         f2c4::beginFrame(dev_.stats().frames);
         ++f2c4::counters().views;
@@ -526,6 +561,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         W.submitNs += ns(ts, tnow());
         if (rc != 0) {
             why = kFbRefused;
+            lateDetail_ = lateOfCode(dev_, cd, rc);
             tag = baseTag;
             return false;
         }
@@ -661,6 +697,15 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     // an owned op composed where the engine's slot would have run it (the record is rebuilt from this composition)
     const auto composeLate = [&](Op& op, int why) {
         ++W.fallback[why];
+        {
+            // F15-1: the root reason (a refused draw: what its refusal site recorded)
+            static constexpr int kOfFb[kFbCount] = {kLateView, kLateMaterials, kLateObject, kLateOther, kLateNoRecord, kLateNoView, kLateLost, kLateAudit};
+            const int lw = why == kFbRefused ? lateDetail_ : kOfFb[why];
+            ++W.late[lw];
+            ++late1s_.why[lw];
+            ++late1s_.ops[mainView ? 0 : 1];
+            lateDetail_ = kLateOther;
+        }
         dev_.setSceneIssue(false);
         tag = savedTag;
         tag.source = op.kind == OpKind::Animation ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
@@ -717,7 +762,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                 persistent = false;  // (the rest of the pass: the per-draw path)
             }
         }
-        for (const std::uint32_t oi : failed) composeLate(ops[oi], kFbRefused);
+        for (const std::uint32_t oi : failed) {
+            lateDetail_ = kLateFlush;
+            composeLate(ops[oi], kFbRefused);
+        }
     };
     for (std::size_t opIndex = 0; opIndex < ops.size(); ++opIndex) {
         Op& op = ops[opIndex];
@@ -739,6 +787,22 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                 why = kFbView;
             } else {
                 const orec::OpRecord& rec = *recPtr;
+                if (dev_.earlyForms_ && ownedMaterialsOk(rec)) {  // (the record's textures are its materials' current ones: polls are once per frame)
+                    // F15-1 (frame-ownership.md 14.20): a texture of the op's draws that is not ready for sampling (a render target the engine drew into this frame, still in its
+                    // attachment layout) is made ready here, as the late composition's prepareTextures would at this same place (after the queued items), instead of refusing
+                    // the draw and composing the op
+                    bool need = false;
+                    for (const orec::DrawRec& r : rec.draws) {
+                        for (std::uint32_t m = r.texMask; m != 0 && !need; m &= m - 1) need = dev_.ownedTextureNeedsPrep(static_cast<const d3d9::Texture*>(r.tex[std::countr_zero(m)]));
+                        if (need) break;
+                    }
+                    if (need) {
+                        flushItems();
+                        for (const orec::DrawRec& r : rec.draws) {
+                            for (std::uint32_t m = r.texMask; m != 0; m &= m - 1) dev_.ownedPrepTexture(const_cast<d3d9::Texture*>(static_cast<const d3d9::Texture*>(r.tex[std::countr_zero(m)])));
+                        }
+                    }
+                }
                 const std::size_t itemsBefore = ownedItems_.size();
                 if (persistent) {
                     done = ownedDrawOpPersistent(op, rec, viewWin, viewSlotP, epoch, scrubStride, scrubPhase, why);
@@ -1040,6 +1104,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             ++S.refused;
             restoreTag();
             why = kFbRefused;
+            lateDetail_ = (cd.vs != nullptr && cd.ps != nullptr && cd.vs->module == cd.vsModule && cd.ps->module == cd.fsModule) ? kLateNotAllowed : kLateModule;
             return false;
         }
         bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig;
@@ -1051,6 +1116,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
                     ++S.tableFull;
                     restoreTag();
                     why = kFbRefused;
+                    lateDetail_ = kLateTableFull;
                     return false;
                 }
                 P.handle.slot = slot;
@@ -1065,6 +1131,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
                 ++S.refused;
                 restoreTag();
                 why = kFbRefused;
+                lateDetail_ = lateOfCode(dev_, cd, rc);
                 return false;
             }
             if (scrub) {
@@ -1102,6 +1169,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             ++S.observerRefused;
             restoreTag();
             why = kFbRefused;
+            lateDetail_ = kLateObserver;
             return false;
         }
         lap(S.observeNs);
@@ -1156,6 +1224,32 @@ void StaticOps::ownedAutoOffMiss(std::uint64_t miss) {
     for (auto& v : ownedOps_) v.clear();
     ownedView_ = {};
     spdlog::error("native: owned static turned off: {} MISS (a persistent draw judged valid differs from a fresh derivation: a dependency change was not noticed)", miss);
+}
+
+// F15-1 (frame-ownership.md 14.20): the composed-late census per second (the warm-up profile): logged only for seconds that composed an owned op late, with the seconds since the
+// first owned view of the session
+void StaticOps::lateSecondReport() {
+    const auto now = Clock::now();
+    if (lateStart_ == Clock::time_point{}) {
+        lateStart_ = late1sAt_ = now;
+        return;
+    }
+    if (now - late1sAt_ < std::chrono::seconds(1)) return;
+    const LateSecond& L = late1s_;
+    if (L.ops[0] + L.ops[1] != 0) {
+        std::string why;
+        for (std::size_t i = 0; i < kLateCount; ++i) {
+            if (L.why[i] != 0) why += std::format("{}{} {}", why.empty() ? "" : ", ", kLateNames[i], L.why[i]);
+        }
+        std::size_t queued = 0;
+        std::uint64_t built = 0, failed = 0;
+        dev_.variantQueue(queued, built, failed);
+        spdlog::info("native: composed late (1 s) t+{:.0f} s: main {} ops in {} views ({:.1f} / view), cascades {} ops in {} views; {}; variant queue {} (built {}, failed {} run total)",
+                     std::chrono::duration<double>(now - lateStart_).count(), L.ops[0], L.views[0], L.views[0] != 0 ? static_cast<double>(L.ops[0]) / static_cast<double>(L.views[0]) : 0.0,
+                     L.ops[1], L.views[1], why, queued, built, failed);
+    }
+    late1s_ = {};
+    late1sAt_ = now;
 }
 
 void StaticOps::ownedReport() {
@@ -1242,12 +1336,15 @@ void StaticOps::ownedReport() {
         if (w.leftAudit != 0) left += std::format("; read log {}", w.leftAudit);
     }
     const double nv = static_cast<double>(frames);
+    static std::uint64_t texPrepLastStore = 0;
+    const std::uint64_t texPrepLast = texPrepLastStore;
+    texPrepLastStore = dev_.ownedTexturePreps_;
     spdlog::info(
         "native: owned static (5 s): {} main views ({} compacted, {} check frames, {} warm-up, {} gated off), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
-        "(fallbacks: {}), undrawn {}; left to the engine path: {}; replay refusals: {}; scene indirect calls {}; check frames DIFFERING {} draws; side effects: {} touches, {} lightmap binds, {} stream 3; "
+        "(fallbacks: {}; root reasons: {}; textures made ready instead {}), undrawn {}; left to the engine path: {}; replay refusals: {}; scene indirect calls {}; check frames DIFFERING {} draws; side effects: {} touches, {} lightmap binds, {} stream 3; "
         "CPU per main view: compaction {:.1f} us (of it the stamp / record checks {:.1f}), view + windows setup {:.1f} us, material polls + stamps {:.1f} us, build {:.1f} us (the rest: derivation inputs, windows, object records), side effects {:.1f} us, submit {:.1f} us (replayOwned incl. observers)",
         w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
-        w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), w.undrawn, left, refused.empty() ? "none" : refused, dev_.sceneStats().indirectCalls - ownedIndirectLast_,
+        w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), list(w.late, kLateNames, kLateCount), dev_.ownedTexturePreps_ - texPrepLast, w.undrawn, left, refused.empty() ? "none" : refused, dev_.sceneStats().indirectCalls - ownedIndirectLast_,
         recs_ ? recs_->total.differing : 0, w.touches, w.lightmaps, w.stream3, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.selectNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
         static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0);
     ownedIndirectLast_ = dev_.sceneStats().indirectCalls;
@@ -1292,11 +1389,11 @@ void StaticOps::ownedShadowReport() {
     const double nv = static_cast<double>(std::max<std::uint64_t>(1, w.views));
     const std::uint64_t miss = q.scrubMiss + q.checkMiss;
     spdlog::info("native: owned shadows (5 s): {} cascade views ({} compacted, {} check frames, {} warm-up, {} gated off), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
-                 "(fallbacks: {}), undrawn {}; left to the engine path: {}; persistent: {} passes ({} env epoch changes, {} flush failures, {} reserve failures), {} draws: reused {} ({:.1f} %), derived {} ({} rewrote the slot), refused {} "
+                 "(fallbacks: {}; root reasons: {}), undrawn {}; left to the engine path: {}; persistent: {} passes ({} env epoch changes, {} flush failures, {} reserve failures), {} draws: reused {} ({:.1f} %), derived {} ({} rewrote the slot), refused {} "
                  "(table full {}, observer {}), rolling scrub {} draws MISS {}; check frames: {} compared, {} skipped, MISS {}; {} cascade records / {} draws; CPU per cascade view: compaction {:.1f} us, view + windows {:.1f} us, "
                  "material polls {:.1f} us, build {:.1f} us, side effects {:.1f} us, submit {:.1f} us, flush {:.1f} us",
                  w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
-                 w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), w.undrawn, left, q.passes, q.envChanges, q.flushFailed, q.arenaFailed, q.draws, q.reused,
+                 w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), list(w.late, kLateNames, kLateCount), w.undrawn, left, q.passes, q.envChanges, q.flushFailed, q.arenaFailed, q.draws, q.reused,
                  q.draws != 0 ? 100.0 * static_cast<double>(q.reused) / static_cast<double>(q.draws) : 0.0, q.derived + q.scrubbed, q.derivedChanged, q.refused, q.tableFull, q.observerRefused, q.scrubbed, q.scrubMiss,
                  q.checkCompared, q.checkSkipped, q.checkMiss, shadowRecs, shadowDraws, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
                  static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);

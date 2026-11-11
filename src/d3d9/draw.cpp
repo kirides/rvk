@@ -235,6 +235,29 @@ bool Device::prepareTextures() {
     return true;
 }
 
+// F15-1 (frame-ownership.md 14.20): the same per-texture step as prepareTextures, for an owned draw's texture (no draw is being prepared: the record's own texture)
+bool Device::ownedTextureNeedsPrep(const Texture* t) const {
+    if (t == nullptr || t->isNull()) return false;
+    for (Surface* s : rt_) {
+        if (s != nullptr && s->texture() == t) return false;  // (a feedback loop: the derivation refuses it, as before)
+    }
+    if (ds_ != nullptr && ds_->texture() == t) return false;
+    return t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+void Device::ownedPrepTexture(Texture* t) {
+    if (!ownedTextureNeedsPrep(t)) return;
+    const std::uint64_t frame = frameValue();
+    if (t->lastUseFrame_ != frame && !t->isRenderTarget() && !t->isDepth()) {
+        t->prepareForSampling(uploadList());
+    } else {
+        endRendering();
+        t->prepareForSampling(frameList());
+    }
+    t->lastUseFrame_ = frame;
+    ++ownedTexturePreps_;
+}
+
 // The shader's inputs against the declaration, computed once per pair (the declaration and the shader never change)
 const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs) {
     const std::uint64_t declId = decl != nullptr ? decl->id() : 0;

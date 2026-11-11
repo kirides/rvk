@@ -733,6 +733,7 @@ void Device::destroy() {
     if (!created_) {
         return;
     }
+    destroying_.store(true, std::memory_order_release);
     stopVariantWorker();
     stopShaderWorkers();
     game_->waitIdle();
@@ -1995,6 +1996,7 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
     if (state == 2) return s->variants[i].load(std::memory_order_acquire);
     if (state != 0) return rhi::ShaderModule::None;
+    if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (F15-1: a shader worker's key prewarm during destroy() must not restart the workers)
     s->variantState[i].store(1, std::memory_order_release);
     {
         const std::lock_guard lock(variantMutex_);
@@ -2097,10 +2099,24 @@ void Device::variantWorker() {
         }
         ++variantsBuilt_;
         if (viaUber) job.shader->uberSlots.fetch_or(1u << i, std::memory_order_release);
+        {
+            const std::lock_guard lock(shaderMutex_);
+            variantHashes_.emplace(m, std::pair<std::uint64_t, std::uint8_t>{job.shader->hash, static_cast<std::uint8_t>(i)});
+        }
         job.shader->variants[i].store(m, std::memory_order_release);
         job.shader->variantState[i].store(2, std::memory_order_release);
         done();
+        prewarmVariantKeys(job.shader->hash, job.slot);  // F15-1
     }
+}
+
+void Device::variantQueue(std::size_t& waiting, std::uint64_t& built, std::uint64_t& failed) {
+    {
+        const std::lock_guard lock(variantMutex_);
+        waiting = variantJobs_.size() + static_cast<std::size_t>(std::max(variantBusy_, 0));
+    }
+    built = variantsBuilt_.load(std::memory_order_relaxed);
+    failed = variantsFailed_.load(std::memory_order_relaxed);
 }
 
 void Device::stopVariantWorker() {
@@ -2848,7 +2864,8 @@ bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& widt
 
 namespace {
 
-constexpr char kKeysMagic[8] = {'R', 'V', 'K', 'P', 'K', 'E', 'Y', '1'};
+constexpr char kKeysMagic[8] = {'R', 'V', 'K', 'P', 'K', 'E', 'Y', '2'};  // (2: F15-1's variant slots)
+inline std::uint64_t variantKeyOf(std::uint64_t hash, std::uint8_t slot) { return (hash ^ (static_cast<std::uint64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull) * 0xff51afd7ed558ccdull; }
 
 }  // namespace
 
@@ -2872,9 +2889,11 @@ void Device::loadPipelineKeys() {
             if (k.ps != k.vs) {
                 pendingKeys_.emplace(k.ps, keys_.size() - 1);
             }
+            if (k.vsSlot != kBaseModule || k.psSlot != kBaseModule) keyStats_.variantKeysLoaded.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    spdlog::info("d3d9: {} pipelines known from earlier runs (built in the background once their shaders exist)", keys_.size());
+    spdlog::info("d3d9: {} pipelines known from earlier runs ({} of them with variant modules: scene forms, enhancement variants; built in the background once their shaders exist)", keys_.size(),
+                 keyStats_.variantKeysLoaded.load());
 }
 
 void Device::savePipelineKeys() {
@@ -2918,13 +2937,29 @@ void Device::recordPipelineKey(const PipelineDesc& pd) {
     PipelineKey k;
     {
         const std::lock_guard lock(shaderMutex_);
-        const auto v = moduleHashes_.find(pd.vs);
-        const auto p = moduleHashes_.find(pd.fs);
-        if (v == moduleHashes_.end() || p == moduleHashes_.end()) {
+        // (F15-1: a stage's module is the shader's own or one of its variants; a depth-only pipeline has no fragment module: not remembered)
+        const auto side = [&](rhi::ShaderModule m, std::uint64_t& hash, std::uint8_t& slot) {
+            if (const auto b = moduleHashes_.find(m); b != moduleHashes_.end()) {
+                hash = b->second;
+                slot = kBaseModule;
+                return true;
+            }
+            if (const auto v = variantHashes_.find(m); v != variantHashes_.end()) {
+                hash = v->second.first;
+                slot = v->second.second;
+                return true;
+            }
+            return false;
+        };
+        if (!side(pd.vs, k.vs, k.vsSlot)) {
             return;
         }
-        k.vs = v->second;
-        k.ps = p->second;
+        if (pd.fs == rhi::ShaderModule::None) {
+            k.ps = k.vs;
+            k.psSlot = kNoModule;
+        } else if (!side(pd.fs, k.ps, k.psSlot)) {
+            return;
+        }
     }
     std::memcpy(&k.desc, &pd, sizeof(pd));
     k.desc.vs = rhi::ShaderModule::None;
@@ -2933,17 +2968,123 @@ void Device::recordPipelineKey(const PipelineDesc& pd) {
     if (keySet_.emplace(reinterpret_cast<const char*>(&k), sizeof(k)).second) {
         keys_.push_back(k);
         keysDirty_ = true;
+        keyStats_.recorded.fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+// F15-1: the scene forms' pipelines are requested in the background (sceneDecide -> prewarmOncePipeline) while the draw is pending: remembered once per description
+void Device::recordBackgroundKey(const PipelineDesc& pd) {
+    const std::uint64_t h = fnv1a(&pd, sizeof(pd));
+    {
+        const std::lock_guard lock(keysMutex_);
+        if (!backgroundKeys_.insert(h).second) return;
+    }
+    recordPipelineKey(pd);
+}
+
+// F15-1: the known pipeline keys_[index]: its modules (base or variant) resolved; a missing variant is requested and the key waits for it (prewarmVariantKeys)
+bool Device::prewarmKey(std::size_t index) {
+    if (destroying_.load(std::memory_order_acquire)) return true;
+    PipelineKey k;
+    {
+        const std::lock_guard lock(keysMutex_);
+        if (index >= keys_.size() || keysPrewarmed_.contains(index)) return true;
+        k = keys_[index];
+    }
+    std::shared_ptr<Shader> vs, ps;
+    {
+        const std::lock_guard sl(shaderMutex_);
+        const auto v = shaders_.find(k.vs);
+        const auto p = shaders_.find(k.ps);
+        if (v == shaders_.end() || p == shaders_.end()) return true;  // (the shader is gone: nothing to wait for)
+        vs = v->second;
+        ps = p->second;
+    }
+    bool wait = false;
+    const auto module = [&](const std::shared_ptr<Shader>& s, std::uint8_t slot, rhi::ShaderModule& out) {
+        if (slot == kBaseModule) {
+            out = s->module.load(std::memory_order_acquire);
+            return out != rhi::ShaderModule::None;  // (not compiled yet: its own completion prewarms)
+        }
+        if (slot == kNoModule) {
+            out = rhi::ShaderModule::None;
+            return true;
+        }
+        if (slot >= static_cast<std::uint8_t>(VariantSlot::Count)) return false;
+        const std::size_t i = slot;
+        const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
+        if (state == 2) {
+            out = s->variants[i].load(std::memory_order_acquire);
+            return out != rhi::ShaderModule::None;
+        }
+        if (state == 3) return false;  // (failed: no pipeline)
+        // (requested only while the variant's provider is registered: variant() marks a slot without one as failed for good)
+        const VariantSlot vslot = static_cast<VariantSlot>(slot);
+        if (state == 0) {
+            const std::lock_guard lock(variantMutex_);
+            const VariantSlot b = isSceneSlot(vslot) ? sceneBaseSlot(vslot) : vslot;
+            if (b != VariantSlot::Count && !variantProviders_[static_cast<std::size_t>(b)].options) return false;
+        }
+        if (state == 0) keyStats_.variantRequests.fetch_add(1, std::memory_order_relaxed);
+        out = variant(ShaderRef(s.get()), vslot);
+        if (out != rhi::ShaderModule::None) return true;
+        if (s->variantState[i].load(std::memory_order_acquire) == 1) {
+            wait = true;
+            const std::lock_guard lock(keysMutex_);
+            variantWaitKeys_.emplace(variantKeyOf(s->hash, slot), index);
+            keyStats_.waits.fetch_add(1, std::memory_order_relaxed);
+        }
+        return false;
+    };
+    const bool vsOk = module(vs, k.vsSlot, k.desc.vs);
+    const bool psOk = module(ps, k.psSlot, k.desc.fs);
+    if (!vsOk || !psOk) return !wait;
+    {
+        const std::lock_guard lock(keysMutex_);
+        if (!keysPrewarmed_.insert(index).second) return true;
+    }
+    game_->prewarmPipeline(k.desc);
+    ((k.vsSlot != kBaseModule || k.psSlot != kBaseModule) ? keyStats_.variantPrewarmed : keyStats_.basePrewarmed).fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+// F15-1: a variant module of `shaderHash` was built (variant worker thread): the known keys that waited for it
+void Device::prewarmVariantKeys(std::uint64_t shaderHash, VariantSlot slot) {
+    std::vector<std::size_t> ready;
+    {
+        const std::lock_guard lock(keysMutex_);
+        auto [b, e] = variantWaitKeys_.equal_range(variantKeyOf(shaderHash, static_cast<std::uint8_t>(slot)));
+        for (auto it = b; it != e; ++it) ready.push_back(it->second);
+        variantWaitKeys_.erase(b, e);
+    }
+    for (const std::size_t i : ready) (void)prewarmKey(i);  // (a key still missing its other variant waits for that one too)
 }
 
 // a shader was created (any thread): queue the known pipelines whose shaders now both exist
 void Device::prewarmPipelines(std::uint64_t shaderHash) {
     std::vector<PipelineKey> ready;
+    std::vector<std::size_t> variantKeys;
     {
         const std::lock_guard lock(keysMutex_);
         auto [b, e] = pendingKeys_.equal_range(shaderHash);
         for (auto it = b; it != e;) {
             const PipelineKey& k = keys_[it->second];
+            if (k.vsSlot != kBaseModule || k.psSlot != kBaseModule) {
+                // F15-1: a key with a variant module: once both shaders exist, its variants are requested now (at load, not at the first draw)
+                const std::uint64_t other = k.vs == shaderHash ? k.ps : k.vs;
+                bool otherReady = other == shaderHash;
+                if (!otherReady) {
+                    const std::lock_guard sl(shaderMutex_);
+                    otherReady = shaders_.contains(other);
+                }
+                if (otherReady) {
+                    variantKeys.push_back(it->second);
+                    it = pendingKeys_.erase(it);
+                } else {
+                    ++it;
+                }
+                continue;
+            }
             const std::uint64_t other = k.vs == shaderHash ? k.ps : k.vs;
             bool otherReady = other == shaderHash;
             if (!otherReady) {
@@ -2972,6 +3113,10 @@ void Device::prewarmPipelines(std::uint64_t shaderHash) {
             if (k.desc.vs == rhi::ShaderModule::None || k.desc.fs == rhi::ShaderModule::None) continue;  // not compiled yet: its own completion prewarms
         }
         game_->prewarmPipeline(k.desc);
+        keyStats_.basePrewarmed.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (earlyForms_) {
+        for (const std::size_t i : variantKeys) (void)prewarmKey(i);
     }
 }
 
