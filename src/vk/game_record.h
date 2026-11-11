@@ -91,6 +91,7 @@ public:
     void prewarmOncePipeline(const PipelineDesc& desc);
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
     void saveCache();
+    void stopPipelineBuilds();  // the pipeline cache's prewarm / optimiser threads joined (device teardown, before the modules go)
     rhi::PipelineStats stats() const;
 
     // rendering scope: attachments transitioned / viewed at their mip+layer, secondary contents mode when threaded

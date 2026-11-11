@@ -594,6 +594,10 @@ public:
     virtual void preparePipelineShader(ShaderModule module, VkShaderStageFlagBits stage) = 0;
     // writes the backend's pipeline cache blob to its file, on a background thread when built since the last save
     virtual void savePipelineCache() = 0;
+    // device teardown: the background pipeline builders (Vulkan prewarm workers + the library optimiser, D3D12 PSO threads) are stopped and joined, their queues
+    // dropped, a build in flight finished; later prewarm requests are ignored. Called before the shader modules are destroyed (a worker still inside
+    // vkCreateGraphicsPipelines with a destroyed module crashed amdvlk64 / hung the exit). Idempotent.
+    virtual void stopPipelineBuilds() = 0;
     virtual PipelineStats pipelineStats() = 0;
 
     // A rendering scope: the backend records its begin (attachments transitioned and viewed at mip/layer; secondary

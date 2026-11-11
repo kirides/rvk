@@ -42,6 +42,7 @@ struct Result {
     std::string log;                   // compiler messages (errors on failure, warnings otherwise)
     bool fromCache = false;
     bool dxilSigned = false;           // Target::Dxil: the container carries a non-zero validator digest (dxil.dll signed it)
+    bool cancelled = false;            // the calling thread's cancel flag (setThreadCancel) was raised: no payload, the compile may still finish in the background
     bool ok() const { return !words.empty() || !bytes.empty(); }
 };
 
@@ -66,6 +67,12 @@ std::string_view version();
 // Compiles one request (thread-safe; every call makes its own compiler instance). The result of a failed compile has an empty
 // payload and the compiler's messages in `log`.
 Result compile(const Request& request);
+
+// A cancel flag for the compiles of the calling thread (nullptr = none, the default). With one, compile() runs the compile on a helper thread and returns a
+// `cancelled` result as soon as the flag is raised; the abandoned compile finishes on its own (it holds only its own copy of the request; its disk cache
+// write is atomic) or dies with the process. For worker pools that must stop at once (the device's shader variant workers at teardown: a cold ubershader
+// variant compiles for up to ~20 s, and DXC has no cancel). The flag must outlive every compile of the thread; DXC's own state is process-wide.
+void setThreadCancel(const std::atomic<bool>* flag);
 
 // The argument list compile() hands DXC for a request (after the source file name): the shared set both backends and the offline
 // checks use; exposed for tools/tests (rvk_shadertool dxc, the dxc.exe cross check).
