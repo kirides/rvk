@@ -297,6 +297,36 @@ bool IllumTable::refresh(std::uint32_t slot, const void* illum) {
     return changed;
 }
 
+void IllumTable::poll(std::uint32_t slot, const void* illum) {
+    // (c) once per frame, for the objects drawn: the object's bytes against the record. A changed f alone = `f`; anything else changed without a
+    // hook = `poll` (objects the engine rewrites in place outside eCIlluminated_PS::UpdateIllumination, e.g. per-batch illumination copies).
+    // The list pointer (+0) is compared with the key of the record's set (14.30: an object whose list pointer was re-pointed without SetLightSet,
+    // e.g. by an illumination copy, kept the old set's record while its draws read the new list: the light spell's set at its spawn)
+    if (illumFChecked_[slot] == frame_ + 1) return;
+    illumFChecked_[slot] = frame_ + 1;
+    const IllumRecord& rec = illums_.shadow()[slot];
+    std::uint8_t raw[kIllumRawBytes];
+    if (!engine::safeRead(illum, raw, sizeof(raw))) return;
+    const void* list = nullptr;
+    std::memcpy(&list, raw, sizeof(list));
+    const std::uint32_t set = rec.info[1];
+    const void* recList = set < setUsed_ ? setKey_[set] : nullptr;
+    bool onlyF = list == recList, differs = list != recList;
+    for (std::uint32_t o = 8; o < kIllumRawBytes; ++o) {
+        if (raw[o] != rec.raw[o]) {
+            differs = true;
+            if (o >= 12) onlyF = false;
+        }
+    }
+    if (!differs || !refresh(slot, illum)) return;
+    if (list != recList) {
+        if (stats_.uploadList++ < 4)
+            spdlog::info("native: illum table: illum {} slot {}: list pointer {} differs from the record's set (slot {}, list {}) without SetLightSet: re-read", illum, slot, list, set, recList);
+    }
+    else if (onlyF) ++stats_.uploadF;
+    else ++stats_.uploadPoll;
+}
+
 std::uint32_t IllumTable::lookupOrCreate(const void* illum) {
     const auto it = illumSlot_.find(illum);
     if (it != illumSlot_.end()) return it->second;
@@ -337,13 +367,14 @@ void IllumTable::onSetLightSet(const void* ps) {
     else ++stats_.setNoChange;
 }
 
-void IllumTable::onSetUpdated(const void* set) {
+void IllumTable::onSetUpdated(const void* set, bool fromLight) {
     if (!active_ || set == nullptr) return;
     const void* list = static_cast<const std::uint8_t*>(set) + 0x10;
     std::lock_guard lock(mutex_);
     for (std::uint32_t i = 0; i < setUsed_; ++i) {
         if (setKey_[i] != list) continue;
         setSeen_[i] = frame_;
+        if (fromLight) ++stats_.lightUpdates;
         LightSetRecord n = sets_.shadow()[i];
         if (!readSetInto(list, n)) return;
         if (std::memcmp(n.raw, sets_.shadow()[i].raw, sizeof(n.raw)) != 0) {
@@ -351,6 +382,7 @@ void IllumTable::onSetUpdated(const void* set) {
             sets_.shadow()[i] = n;
             sets_.mark(i);
             ++stats_.uploadSetData;
+            if (fromLight) ++stats_.uploadLightData;
         }
         return;
     }
@@ -399,26 +431,7 @@ std::uint32_t IllumTable::checkDraw(const void* illum, const ComposeParams& p, c
     }
     illumSeen_[slot] = frame_;
     IllumRecord& rec = illums_.shadow()[slot];
-    // (c) once per frame, for the objects drawn: the object's bytes against the record. A changed f alone = `f`; anything else changed without a
-    // hook = `poll` (objects the engine rewrites in place outside eCIlluminated_PS::UpdateIllumination, e.g. per-batch illumination copies)
-    if (illumFChecked_[slot] != frame_ + 1) {
-        illumFChecked_[slot] = frame_ + 1;
-        std::uint8_t raw[kIllumRawBytes];
-        if (engine::safeRead(illum, raw, sizeof(raw))) {
-            bool onlyF = true, differs = false;
-            for (std::uint32_t o = 8; o < kIllumRawBytes; ++o) {
-                if (raw[o] != rec.raw[o]) {
-                    differs = true;
-                    if (o < 8 || o >= 12) onlyF = false;
-                }
-            }
-            if (differs) {
-                refresh(slot, illum);
-                if (onlyF) ++stats_.uploadF;
-                else ++stats_.uploadPoll;
-            }
-        }
-    }
+    poll(slot, illum);  // (c): the once-per-frame byte poll
     const std::uint32_t setSlot = rec.info[1];
     if (setSlot >= setUsed_ || setKey_[setSlot] == nullptr) {
         ++stats_.unchecked;
@@ -455,25 +468,7 @@ bool IllumTable::pollDraw(const void* illum, std::uint32_t expectSlot) {
     if (it == illumSlot_.end() || it->second != expectSlot) return false;
     const std::uint32_t slot = it->second;
     illumSeen_[slot] = frame_;
-    if (illumFChecked_[slot] != frame_ + 1) {
-        illumFChecked_[slot] = frame_ + 1;
-        const IllumRecord& rec = illums_.shadow()[slot];
-        std::uint8_t raw[kIllumRawBytes];
-        if (engine::safeRead(illum, raw, sizeof(raw))) {
-            bool onlyF = true, differs = false;
-            for (std::uint32_t o = 8; o < kIllumRawBytes; ++o) {
-                if (raw[o] != rec.raw[o]) {
-                    differs = true;
-                    if (o < 8 || o >= 12) onlyF = false;
-                }
-            }
-            if (differs) {
-                refresh(slot, illum);
-                if (onlyF) ++stats_.uploadF;
-                else ++stats_.uploadPoll;
-            }
-        }
-    }
+    poll(slot, illum);
     return true;
 }
 
@@ -486,25 +481,8 @@ std::uint32_t IllumTable::ensureSlot(const void* illum) {
         return kNoSlot;
     }
     illumSeen_[slot] = frame_;
-    if (illumFChecked_[slot] != frame_ + 1) {
-        illumFChecked_[slot] = frame_ + 1;
-        const IllumRecord& rec = illums_.shadow()[slot];
-        std::uint8_t raw[kIllumRawBytes];
-        if (engine::safeRead(illum, raw, sizeof(raw))) {
-            bool onlyF = true, differs = false;
-            for (std::uint32_t o = 8; o < kIllumRawBytes; ++o) {
-                if (raw[o] != rec.raw[o]) {
-                    differs = true;
-                    if (o < 8 || o >= 12) onlyF = false;
-                }
-            }
-            if (differs) {
-                refresh(slot, illum);
-                if (onlyF) ++stats_.uploadF;
-                else ++stats_.uploadPoll;
-            }
-        }
-    }
+    poll(slot, illum);
+
     return slot;
 }
 
@@ -588,10 +566,10 @@ void IllumTable::report() {
     std::uint32_t liveSets = 0;
     for (std::uint32_t i = 0; i < setUsed_; ++i) liveSets += setKey_[i] != nullptr ? 1u : 0u;
     spdlog::info(
-        "native: illum table (5 s): {} records (peak {}, slots {}), {} sets; uploads: new {}, dirty {}, set {}, f {}, poll {}, set data {}; hook without change: dirty {}, set {}; freed {} "
+        "native: illum table (5 s): {} records (peak {}, slots {}), {} sets; uploads: new {}, dirty {}, set {}, f {}, poll {}, list {} (owned ops refused for it {}), set data {} (moving lights: {} re-reads, {} changed); hook without change: dirty {}, set {}; freed {} "
         "(destroyed {}, idle {}, sets {}); {:.1f} records / {:.2f} KiB per frame (GPU buffers: {} + {} records flushed); draws checked {} (unchecked {}) DIFFERING {}; "
         "verify: illums {} read-backs ({} slots) DIFFERING {}, sets {} read-backs DIFFERING {}; overflow illum {} set {} gpu {}, read failures {}",
-        liveIllums_, peakIllums_, illumUsed_, liveSets, stats_.uploadNew, stats_.uploadDirty, stats_.uploadSet, stats_.uploadF, stats_.uploadPoll, stats_.uploadSetData, stats_.dirtyNoChange,
+        liveIllums_, peakIllums_, illumUsed_, liveSets, stats_.uploadNew, stats_.uploadDirty, stats_.uploadSet, stats_.uploadF, stats_.uploadPoll, stats_.uploadList, stats_.liveListMoved, stats_.uploadSetData, stats_.lightUpdates, stats_.uploadLightData, stats_.dirtyNoChange,
         stats_.setNoChange, stats_.freed, stats_.destroyed, stats_.idleFreed, stats_.setsFreed, static_cast<double>(slots - lastSlots_) / static_cast<double>(frames),
         static_cast<double>(bytes - lastBytes_) / 1024.0 / static_cast<double>(frames), is.slotsUploaded, ss.slotsUploaded, stats_.checked, stats_.unchecked, stats_.differing,
         is.verifyDone, is.verifySlots, is.verifyBad, ss.verifyDone, ss.verifyBad, stats_.illumOverflow, stats_.setOverflow, is.overflow + ss.overflow, stats_.readFailed);

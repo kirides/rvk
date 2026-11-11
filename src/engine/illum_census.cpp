@@ -35,6 +35,7 @@ using SetFn = void (*)(void*, void*);
 Hook<BoolFn> g_setUpdate;
 Hook<VoidFn> g_psUpdate, g_admin, g_psDestroy;
 Hook<SetFn> g_setLightSet;
+Hook<VoidFn> g_dynLightUpdate;
 
 using Ptrs = std::unordered_set<const void*>;
 
@@ -114,6 +115,22 @@ bool detourSetUpdate(void* self) {
     const bool r = g_setUpdate.original(self);
     if (g_table) gpuscene::illumtable().onSetUpdated(self);
     return r;
+}
+
+// eCDynamicLight_PS::UpdateIllumination (a dynamic light moved / changed: OnUpdatedWorldMatrix): rebuilds the lists of the light's sets in place with its own
+// inlined loop (no eCLightSet::UpdateIllumination call). Without this hook a moving light (the light spell) left the set records at the bytes of the last
+// UpdateLightSets while the frame's draws read the moved light: table / lighting images DIFFERING, owned draws lit from the stale position (14.30)
+void detourDynLightUpdate(void* self) {
+    g_dynLightUpdate.original(self);
+    if (!g_table || self == nullptr) return;
+    constexpr std::size_t kSets = 0x30, kSetCount = 0x38;
+    const std::uint8_t* const* sets = nullptr;
+    std::int32_t n = 0;
+    if (!readAtSafe(self, kSets, sets) || !readAtSafe(self, kSetCount, n) || sets == nullptr || n <= 0 || n > 64) return;
+    for (std::int32_t i = 0; i < n; ++i) {
+        const void* set = nullptr;
+        if (readAtSafe(sets, static_cast<std::size_t>(i) * sizeof(void*), set) && set != nullptr) gpuscene::illumtable().onSetUpdated(set, true);
+    }
 }
 
 void detourPsUpdate(void* self) {
@@ -197,6 +214,11 @@ bool install() {
     ok &= g_psUpdate.install("eCIlluminated_PS::UpdateIllumination", reinterpret_cast<VoidFn>(s.illumPsUpdateIllumination), &detourPsUpdate);
     ok &= g_setLightSet.install("eCIlluminated_PS::SetLightSet", reinterpret_cast<SetFn>(s.illumPsSetLightSet), &detourSetLightSet);
     ok &= g_admin.install("eCIlluminationAdmin::UpdateLightSets", reinterpret_cast<VoidFn>(s.illumAdminUpdateLightSets), &detourAdmin);
+    // RVK_DYNLIGHT_HOOK=0: the hook left out (A/B of the 14.30 defect: moving lights' set rebuilds unseen)
+    char dl[8]{};
+    const bool dynHook = !(GetEnvironmentVariableA("RVK_DYNLIGHT_HOOK", dl, sizeof(dl)) != 0 && dl[0] == '0');
+    if (!dynHook) spdlog::warn("engine: illum table: the eCDynamicLight_PS::UpdateIllumination hook is left out (RVK_DYNLIGHT_HOOK=0)");
+    if (table && dynHook) ok &= g_dynLightUpdate.install("eCDynamicLight_PS::UpdateIllumination", reinterpret_cast<VoidFn>(s.dynLightUpdateIllumination), &detourDynLightUpdate);
     if (table) ok &= g_psDestroy.install("eCIlluminated_PS::Destroy", reinterpret_cast<VoidFn>(s.illumPsDestroy), &detourPsDestroy);
     g_on = ok && census;
     g_table = ok && table;
