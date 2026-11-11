@@ -203,7 +203,15 @@ bool StaticOps::orderedPlace(const Op& op) {
         ++ordW_.composed[li];
         return false;
     };
-    if (const int v = orderedValid(op, rec); v >= 0) return refuse(v);
+    const auto lap = [&](std::uint64_t& acc, Clock::time_point& from) {
+        const auto now = Clock::now();
+        acc += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - from).count());
+        from = now;
+    };
+    auto tl = t0;
+    const int valid = orderedValid(op, rec);
+    lap(ordW_.validNs, tl);
+    if (valid >= 0) return refuse(valid);
     if (!orderedPassBegin(op, rec) || (rec.dbvp && !ordPass_.okDb)) return refuse(kOwView);
     const std::size_t vw = rec.dbvp ? 1 : 0;
     const std::uint32_t slot = ordPass_.slot[vw];
@@ -253,7 +261,9 @@ bool StaticOps::orderedPlace(const Op& op) {
     const std::uint64_t obs0 = persistStats().observerRefused, full0 = persistStats().tableFull;
     const std::size_t before = ordItems_.size();
     ownedItems_.swap(ordItems_);  // (ownedDrawOpPersistent appends to ownedItems_: here the run's list)
+    lap(ordW_.prepNs, tl);
     bool done = ownedDrawOpPersistent(op, rec, ordPass_.viewWin[vw], ordRun_.slot, ordRun_.epoch, 16, scrubPhase, why);
+    lap(ordW_.drawNs, tl);
     ownedItems_.swap(ordItems_);
     persistEnvIndex_ = -1;
     dev_.setOwnedBulkSuspended(false);
@@ -285,6 +295,7 @@ bool StaticOps::orderedPlace(const Op& op) {
     dev_.setOrderedPending(true);  // (anything else the device records queues the run first)
     // the engine's slot is skipped: its side effects at the op's place (BindLightmaps, the touches)
     ownedSideEffects(rec);
+    lap(ordW_.sideNs, tl);
     ++ordW_.owned[li];
     ++ordTotalOwned_;
     ordW_.draws[li] += drawn;
@@ -365,9 +376,10 @@ void StaticOps::orderedReport() {
                              w.noRecord[l], w.notOrdered[l], w.recordsBuilt[l], ex.empty() ? "none" : ex);
     }
     const double nv = static_cast<double>(std::max<std::uint64_t>(1, ownedW_.views));
-    spdlog::info("native: owned ordered (5 s): {}; {} runs, {} ordered flushes ({} buckets = indirect commands, {} refused, {} draws lost), {} list segments; CPU per main view {:.1f} us at the ops + {:.1f} us in the run flushes", lists, w.runs, w.flushes,
+    spdlog::info("native: owned ordered (5 s): {}; {} runs, {} ordered flushes ({} buckets = indirect commands, {} refused, {} draws lost), {} list segments; CPU per main view {:.1f} us at the ops (stamps {:.1f}, setup {:.1f}, draws {:.1f}, side effects {:.1f}) + {:.1f} us in the run flushes", lists, w.runs, w.flushes,
                  w.buckets, w.flushFailed, w.lostDraws, w.passes,
-                 static_cast<double>(w.ns) / nv / 1000.0, static_cast<double>(w.flushNs) / nv / 1000.0);
+                 static_cast<double>(w.ns) / nv / 1000.0, static_cast<double>(w.validNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.drawNs) / nv / 1000.0,
+                 static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.flushNs) / nv / 1000.0);
     w = {};
 }
 

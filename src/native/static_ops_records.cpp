@@ -729,6 +729,10 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
             R.viewWin = ownedWin_;
             R.viewWinValid = true;
         }
+        // (a window the list's first draw was not offered - an instance-rate draw gets no VS window 1 - is taken from the first draw that has it)
+        for (const auto [st, wi] : {std::pair<int, int>{0, 0}, {0, 1}, {1, 0}}) {
+            if (R.viewWin.w[st][wi].kind == d3d9::OwnedWindows::Kind::None && ownedWin_.w[st][wi].kind != d3d9::OwnedWindows::Kind::None) R.viewWin.w[st][wi] = ownedWin_.w[st][wi];
+        }
         dw.w[0][0] = R.viewWin.w[0][0];
         dw.w[1][0] = R.viewWin.w[1][0];
         dw.w[0][1] = r.vs1Offered ? R.viewWin.w[0][1] : d3d9::OwnedWindows::Win{};
@@ -826,6 +830,17 @@ void StaticOps::recEnd(const Op& op) {
         if (pe == packets_.end() || !pe->second.cd.valid || !pe->second.desc || !packetSameDesc(d, *pe->second.desc)) {
             ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
             if (R.ordered) ++ordW_.notRetained[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2];
+            if (R.ordered) {
+                // (diagnostics: each material once, after the first world frames: water's draws are the enhanced water's replacer by design)
+                static std::vector<std::string> seenNames;
+                const std::string mname = d.tagMaterialName != nullptr ? d.tagMaterialName : "";
+                if (dev_.stats().frames > 600 && seenNames.size() < 24 && std::find(seenNames.begin(), seenNames.end(), mname) == seenNames.end()) {
+                    seenNames.push_back(mname);
+                    spdlog::info("native: owned ordered: {} draw {} not retained (water {}): packet {}, valid {}, same description {}, material '{}'", describe(op), k, d.tagWater, pe != packets_.end(),
+                                 pe != packets_.end() && pe->second.cd.valid, pe != packets_.end() && pe->second.desc && packetSameDesc(d, *pe->second.desc),
+                                 d.tagMaterialName != nullptr ? d.tagMaterialName : "");
+                }
+            }
             R.map.erase(R.key);
             R.active = false;
             w.buildNs += ns(t0, tnow());
@@ -862,7 +877,6 @@ void StaticOps::recEnd(const Op& op) {
             // (setOwnedFor's rule: no window 1 / 2 for a draw with an instance-rate stream on ANY stream; F9 / F14: the alpha list's herbs carry one on stream 1)
             bool inst = false;
             for (const auto& st : d.streams) inst = inst || (st.buffer != nullptr && st.freq != 1);
-            if (inst && orderedGroupNow(op_)) inst = d.streams[0].buffer != nullptr && d.streams[0].freq != 1;  // (setOwnedFor's rule for the alpha / refracted ops)
             r.vs1Offered = actorRec ? true : ownedObjects_ && op_ != nullptr && op_->entity != nullptr && !inst;
         }
         r.tagSubMesh = d.tagSubMesh;

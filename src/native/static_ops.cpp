@@ -1291,9 +1291,6 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
                                 (ownedShadowsOn() && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
         bool instanced = false;
         for (const auto& s : d.streams) instanced = instanced || (s.buffer != nullptr && s.freq != 1);
-        // F9 / F14: the alpha list's fading herbs bind stream 3 at instance rate (0x80000001) while stream 0 is not instanced (D3D9: no instancing, one instance): they are
-        // plain draws, their c31..c35 are the entity's (the check frames compare)
-        if (instanced && orderedGroupNow(op_)) instanced = d.streams[0].buffer != nullptr && d.streams[0].freq != 1;
         if (actorDraw && !instanced) {
             d3d9::OwnedWindows::Win bw;
             bool served = false;

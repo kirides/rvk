@@ -1645,7 +1645,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         // draws): no batch, but scene forms for the ordered owned path (drawn at its op's place, never regrouped)
         // (F2f's instance-list draws too: one render instance, not hardware-instanced, while native.owned_instances gives them the static meshes' scene forms)
         const bool instList = sceneInstances_ && k == draws::Kind::InstancedMesh && (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0 && (streams_[0].freq & STREAMSOURCE_INSTANCEDATA) == 0;
-        orderedNow_ = sceneOrdered_ && !packet_.batchable && (k == draws::Kind::StaticMesh || k == draws::Kind::Refracted || instList) && phase.view == scene::View::Main &&
+        // (no stream at instance rate: an indirect scene draw's firstInstance is its record index, an instance-rate attribute would be read at that index (out of its buffer);
+        // the alpha list's fading herbs bind stream 3 with 0x80000001)
+        bool instRate = false;
+        for (std::uint32_t i = 0; i < 4; ++i) instRate = instRate || (streams_[i].buffer != nullptr && (streams_[i].freq & STREAMSOURCE_INSTANCEDATA) != 0);
+        orderedNow_ = sceneOrdered_ && !packet_.batchable && !instRate && (k == draws::Kind::StaticMesh || k == draws::Kind::Refracted || instList) && phase.view == scene::View::Main &&
                       (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::Alpha || phase.pass == scene::Pass::Refracted) && !replaced && tint == 0 &&
                       customVertices_ == 0 && geom.indexed && !geom.userPointer;
     }

@@ -602,7 +602,12 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     if (frameBlock.null() || shadow == nullptr) return false;
     for (const OwnedItem& it : items) {
         // (every address the shaders will read from the slot: it must hold a written record with a block address and its draw must be a scene draw of ours)
-        if (it.cd == nullptr || it.slot >= slotCount || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 || shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == GamePipeline::None) {
+        // (F9 / F14, GPU safety: an ordered draw with an instance-rate vertex stream would read it at firstInstance = the record's list index: out of its buffer)
+        bool instRate = false;
+        if (it.cd != nullptr && it.cd->ordered) {
+            for (std::uint32_t b = 0; b < it.cd->vi.bindingCount && b < rhi::kMaxVertexBindings; ++b) instRate = instRate || it.cd->vi.bindings[b].perInstance != 0;
+        }
+        if (it.cd == nullptr || instRate || it.slot >= slotCount || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 || shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == GamePipeline::None) {
             ++ownedPersistStats.refused;
             return false;
         }

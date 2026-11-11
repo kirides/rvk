@@ -2288,6 +2288,40 @@ mov oC0, r0
                 bad(refO, pr, "a pending run queued before the next normal draw");
             }
             std::printf("  owned ordered: four blended draws in A B A B order: ordered flush = the normal draws, unordered (merged) flush differs in %u bytes\n", nd);
+            // GPU safety (the device loss of 2026-11-11, frame-ownership.md 14.20): a blended draw with a stream bound at instance rate (the alpha list's herbs: stream 3 at
+            // 0x80000001) must NOT get the ordered scene forms: the indirect draw's firstInstance is its record index, the instance-rate attribute would be read there
+            {
+                beginO();
+                dev.setSceneIssue(true);
+                dev.setStreamSource(3, vbo.get(), 0, sizeof(Vertex));
+                dev.setStreamSourceFreq(3, STREAMSOURCE_INSTANCEDATA | 1u);
+                dev.setPixelShader(psOf(0));
+                Device::CachedDraw ci;
+                dev.beginCapture(&ci);
+                dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+                dev.endCapture();
+                dev.setStreamSourceFreq(3, 1u);
+                dev.setStreamSource(3, nullptr, 0, 0);
+                end("ownedo_instrate");
+                if (ci.ordered || ci.scenePipeline2 != GamePipeline::None) {
+                    std::printf("  FAIL owned ordered: a draw with an instance-rate stream got the ordered scene forms (ordered %d, v2 pipeline %llu)\n", ci.ordered,
+                                static_cast<unsigned long long>(ci.scenePipeline2));
+                    ++g_failures;
+                }
+                // and the flush's own guard refuses such an item even if it were marked ordered
+                Device::CachedDraw forged = cdo[0];
+                forged.vi.bindingCount = std::max<std::uint32_t>(forged.vi.bindingCount, 2);
+                forged.vi.bindings[1].perInstance = 1;
+                std::vector<Device::OwnedItem> items = {{&forged, dev.ownedBucketKey(forged, 3), oslots[0]}};
+                Device::OwnedArena arena;
+                beginO();
+                const bool refused = dev.ownedReserve(1, arena) && !dev.ownedFlush(items, arena, 3, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity, true);
+                end("ownedo_instrate_guard");
+                if (!refused) {
+                    std::printf("  FAIL owned ordered: the flush took an ordered item with an instance-rate binding\n");
+                    ++g_failures;
+                }
+            }
             for (const std::uint32_t s : oslots) tab.release(s);
             // the COMPOSED scene forms in the solid pass: opaque draws (batchable: they wait in the batch with their records) and blended ones (ordered: recorded alone, after
             // the batch) interleaved over the same pixels; the result must be the normal draws' (a blended draw's record joining the batch's record list, or the batch
