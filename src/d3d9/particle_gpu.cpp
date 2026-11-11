@@ -128,4 +128,16 @@ void expand(const OpConsts& k, const Record& r, std::uint32_t corner, std::uint8
     std::memcpy(out + 0x20, uv, 16);
 }
 
+void expandStrip(const float a[4], const float b[4], const StripRecord& r, std::uint8_t out[0x20]) {
+    // bCFloatAlphaColor: t = B; t.Sub(A); t.Multiply(u); t.Add(A) per channel (r, g, b, a); the vertex colour's alpha x the segment's factor
+    float c[4];
+    for (int i = 0; i < 4; ++i) c[i] = (b[i] - a[i]) * r.t + a[i];
+    c[3] = c[3] * r.alpha;
+    const std::uint32_t argb = argbOf(c[0], c[1], c[2], c[3]);
+    const float uv[4] = {r.t, r.side, r.t, r.side};
+    std::memcpy(out, r.pos, 12);
+    std::memcpy(out + 0xc, &argb, 4);
+    std::memcpy(out + 0x10, uv, 16);
+}
+
 }  // namespace rvk::d3d9::particle

@@ -1963,7 +1963,7 @@ private:
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
     std::unordered_map<std::uint64_t, std::shared_ptr<Shader>> particleVs_;  // F11: (engine vertex shader, kind, declaration) -> its expansion form (null: refused)
     std::unordered_map<std::uint64_t, const char*> particleVsWhy_;
-    std::unique_ptr<VertexDecl> particleDecl_[2];
+    std::unique_ptr<VertexDecl> particleDecl_[3];
     rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash, bool half16 = false);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
     void resetUberVariants();  // S-1a: debug.ubershader toggled at run time: every material pixel shader's variants are built again in the new form

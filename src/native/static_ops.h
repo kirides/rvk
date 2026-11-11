@@ -561,6 +561,8 @@ private:
         std::uint64_t ops = 0, quads = 0, recordBytes = 0, cpuOps = 0, cpuQuads = 0, cached = 0;
         std::uint64_t twinVertices = 0, twinExact = 0, twinDiffer = 0, compares = 0;
         std::uint64_t rainOps = 0, rainDrops = 0, rainCpuOps = 0;  // the precipitation (sky billboard records)
+        std::uint64_t stripOps = 0, stripVertices = 0, stripCpuOps = 0;  // the strips (vertex records)
+        std::string stripWhy;
         std::string rainWhy;
         float twinMaxAbs = 0.0f;
         std::string why;

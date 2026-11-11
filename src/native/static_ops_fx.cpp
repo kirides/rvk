@@ -164,13 +164,28 @@ StaticOps::Skip StaticOps::composeStrip(const Op& op) {
     zeroColor(c1);
     g_color.alphaCtor(a.b, ps + 0x20, get<float>(ps, 0x38));
     g_color.alphaCtor(b.b, ps + 0x40, get<float>(ps, 0x58));
-    std::vector<std::uint8_t> vb(static_cast<std::size_t>(segments) * 2 * kStripStride);
+    // F11 (native.own_particles): the strip's vertex records (position, u / v, the segment's alpha factor, the side) for the GPU form; the CPU vertices stay the fallback
+    const int ownMode = g_ != nullptr && !g_->compare ? ownParticlesMode() : 0;
+    std::vector<std::uint8_t> recs(ownMode != 0 ? static_cast<std::size_t>(segments) * 2 * d3d9::particle::kStripRecordStride : 0);
+    std::vector<std::uint8_t> vb(static_cast<std::size_t>(segments) * 2 * kStripStride);  // (also On: the fallback of a strip without a GPU form; strips are rare)
     float u = 0.0f, v = 0.0f;
     for (std::int32_t i = 0; i < segments; ++i) {
         const std::uint8_t* s = seg.data() + static_cast<std::size_t>(i) * kSegmentStride;
         float f[9];
         std::memcpy(f, s, sizeof(f));
         const float du = f[6] / lenU, dv = f[7] / lenV;
+        if (ownMode != 0) {
+            d3d9::particle::StripRecord r[2];
+            std::memcpy(r[0].pos, &f[0], 12);
+            r[0].t = u;
+            r[0].alpha = f[8];
+            r[0].side = 0.0f;
+            std::memcpy(r[1].pos, &f[3], 12);
+            r[1].t = v;
+            r[1].alpha = f[8];
+            r[1].side = 1.0f;
+            std::memcpy(recs.data() + static_cast<std::size_t>(i) * 2 * d3d9::particle::kStripRecordStride, r, sizeof(r));
+        }
         g_color.alphaCopy(t.b, b.b);
         g_color.sub(t.b, a.b);
         g_color.multiply(t.b, u);
@@ -218,13 +233,87 @@ StaticOps::Skip StaticOps::composeStrip(const Op& op) {
     g.primType = static_cast<std::uint32_t>(dd.type);
     const std::size_t before = drawCount_;
     if (const Skip k = nonOpPasses(shader, nullptr, 0, g, get<std::int32_t>(ps, 0xa4)); k != Skip::None) return k;
-    if (vb.size() > kOwnVbBytes) return Skip::Unreadable;
+    if (vb.size() > kOwnVbBytes || recs.size() > kOwnVbBytes) return Skip::Unreadable;
     for (std::size_t i = before; i < drawCount_; ++i) {
         sc::DrawDesc& x = *draws_[i];
         x.indexed = false;
         x.indices = nullptr;
         x.vertexStride = kStripStride;
         x.vertexBytes = vb;
+    }
+    if (ownMode != 0 && drawCount_ > before) {
+        // the colours A / B (c232 / c233) as bCFloatAlphaColor holds them (r +8, g +0xc, b +0x10, a +0x18)
+        float ca[4], cb[4];
+        std::memcpy(ca, a.b + 8, 12);
+        ca[3] = a.alpha();
+        std::memcpy(cb, b.b + 8, 12);
+        cb[3] = b.alpha();
+        if (ownMode == 2) {
+            // the C++ twin of rvkStripExpand against the engine-rule vertices
+            for (std::int32_t k = 0; k < 2 * segments; ++k) {
+                d3d9::particle::StripRecord r;
+                std::memcpy(&r, recs.data() + static_cast<std::size_t>(k) * d3d9::particle::kStripRecordStride, sizeof(r));
+                std::uint8_t mine[kStripStride];
+                d3d9::particle::expandStrip(ca, cb, r, mine);
+                ++ptWindow_.twinVertices;
+                if (std::memcmp(mine, vb.data() + static_cast<std::size_t>(k) * kStripStride, kStripStride) == 0) {
+                    ++ptWindow_.twinExact;
+                } else {
+                    ++ptWindow_.twinDiffer;
+                    if (ptTwinLogged_ < 8) {
+                        ++ptTwinLogged_;
+                        std::uint32_t x0, x1;
+                        std::memcpy(&x0, mine + 0xc, 4);
+                        std::memcpy(&x1, vb.data() + static_cast<std::size_t>(k) * kStripStride + 0xc, 4);
+                        spdlog::info("native: own particles: strip twin check: vertex {} differs (colour {:#010x} vs the engine rule's {:#010x})", k, x0, x1);
+                    }
+                }
+            }
+        }
+        const char* why = nullptr;
+        bool gpu = true;
+        std::vector<sc::DrawDesc> trials;
+        for (std::size_t i = before; i < drawCount_ && gpu; ++i) {
+            trials.push_back(*draws_[i]);
+            sc::DrawDesc& x = trials.back();
+            auto* engineVs = const_cast<d3d9::Shader*>(static_cast<const d3d9::Shader*>(x.vs));
+            d3d9::Shader* vs = engineVs != nullptr ? dev_.particleVs(*engineVs, d3d9::particle::kKindStrip, static_cast<const d3d9::VertexDecl*>(x.decl), &why) : nullptr;
+            if (vs == nullptr || x.primType != 5 || x.primCount + 2 != static_cast<std::uint32_t>(2 * segments)) {
+                if (why == nullptr) why = "not a strip of the segments' vertices";
+                gpu = false;
+                break;
+            }
+            x.vs = vs;
+            x.decl = dev_.particleDecl(d3d9::particle::kKindStrip);
+            x.streams[0].stride = d3d9::particle::kStripRecordStride;
+            x.vertexStride = d3d9::particle::kStripRecordStride;
+            x.vertexBytes = recs;
+            for (std::uint32_t r = 0; r < 2; ++r) {
+                const std::uint32_t reg = d3d9::particle::kConstFirst + r;
+                std::memcpy(x.vsF[reg], r == 0 ? ca : cb, 16);
+                x.vsSet[reg / 64] |= 1ull << (reg % 64);
+                x.vsLive.set(reg);
+            }
+            x.particleGpu = 1;
+        }
+        if (gpu && ownMode == 2) {
+            ptCmp_.gpu = std::move(trials.front());
+            ptCmp_.armed = true;
+            ptCmp_.name = "strips";
+            draws_[before]->particleGpu = 2;
+        } else if (gpu) {
+            for (std::size_t i = before; i < drawCount_; ++i) *draws_[i] = std::move(trials[i - before]);
+        }
+        if (OwnPost* own = ownPost()) {
+            for (std::size_t i = before; i < drawCount_; ++i) own->countScene(OwnPost::Scene::Particles, draws_[i]->particleGpu != 0, why);
+        }
+        if (gpu && ownMode == 1) {
+            ++ptWindow_.stripOps;
+            ptWindow_.stripVertices += static_cast<std::uint64_t>(2 * segments);
+        } else {
+            ++ptWindow_.stripCpuOps;
+            if (why != nullptr && ptWindow_.stripWhy.empty()) ptWindow_.stripWhy = why;
+        }
     }
     return Skip::None;
 }
@@ -1629,17 +1718,26 @@ void StaticOps::particleCompareBefore(const sc::DrawDesc& d) {
     if (stencilMask != 0) dev_.setRenderState(RS_STENCILWRITEMASK, 0);
     dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(g.vs))));
     dev_.setVertexDecl(const_cast<VertexDecl*>(static_cast<const VertexDecl*>(g.decl)));
-    dev_.setStreamSource(0, const_cast<Buffer*>(static_cast<const Buffer*>(g.streams[0].buffer)), 0, g.streams[0].stride);
-    dev_.setStreamSourceFreq(0, g.streams[0].freq);
-    dev_.setStreamSource(1, ownInstVb_.get(), recOffset, g.streams[1].stride);
-    dev_.setStreamSourceFreq(1, g.streams[1].freq);
-    dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(g.indices)));
+    const bool instanced = g.cpuStream == 1;  // (particles / precipitation: instances of a quad; strips: per-vertex records on stream 0, drawn from vertex 0)
+    if (instanced) {
+        dev_.setStreamSource(0, const_cast<Buffer*>(static_cast<const Buffer*>(g.streams[0].buffer)), 0, g.streams[0].stride);
+        dev_.setStreamSourceFreq(0, g.streams[0].freq);
+        dev_.setStreamSource(1, ownInstVb_.get(), recOffset, g.streams[1].stride);
+        dev_.setStreamSourceFreq(1, g.streams[1].freq);
+        dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(g.indices)));
+    } else {
+        dev_.setStreamSource(0, ownInstVb_.get(), recOffset, g.streams[0].stride);
+        dev_.setStreamSourceFreq(0, 1);
+        dev_.setStreamSource(1, nullptr, 0, 0);
+        dev_.setStreamSourceFreq(1, 1);
+    }
     dev_.setVertexShaderConstantF(pt::kConstFirst, g.vsF[pt::kConstFirst], pt::kConstCount);
     const bool savedIssuing = issuing_;
     const std::size_t savedIndex = issueIndex_;
     issuing_ = true;
     issueIndex_ = ~std::size_t{0};  // (the compare draw has no composition of its own: the own-draw check skips it)
-    dev_.drawIndexedPrimitive(g.primType, 0, 0, 4, 0, 2);
+    if (instanced) dev_.drawIndexedPrimitive(g.primType, 0, 0, 4, 0, 2);
+    else if (static_cast<std::uint64_t>(g.primCount + 2) * g.streams[0].stride <= size) dev_.drawPrimitive(g.primType, 0, g.primCount);
     issuing_ = savedIssuing;
     issueIndex_ = savedIndex;
     dev_.setVertexShaderConstantF(pt::kConstFirst, regs[0], pt::kConstCount);
@@ -1681,10 +1779,11 @@ void StaticOps::particleGpuReport() {
     ParticleGpuStats& w = ptWindow_;
     if (mode != 0 || w.ops != 0 || w.cpuOps != 0) {
         spdlog::info("native: own particles (5 s): {}: {} ops ({} quads, {} record bytes) drawn from GPU-expanded records, {} cached instances; {} ops ({} quads) on CPU quads{}; "
-                     "records + sort CPU {} us in {} ops; twin check (C++ twin vs the engine rule): {} vertices, {} byte-exact, {} differ (max |d| {:.3g}); {} image compares; precipitation: {} ops ({} drops) from GPU-expanded records, {} on CPU vertices{}",
+                     "records + sort CPU {} us in {} ops; twin check (C++ twin vs the engine rule): {} vertices, {} byte-exact, {} differ (max |d| {:.3g}); {} image compares; precipitation: {} ops ({} drops) from GPU-expanded records, {} on CPU vertices{}; strips: {} ops ({} vertices) from GPU-expanded records, {} on CPU vertices{}",
                      mode == 0 ? "off" : mode == 1 ? "on" : "compare", w.ops, w.quads, w.recordBytes, w.cached, w.cpuOps, w.cpuQuads,
                      w.why.empty() ? std::string() : std::format(" (first reason: {})", w.why), w.cpuUs, w.cpuTimed, w.twinVertices, w.twinExact, w.twinDiffer, w.twinMaxAbs,
-                     w.compares, w.rainOps, w.rainDrops, w.rainCpuOps, w.rainWhy.empty() ? std::string() : std::format(" (first reason: {})", w.rainWhy));
+                     w.compares, w.rainOps, w.rainDrops, w.rainCpuOps, w.rainWhy.empty() ? std::string() : std::format(" (first reason: {})", w.rainWhy), w.stripOps,
+                     w.stripVertices, w.stripCpuOps, w.stripWhy.empty() ? std::string() : std::format(" (first reason: {})", w.stripWhy));
     }
     w = {};
 }

@@ -795,9 +795,98 @@ mov oT0.xy, v2
         }
         f.dev.release(std::move(sdecl));
     }
+    // strips: per-vertex records (rvkStripExpand: the colours lerped in the shader) against the C++ twin's vertices, a non-indexed triangle strip
+    {
+        const char* stripVs = R"(
+vs_2_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_texcoord1 v3
+def c4, 1, 0, 0, 0
+mov r0, v0
+mov r0.w, c4.x
+dp4 oPos.x, r0, c0
+dp4 oPos.y, r0, c1
+dp4 oPos.z, r0, c2
+dp4 oPos.w, r0, c3
+mov oD0, v1
+mov oT0.xy, v2
+mov oT1.xy, v3
+)";
+        auto tvs = shaderFrom(f.dev, stripVs);
+        auto tps = shaderFrom(f.dev, "ps_2_0\ndcl v0\ndcl t0.xy\nmov r0, v0\nmov r0.y, t0.x\nmov oC0, r0\n");
+        const VertexElement stripDecl[] = {
+            {0, 0x00, DECLTYPE_FLOAT3, 0, 0, 0}, {0, 0x0c, DECLTYPE_D3DCOLOR, 0, 10, 0}, {0, 0x10, DECLTYPE_FLOAT2, 0, 5, 0}, {0, 0x18, DECLTYPE_FLOAT2, 0, 5, 1},
+            {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+        };
+        auto tdecl = f.dev.createVertexDecl(stripDecl);
+        const char* twhy = nullptr;
+        Shader* tpvs = tvs ? f.dev.particleVs(*tvs, pt::kKindStrip, tdecl.get(), &twhy) : nullptr;
+        VertexDecl* tpdecl = f.dev.particleDecl(pt::kKindStrip);
+        if (tpvs == nullptr || !tps || tpdecl == nullptr) {
+            std::printf("  FAIL own particles: the strip form: %s\n", twhy != nullptr ? twhy : "shaders");
+            ++failures;
+        } else {
+            constexpr std::uint32_t kSeg = 8;
+            const float ca[4] = {0.9f, 0.2f, 0.1f, 0.8f}, cb[4] = {0.1f, 0.7f, 1.0f, 0.3f};
+            std::vector<pt::StripRecord> recs(2 * kSeg);
+            std::vector<std::uint8_t> verts(2 * kSeg * 0x20);
+            float u = 0.0f, v = 0.0f;
+            for (std::uint32_t i = 0; i < kSeg; ++i) {
+                const float x = -7.0f + 14.0f * static_cast<float>(i) / (kSeg - 1);
+                recs[2 * i] = {{x, -3.0f + 0.3f * static_cast<float>(i), 0.5f}, u, 0.5f + 0.06f * static_cast<float>(i), 0.0f};
+                recs[2 * i + 1] = {{x + 0.4f, 3.5f, 0.5f}, v, 0.5f + 0.06f * static_cast<float>(i), 1.0f};
+                u += 0.13f;
+                v += 0.11f;
+            }
+            for (std::uint32_t k = 0; k < 2 * kSeg; ++k) pt::expandStrip(ca, cb, recs[k], verts.data() + k * 0x20);
+            auto tvb = f.dev.createBuffer(static_cast<std::uint32_t>(verts.size()), 0, POOL_MANAGED, false, false);
+            auto trv = f.dev.createBuffer(static_cast<std::uint32_t>(recs.size() * sizeof(pt::StripRecord)), 0, POOL_MANAGED, false, false);
+            std::memcpy(tvb->lock(0, 0, 0), verts.data(), verts.size());
+            tvb->unlock();
+            std::memcpy(trv->lock(0, 0, 0), recs.data(), recs.size() * sizeof(pt::StripRecord));
+            trv->unlock();
+            float cs[2][4];
+            std::memcpy(cs[0], ca, 16);
+            std::memcpy(cs[1], cb, 16);
+            Pixels pic[2];
+            for (int pass = 0; pass < 2; ++pass) {
+                f.reset();
+                f.dev.setRenderState(RS_ZENABLE, 0);
+                f.dev.setPixelShader(tps);
+                f.dev.setVertexShaderConstantF(0, vp[0], 4);
+                if (pass == 0) {
+                    f.dev.setVertexShader(tvs);
+                    f.dev.setVertexDecl(tdecl.get());
+                    f.dev.setStreamSource(0, tvb.get(), 0, 0x20);
+                } else {
+                    f.dev.setVertexShaderRef(ShaderRef(tpvs));
+                    f.dev.setVertexDecl(tpdecl);
+                    f.dev.setStreamSource(0, trv.get(), 0, pt::kStripRecordStride);
+                    f.dev.setVertexShaderConstantF(pt::kConstFirst, cs[0], 2);
+                }
+                f.dev.drawPrimitive(PT_TRIANGLESTRIP, 0, 2 * kSeg - 2);
+                pic[pass] = capture(f.dev, pass == 0 ? "strip_cpu" : "strip_gpu");
+            }
+            std::uint32_t off = 0, lit = 0;
+            for (std::uint32_t y = 0; y < pic[0].h; ++y) {
+                for (std::uint32_t x = 0; x < pic[0].w; ++x) {
+                    if (pic[0].at(x, y) != pic[1].at(x, y)) ++off;
+                    if ((pic[0].at(x, y) & 0xffffff) != 0) ++lit;
+                }
+            }
+            if (off != 0 || lit < 200) {
+                std::printf("  FAIL own particles: strips: %u pixels differ, %u lit\n", off, lit);
+                ++failures;
+            }
+            for (auto* b : {&tvb, &trv}) f.dev.release(std::move(*b));
+        }
+        f.dev.release(std::move(tdecl));
+    }
     f.dev.setIndices(nullptr);
     if (failures != 0) g_failures += failures;
-    else std::printf("  own particles: 5 ops x 4 pictures + the sky billboards equal to the CPU twin's (worst %u edge pixels)\n", worstPixels);
+    else std::printf("  own particles: 5 ops x 4 pictures + the sky billboards + a strip equal to the CPU twin's (worst %u edge pixels)\n", worstPixels);
     for (auto* b : {&evb, &eib, &rvb, &qib, &dummy}) f.dev.release(std::move(*b));
     f.dev.release(std::move(edecl));
 }

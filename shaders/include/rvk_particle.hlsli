@@ -191,3 +191,22 @@ RvkSkyBbVertex rvkSkyBillboardExpand(uint corner, float4 r0, float4 r1, float4 c
     o.corner = float4(c, 0.0, 1.0);
     return o;
 }
+
+// ---- strips (eCStrip_PS::UpdateVertices 0x6fd960): one record per vertex (position, the accumulated u / v, the segment's alpha factor, the side 0 / 1); the
+// colours A (c232) and B (c233) lerped as bCFloatAlphaColor's Sub / Multiply / Add do (per channel, alpha too), the alpha times the factor, SharedBase's bytes.
+// The C++ twin: d3d9/particle_gpu.cpp expandStrip.
+struct RvkStripVertex {
+    float4 pos, c, t0, t1;
+};
+RvkStripVertex rvkStripExpand(float4 r0, float4 r1) {
+    const float4 A = RVK_VSC(232), B = RVK_VSC(233);
+    const float t = r0.w;
+    precise float4 c = float4((B.x - A.x) * t + A.x, (B.y - A.y) * t + A.y, (B.z - A.z) * t + A.z, (B.w - A.w) * t + A.w);
+    precise float a = c.w * r1.x;
+    RvkStripVertex o;
+    o.pos = float4(r0.xyz, 1.0);
+    o.c = float4(rvkPtByte(c.x), rvkPtByte(c.y), rvkPtByte(c.z), rvkPtByte(a));
+    o.t0 = float4(t, r1.y, 0.0, 1.0);
+    o.t1 = o.t0;
+    return o;
+}

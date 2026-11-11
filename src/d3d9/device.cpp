@@ -1711,7 +1711,7 @@ rhi::ShaderModule Device::lodModule(Shader& vs) {
 
 // F11 (frame-ownership.md 14.26): the particle quads expanded on the GPU (d3d9/particle_gpu.h, shaders/include/rvk_particle.hlsli)
 VertexDecl* Device::particleDecl(int kind) {
-    auto& slot = particleDecl_[kind == particle::kKindSkyBillboard ? 1 : 0];
+    auto& slot = particleDecl_[std::clamp(kind, 0, 2)];
     if (!slot) {
         std::vector<VertexElement> e;
         const auto tc = static_cast<std::uint8_t>(shader::Usage::TexCoord);
@@ -1722,6 +1722,10 @@ VertexDecl* Device::particleDecl(int kind) {
             e.push_back({1, 0x10, DECLTYPE_FLOAT3, 0, tc, loc(1)});
             e.push_back({1, 0x1c, DECLTYPE_D3DCOLOR, 0, tc, loc(2)});
             e.push_back({1, 0x20, DECLTYPE_FLOAT4, 0, tc, loc(3)});
+        } else if (kind == particle::kKindStrip) {
+            // the strip vertex record (0x18, per vertex on stream 0): position + t, the alpha factor + the side
+            e.push_back({0, 0x00, DECLTYPE_FLOAT4, 0, tc, loc(0)});
+            e.push_back({0, 0x10, DECLTYPE_FLOAT2, 0, tc, loc(1)});
         } else {
             for (std::uint16_t k = 0; k < 6; ++k) e.push_back({1, static_cast<std::uint16_t>(16 * k), DECLTYPE_FLOAT4, 0, tc, loc(k)});
             e.push_back({1, 0x60, DECLTYPE_D3DCOLOR, 0, tc, loc(6)});
@@ -1757,7 +1761,7 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
             for (const VertexElement& e : engineDecl->elements()) els += std::format(" s{}+{:#x}:t{}:u{}{}", e.stream, e.offset, e.type, e.usage, e.usageIndex);
         }
         spdlog::info("native: own particles: vertex shader {:016x} ({}) stays on the CPU quads: {} (inputs{}; declaration{})", vs.hash,
-                     kind == particle::kKindSkyBillboard ? "sky billboards" : "particles", w, ins, els);
+                     kind == particle::kKindSkyBillboard ? "sky billboards" : kind == particle::kKindStrip ? "strips" : "particles", w, ins, els);
         return nullptr;
     };
     if (vs.stage != shader::Stage::Vertex || vs.bytecode.empty()) return refuse("not a translated vertex shader");
@@ -1772,7 +1776,9 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     static constexpr Field kParticle[] = {{0x00, DECLTYPE_FLOAT3, "q.pos"}, {0x0c, DECLTYPE_FLOAT3, "q.nrm"}, {0x18, DECLTYPE_D3DCOLOR, "q.c0"},
                                           {0x1c, DECLTYPE_D3DCOLOR, "q.c1"}, {0x20, DECLTYPE_FLOAT2, "q.t0"},   {0x28, DECLTYPE_FLOAT2, "q.t1"}};
     static constexpr Field kSky[] = {{0x00, DECLTYPE_FLOAT3, "q.pos"}, {0x0c, DECLTYPE_D3DCOLOR, "q.c"}, {0x10, DECLTYPE_FLOAT2, "q.uv"}, {0x18, DECLTYPE_FLOAT2, "q.corner"}};
-    const std::span<const Field> fields = kind == particle::kKindSkyBillboard ? std::span<const Field>(kSky) : std::span<const Field>(kParticle);
+    static constexpr Field kStrip[] = {{0x00, DECLTYPE_FLOAT3, "q.pos"}, {0x0c, DECLTYPE_D3DCOLOR, "q.c"}, {0x10, DECLTYPE_FLOAT2, "q.t0"}, {0x18, DECLTYPE_FLOAT2, "q.t1"}};
+    const std::span<const Field> fields = kind == particle::kKindSkyBillboard ? std::span<const Field>(kSky) : kind == particle::kKindStrip ? std::span<const Field>(kStrip)
+                                                                                                                                         : std::span<const Field>(kParticle);
     std::string assign;
     for (const auto& in : vs.reflection.vertexInputs) {
         if (in.location >= particle::kRecordLocation) return refuse("an input register at or above v8");
@@ -1792,11 +1798,13 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     if (vs.reflection.windowEnd[3] != 0) return refuse("it reads VS c232.. (the expansion's constants)");
     shader::TranslateOptions o;
     o.prelude = "#include \"rvk_particle.hlsli\"\n";
-    const std::uint32_t inputs = kind == particle::kKindSkyBillboard ? 4u : 8u;
+    const std::uint32_t inputs = kind == particle::kKindSkyBillboard ? 4u : kind == particle::kKindStrip ? 2u : 8u;
     for (std::uint32_t k = 0; k < inputs; ++k) {
         o.extraInputs += std::format("    [[vk::location({})]] float4 rvk_pr{} : ATTR{};\n", particle::kRecordLocation + k, k, particle::kRecordLocation + k);
     }
-    if (kind == particle::kKindSkyBillboard) {
+    if (kind == particle::kKindStrip) {
+        o.prologue = std::format("    {{ RvkStripVertex q = rvkStripExpand(rvk_in.rvk_pr0, rvk_in.rvk_pr1);{} }}", assign);
+    } else if (kind == particle::kKindSkyBillboard) {
         o.prologue = std::format("    {{ RvkSkyBbVertex q = rvkSkyBillboardExpand(rvk_in.rvk_vertexId, rvk_in.rvk_pr0, rvk_in.rvk_pr1, rvk_in.rvk_pr2, rvk_in.rvk_pr3);{} }}", assign);
     } else {
         o.prologue = std::format("    {{ RvkParticleVertex q = rvkParticleExpand(rvk_in.rvk_vertexId, rvk_in.rvk_pr0, rvk_in.rvk_pr1, rvk_in.rvk_pr2, rvk_in.rvk_pr3, rvk_in.rvk_pr4, "
@@ -1822,8 +1830,9 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
         s->reflection.vertexInputs.push_back({particle::kRecordLocation + k, shader::Usage::TexCoord, static_cast<std::uint8_t>(particle::kRecordLocation + k)});
     }
     if (kind != particle::kKindSkyBillboard) {
-        s->reflection.floatConstCount = std::max<std::uint32_t>(s->reflection.floatConstCount, particle::kConstFirst + particle::kConstCount);
-        s->reflection.windowEnd[3] = static_cast<std::uint16_t>(particle::kConstFirst + particle::kConstCount);
+        const std::uint32_t end = particle::kConstFirst + (kind == particle::kKindStrip ? 2u : particle::kConstCount);
+        s->reflection.floatConstCount = std::max<std::uint32_t>(s->reflection.floatConstCount, end);
+        s->reflection.windowEnd[3] = static_cast<std::uint16_t>(end);
     }
     s->semantics = vs.semantics;
     s->bytecode = vs.bytecode;
@@ -1835,7 +1844,7 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     std::string els;
     for (const VertexElement& e : engineDecl->elements()) els += std::format(" s{}+{:#x}:t{}:u{}{}", e.stream, e.offset, e.type, e.usage, e.usageIndex);
     spdlog::info("native: own particles: vertex shader {:016x} -> its GPU expansion form ({}; {} inputs:{}; declaration{})", vs.hash,
-                 kind == particle::kKindSkyBillboard ? "sky billboards" : "particles", vs.reflection.vertexInputs.size(), assign, els);
+                 kind == particle::kKindSkyBillboard ? "sky billboards" : kind == particle::kKindStrip ? "strips" : "particles", vs.reflection.vertexInputs.size(), assign, els);
     particleVs_.emplace(key, s);
     return s.get();
 }

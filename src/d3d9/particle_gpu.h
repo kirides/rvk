@@ -17,7 +17,17 @@ inline constexpr std::uint32_t kVertexStride = 0x30;  // the engine's particle v
 inline constexpr std::uint32_t kRecordLocation = 8;
 
 // the expansion kinds (Device::particleVs): the particle vertex; an eCSkyObject billboard (the precipitation: 0x30-byte records, sc::skyBillboardVertices' rule)
-inline constexpr int kKindParticle = 0, kKindSkyBillboard = 1;
+inline constexpr int kKindParticle = 0, kKindSkyBillboard = 1, kKindStrip = 2;
+// a strip vertex record (eCStrip_PS::UpdateVertices 0x6fd960 without the colour work): position, the accumulated u (side 0) / v (side 1), the segment's alpha factor,
+// the side; the colours A / B in VS c232 / c233 (rvkStripExpand lerps them as bCFloatAlphaColor Sub / Multiply / Add do)
+inline constexpr std::uint32_t kStripRecordStride = 0x18;
+struct StripRecord {
+    float pos[3];
+    float t, alpha, side;
+};
+static_assert(sizeof(StripRecord) == kStripRecordStride);
+// the C++ twin of rvkStripExpand: the engine's 0x20-byte strip vertex (POSITION, COLOR0, TEXCOORD0, TEXCOORD1)
+void expandStrip(const float a[4], const float b[4], const StripRecord& r, std::uint8_t out[0x20]);
 inline constexpr std::uint32_t kSkyRecordStride = 0x30;
 
 // flags (c244.w)

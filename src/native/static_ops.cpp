@@ -541,6 +541,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.maskSet = false;
     d.maskValue = 0.0f;
     d.skyDome = false;
+    d.particleGpu = 0;
     return d;
 }
 
