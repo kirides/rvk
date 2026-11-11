@@ -11,6 +11,7 @@
 #include "enh/rt_scene.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/owned_compact.h"
+#include "native/f10_request.h"
 #include "native/own_post.h"
 #include "native/static_ops.h"
 
@@ -139,6 +140,18 @@ void StaticOps::stagesReport() {
         last = st.replayed;
         line += stage("rt_records", settingOn(rs.nativeRtRecords), st.armed, a, std::format("{} owned draws replayed from their record scripts", a),
                       needsOf(rs.nativeRtRecords, {rs.nativeOwnedPersistent}));
+    }
+    // F10-1: the main view's static mesh contexts requested natively (native.own_collection; acted = contexts requested by the port in the window)
+    {
+        static std::uint64_t last = 0, lastDef = 0, lastCmp = 0;
+        const f10req::StageState st = f10req::stageState();
+        const std::uint64_t a = st.acted - last, d = st.deferred - lastDef, c = st.compared - lastCmp;
+        last = st.acted;
+        lastDef = st.deferred;
+        lastCmp = st.compared;
+        line += stage("own_collection", st.setting != 0, st.armed != 0 && st.armed == st.setting, st.setting == 2 ? c : a,
+                      st.setting == 2 ? std::format("compare: {} contexts compared; run DIFFERING {}", c, st.differing)
+                                      : std::format("on: {} contexts requested natively, {} z / solid ops deferred, {} compared; run DIFFERING {}", a, d, c, st.differing));
     }
     // 14.13: bone-history motion (native.bone_motion, restart; acted = skinned solid draws drawn with the bone-motion forms, composed + owned records, in the window)
     {

@@ -38,6 +38,7 @@
 #include "gpuscene/material_table.h"
 #include "engine/scene_table.h"
 #include "native/f10_collect.h"
+#include "native/f10_request.h"
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
@@ -491,6 +492,7 @@ void onProcessAttach(void* module) {
         engine::hemisphere::install();  // the weather hemisphere light for the GI sky (docs/research/rtgi.md 17)
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
+        native::f10req::install();  // F10-1 (native.own_collection): the detour of eCFrustumElementItem::Request (passes through while the setting is off)
         native::f10::install();  // RVK_F10_COMPARE=1: the native main-view collection compared with the engine's (frame-ownership.md 7.31)
         engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 or native.illum_table (frame-ownership.md F0)
         {

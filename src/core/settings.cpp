@@ -2961,6 +2961,24 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnCollection = &reg.add({
+        .key = "native.own_collection",
+        .label = "Native frame: own collection (static meshes)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F10-1 (docs/research/frame-ownership.md 14.31; Full): the main view's request of the static mesh contexts (no hierarchy nodes, no render "
+                       "instances, resources resident) is done by the renderer instead of the engine's eCRenderContextMesh::RequestRenderOps: the same resource "
+                       "touches (the engine's calls, in the same order) and the same op bytes; on owned frames their z / solid ops never enter the engine's lists "
+                       "(merged at their exact positions at Execute, the owned ones drawn from their records). Check frames (native.owned_check) and Compare run the "
+                       "engine's request and compare it with the native one run dry (op bytes per list, the resource LRU's head; rvk.log `native: own collection "
+                       "(5 s)`: DIFFERING must stay 0, a difference turns the stage off). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the engine's request"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeBoneMotion = &reg.add({
         .key = "native.bone_motion",
         .label = "Native frame: bone-history motion",

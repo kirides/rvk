@@ -515,6 +515,7 @@ struct RendererSettings {
     Setting* nativeRigidMotion = nullptr;      // native.rigid_motion (frame-ownership.md 14.15 b: moving rigid draws' per-object motion from the object table's history, restart)
     Setting* nativeBoneMotion = nullptr;       // native.bone_motion: off | on | compare (frame-ownership.md 14.13: the skinned draws' per-object motion from the bone table's history, restart)
     Setting* nativeOwnFoliage = nullptr;       // native.own_foliage: S-5 grass distance thinning tied to lod.view (Full)
+    Setting* nativeOwnCollection = nullptr;    // native.own_collection: F10-1 (frame-ownership.md 14.31): the main view's static mesh contexts requested natively, z / solid ops handed to the owned path (Full, Debug)
     Setting* nativeRtRecords = nullptr;        // native.rt_records: F8-1 (frame-ownership.md 14.30): the RT scene's sightings of owned draws replayed from their record scripts (Full, Debug)
     Setting* nativeTreeWind = nullptr;         // native.tree_wind: off | on | compare (F4-5, frame-ownership.md 14.17: the RT scene's animated SpeedTrees by compute, no capture; Full)
     Setting* nativeVertexPull = nullptr;       // native.vertex_pull: S-4 vertex pulling of the persistent owned draws (no vertex input: one indirect command per pipeline x state x index binding)

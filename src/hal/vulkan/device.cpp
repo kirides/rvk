@@ -29,6 +29,7 @@
 #include "engine/lod.h"
 #include "engine/scene_table.h"
 #include "native/f10_collect.h"
+#include "native/f10_request.h"
 #include "gpuscene/instance_buffer.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/lighting_images.h"
@@ -1816,6 +1817,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     // (stale rows / indirect args: GPU page fault, frame-ownership.md 7.35).
     engine::scenetable::onPresent();
     native::f10::onPresent();
+    native::f10req::onPresent();
     {
         gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
         gpuscene::illumtable().flush(dev_, true);
