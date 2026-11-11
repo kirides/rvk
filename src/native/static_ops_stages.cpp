@@ -146,17 +146,25 @@ void StaticOps::stagesReport() {
     }
     // F12 / F13 (frame-ownership.md 14.24): the sky dome / the GUI sprite batches on our own shaders (native.own_sky / native.own_gui; acted = composed draws drawn with
     // the ports in the window; compare counts as armed)
-    for (const OwnPost::Scene which : {OwnPost::Scene::Sky, OwnPost::Scene::Gui}) {
-        static std::uint64_t last[2] = {};
+    for (const OwnPost::Scene which : {OwnPost::Scene::Sky, OwnPost::Scene::Gui, OwnPost::Scene::Particles}) {
+        static std::uint64_t last[3] = {};
         const auto i = static_cast<std::size_t>(which);
         const std::uint64_t acts = ownSceneActs(which);
         const std::uint64_t a = acts >= last[i] ? acts - last[i] : acts;
         last[i] = acts;
-        settings::Setting* st = which == OwnPost::Scene::Sky ? rs.nativeOwnSky : rs.nativeOwnGui;
+        static constexpr const char* kStage[3] = {"own_sky", "own_gui", "own_particles"};
+        static constexpr const char* kWhat[3] = {"sky dome draws", "sprite batch draws", "particle draws (F11: quads expanded on the GPU)"};
+        settings::Setting* st = which == OwnPost::Scene::Sky ? rs.nativeOwnSky : which == OwnPost::Scene::Gui ? rs.nativeOwnGui : rs.nativeOwnParticles;
         const int want = st != nullptr ? static_cast<int>(st->asInt()) : 0;
         const int have = ownSceneMode(which);
-        line += stage(which == OwnPost::Scene::Sky ? "own_sky" : "own_gui", want != 0, have != 0 && have == want, a,
-                      std::format("{}: {} {} on our shaders", have == 2 ? "compare" : "on", a, which == OwnPost::Scene::Sky ? "sky dome draws" : "sprite batch draws"));
+        line += stage(kStage[i], want != 0, have != 0 && have == want, a, std::format("{}: {} {} on our shaders", have == 2 ? "compare" : "on", a, kWhat[i]));
+    }
+    // row 13 (frame-ownership.md 14.26): native.owned_decals (acted = decal records drawn from their persistent buffers / content-checked in the window)
+    {
+        const int want = rs.nativeOwnedDecals != nullptr ? static_cast<int>(rs.nativeOwnedDecals->asInt()) : 0;
+        const std::uint64_t a = decalW_.hits + decalW_.checked;
+        line += stage("owned_decals", want != 0, ownedDecals_ != 0 && ownedDecals_ == want, a,
+                      std::format("{}: {} decal records from persistent buffers, {} checked", ownedDecals_ == 2 ? "compare" : "on", decalW_.hits, decalW_.checked));
     }
     // S-1a: the HLSL ubershader (debug.ubershader; the owned-shader line holds the per-kind counts)
     const bool uberSetting = settingOn(rs.ubershader), uberCode = dev_.ubershader();

@@ -31,6 +31,8 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
+#include "d3d9/particle_gpu.h"
+#include "native/static_compose.h"
 #include "enh/rt_scene.h"
 #include "gpuscene/bone_table.h"
 #include "gpuscene/row_table.h"
@@ -500,6 +502,304 @@ void testInstancing(Fixture& f) {
     expect("instance 1", px, 50, 50, 0x00FF00);
     expect("no instance", px, 10, 10, 0x000000);
     f.dev.release(std::move(inst));
+}
+
+// F11 (frame-ownership.md 14.26, native.own_particles): particle records expanded by the GPU (Device::particleVs = a translated particle-style vertex shader whose
+// inputs rvkParticleExpand builds from the instance record + VS c232..c247) against the same particles expanded on the CPU by the C++ twin
+// (d3d9::particle::expand) and drawn through the input assembler with the engine's vertex layout. Five ops: every orientation mode, entity coordinates with a
+// rotated entity matrix, the axis in entity space, rotations about R / U / L, pinned corners, normal modes 0 / 2 / 3; four pixel shaders show COLOR0 (the
+// facing bytes), the uv + COLOR1, the normal, the blend frame's uv. The pictures must be equal (a corner one ulp off may move an edge pixel: a handful allowed)
+void testOwnParticles(Fixture& f) {
+    namespace pt = rvk::d3d9::particle;
+    const char* vsSrc = R"(
+vs_2_0
+dcl_position v0
+dcl_normal v1
+dcl_color v2
+dcl_color1 v3
+dcl_texcoord v4
+dcl_texcoord1 v5
+def c4, 1, 0, 0, 0
+dp4 r0.x, v0, c31
+dp4 r0.y, v0, c32
+dp4 r0.z, v0, c33
+mov r0.w, c4.x
+dp4 oPos.x, r0, c0
+dp4 oPos.y, r0, c1
+dp4 oPos.z, r0, c2
+dp4 oPos.w, r0, c3
+mov oD0, v2
+mov oT0.xy, v4
+mov oT1.xy, v5
+mov oT2, v1
+mov oT3, v3
+)";
+    const char* psSrc[4] = {"ps_2_0\ndcl v0\nmov oC0, v0\n",
+                            "ps_2_0\ndcl t0.xy\ndcl t3\ndef c0, 0, 0, 0, 1\nmov r0, c0\nmov r0.xy, t0\nmov r0.z, t3.x\nmov oC0, r0\n",
+                            "ps_2_0\ndcl t2\ndef c0, 0.5, 0.5, 0.5, 1\nmad r0, t2, c0, c0\nmov r0.w, c0.w\nmov oC0, r0\n",
+                            "ps_2_0\ndcl t1.xy\ndef c0, 0, 0, 0, 1\nmov r0, c0\nmov r0.xy, t1\nmov oC0, r0\n"};
+    auto vs = shaderFrom(f.dev, vsSrc);
+    std::shared_ptr<Shader> ps[4];
+    for (int i = 0; i < 4; ++i) ps[i] = shaderFrom(f.dev, psSrc[i]);
+    if (!vs || !ps[0] || !ps[1] || !ps[2] || !ps[3]) {
+        std::printf("  FAIL own particles: shaders\n");
+        ++g_failures;
+        return;
+    }
+    // the engine's particle vertex layout (CreateVisual 0x5d7620)
+    const VertexElement engineDecl[] = {
+        {0, 0x00, DECLTYPE_FLOAT3, 0, 0 /*POSITION*/, 0},  {0, 0x0c, DECLTYPE_FLOAT3, 0, 3 /*NORMAL*/, 0},  {0, 0x18, DECLTYPE_D3DCOLOR, 0, 10 /*COLOR*/, 0},
+        {0, 0x1c, DECLTYPE_D3DCOLOR, 0, 10, 1},            {0, 0x20, DECLTYPE_FLOAT2, 0, 5 /*TEXCOORD*/, 0}, {0, 0x28, DECLTYPE_FLOAT2, 0, 5, 1},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    auto edecl = f.dev.createVertexDecl(engineDecl);
+    const char* why = nullptr;
+    Shader* pvs = f.dev.particleVs(*vs, pt::kKindParticle, edecl.get(), &why);
+    VertexDecl* pdecl = f.dev.particleDecl(pt::kKindParticle);
+    if (pvs == nullptr || pdecl == nullptr) {
+        std::printf("  FAIL own particles: the expansion form: %s\n", why != nullptr ? why : "no declaration");
+        ++g_failures;
+        return;
+    }
+    constexpr std::uint32_t kQuads = 6;
+    auto evb = f.dev.createBuffer(kQuads * 4 * pt::kVertexStride, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    auto eib = f.dev.createBuffer(kQuads * 6 * 2, 0, POOL_MANAGED, true, false);
+    auto rvb = f.dev.createBuffer(kQuads * pt::kRecordStride, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    auto qib = f.dev.createBuffer(16, 0, POOL_MANAGED, true, false);
+    auto dummy = f.dev.createBuffer(64, 0, POOL_MANAGED, false, false);
+    const std::uint16_t order[6] = {0, 1, 2, 0, 2, 3};
+    {
+        auto* p = static_cast<std::uint16_t*>(eib->lock(0, 0, 0));
+        for (std::uint32_t q = 0; q < kQuads; ++q) {
+            for (int i = 0; i < 6; ++i) p[6 * q + i] = static_cast<std::uint16_t>(4 * q + order[i]);
+        }
+        eib->unlock();
+        std::memcpy(qib->lock(0, 0, 0), order, sizeof(order));
+        qib->unlock();
+        std::memset(dummy->lock(0, 0, 0), 0, 64);
+        dummy->unlock();
+    }
+    // the view: world x / y in [-8, 8] -> clip, z = 0.5; world identity; c34.w = 1
+    const float vp[4][4] = {{0.125f, 0, 0, 0}, {0, 0.125f, 0, 0}, {0, 0, 0, 0.5f}, {0, 0, 0, 1}};
+    const float world[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+    struct Op {
+        int mode, normalMode;
+        bool entityCoords, axisInEntity, pinned;
+    };
+    const Op ops[] = {{0, 0, false, false, false}, {1, 1, true, false, false}, {2, 2, false, true, true}, {4, 2, true, true, false}, {3, 3, false, false, false}};
+    int failures = 0, opIndex = 0;
+    std::uint32_t worstPixels = 0;
+    for (const Op& op : ops) {
+        pt::OpConsts k{};
+        // a camera at (0, 0, -20): rows right / up / look
+        k.c[0][0] = 1.0f;
+        k.c[1][1] = 1.0f;
+        k.c[2][2] = 1.0f;
+        k.c[3][2] = -20.0f;
+        k.c[3][3] = static_cast<float>(op.mode);
+        // the entity: a turn of 30 degrees about z, at (0.5, -0.25, 0); its inverse without translation (rows)
+        const float cz = 0.8660254f, sz = 0.5f;
+        const float E[16] = {cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0.5f, -0.25f, 0, 1};
+        const float Mi[16] = {cz, -sz, 0, 0, sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        std::memcpy(k.c[4], E, 64);
+        if (op.entityCoords) std::memcpy(k.c[8], Mi, 64);
+        k.c[12][0] = 0.3f;
+        k.c[12][1] = 0.4f;
+        k.c[12][2] = -0.866f;
+        k.c[12][3] = static_cast<float>((op.entityCoords ? pt::kFlagEntityCoords : 0u) | (op.axisInEntity ? pt::kFlagAxisInEntity : 0u) |
+                                        (op.pinned ? pt::kFlagPinned : 0u) | static_cast<std::uint32_t>(op.normalMode) << 4);
+        k.c[13][0] = -6.0f;
+        k.c[13][1] = 6.0f;
+        k.c[13][3] = 0.25f;  // pivot A
+        k.c[14][0] = 1.0f;   // Eo
+        k.c[14][3] = -0.5f;  // pivot B
+        k.c[15][1] = 1.0f;   // up
+        std::vector<pt::Record> recs(kQuads);
+        for (std::uint32_t q = 0; q < kQuads; ++q) {
+            pt::Record& r = recs[q];
+            r.r[0][0] = -5.1f + 4.9f * static_cast<float>(q % 3);
+            r.r[0][1] = -3.3f + 6.2f * static_cast<float>(q / 3);
+            r.r[0][2] = 0.7f * static_cast<float>(q) - 1.0f;
+            r.r[0][3] = 1.3f + 0.21f * static_cast<float>(q);  // hx
+            r.r[1][0] = 0.6f - 0.1f * static_cast<float>(q);   // d
+            r.r[1][1] = 0.8f;
+            r.r[1][2] = 0.15f * static_cast<float>(q);
+            r.r[1][3] = 1.1f + 0.13f * static_cast<float>(q);  // hy
+            const std::uint32_t mask = q % 4 == 0 ? 0u : q % 4 == 1 ? 1u : q % 4 == 2 ? 4u : 7u;
+            const float ang[3] = {0.4f + 0.1f * static_cast<float>(q), -0.7f, 1.2f - 0.2f * static_cast<float>(q)};
+            r.r[2][0] = std::sin(ang[0]);
+            r.r[2][1] = std::cos(ang[0]);
+            r.r[2][2] = std::sin(ang[1]);
+            r.r[2][3] = std::cos(ang[1]);
+            r.r[3][0] = std::sin(ang[2]);
+            r.r[3][1] = std::cos(ang[2]);
+            r.mask = static_cast<float>(mask);
+            r.r[3][2] = 0.15f * static_cast<float>(q + 1);  // age ratio
+            r.r[3][3] = 1.0f - 0.1f * static_cast<float>(q);
+            r.r[4][0] = 0.25f * static_cast<float>(q % 4), r.r[4][1] = 0.5f, r.r[4][2] = r.r[4][0] + 0.25f, r.r[4][3] = 1.0f;
+            r.r[5][0] = 0.1f, r.r[5][1] = 0.2f * static_cast<float>(q % 3), r.r[5][2] = 0.6f, r.r[5][3] = 0.9f;
+            r.colour1 = 0xff000000u | (40u * q) << 16 | (255u - 30u * q) << 8 | 0x33u;
+        }
+        // the CPU reference vertices (the C++ twin) and the records
+        {
+            auto* v = static_cast<std::uint8_t*>(evb->lock(0, 0, LOCK_DISCARD));
+            for (std::uint32_t q = 0; q < kQuads; ++q) {
+                for (std::uint32_t c = 0; c < 4; ++c) pt::expand(k, recs[q], c, v + (4 * q + c) * pt::kVertexStride);
+            }
+            evb->unlock();
+            std::memcpy(rvb->lock(0, 0, LOCK_DISCARD), recs.data(), recs.size() * sizeof(pt::Record));
+            rvb->unlock();
+        }
+        for (int s = 0; s < 4; ++s) {
+            Pixels pic[2];
+            for (int pass = 0; pass < 2; ++pass) {
+                f.reset();
+                f.dev.setRenderState(RS_ZENABLE, 0);
+                f.dev.setPixelShader(ps[s]);
+                f.dev.setVertexShaderConstantF(0, vp[0], 4);
+                f.dev.setVertexShaderConstantF(31, world[0], 3);
+                if (pass == 0) {
+                    f.dev.setVertexShader(vs);
+                    f.dev.setVertexDecl(edecl.get());
+                    f.dev.setStreamSource(0, evb.get(), 0, pt::kVertexStride);
+                    f.dev.setIndices(eib.get());
+                    f.dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, kQuads * 4, 0, kQuads * 2);
+                } else {
+                    // as StaticOps::particleToGpu sets the draw: the expansion form, the record stream at instance rate, the quad's 6 indices, c232..c247
+                    f.dev.setVertexShaderRef(ShaderRef(pvs));
+                    f.dev.setVertexDecl(pdecl);
+                    f.dev.setStreamSource(0, dummy.get(), 0, 16);
+                    f.dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | kQuads);
+                    f.dev.setStreamSource(1, rvb.get(), 0, pt::kRecordStride);
+                    f.dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
+                    f.dev.setIndices(qib.get());
+                    f.dev.setVertexShaderConstantF(pt::kConstFirst, k.c[0], pt::kConstCount);
+                    f.dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+                    f.dev.setStreamSourceFreq(0, 1);
+                    f.dev.setStreamSourceFreq(1, 1);
+                    f.dev.setStreamSource(1, nullptr, 0, 0);
+                }
+                pic[pass] = capture(f.dev, pass == 0 ? "particles_cpu" : "particles_gpu");
+            }
+            std::uint32_t off = 0, lit = 0;
+            for (std::uint32_t y = 0; y < pic[0].h; ++y) {
+                for (std::uint32_t x = 0; x < pic[0].w; ++x) {
+                    if (!similar(pic[0].at(x, y), pic[1].at(x, y), 1)) ++off;
+                    if ((pic[0].at(x, y) & 0xffffff) != 0) ++lit;
+                }
+            }
+            worstPixels = std::max(worstPixels, off);
+            if (off > 3 || lit < 200) {
+                std::printf("  FAIL own particles: op %d (mode %d) pixel shader %d: %u pixels differ, %u lit\n", opIndex, op.mode, s, off, lit);
+                ++failures;
+            }
+        }
+        ++opIndex;
+    }
+    // the precipitation's form: eCSkyObject billboard records (0x30) expanded by rvkSkyBillboardExpand against sc::skyBillboardVertices through the input assembler
+    {
+        const char* skyVs = R"(
+vs_2_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_texcoord1 v3
+def c4, 1, 0, 0, 0
+mov r0, v0
+add r0.xy, r0, v3
+mov r0.w, c4.x
+dp4 oPos.x, r0, c0
+dp4 oPos.y, r0, c1
+dp4 oPos.z, r0, c2
+dp4 oPos.w, r0, c3
+mov oD0, v1
+mov oT0.xy, v2
+)";
+        auto svs = shaderFrom(f.dev, skyVs);
+        auto sps = shaderFrom(f.dev, "ps_2_0\ndcl v0\ndcl t0.xy\nmov r0, v0\nmov r0.xy, t0\nmov oC0, r0\n");
+        const VertexElement skyDecl[] = {
+            {0, 0x00, DECLTYPE_FLOAT3, 0, 0, 0}, {0, 0x0c, DECLTYPE_D3DCOLOR, 0, 10, 0}, {0, 0x10, DECLTYPE_FLOAT2, 0, 5, 0}, {0, 0x18, DECLTYPE_FLOAT2, 0, 5, 1},
+            {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+        };
+        auto sdecl = f.dev.createVertexDecl(skyDecl);
+        const char* swhy = nullptr;
+        Shader* spvs = svs ? f.dev.particleVs(*svs, pt::kKindSkyBillboard, sdecl.get(), &swhy) : nullptr;
+        VertexDecl* spdecl = f.dev.particleDecl(pt::kKindSkyBillboard);
+        if (spvs == nullptr || !sps || spdecl == nullptr) {
+            std::printf("  FAIL own particles: the sky billboard form: %s\n", swhy != nullptr ? swhy : "shaders");
+            ++failures;
+        } else {
+            constexpr std::uint32_t kDrops = 9;
+            std::vector<std::uint8_t> bb(kDrops * pt::kSkyRecordStride);
+            for (std::uint32_t i = 0; i < kDrops; ++i) {
+                float o[12] = {-5.3f + 5.1f * static_cast<float>(i % 3), -5.2f + 4.9f * static_cast<float>(i / 3), 0.25f, 0.4f + 0.05f * static_cast<float>(i), 0.1f,
+                               0.2f, 1.7f - 0.1f * static_cast<float>(i), 0.0f, 0.1f * static_cast<float>(i), 0.0f, 0.1f * static_cast<float>(i) + 0.4f, 1.0f};
+                const std::uint32_t colour = 0xff000000u | (25u * i) << 16 | 0x8080u;
+                std::memcpy(&o[7], &colour, 4);
+                std::memcpy(bb.data() + i * pt::kSkyRecordStride, o, sizeof(o));
+            }
+            std::vector<std::uint8_t> verts;
+            rvk::native::sc::skyBillboardVertices(bb, kDrops, verts);
+            auto svb = f.dev.createBuffer(static_cast<std::uint32_t>(verts.size()), 0, POOL_MANAGED, false, false);
+            auto srv = f.dev.createBuffer(static_cast<std::uint32_t>(bb.size()), 0, POOL_MANAGED, false, false);
+            auto sib = f.dev.createBuffer(kDrops * 12, 0, POOL_MANAGED, true, false);
+            std::memcpy(svb->lock(0, 0, 0), verts.data(), verts.size());
+            svb->unlock();
+            std::memcpy(srv->lock(0, 0, 0), bb.data(), bb.size());
+            srv->unlock();
+            auto* ip = static_cast<std::uint16_t*>(sib->lock(0, 0, 0));
+            for (std::uint32_t q = 0; q < kDrops; ++q) {
+                for (int i = 0; i < 6; ++i) ip[6 * q + i] = static_cast<std::uint16_t>(4 * q + order[i]);
+            }
+            sib->unlock();
+            Pixels pic[2];
+            for (int pass = 0; pass < 2; ++pass) {
+                f.reset();
+                f.dev.setRenderState(RS_ZENABLE, 0);
+                f.dev.setPixelShader(sps);
+                f.dev.setVertexShaderConstantF(0, vp[0], 4);
+                if (pass == 0) {
+                    f.dev.setVertexShader(svs);
+                    f.dev.setVertexDecl(sdecl.get());
+                    f.dev.setStreamSource(0, svb.get(), 0, 0x20);
+                    f.dev.setIndices(sib.get());
+                    f.dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, kDrops * 4, 0, kDrops * 2);
+                } else {
+                    f.dev.setVertexShaderRef(ShaderRef(spvs));
+                    f.dev.setVertexDecl(spdecl);
+                    f.dev.setStreamSource(0, dummy.get(), 0, 16);
+                    f.dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | kDrops);
+                    f.dev.setStreamSource(1, srv.get(), 0, pt::kSkyRecordStride);
+                    f.dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
+                    f.dev.setIndices(qib.get());
+                    f.dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+                    f.dev.setStreamSourceFreq(0, 1);
+                    f.dev.setStreamSourceFreq(1, 1);
+                    f.dev.setStreamSource(1, nullptr, 0, 0);
+                }
+                pic[pass] = capture(f.dev, pass == 0 ? "precip_cpu" : "precip_gpu");
+            }
+            std::uint32_t off = 0, lit = 0;
+            for (std::uint32_t y = 0; y < pic[0].h; ++y) {
+                for (std::uint32_t x = 0; x < pic[0].w; ++x) {
+                    if (pic[0].at(x, y) != pic[1].at(x, y)) ++off;
+                    if ((pic[0].at(x, y) & 0xffffff) != 0) ++lit;
+                }
+            }
+            if (off != 0 || lit < 200) {
+                std::printf("  FAIL own particles: sky billboards: %u pixels differ, %u lit\n", off, lit);
+                ++failures;
+            }
+            f.dev.setIndices(nullptr);
+            for (auto* b : {&svb, &srv, &sib}) f.dev.release(std::move(*b));
+        }
+        f.dev.release(std::move(sdecl));
+    }
+    f.dev.setIndices(nullptr);
+    if (failures != 0) g_failures += failures;
+    else std::printf("  own particles: 5 ops x 4 pictures + the sky billboards equal to the CPU twin's (worst %u edge pixels)\n", worstPixels);
+    for (auto* b : {&evb, &eib, &rvb, &qib, &dummy}) f.dev.release(std::move(*b));
+    f.dev.release(std::move(edecl));
 }
 
 // F7-1 (frame-ownership.md 7.40): the vegetation's retained instance stream = one dynamic buffer holding many batches' instances, a batch drawn from a stream
@@ -5211,7 +5511,7 @@ int main(int argc, char** argv) {
         {"clear", testClear},         {"raster rules", testRasterRules}, {"cull", testCull},
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
         {"stencil", testStencil}, {"scope clear", testScopeClear}, {"no-stencil depth", testNoStencilDepth}, {"depth-only pass without a pixel shader (S-6)", testDepthOnlyPass},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
-        {"instancing", testInstancing}, {"retained instance stream (F7-1)", testRetainedInstanceStream}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
+        {"instancing", testInstancing}, {"retained instance stream (F7-1)", testRetainedInstanceStream}, {"own particles (F11)", testOwnParticles}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},

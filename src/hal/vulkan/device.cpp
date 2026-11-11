@@ -221,6 +221,8 @@ void HalDevice::applyStaticOps() {
     staticOps_->setMode(native::StaticOps::Group::Mesh, sceneTake && (groups & 1) != 0, sceneCompare && (groups & 1) != 0);
     staticOps_->setOverlays((sceneTake || sceneCompare) && (groups & 2) != 0);
     staticOps_->setMode(native::StaticOps::Group::Decals, sceneTake && (groups & 4) != 0, sceneCompare && (groups & 4) != 0);
+    // row 13 (frame-ownership.md 14.26): the decal records' persistent geometry (Full, the decal group taken over)
+    staticOps_->setOwnedDecals(rs.nativeOwnedDecals != nullptr && renderMode() == RenderMode::Full && sceneTake && (groups & 4) != 0 ? static_cast<int>(rs.nativeOwnedDecals->asInt()) : 0);
     // N5.2c: 8 the sky dome op, 16 the opaque billboards' queue
     staticOps_->setMode(native::StaticOps::Group::Sky, sceneTake && (groups & 8) != 0, sceneCompare && (groups & 8) != 0);
     staticOps_->setMode(native::StaticOps::Group::Billboards, sceneTake && (groups & 16) != 0, sceneCompare && (groups & 16) != 0);
@@ -258,6 +260,8 @@ void HalDevice::applyStaticOps() {
         };
         effectOps_->setOwnScene(native::OwnPost::Scene::Sky, sceneMode(rs.nativeOwnSky, sceneTake && (groups & (8 | 32)) == (8 | 32), "sky"));
         effectOps_->setOwnScene(native::OwnPost::Scene::Gui, sceneMode(rs.nativeOwnGui, sceneTake && (groups & 65536) != 0, "gui"));
+        // F11 (frame-ownership.md 14.26): the particle ops' quads expanded on the GPU (group 4096 taken over)
+        effectOps_->setOwnScene(native::OwnPost::Scene::Particles, sceneMode(rs.nativeOwnParticles, sceneTake && (groups & 4096) != 0, "particles"));
     }
     frameTap_->setStaticOpsActive(staticOps_->active());
     frameTap_->setEffectOpsActive(effectOps_->active());
@@ -764,7 +768,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

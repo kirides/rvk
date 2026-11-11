@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "d3d9/particle_gpu.h"
 #include "native/static_ops_retained.h"
 #include "native/frame_desc.h"
 #include "native/static_compose.h"
@@ -158,6 +159,14 @@ public:
     // persistent DrawRecords AT THEIR OP'S PLACE (the engine's slot is skipped; an ordered flush, one indirect command per run of consecutive equal buckets) instead of being
     // composed; the engine's own sort result is the order. Needs owned_persistent (+ owned_static, the scene ABI v2 view table)
     void setOwnedOrdered(bool on);
+    // native.owned_decals (frame-ownership.md 14.26, roadmap row 13; static_ops_nonop.cpp): 0 off, 1 on (a decal record's geometry in persistent buffers, rewritten only
+    // when what it is made from changed: drawn without reading / transforming a vertex), 2 compare (built every frame, checked against the persistent copy: MISS)
+    void setOwnedDecals(int mode) {
+        if (mode == 0 && ownedDecals_ != 0) releaseDecalCache();
+        ownedDecals_ = mode;
+    }
+    int ownedDecals() const { return ownedDecals_; }
+    std::uint64_t ownedDecalHits() const { return decalHitsTotal_; }
     bool ownedOrderedOn() const { return ownedOrdered_ && ownedPersistent_ && ownedStatic_; }
     void orderedFlushRun();  // the pending run of ordered draws as one ordered flush (also the device's hook: Device::setOrderedHook)
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
@@ -512,6 +521,63 @@ private:
     // the billboard records skyObjectDraws expands instead of the object's array (precipitation: re-done from the drops)
     const std::vector<std::uint8_t>* billboardsOverride_ = nullptr;
     bool particleVertices(const std::uint8_t* ps, const std::uint8_t* entity, std::vector<std::uint8_t>& out, std::uint32_t& quads);
+    // ---- F11 (frame-ownership.md 14.26, native.own_particles): the particle quads expanded on the GPU (d3d9/particle_gpu.h) ----
+    // the op's particle records (the engine's depth order) + its constants: what particleVertices builds, without the per-corner work
+    bool particleRecords(const std::uint8_t* ps, const std::uint8_t* entity, std::vector<std::uint8_t>& out, std::uint32_t& quads, d3d9::particle::OpConsts& k);
+    // compare: the C++ twin of the GPU expansion against the engine-rule vertices, byte for byte (counted)
+    void particleTwinCheck(const std::vector<std::uint8_t>& recs, const d3d9::particle::OpConsts& k, const std::vector<std::uint8_t>& vb, std::uint32_t quads);
+    // `x` (a composed particle draw) as its GPU form: the expansion vertex shader, the record stream (instances), VS c232..c247; false (`why`): stays as it is
+    bool particleToGpu(sc::DrawDesc& x, const std::vector<std::uint8_t>& recs, std::uint32_t quads, const d3d9::particle::OpConsts* k, int kind, const char*& why);
+    // compare: around the issue of a composed particle draw that has a GPU form (DrawDesc::particleGpu == 2): its GPU form drawn into a scratch copy of the target
+    // before the composed draw, the two images compared after it
+    void particleCompareBefore(const sc::DrawDesc& d);
+    void particleCompareAfter();
+    int ownParticlesMode() const;  // 0 off, 1 on, 2 compare (OwnPost::Scene::Particles)
+    struct ParticleGpu {
+        std::vector<std::uint8_t> recs;
+        d3d9::particle::OpConsts k;
+        std::uint32_t quads = 0;
+        sc::DrawDesc gpu;  // the compare draw's GPU form
+        bool armed = false;
+        const char* name = "particles";  // the compared image
+        d3d9::Surface* scratch = nullptr;
+        d3d9::Surface* target = nullptr;
+        std::uint64_t skips = 0;
+    } ptCmp_;
+    struct ParticleGpuStats {
+        std::uint64_t ops = 0, quads = 0, recordBytes = 0, cpuOps = 0, cpuQuads = 0, cached = 0;
+        std::uint64_t twinVertices = 0, twinExact = 0, twinDiffer = 0, compares = 0;
+        std::uint64_t rainOps = 0, rainDrops = 0, rainCpuOps = 0;  // the precipitation (sky billboard records)
+        std::string rainWhy;
+        float twinMaxAbs = 0.0f;
+        std::string why;
+        std::uint64_t cpuUs = 0, cpuTimed = 0;
+    } ptWindow_;
+    std::uint32_t ptTwinLogged_ = 0;
+    std::unique_ptr<d3d9::Buffer> ptIb_, ptDummy_;
+    std::array<std::uint16_t, 6> ptIndices_{};
+    bool ptIndicesKnown_ = false;
+    bool leanParticleGpu_ = false;
+    d3d9::particle::OpConsts leanParticleConsts_;
+    void particleGpuReport();
+    // ---- native.owned_decals: the decal records' persistent geometry (composeDecals) ----
+    struct DecalEntry {
+        std::unique_ptr<d3d9::Buffer> vb, ib;  // static (POOL_MANAGED) buffers of the record's vertices (from vertex 0) / indices (record-relative)
+        std::int32_t vertices = 0, indices = 0;
+        std::vector<std::uint8_t> vbBytes;     // what they hold (the content checks)
+        std::vector<std::uint16_t> ibBytes;
+        std::uint64_t lastFrame = 0;
+    };
+    static constexpr std::size_t kDecalEntries = 2048;
+    std::unordered_map<std::uint64_t, DecalEntry> decalCache_;
+    struct DecalStats {
+        std::uint64_t passes = 0, cpuUs = 0, records = 0, decals = 0, hits = 0, created = 0, rebuilt = 0, checked = 0, miss = 0, full = 0, evicted = 0, uploadBytes = 0;
+    } decalW_;
+    int ownedDecals_ = 0;
+    std::uint32_t decalMissLogged_ = 0;
+    std::uint64_t decalTotalMiss_ = 0, decalHitsTotal_ = 0;
+    void decalsReport();
+    void releaseDecalCache();
     struct FxStats {
         std::uint64_t particleOps = 0, particleQuads = 0, particleSkipped = 0, particleEngineBytes = 0, particleZeroQuads = 0, particleSorted = 0;
         std::array<std::uint64_t, 6> orient{};    // PS +0x170: 0..4, other
@@ -614,7 +680,9 @@ private:
     struct ParticleCache {
         std::uint64_t frame = ~0ull;
         std::uint32_t quads = 0;
-        std::vector<std::uint8_t> vb;
+        std::vector<std::uint8_t> vb;  // the vertices, or (gpu) the particle records
+        bool gpu = false;
+        d3d9::particle::OpConsts k;
     };
     std::unordered_map<const void*, ParticleCache, PtrHash> particleCache_;
     std::vector<std::uint8_t> leanParticleVb_;

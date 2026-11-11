@@ -633,6 +633,58 @@ TEST(particle_rules_follow_update_vertices) {
           sc::stripAlpha(0.8f, false, 2.0f, -1.0f) == 0.0f);
 }
 
+#include "d3d9/particle_gpu.h"
+
+// F11 (frame-ownership.md 14.26): the C++ twin of the GPU particle expansion (d3d9/particle_gpu.cpp = shaders/include/rvk_particle.hlsli) on hand-checked cases
+TEST(particle_gpu_expansion_twin) {
+    namespace pt = rvk::d3d9::particle;
+    // SharedBase's byte rule: x 255 truncated, the low byte, no clamp; 0xAARRGGBB
+    CHECK(pt::byteOf(1.0f) == 255 && pt::byteOf(0.5f) == 127 && pt::byteOf(0.0f) == 0 && pt::byteOf(-0.001f) == 0 && pt::byteOf(1.5f) == (382u & 255u));
+    CHECK(pt::byteOf(std::nanf("")) == 0 && pt::argbOf(1.0f, 0.0f, 0.5f, 1.0f) == 0xffff007fu);
+    CHECK(pt::clampOf(2.0f) == 1.0f && pt::clampOf(-1.0f) == 0.0f && pt::clampOf(std::nanf("")) == 1.0f);
+    // mode 0 (camera rows), camera at the origin looking along +z: right x, up y; a particle at (0, 0, 10), half sizes 2 / 1, pivots 0
+    pt::OpConsts k{};
+    k.c[0][0] = 1.0f;   // R0 = right
+    k.c[1][1] = 1.0f;   // R1 = up
+    k.c[2][2] = 1.0f;   // R2 = look
+    k.c[3][3] = 0.0f;   // camera position (0, 0, 0), mode 0
+    k.c[4][0] = k.c[5][1] = k.c[6][2] = k.c[7][3] = 1.0f;  // entity matrix identity
+    k.c[15][1] = 1.0f;  // up
+    pt::Record r{};
+    r.r[0][2] = 10.0f;
+    r.r[0][3] = 2.0f;  // hx
+    r.r[1][3] = 1.0f;  // hy
+    r.r[3][2] = 0.5f;  // age ratio
+    r.r[3][3] = 1.0f;  // 1 - frame fraction
+    r.r[4][0] = 0.0f, r.r[4][1] = 0.0f, r.r[4][2] = 1.0f, r.r[4][3] = 1.0f;
+    r.colour1 = 0x80ff8040u;
+    std::uint8_t v[4][pt::kVertexStride];
+    for (std::uint32_t c = 0; c < 4; ++c) pt::expand(k, r, c, v[c]);
+    const auto fl = [&](int c, int off) { float x; std::memcpy(&x, v[c] + off, 4); return x; };
+    const auto u32 = [&](int c, int off) { std::uint32_t x; std::memcpy(&x, v[c] + off, 4); return x; };
+    // corners: 0 (-hx, +hy), 1 (-hx, -hy), 2 (+hx, -hy), 3 (+hx, +hy) around the position; uv (u0 v0) (u0 v1) (u1 v1) (u1 v0)
+    CHECK(fl(0, 0) == -2.0f && fl(0, 4) == 1.0f && fl(0, 8) == 10.0f);
+    CHECK(fl(1, 0) == -2.0f && fl(1, 4) == -1.0f && fl(2, 0) == 2.0f && fl(2, 4) == -1.0f && fl(3, 0) == 2.0f && fl(3, 4) == 1.0f);
+    CHECK(fl(0, 0x20) == 0.0f && fl(0, 0x24) == 0.0f && fl(1, 0x24) == 1.0f && fl(2, 0x20) == 1.0f && fl(3, 0x24) == 0.0f);
+    // the look vector (0, 0, 1) points away from the camera (dot with the direction to the camera = -1): flipped, the normal (normal mode 0) = L = (0, 0, -1);
+    // COLOR0 = (age 0.5, |dot| 1, max(dot, 0) 0, 1 - frac 1) -> 0xff7fff00
+    CHECK(fl(0, 0xc) == 0.0f && fl(0, 0x10) == 0.0f && fl(0, 0x14) == -1.0f);
+    CHECK(u32(0, 0x18) == 0xff7fff00u && u32(2, 0x1c) == 0x80ff8040u);
+    // a quarter turn about L (angle 2, sin 1 / cos 0; M = (0 -1 0 / 1 0 0 / 0 0 1)): the corner (-2, 1) turns to (1, 2) (v' = v M, row vector)
+    r.mask = 4.0f;
+    r.r[3][0] = 1.0f;  // sin
+    r.r[3][1] = 0.0f;  // cos
+    pt::expand(k, r, 0, v[0]);
+    CHECK(fl(0, 0) == 1.0f && fl(0, 4) == 2.0f && fl(0, 8) == 10.0f);
+    // pinned corners: 2 and 3 at the pin point
+    r.mask = 0.0f;
+    k.c[12][3] = static_cast<float>(pt::kFlagPinned);
+    k.c[13][0] = 7.0f;
+    pt::expand(k, r, 3, v[3]);
+    pt::expand(k, r, 0, v[0]);
+    CHECK(fl(3, 0) == 7.0f && fl(3, 8) == 0.0f && fl(0, 0) == -2.0f);
+}
+
 TEST(sky_dome_states) {
     // the dome's BlendMode 4 (One / InvSrcAlpha): blended, depth write off, colour without alpha, LESSEQUAL
     sc::BlendInputs b;

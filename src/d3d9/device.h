@@ -766,6 +766,14 @@ public:
     std::unique_ptr<Buffer> createBuffer(std::uint32_t size, std::uint32_t usage, std::uint32_t pool, bool index, bool index32);
     std::shared_ptr<Shader> createShader(std::span<const std::uint32_t> bytecode);  // cached by bytecode hash
     std::unique_ptr<VertexDecl> createVertexDecl(std::span<const VertexElement> elements);
+    // F11 (frame-ownership.md 14.26, native.own_particles): the GPU-expansion form of a translated particle vertex shader (render thread; built on its first
+    // use, cached per engine shader and in the SPIR-V disk cache): the engine's program unchanged, its POSITION / NORMAL / COLOR0 / COLOR1 / TEXCOORD0 / 1 inputs
+    // built by rvkParticleExpand (shaders/include/rvk_particle.hlsli) from the instance's record (particleDecl: TEXCOORD8..15 of stream 1) and VS c232..c247.
+    // Null (`why`) when the shader reads another input or the variant does not build. particleDecl = the record stream's declaration (stream 1, instance rate).
+    // kind (d3d9/particle_gpu.h): kKindParticle = the particle vertex (rvkParticleExpand), kKindSkyBillboard = an eCSkyObject billboard (rvkSkyBillboardExpand: the
+    // precipitation); engineDecl = the composed draw's declaration: each input is the expansion's field at that element's offset (refused when one is not)
+    Shader* particleVs(Shader& engineVs, int kind, const VertexDecl* engineDecl, const char** why = nullptr);
+    VertexDecl* particleDecl(int kind = 0);
     void release(std::unique_ptr<Texture> texture);
     void release(std::unique_ptr<Buffer> buffer);
     void release(std::unique_ptr<VertexDecl> decl);
@@ -1951,6 +1959,9 @@ private:
     void logTracedMaterial(draws::Kind kind, bool jittered);
     rhi::ShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (None when it fails to build)
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
+    std::unordered_map<std::uint64_t, std::shared_ptr<Shader>> particleVs_;  // F11: (engine vertex shader, kind, declaration) -> its expansion form (null: refused)
+    std::unordered_map<std::uint64_t, const char*> particleVsWhy_;
+    std::unique_ptr<VertexDecl> particleDecl_[2];
     rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash, bool half16 = false);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
     void resetUberVariants();  // S-1a: debug.ubershader toggled at run time: every material pixel shader's variants are built again in the new form

@@ -371,7 +371,7 @@ void OwnPost::report() {
         spdlog::info("native: own post state (5 s): {} (setting {}, code {}){}", mode_ == Mode::Off ? "inactive" : "active", want, have, want != have ? " INCONSISTENT" : "");
     }
     reportScene();
-    if (mode_ == Mode::Off && sceneMode_[0] == Mode::Off && sceneMode_[1] == Mode::Off) return;
+    if (mode_ == Mode::Off && sceneMode_[0] == Mode::Off && sceneMode_[1] == Mode::Off && sceneMode_[2] == Mode::Off) return;
     reportFx();
     if (mode_ == Mode::Off) {
         // (own_sky / own_gui alone: their compared images)
