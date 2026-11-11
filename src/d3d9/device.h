@@ -1937,6 +1937,10 @@ private:
     bool gbufferLit() const;                                                        // ... that test
     BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
+    static unsigned variantThreadCount();  // 14.26: the variant workers (all hardware threads but four, 3..12; RVK_VARIANT_THREADS)
+    struct VariantTimes {
+        std::atomic<std::uint64_t> n{0}, moduleUs{0}, prewarmUs{0};
+    } variantTimes_;  // 14.26: the variant workers' time per built variant (diagnostics)
     void stopVariantWorker();
     void enqueueShaderJob(Shader* shader, std::function<void()> job);  // the compile of a translated shader (createShader)
 public:
