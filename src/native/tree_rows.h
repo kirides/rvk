@@ -33,5 +33,10 @@ constexpr float rampValue(std::uint32_t position) { return static_cast<float>(po
 // RVK_TREE_LIGHT_CUTS=1 (read once): the solid tree batches end on a differing light signature also when the table holds the lights (every tree lit by its own
 // register lamps, ~1.6 x the composed batches at jungle); default: such instances merge and the batch's last instance lights it (frame-ownership.md 14.36)
 bool lightCuts();
+// the tree batch cut mode: 0 = RVK_TREE_LIGHT_CUTS=0 (never cut on table-known lights), 1 = =1 (always), 2 = default (only a tree a lamp lights, lampMin())
+int lightCutMode();
+float lampMin();  // RVK_TREE_LAMP_MIN (default kLampMin): a lamp lights a tree when colour x intensity x distance falloff (sc::treeLampContribution) is at least this
+// the light signature planTreeBatches uses for an instance whose `ns` static lights the table holds (0 = merges): shared by the composed and the owned path
+std::uint64_t knownLightSig(const std::uint8_t* illum, std::uint32_t ns, const float pos[3], bool* lit = nullptr);
 
 }  // namespace rvk::native::tro

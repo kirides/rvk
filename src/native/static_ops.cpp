@@ -3091,10 +3091,10 @@ void StaticOps::report() {
             return std::format("SpeedTree ops {} (branches {}, fronds {}, leaf cards {}, leaf meshes {}; 0 draws {}, wrong TransformationType {}), "
                                "instancing hardware {} / software {} ops, {} instances in {} batches ({} not drawn: strip length 0), {} leaf LOD "
                                "passes, queue copies sorted {}, shadow fronds skipped (leaf-card vertices > frond vertices) {}; tree billboard ops {} ({} tex-coord uploads); vegetation ops {} (0 draws {}, mesh "
-                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}; solid batch cuts: limit {} / strip {} / list {} / sun {} / static {} / own lights {} / null list {}; instances with table-known lights {}",
+                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}; solid batch cuts: limit {} / strip {} / list {} / sun {} / static {} / own lights {} / null list {}; instances with table-known lights {} (lamp-lit {})",
                                a.ops, a.types[0], a.types[1], a.types[2], a.types[3], a.zeroOps, a.wrongTransformation, a.hardware, a.software,
                                a.instances, a.batches, a.undrawnBatches, a.leafLods, a.sortedCopies, a.shadowFrondsSkipped, a.billboardOps, a.billboardTexCoords, a.grassOps,
-                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved, a.splits[0], a.splits[1], a.splits[2], a.splits[3], a.splits[4], a.splits[5], a.splits[6], a.knownLights);
+                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved, a.splits[0], a.splits[1], a.splits[2], a.splits[3], a.splits[4], a.splits[5], a.splits[6], a.knownLights, a.litLights);
         };
         TreeStats& t = treeTotal_;
         const TreeStats& w = treeWindow_;
@@ -3108,6 +3108,7 @@ void StaticOps::report() {
         t.undrawnBatches += w.undrawnBatches;
         for (std::size_t i = 0; i < t.splits.size(); ++i) t.splits[i] += w.splits[i];
         t.knownLights += w.knownLights;
+        t.litLights += w.litLights;
         for (std::size_t i = 0; i < t.types.size(); ++i) t.types[i] += w.types[i];
         t.leafLods += w.leafLods;
         t.shadowFrondsSkipped += w.shadowFrondsSkipped;

@@ -573,13 +573,13 @@ bool StaticOps::treePlan(bool zpass, std::uint32_t type, bool tableMerge, const 
                     why = 5;
                     return false;
                 }
-                if (tro::lightCuts()) {
+                if (tro::lightCutMode() != 0) {
                     std::uint8_t head[0x80];
                     for (std::uint32_t k = 0; k < 0x80; k += 8) {
                         const std::uint64_t w = is.at<std::uint64_t>(k);
                         std::memcpy(head + k, &w, 8);
                     }
-                    s.lightSig = sc::treeLightSig(head, ns);
+                    s.lightSig = tro::knownLightSig(head, ns, s.world + 12);
                 }
             }
             s.sun = sunListValue && !noSun;

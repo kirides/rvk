@@ -3812,6 +3812,28 @@ Owned trees DIFFERING 0 (rows 0, lighting 0, counts 0, templates 0), MISS 0 in e
 tree ops at the night spots. beach_night_storm is no picture-check spot (`freeze = false` + thunder: the clock runs, the sea and the lightning move; it FAILs with
 `native.owned_trees=false` too). `rvk_tests`, `rvk_rhitest --validation`, `rvk_d3d9test --validation` (Vulkan + D3D12) pass.
 
+**Follow-up: cut on the light signature only where a lamp lights the tree (2026-11-12; default now, user decision; `RVK_TREE_LIGHT_CUTS=0` = never cut on table-known lights = the 14.36 behaviour, `=1` = always cut, `RVK_TREE_LAMP_MIN=<x>` = the threshold).**
+`tro::knownLightSig` (`static_ops_trees.cpp`, shared by `planTreeBatches`' input in the composition and by `treePlan`) gives a table-known instance the light signature `sc::treeLightSig`
+only when `sc::treeLampContribution(illum, ns, treePos) >= 0.1`, else 0 (merges as before). The contribution is per tree and per lamp entry: the entry's diffuse colour x intensity
+(illum +0x20 + 0x40 e, largest component) times the engine's falloff `1 - d^2 / R^2` (position at +0x10, **1 / R^2 at +0x1c** - the entry's w; +0x2c is 0, there is no range field), d to the tree's world
+translation (entity +0x60, floats 12 .. 14); best of the (<= 2) entries. Measured first: the colour alone does not discriminate (the lamps flicker 1 - 2.6 by day as at night; only a few fading lights
+are ~0.1), the distance does: the illumination lists lamps well outside their range (a tree 1,800 units from a lamp of R 850 lists it). Per-tree, no day / night switch: a torch-lit tree by day cuts.
+`rvk.log native: trees (5 s)` ends `instances with table-known lights N (lamp-lit M)`.
+
+Batches per instance in the settled holds (private copy `risen-test-vk-tlc`, anm all-on set, `upscale.mode=off`, frame generation off, freeze_wait 900; the instance counts vary a few % between runs):
+
+| spot | merged (`=0`) | default 0.1 (lamp-lit of known) | `=1` always |
+|---|---|---|---|
+| jungle (day) | 0.148 | 0.173 (30 %) | 0.239 |
+| harbour_night | 0.278 | 0.30 (25 %) | 0.552 |
+| harbour_night_north | 0.22 | 0.23 (9 %) | 0.31 - 0.32 |
+
+Jungle by day stays within +17 % of the merged count (always-cut +60 %); at the night spots the batches grow +8 % / +5 % (always-cut +98 % / +45 %): most of `=1`'s extra cuts are trees whose listed
+lamp is out of range, which light nothing, so they merge. Thresholds 0.3 / 0.1 / 0.03 differ little in batches (jungle 0.166 / 0.173 / 0.178; harbour_night 0.33 / 0.30 / 0.26 - 0.31, noise), 0.1 was taken
+(contribution 0.1 = a lamp of colour ~1.5 at 93 % of its range). **Picture check** (anm all-on + `native.picture_check=true`, freeze_wait 1800, final build): harbour_night ok 0.048 - 0.052 % vs control
+0.050 - 0.059 %, harbour_night_north ok 0.034 - 0.052 % vs 0.041 - 0.056 %, jungle ok 0.046 - 0.049 % vs 0.045 - 0.047 %; owned trees DIFFERING 0 (rows / lighting / counts / templates 0), MISS 0.
+`rvk_tests` (new `tree_lamp_contribution_by_distance`), `rvk_d3d9test --validation` Vulkan + D3D12 pass.
+
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
 User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us

@@ -262,6 +262,10 @@ void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit
 // TreeInstance::lightSig of an illumination with `ns` (1 .. 2) static light entries: a hash over each entry's first 48 bytes (position, colour, ...) at
 // illum +0x10 + 0x40 e; `illum` = the illumination's first 0x80 bytes
 std::uint64_t treeLightSig(const std::uint8_t* illum, std::uint32_t ns);
+// true when one of the `ns` (1 .. 2) static light entries lights a tree at `pos` (its world position) noticeably: the entry's diffuse colour x intensity (illum
+// +0x20 + 0x40 e, rgb) times the engine's distance falloff 1 - d^2 / R^2 (position at +0x10 + 0x40 e, 1 / R^2 at +0x1c + 0x40 e), largest colour component,
+// is >= `minContribution`. Per tree (frame-ownership.md 14.36): only such trees end a merged batch on their light signature
+float treeLampContribution(const std::uint8_t* illum, std::uint32_t ns, const float pos[3]);
 // the draw description a batch writes into the visual's record (the rest stays as the record has it)
 struct TreeRange {
     std::uint32_t numVertices = 0, startIndex = 0, primCount = 0;
