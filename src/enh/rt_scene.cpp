@@ -2296,6 +2296,12 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                      q.vertexBuffer != nullptr && q.vertexBuffer->ringCopied(), els);
     }
     if (mainView && !solid && !skin) return;  // the pre-pass's draws only feed the skinning pass
+    // 14.15 (Full, native.bone_motion=on): a cascade's character draw while the skinning pipeline is still being built (the first second of a session) takes no
+    // capture either: the character enters the TLAS with the first skinning job (no capture-variant pipeline per skinned shader for a few frames)
+    if (!solid && !skin && skinWanted_ && !skinReady_ && !skinVerify_ && dev.boneMotion() == 1 && !d3d9::Device::nocapOld()) {
+        dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtCascade, d3d9::Device::captureKindOf(q));
+        return;
+    }
     // verify: only the cascades' draws (the vertex shader capture of the same draw is the reference)
     if (skin && skinVerify_ && mainView) return;
     // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
@@ -2329,6 +2335,12 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (has && (!characterMotion_ || dev.boneMotionCovered()) && !skinVerify_) {
             ++iv_.solidCaptureSkipped;
             dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidMotion, d3d9::Device::captureKindOf(q));
+            return;
+        }
+        // 14.15: a solid-pass part without a job of this frame (its first frame: the pre-pass / cascades did not draw it yet) whose motion the bone forms give takes
+        // no capture: the TLAS takes it from the next frame's job (one frame without it), as the RT scene does for any part it first sees in a late pass
+        if (!has && dev.boneMotionCovered() && dev.boneMotion() == 1 && !skinVerify_ && !d3d9::Device::nocapOld()) {
+            dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidNoJob, d3d9::Device::captureKindOf(q));
             return;
         }
         if (!has && skinLogged_.size() < 12 && skinLogged_.insert(key).second) {
