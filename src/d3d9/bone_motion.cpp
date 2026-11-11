@@ -22,6 +22,7 @@
 #include "d3d9/device.h"
 #include "gpuscene/bone_table.h"
 #include "gpuscene/object_table.h"
+#include "gpuscene/row_table.h"
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
@@ -284,7 +285,120 @@ rhi::GpuRef Device::historyOf(rhi::GpuRef base) const {
     return gpuscene::objecttable().prevOf(base);
 }
 
-bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
+bool Device::rigidRowWindow() const {
+    if (owned_ == nullptr || nocapOld()) return false;
+    const OwnedWindows::Win& w = owned_->w[0][2];
+    float rows[12];
+    return w.kind == OwnedWindows::Kind::Object && !w.base.null() && gpuscene::rowtable().worldRowsAt(w.base.bits, rows);
+}
+
+// 14.22: an instanced-mesh draw (held equipment, a render instance) whose VS window 2 is not an object record (uploaded: its op record is being built, or not owned).
+// Its rows c33..c35 (composed by the op: the instance's world rows) are remembered per draw key (entity x buffers x range; the instances of one list share a key) for the
+// next frame. Rows seen last frame under the key = no motion of its own (a re-sorted list); one placement under the key in both frames that moved (< kJump) = the
+// bone-motion forms with a per-frame block of the previous rows (rigidPrev_ / bonePushPrev_: the second run reads it as window 2, its c36.w = 1 the validity word);
+// a new key, a list whose instances changed, a jump, or a shader that reads c36 itself: camera motion only (no capture either: a capture of an aliased key would be
+// another instance's)
+bool Device::rigidListPredict(const DrawGeom& geom) {
+    const std::uint64_t frame = frameValue();
+    std::uint64_t key = 1469598103934665603ull;
+    const auto mixk = [&](std::uint64_t v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    mixk(reinterpret_cast<std::uintptr_t>(tag_.entity));
+    if (streams_[0].buffer != nullptr) {
+        const ResourceRef r = streams_[0].buffer->ref();
+        mixk(r.id);
+        mixk(r.generation);
+    }
+    if (indices_ != nullptr) {
+        const ResourceRef r = indices_->ref();
+        mixk(r.id);
+        mixk(r.generation);
+    }
+    mixk(streams_[0].offset);
+    mixk(geom.first);
+    mixk(geom.primitives);
+    mixk(static_cast<std::uint32_t>(geom.baseVertex));
+    std::uint64_t h = 1469598103934665603ull;
+    for (std::uint32_t r = 33; r < 36; ++r) {
+        std::uint32_t bits[4];
+        std::memcpy(bits, vsF_[r], sizeof(bits));
+        for (const std::uint32_t b : bits) {
+            h ^= b;
+            h *= 1099511628211ull;
+        }
+    }
+    if (frame % 300 == 0 && rigidRowsSweep_ != frame) {
+        rigidRowsSweep_ = frame;
+        std::erase_if(rigidRows_, [&](const auto& kv) { return kv.second.frame + 600 < frame; });
+    }
+    RigidRows& e = rigidRows_[key];
+    if (e.frame != frame) {
+        if (e.frame + 1 == frame) {
+            e.prevN = e.n;
+            e.prevHashes.swap(e.hashes);
+            std::sort(e.prevHashes.begin(), e.prevHashes.end());  // (looked up by binary search)
+            std::memcpy(e.prevFirst, e.first, sizeof(e.first));
+        } else {
+            e.prevN = 0;
+            e.prevHashes.clear();
+        }
+        e.hashes.clear();
+        e.n = 0;
+        e.frame = frame;
+    }
+    const std::uint32_t idx = e.n;
+    if (idx < 512) e.hashes.push_back(h);
+    if (idx == 0) std::memcpy(e.first, vsF_[33], sizeof(e.first));
+    ++e.n;
+    const auto still = [&](std::uint64_t& counter) {
+        ++counter;
+        obsRigidStill_ = true;
+        return false;
+    };
+    if (std::binary_search(e.prevHashes.begin(), e.prevHashes.end(), h)) return still(boneStats.listStill);
+    if (e.prevN == 0) return still(boneStats.listNew);
+    if (e.prevN != 1 || idx != 0) return still(boneStats.listAmbiguous);
+    const float dx = vsF_[33][3] - e.prevFirst[0][3], dy = vsF_[34][3] - e.prevFirst[1][3], dz = vsF_[35][3] - e.prevFirst[2][3];
+    if (!(dx * dx + dy * dy + dz * dz <= gpuscene::ObjectTable::kJump * gpuscene::ObjectTable::kJump)) return still(boneStats.listNew);
+    // (the block holds c31..c36: a shader reading past c35 in window 2 would read our validity word / past the block)
+    if (vs_->reflection.windowEnd[2] > 36) return still(boneStats.listRefused);
+    const bool push = !(sceneInstances_ && sceneActive());
+    if (push) {
+        const rhi::ShaderModule vsB = variant(vs_, VariantSlot::BoneVs);
+        const rhi::ShaderModule psM = ps_.get() != nullptr ? variant(ps_, gbufferSlot(true)) : rhi::ShaderModule::None;
+        if (vsB == rhi::ShaderModule::None || psM == rhi::ShaderModule::None) {
+            ++boneStats.rigidPending;
+            obsBonePending_ = true;
+            return false;
+        }
+    } else if (!boneFormsReady()) {
+        ++boneStats.rigidPending;
+        obsBonePending_ = true;
+        return false;
+    }
+    // the previous block: c31, c32 as composed now (c32 .w = the fade; position-free), c33..c35 = last frame's rows, c36 = (0, 0, 0, 1u)
+    rhi::RingAlloc a = game_->allocRing(6 * 16, 16);
+    if (a.ptr == nullptr || a.ref.null()) return still(boneStats.listRefused);
+    auto* dst = static_cast<std::uint8_t*>(a.ptr);
+    std::memcpy(dst, vsF_[31], 32);
+    std::memcpy(dst + 32, e.prevFirst, 48);
+    const std::uint32_t valid[4] = {0u, 0u, 0u, 1u};
+    std::memcpy(dst + 80, valid, 16);
+    const rhi::GpuRef base = a.ref.plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);  // (biased like every window block: c[n] at base + n x 16)
+    ++boneStats.listMoving;
+    if (push) {
+        bonePushPrev_ = base;
+        ++boneStats.pushPredicted;
+    } else {
+        rigidPrev_ = base;
+        ++boneStats.rigidPredicted;
+    }
+    return true;
+}
+
+bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase, const DrawGeom* geom) {
     if (boneMode_ != 1 || phase.view != scene::View::Main || phase.pass != scene::Pass::Solid) return false;
     const bool skinned = kind == draws::Kind::Skinned;
     const bool rigid = (kind == draws::Kind::StaticMesh || kind == draws::Kind::InstancedMesh) && rigidMotionOn();  // 14.15 b
@@ -306,10 +420,18 @@ bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
         }
     } else {
         if (owned_->w[0][2].kind != OwnedWindows::Kind::Object) {
+            // 14.22: an instanced-mesh draw without an object record: its rows of the last frame
+            if (kind == draws::Kind::InstancedMesh && geom != nullptr && !nocapOld()) return rigidListPredict(*geom);
             ++boneStats.rigidNoWindow;
             return false;
         }
         if (gpuscene::objecttable().prevOf(owned_->w[0][2].base).null()) {
+            // 14.22: an instance row image (F2f) is immutable while its record lives (the stamp holds the instance's matrix): no motion of its own
+            if (rigidRowWindow()) {
+                ++boneStats.rowStill;
+                obsRigidStill_ = true;
+                return false;
+            }
             ++boneStats.rigidNoHistory;
             return false;
         }
@@ -382,9 +504,12 @@ void Device::boneMotionFrame() {
                      s.records - p.records, s.recordsNoPrev - p.recordsNoPrev, bonePipes_.size());
         if (rigidMode_) {
             spdlog::info("native: rigid motion (5 s): {}; static solid draws predicted {} (no object window {}, no history {}, forms pending {}); instanced-mesh draws "
-                         "with the push form predicted {}, drawn {}",
+                         "with the push form predicted {}, drawn {}; instanced-mesh draws without an object record: row image (still) {}, rows seen last frame {}, moved "
+                         "(previous rows block) {}, camera motion only: new {}, list changed {}, refused {}; replays drawn anew for the bone forms {}",
                          rigidMotionOn() ? "on" : "waiting for upscale.object_motion=all", s.rigidPredicted - p.rigidPredicted, s.rigidNoWindow - p.rigidNoWindow,
-                         s.rigidNoHistory - p.rigidNoHistory, s.rigidPending - p.rigidPending, s.pushPredicted - p.pushPredicted, s.pushDrawn - p.pushDrawn);
+                         s.rigidNoHistory - p.rigidNoHistory, s.rigidPending - p.rigidPending, s.pushPredicted - p.pushPredicted, s.pushDrawn - p.pushDrawn,
+                         s.rowStill - p.rowStill, s.listStill - p.listStill, s.listMoving - p.listMoving, s.listNew - p.listNew, s.listAmbiguous - p.listAmbiguous,
+                         s.listRefused - p.listRefused, s.replayBoneRefused - p.replayBoneRefused);
         }
     } else {
         spdlog::info("native: bone motion compare (5 s): {} capture draws with a bone image; vertices compared {}, max error {:.5f} px / {:.6f} units, {} above 0.01 px, {} without a previous capture; largest motion seen: bone path {:.4f}, captures {:.4f} units; second run on this frame's image vs the first: {:.6f} units",

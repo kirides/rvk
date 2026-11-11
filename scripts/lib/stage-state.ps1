@@ -30,6 +30,12 @@ $script:StageOfSetting = [ordered]@{
     'native.tree_wind'             = 'tree_wind'
 }
 
+# stages whose input can legitimately be absent from a whole run (frame-ownership.md 14.22): bone_motion acts only on skinned solid draws that move (a frozen
+# rvkcompare spot animates nothing), tree_wind only on animated SpeedTrees inside the RT range of a swaying-tree consumer. For these an arm claimed on also passes
+# when EVERY window says `inactive(armed, nothing owned in the window)` (armed, nothing to act on); `setting on, code off`, `gated` and `setting off` still fail.
+$script:IdleCapableStages = @('bone_motion', 'tree_wind')
+$script:ArmedIdle = 'inactive(armed, nothing owned in the window)'
+
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)
 function Get-StageWindows([string]$Log) {
     $windows = @()
@@ -80,7 +86,8 @@ function Assert-WindowStages($Window, [string[]]$Settings, [string]$Arm = '', [s
         # (stricter than Assert-ArmStages: a window lies inside one arm after its settle frames, so an arm claimed on must have ACTED in it;
         # `inactive(armed, nothing owned in the window)` = the toggle armed the code but nothing ran through it, e.g. native.vertex_pull switched on
         # at run time: no record is rebuilt pulled; -AllowIdle accepts it for stages that legitimately have nothing in view)
-        if ($want -and $state -notlike 'active*' -and -not ($AllowIdle -and $state -like 'inactive(armed*')) { $failures += "window $($Window.Tag) claims $($kv[0])=on but $stage=$state" }
+        $idleOk = ($AllowIdle -and $state -like 'inactive(armed*') -or ($stage -in $script:IdleCapableStages -and $state -eq $script:ArmedIdle)
+        if ($want -and $state -notlike 'active*' -and -not $idleOk) { $failures += "window $($Window.Tag) claims $($kv[0])=on but $stage=$state" }
         if (-not $want -and $state -like 'active*') { $failures += "window $($Window.Tag) claims $($kv[0])=off but $stage=$state" }
     }
     if ($failures.Count -gt 0) {
@@ -125,7 +132,22 @@ function Assert-ArmStages([string]$Log, [string[]]$Settings, [string]$Arm = "", 
             $lastState = if ($last.Contains($stage)) { $last[$stage] } else { '(missing)' }
             if ($want) {
                 # on = it acted in some window of the run and is armed at the end (a spot with nothing of its kind in view makes the last window 'armed, nothing owned')
-                if (-not $anyActive) { $failures += "arm claims $($kv[0])=on but no window says $stage active (last: $lastState)" }
+                if (-not $anyActive -and $stage -in $script:IdleCapableStages) {
+                    # (armed, nothing to act on: accepted only when every window from the first armed one on says exactly that; the windows before it may say
+                    # `setting on, code off` while the stage arms at start-up (tree_wind waits for its pipeline); a stage that never arms fails)
+                    $armedAt = -1
+                    for ($i = 0; $i -lt $considered.Count; $i++) { if ($considered[$i].Contains($stage) -and $considered[$i][$stage] -eq $script:ArmedIdle) { $armedAt = $i; break } }
+                    $before = if ($armedAt -gt 0) { @($considered[0..($armedAt - 1)]) } else { @() }
+                    $after = if ($armedAt -ge 0) { @($considered[$armedAt..($considered.Count - 1)]) } else { @($considered) }
+                    $bad = @($after | Where-Object { -not $_.Contains($stage) -or $_[$stage] -ne $script:ArmedIdle })
+                    $bad += @($before | Where-Object { -not $_.Contains($stage) -or $_[$stage] -notlike 'inactive(setting on, code off*' })
+                    if ($bad.Count -gt 0) {
+                        $badState = if ($bad[0].Contains($stage)) { $bad[0][$stage] } else { '(missing)' }
+                        $failures += "arm claims $($kv[0])=on but no window says $stage active and a window says $badState"
+                    }
+                    elseif (-not $Quiet) { Write-Host "note: $stage armed but idle in every window (nothing to act on)" -ForegroundColor Yellow }
+                }
+                elseif (-not $anyActive) { $failures += "arm claims $($kv[0])=on but no window says $stage active (last: $lastState)" }
                 elseif ($lastState -notlike 'active*' -and $lastState -notlike 'inactive(armed*') { $failures += "arm claims $($kv[0])=on but the last window says $stage=$lastState" }
             }
             else {

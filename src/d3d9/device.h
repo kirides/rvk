@@ -1020,7 +1020,9 @@ public:
     // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
     bool boneMotionDraw() const { return obsBone_; }
     // ... or will be once its forms are built (14.15: while they compile the draw keeps the plain form, its motion that frame is the camera's: no capture as fallback)
-    bool boneMotionCovered() const { return obsBone_ || (obsBonePending_ && !nocapOld()); }
+    bool boneMotionCovered() const { return obsBone_ || ((obsBonePending_ || obsRigidStill_) && !nocapOld()); }
+    // 14.22: a rigid draw whose VS window 2 is an instance row image (F2f): no motion of its own (the record's stamp holds the instance's matrix, a moved instance remakes it)
+    bool rigidRowWindow() const;
     // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
     // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
     void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
@@ -1033,6 +1035,10 @@ public:
     struct BoneMotionStats {
         std::uint64_t predicted = 0, chosen = 0, chosen2 = 0, chosenPull = 0, pending = 0, noHistory = 0, records = 0, recordsNoPrev = 0, compareDraws = 0;
         std::uint64_t rigidPredicted = 0, rigidNoWindow = 0, rigidNoHistory = 0, rigidPending = 0, pushPredicted = 0, pushDrawn = 0;  // 14.15 b
+        // 14.22: instanced-mesh draws without an object record (an uploaded VS window 2 / a row image): still (rows seen last frame / a row image), moving with the previous
+        // rows as a per-frame block, no source (new / ambiguous list / a jump / the shader reads c36): camera motion only
+        std::uint64_t listStill = 0, rowStill = 0, listMoving = 0, listNew = 0, listAmbiguous = 0, listRefused = 0;
+        std::uint64_t replayBoneRefused = 0;  // 14.22: packet-cache replays of draws that now take the bone-motion forms (cached without them): drawn by the normal path
         std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
         float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
         float winPx = 0.0f, winWorld = 0.0f, winMotionBone = 0.0f, winMotionCapture = 0.0f, winRerun = 0.0f;
@@ -1170,6 +1176,9 @@ public:
         GamePipeline scenePipelinePull = GamePipeline::None;
         bool ordered = false;     // F9 / F14 (native.owned_ordered): not batchable, its scene forms were made for the ordered owned path (drawn at its op's place)
         bool boneMotion = false;  // 14.13 (native.bone_motion): the scene forms above are the bone-motion forms (the record's prevVs = the bone window's history image)
+        // 14.22: what the observers of the composing draw were told (replayDraw repeats it): 0 nothing, 1 bone forms predicted but not taken (declined: no form
+        // for the draw's state), 2 forms pending, 3 rigid without motion of its own
+        std::uint8_t boneObs = 0;
         shader::abi::VertexFetch pull{};
         rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;  // vsModule: the one drawn with (the engine's, or the billboards' fade variant); fsModule: the engine's
         // the enhancement variant decision of prepareDraw and what it was derived from (retained-signals.md 13): replayBuild re-derives the cheap inputs
@@ -1728,6 +1737,7 @@ public:
     // the plain ubershader module a draw of `ps` is offered now (None: off, no request, not built / not covered): read only; CachedDraw::Variant::uberAsked is its value at capture
     rhi::ShaderModule uberAskedNow(const Shader& ps) const;
     bool ubershader() const { return ubershader_.load(std::memory_order_relaxed); }
+    void sourceAttached(Shader& s);  // 14.22: engine/material_source attached the request to `s` (notifySourceAttached)
     // the ubershader's lit core in real 16-bit arithmetic: the device has it (rhi::DeviceCaps::shaderFloat16) and RVK_UBER_HALF is not 0
     bool uberHalf() const;
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
@@ -2254,6 +2264,18 @@ private:
     bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)
     bool obsBonePending_ = false;   // ... would be, its forms are still being built (boneMotionCovered)
     rhi::GpuRef bonePushPrev_;      // 14.15 b: the draw being prepared takes the bone-motion PUSH form (an instanced-mesh op): its object record's history base
+    bool obsRigidStill_ = false;    // 14.22: the draw is rigid and has no motion of its own (boneMotionCovered: no capture)
+    rhi::GpuRef rigidPrev_;         // 14.22: the draw's previous-frame window 2 block (a per-frame ring block): the bone forms' prevVs instead of historyOf
+    // 14.22: the instanced-mesh draws with an uploaded VS window 2, per draw key (entity x buffers x range): the rows c33..c35 seen last frame / this frame
+    struct RigidRows {
+        std::uint64_t frame = 0;
+        std::uint32_t n = 0, prevN = 0;
+        float first[3][4] = {}, prevFirst[3][4] = {};
+        std::vector<std::uint64_t> hashes, prevHashes;  // (the rows of each instance drawn under the key, this frame / the last; capped at 512)
+    };
+    std::unordered_map<std::uint64_t, RigidRows> rigidRows_;
+    std::uint64_t rigidRowsSweep_ = 0;
+    bool rigidListPredict(const DrawGeom& geom);  // bonePredict's instanced-mesh branch without an object record
     CaptureSite obsSite_ = CaptureSite::Composed;  // the path showing the observers the draw (capture census)
     struct CaptureCensus {
         std::uint64_t n[static_cast<std::size_t>(CaptureBy::Count)][static_cast<std::size_t>(CaptureKind::Count)][static_cast<std::size_t>(CaptureSite::Count)] = {};
@@ -2266,7 +2288,7 @@ private:
     std::unordered_set<std::uint64_t> bonePipes_;  // the scene pipelines (v1, v2, pulled) of the bone-motion forms: toScenePacket gives their records the history base
     bool bonePipe(GamePipeline p) const { return boneMode_ == 1 && !bonePipes_.empty() && bonePipes_.contains(static_cast<std::uint64_t>(p)); }
     bool boneFormsReady();          // the current shaders' bone-motion forms (v1 + v2 VS, the motion PS's scene forms) exist (requested when not)
-    bool bonePredict(draws::Kind kind, const scene::Phase& phase);  // prepareDraw, before the observers: the draw will take the bone-motion forms
+    bool bonePredict(draws::Kind kind, const scene::Phase& phase, const DrawGeom* geom = nullptr);  // prepareDraw, before the observers: the draw will take the bone-motion forms
     bool boneOfCached(const CachedDraw& c) const { return c.boneMotion && boneMode_ == 1 && gbuf_.active && gbuf_.motion != nullptr; }
     std::unique_ptr<rhi::Buffer> boneCmp_;  // compare mode: kBoneCmpSlots x 16 bytes the capture vertex shaders accumulate into (Readback)
     std::uint64_t boneCmpFrame_ = 0;
@@ -2492,6 +2514,9 @@ private:
     std::condition_variable variantCv_, variantIdleCv_;
     int variantBusy_ = 0;  // jobs a worker is building now (variantMutex_); resetUberVariants waits for 0
     std::atomic<std::uint64_t> uberFallbacks_{0};  // S-1a: ubershader builds that failed and were taken by the translated shader
+    std::unordered_set<std::uint64_t> uberFailSeen_;  // 14.22: (shader x slot) of the translated scene forms of covered requests, logged once
+    int uberFailLogged_ = 0;
+    std::atomic<std::uint64_t> uberLateSource_{0}, uberLateReset_{0};  // 14.22: variants rebuilt because the engine's request arrived during / after their build
     std::deque<VariantJob> variantJobs_;
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
     mutable std::mutex shaderJobMutex_;

@@ -1250,6 +1250,18 @@ void D3D12DeviceImpl::logMemoryStats() {
     spdlog::info("perf: d3d12 mesh arena {} blocks, {:.1f} MiB used of {:.1f} MiB; {} pipelines ({} PSOs built in {:.0f} ms of build time, {} pending, {} draws skipped while pending)", arena_.size(),
                  static_cast<double>(used) / 1048576.0, static_cast<double>(size) / 1048576.0, entries_.size(), psoBuilt_.load(), static_cast<double>(psoNs_.load()) * 1e-6,
                  psoPending_.load(), psoSkipped_.load());
+    if (caps_.rayQuery) {
+        // 14.22: the BLAS storage arena (one buffer creation per chunk instead of one per BLAS)
+        std::uint64_t asUsed = 0;
+        std::size_t asChunks = 0;
+        {
+            const std::lock_guard lock(asMutex_);
+            asChunks = asChunks_.size();
+            for (const AsChunk& c : asChunks_) asUsed += c.used;
+        }
+        spdlog::info("perf: d3d12 blas arena: {} chunks of {} MiB, {:.1f} MiB used; run totals: {} BLAS placed, {} freed, {} in a buffer of their own (larger than a chunk / no memory)", asChunks,
+                     kAsChunk >> 20, static_cast<double>(asUsed) / 1048576.0, asStats_.allocs, asStats_.frees, asStats_.dedicated);
+    }
 }
 
 // ---- GPU timestamps ----------------------------------------------------------------------------------------------------------

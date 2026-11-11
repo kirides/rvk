@@ -364,6 +364,12 @@ const AgilityRuntime& agility(const DeviceDesc& desc) {
 
 class D3D12DeviceImpl;
 
+// 14.22: a BLAS's range of the device's acceleration structure arena (D3D12DeviceImpl::asAlloc)
+struct AsSpan {
+    std::int32_t chunk = -1;  // -1 = none (a dedicated resource)
+    std::uint64_t offset = 0, size = 0;
+};
+
 // a CPU-writable range of descriptors of a heap with a free list
 struct HeapAllocator {
     std::uint32_t next = 1;  // 0 is reserved (the default descriptor; the texture heap reserves kReservedSlots)
@@ -464,7 +470,7 @@ public:
     bool createTlas(const TlasDesc& desc);
     bool createStorage(std::uint64_t bytes, const char* name);
     bool isTlas() const override { return tlas_; }
-    std::uint64_t address() const override { return storage_->GetGPUVirtualAddress(); }
+    std::uint64_t address() const override { return (storage_ ? storage_->GetGPUVirtualAddress() : arenaBuffer_->GetGPUVirtualAddress()) + span_.offset; }
     std::uint32_t tlasSlot() const override { return slot_; }
     std::uint64_t storageBytes() const override { return storageBytes_; }
     std::uint64_t scratchAddress() const { return scratch_->GetGPUVirtualAddress(); }
@@ -486,6 +492,10 @@ private:
     std::uint64_t buildScratch_ = 0, updateScratch_ = 0, storageBytes_ = 0;
     ComPtr<ID3D12Resource> storage_, scratch_;
     std::uint32_t slot_ = 0;
+    // 14.22: a BLAS in the device's arena (storage_ null): the chunk's buffer + the span
+    ID3D12Resource* arenaBuffer_ = nullptr;
+    AsSpan span_;
+    bool storageFor(std::uint64_t bytes, const wchar_t* name);
 };
 
 // compacted sizes: UINT64s written by EmitRaytracingAccelerationStructurePostbuildInfo into a UAV buffer, copied to a readback buffer
@@ -679,6 +689,8 @@ public:
         if (desc.rayTracing && dxr11_ && SUCCEEDED(device_.As(&device5_))) {
             caps_.rayQuery = true;
         }
+        // (14.22: the BLAS arena's first chunk now, not inside the first frame that builds the scene)
+        if (caps_.rayQuery && !asArenaGrow()) spdlog::warn("d3d12: the acceleration structure arena could not be created (BLAS storage stays one buffer each)");
         D3D12_COMMAND_QUEUE_DESC qd{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
         RVK_HR(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue");
         RVK_HR(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_)), "CreateCommandAllocator");
@@ -1052,6 +1064,80 @@ public:
         return kHeapSize - kUavRing - kViewRing + (gameMode_ ? frameSlot_ : 0) * perSlot + t;
     }
     ID3D12Device5* device5() { return device5_.Get(); }
+    // 14.22: the BLAS storage arena. Every CreateCommittedResource of a BLAS (its build storage and its compacted copy) waited on the CPU inside the AMD driver for the
+    // paging fence (d3d12core NtGdiDdDDIWaitForSynchronizationObjectFromCpu below amdxc64's allocation): a spot change that builds and compacts ~100 - 300 BLAS stalled
+    // the engine thread for 0.5 - 2.2 s (rvk.log `rt: scene: slow pass`, `diag: hang`). BLAS storage now lives in a few large buffers in the RAYTRACING_ACCELERATION_STRUCTURE
+    // state (an acceleration structure may sit at any 256-byte aligned address of such a buffer; every AS barrier of this backend is a null UAV barrier), suballocated
+    // first-fit with coalescing; the first chunk is created with the device (ray query on). A request larger than a chunk gets a dedicated buffer as before.
+    static constexpr std::uint64_t kAsChunk = 64ull << 20;
+    struct AsChunk {
+        ComPtr<ID3D12Resource> buffer;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> free;  // (offset, size), sorted by offset
+        std::uint64_t used = 0;
+    };
+    bool asArenaGrow() {
+        ComPtr<ID3D12Resource> b = createDefaultBuffer(kAsChunk, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+        if (!b) return false;
+        b->SetName(L"rhi blas arena");
+        AsChunk c;
+        c.buffer = std::move(b);
+        c.free.push_back({0, kAsChunk});
+        asChunks_.push_back(std::move(c));
+        ++asStats_.chunks;
+        return true;
+    }
+    // `bytes` (a multiple of 256) from the arena: the chunk's resource + offset; false = not from the arena (larger than a chunk / no memory)
+    bool asAlloc(std::uint64_t bytes, AsSpan& out, ID3D12Resource*& resource) {
+        static const bool off = [] {
+            char e[8];
+            return GetEnvironmentVariableA("RVK_AS_ARENA", e, sizeof e) > 0 && e[0] == '0';
+        }();
+        if (off || bytes == 0 || bytes > kAsChunk) return false;  // (RVK_AS_ARENA=0: one buffer per BLAS, the old behaviour, A/B)
+        const std::lock_guard lock(asMutex_);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (std::size_t ci = 0; ci < asChunks_.size(); ++ci) {
+                AsChunk& c = asChunks_[ci];
+                for (std::size_t i = 0; i < c.free.size(); ++i) {
+                    auto& [off, size] = c.free[i];
+                    if (size < bytes) continue;
+                    out = {static_cast<std::int32_t>(ci), off, bytes};
+                    off += bytes;
+                    size -= bytes;
+                    if (size == 0) c.free.erase(c.free.begin() + static_cast<std::ptrdiff_t>(i));
+                    c.used += bytes;
+                    resource = c.buffer.Get();
+                    ++asStats_.allocs;
+                    return true;
+                }
+            }
+            if (pass == 0 && !asArenaGrow()) return false;
+        }
+        return false;
+    }
+    void asFree(const AsSpan& span) {
+        if (span.chunk < 0) return;
+        const std::lock_guard lock(asMutex_);
+        if (static_cast<std::size_t>(span.chunk) >= asChunks_.size()) return;
+        AsChunk& c = asChunks_[static_cast<std::size_t>(span.chunk)];
+        auto it = std::lower_bound(c.free.begin(), c.free.end(), std::pair<std::uint64_t, std::uint64_t>{span.offset, 0});
+        it = c.free.insert(it, {span.offset, span.size});
+        // (coalesce with the neighbours)
+        if (it + 1 != c.free.end() && it->first + it->second == (it + 1)->first) {
+            it->second += (it + 1)->second;
+            c.free.erase(it + 1);
+        }
+        if (it != c.free.begin() && (it - 1)->first + (it - 1)->second == it->first) {
+            (it - 1)->second += it->second;
+            c.free.erase(it);
+        }
+        c.used -= span.size;
+        ++asStats_.frees;
+    }
+    struct AsStats {
+        std::uint64_t chunks = 0, allocs = 0, frees = 0, dedicated = 0;
+    } asStats_;
+    std::mutex asMutex_;
+    std::vector<AsChunk> asChunks_;
     ComPtr<ID3D12Resource> scratch_;
     std::vector<ComPtr<ID3D12Resource>> scratchGraveyard_;
     std::uint64_t scratchSize_ = 0;
@@ -1480,8 +1566,9 @@ D3DTexture::~D3DTexture() {
 D3DAccel::~D3DAccel() {
     if (dev_.gameMode()) {
         D3D12DeviceImpl* d = &dev_;
-        dev_.retire([d, a = std::move(storage_), b = std::move(scratch_), slot = slot_]() mutable {
+        dev_.retire([d, a = std::move(storage_), b = std::move(scratch_), slot = slot_, span = span_]() mutable {
             d->srvAlloc().release(slot);
+            d->asFree(span);  // (14.22: the arena span is reused only once the frames that may still read it are done)
             a.Reset();
             b.Reset();
         });
@@ -1489,6 +1576,7 @@ D3DAccel::~D3DAccel() {
     }
     dev_.waitIdle();
     dev_.srvAlloc().release(slot_);
+    dev_.asFree(span_);
 }
 
 namespace {
@@ -1523,9 +1611,13 @@ bool D3DAccel::allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPU
     buildScratch_ = alignUp(std::max<std::uint64_t>(info.ScratchDataSizeInBytes, 256), 256);
     updateScratch_ = alignUp(std::max<std::uint64_t>(info.UpdateScratchDataSizeInBytes, 256), 256);
     storageBytes_ = alignUp(info.ResultDataMaxSizeInBytes, 256);
-    storage_ = dev_.createDefaultBuffer(storageBytes_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    if (!storage_) return false;
-    storage_->SetName(tlas_ ? L"rhi tlas" : L"rhi blas");
+    if (tlas_) {
+        storage_ = dev_.createDefaultBuffer(storageBytes_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+        if (!storage_) return false;
+        storage_->SetName(L"rhi tlas");
+    } else if (!storageFor(storageBytes_, L"rhi blas")) {
+        return false;
+    }
     if (scratch) {
         // (the scratch is created in COMMON, which is what a buffer starts in whatever is asked for; the build promotes it to UNORDERED_ACCESS implicitly
         // and it decays back when the command list has executed)
@@ -1556,12 +1648,21 @@ bool D3DAccel::createBlas(const BlasDesc& desc) {
     return allocate(in, false);
 }
 
+// 14.22: a BLAS's storage from the arena, a dedicated buffer when it does not fit a chunk
+bool D3DAccel::storageFor(std::uint64_t bytes, const wchar_t* name) {
+    if (dev_.asAlloc(bytes, span_, arenaBuffer_)) return true;
+    span_ = {};
+    arenaBuffer_ = nullptr;
+    ++dev_.asStats_.dedicated;
+    storage_ = dev_.createDefaultBuffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    if (!storage_) return false;
+    storage_->SetName(name);
+    return true;
+}
+
 bool D3DAccel::createStorage(std::uint64_t bytes, const char* name) {
     storageBytes_ = alignUp(bytes, 256);
-    storage_ = dev_.createDefaultBuffer(storageBytes_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    if (!storage_) return false;
-    storage_->SetName(widen(name).c_str());
-    return true;
+    return storageFor(storageBytes_, widen(name).c_str());
 }
 
 bool D3DAccel::createTlas(const TlasDesc& desc) {

@@ -74,21 +74,8 @@ std::string readChars(const char* p, std::size_t limit = kMaxText) {
     return out;
 }
 
-void record(const void* src, void* element) {
-    g_requests.fetch_add(1, std::memory_order_relaxed);
-    void* wrapper = nullptr;
-    void* api = nullptr;
-    if (!readAt(element, kElementShader, wrapper) || !readAt(wrapper, kWrapperApi, api) || api == nullptr || g_resolver == nullptr) {
-        g_unresolved.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    d3d9::Shader* shader = g_resolver(api);
-    if (shader == nullptr) {
-        g_unresolved.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    g_resolved.fetch_add(1, std::memory_order_relaxed);
-    if (shader->source.load(std::memory_order_acquire) != nullptr) return;  // the first request of a bytecode names it
+// the engine's request (eSGfxHLSLShaderSrc) as a MaterialSource
+std::unique_ptr<d3d9::MaterialSource> parse(const void* src) {
     auto s = std::make_unique<d3d9::MaterialSource>();
     s->file = readCString(static_cast<const std::uint8_t*>(src) + kSrcText);
     s->entry = readCString(static_cast<const std::uint8_t*>(src) + kSrcEntry);
@@ -107,19 +94,52 @@ void record(const void* src, void* element) {
             s->macros.emplace_back(readChars(name, 256), readChars(value));
         }
     }
-    const d3d9::MaterialSource* raw = s.get();
-    const d3d9::MaterialSource* expected = nullptr;
+    return s;
+}
+
+// `pre`: the request parsed before the compile (frame-ownership.md 14.22: d3d9::Device::createShader attached it to the shader it created inside the call, before any
+// variant of it was queued); kept when the shader holds it
+void record(void* element, std::unique_ptr<d3d9::MaterialSource>& pre) {
+    g_requests.fetch_add(1, std::memory_order_relaxed);
+    void* wrapper = nullptr;
+    void* api = nullptr;
+    if (!readAt(element, kElementShader, wrapper) || !readAt(wrapper, kWrapperApi, api) || api == nullptr || g_resolver == nullptr) {
+        g_unresolved.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    d3d9::Shader* shader = g_resolver(api);
+    if (shader == nullptr) {
+        g_unresolved.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    g_resolved.fetch_add(1, std::memory_order_relaxed);
+    const d3d9::MaterialSource* raw = pre.get();
     const std::lock_guard lock(g_mutex);
-    if (shader->source.compare_exchange_strong(expected, raw, std::memory_order_acq_rel)) {
+    const d3d9::MaterialSource* expected = nullptr;
+    // (attached at the creation, or attached now: the first request of a bytecode names it)
+    if (shader->source.load(std::memory_order_acquire) == raw || shader->source.compare_exchange_strong(expected, raw, std::memory_order_acq_rel)) {
         g_entries.push_back({shader->hash, fnv1a(shader->bytecode.data(), shader->bytecode.size() * 4), shader->stage == shader::Stage::Pixel, raw});
-        g_owned.push_back(std::move(s));
+        g_owned.push_back(std::move(pre));
         g_dirty = true;
+        d3d9::notifySourceAttached(*shader);  // (14.22: variants built before it are rebuilt with it)
     }
 }
 
 void* detour(void* admin, const void* src, int version, unsigned long flags) {
+    if (!g_enabled.load(std::memory_order_relaxed)) return g_hook.original(admin, src, version, flags);
+    // 14.22: the request is known before the shader exists: the shader created inside the call gets it at its creation (d3d9::setPendingMaterialSource), so the variants
+    // its creation queues (F15-1's pipeline keys of earlier runs, on the shader workers) are built from the ubershader instead of racing the attach below
+    std::unique_ptr<d3d9::MaterialSource> pre = parse(src);
+    d3d9::setPendingMaterialSource(pre.get());
     void* element = g_hook.original(admin, src, version, flags);
-    if (element != nullptr && g_enabled.load(std::memory_order_relaxed)) record(src, element);
+    const bool used = d3d9::pendingMaterialSourceUsed();
+    d3d9::setPendingMaterialSource(nullptr);
+    if (element != nullptr) record(element, pre);
+    // (a shader that took it at its creation holds the pointer: it stays alive even when the element resolved to another shader / none)
+    if (pre && used) {
+        const std::lock_guard lock(g_mutex);
+        g_owned.push_back(std::move(pre));
+    }
     return element;
 }
 

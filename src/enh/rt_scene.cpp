@@ -3126,14 +3126,17 @@ void RtScene::record(d3d9::PassContext& ctx) {
             return true;
         });
     }
+    const double msPre = msSince(t0);  // (14.22: the slow pass line names its parts)
     {
         d3d9::RegionScope r(dev_, "rt.compact");
         processCompactions(cl, slot);
     }
+    const double msCompact = msSince(t0) - msPre;
     {
         d3d9::RegionScope r(dev_, "rt.blas builds");
         buildPending(cl, slot);
     }
+    const double msBuilds = msSince(t0) - msPre - msCompact;
     if ((lodRangeUnits_ > 0.0f && lodBias_ > 0) || !proxyJobs_.empty()) {
         d3d9::RegionScope r(dev_, "rt.lod proxies");
         buildProxies(cl);
@@ -3142,6 +3145,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         d3d9::RegionScope r(dev_, "rt.dynamic");
         buildDynamic(cl, frame);
     }
+    const double msDynamic = msSince(t0) - msPre - msCompact - msBuilds;
 
     // characters built this frame (setDynamic) after the world's instances
     std::uint32_t dynCount = 0;
@@ -3565,9 +3569,9 @@ void RtScene::record(d3d9::PassContext& ctx) {
     const double passMs = msSince(t0);
     iv_.passCpuMs += passMs;
     if (passMs > 50.0) {
-        spdlog::info("rt: scene: slow pass: {:.1f} ms CPU ({} BLAS built this interval, {} instances; the driver's first acceleration "
-                     "structure builds compile its build kernels)",
-                     passMs, iv_.built, n);
+        spdlog::info("rt: scene: slow pass: {:.1f} ms CPU ({} BLAS built this interval, {} instances; upkeep {:.1f}, compactions {:.1f}, BLAS builds {:.1f}, characters / trees {:.1f}, "
+                     "instances + TLAS {:.1f} ms)",
+                     passMs, iv_.built, n, msPre, msCompact, msBuilds, msDynamic, passMs - msPre - msCompact - msBuilds - msDynamic);
     }
     logStats(false);
 }

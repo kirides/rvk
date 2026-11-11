@@ -119,7 +119,8 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     // 14.13 (native.bone_motion): the draw takes the bone-motion forms: its previous positions come from the bone table's history, no capture
     // (14.15 b, native.rigid_motion: a static mesh's draw with the object table's history likewise)
-    if ((q.kind == Kind::Skinned || isRigid(q.kind)) && dev.boneMotionCovered()) {
+    // (14.22: a rigid draw whose VS window 2 is an instance row image has no motion of its own on any path: the image is immutable while its record lives)
+    if ((q.kind == Kind::Skinned || isRigid(q.kind)) && (dev.boneMotionCovered() || (isRigid(q.kind) && dev.rigidRowWindow()))) {
         ++boneDraws_;
         dev.noteCaptureAvoided(q.kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(q));
         return;
