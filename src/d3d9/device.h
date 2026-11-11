@@ -1294,9 +1294,20 @@ public:
         float alphaRef = 0.0f;
         float psC5[4]{};                                // pixel window 1 (c5) as the draw's pass sets it (.w only when it sets the mask)
         bool ambientLit = false;                        // the draw's ambient registers (c15..c21 of its lighting) are not all zero, composed from the record's illumination
+        // 14.35: the draw's VS window 2 as the owned path serves it now (a skinned part's bone image, a static mesh's object record; null = unknown: the bone-motion decision
+        // is not re-checked). A main solid draw whose bone-motion decision now differs from the retained one is refused (4): its record is remade from the composition
+        rhi::GpuRef vsWin2{};
+        OwnedWindows::Kind vsWin2Kind = OwnedWindows::Kind::None;
     };
+    // 14.35: the composition's bone-motion decision for a retained skinned main solid draw with this VS window 2 now (sceneDecide + bonePredict's skinned branch, read only):
+    // 1 = the bone forms, 0 = not, -1 = not decidable here (not such a draw / the window unknown)
+    int boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, OwnedWindows::Kind win2Kind, bool gbufTaken) const;
+    struct BoneDeriveStats {
+        std::uint64_t refusedGained = 0, refusedLost = 0;  // records without the forms whose window has a history now / with the forms whose window has none
+    } boneDeriveStats;
     // 0 = derived into `out`; else why not (1 stale module, 2 phase, 3 consumers, 4 variant, 5 env, 6 stream / index binding, 7 texture, 8 jitter flags, 9 scene form)
-    int deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out);
+    int deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out, const OwnedWindows* ow = nullptr);  // (ow: the owned path's windows; their VS window 2 = in.vsWin2 when that is null)
+    bool isBonePipeline(GamePipeline p) const { return bonePipe(p); }  // (diagnostics: a bone-motion scene form)
     // ---- F2c-3 (native.owned_static, frame-ownership.md 7.16; scene_draws.cpp): an op record's draw submitted as a scene draw WITHOUT a composition: the block is
     // derived (deriveScene), every register window comes from the caller's tables (`windows`), the register file is not read. The caller set the draw tag,
     // the vertex / pixel shader refs of the record, setSceneIssue(true) and the windows' tables; 0 = queued, else the refusal reason (nothing queued):

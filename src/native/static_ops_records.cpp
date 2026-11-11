@@ -21,6 +21,7 @@
 #include "enh/light_table.h"
 #include "engine/memread.h"
 #include "engine/scene_table.h"
+#include "gpuscene/bone_table.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/lighting_images.h"
@@ -622,6 +623,14 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
             }
         }
     }
+    {
+        // 14.35: VS window 2 as the owned draw would read it now (the part's bone image as served this frame, the object / row record): the bone-motion decision follows it
+        d3d9::OwnedWindows::Win w2;
+        if (rec.actor ? gpuscene::bonetable().servedNow(rec.actorKey, w2) : ownedObjWindow(rec, r, w2)) {
+            in.vsWin2 = w2.base;
+            in.vsWin2Kind = w2.kind;
+        }
+    }
     d3d9::Device::SceneView dv;
     const auto tc = tnow();
     const int why = dev_.deriveScene(*r.cd, in, dv);
@@ -643,12 +652,24 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         diff[static_cast<std::size_t>(f)] = true;
         if (detail.empty()) detail = std::format("{}: {}", orec::kFieldNames[static_cast<std::size_t>(f)], what);
     };
-    const std::string cdv = std::format("[cd: gate {} staticOk {} wanted {} giDraw {} drawn {} scenePending {}, ambient from the record {}]", r.cd->v.gate, r.cd->v.staticOk, r.cd->v.wanted, r.cd->v.giDraw,
-                                        r.cd->v.drawn, r.cd->v.scenePending, in.ambientLit);
+    const std::string cdv = std::format("[cd: gate {} staticOk {} wanted {} giDraw {} drawn {} scenePending {}, ambient from the record {}; gbufWanted {} boneMotion {} boneObs {}, bone forms: derived {} composed {}, "
+                                        "bone window {} (kind {}) history {}, draw kind {}]",
+                                        r.cd->v.gate, r.cd->v.staticOk, r.cd->v.wanted, r.cd->v.giDraw, r.cd->v.drawn, r.cd->v.scenePending, in.ambientLit, r.cd->v.gbufWanted, r.cd->boneMotion,
+                                        r.cd->boneObs, dev_.isBonePipeline(dv.pipeline), dev_.isBonePipeline(R.probes[k].pipeline), !in.vsWin2.null(), static_cast<int>(in.vsWin2Kind),
+                                        !in.vsWin2.null() && !dev_.historyOf(in.vsWin2).null(), d3d9::draws::name(r.cd->kind));
     if (!dv.scene && pv.valid && r.cd->scenePipeline == d3d9::GamePipeline::None) {
         // (F6-2 / 14.23: the record was built while the draw's scene form was still being made (its retained packet has none); the composition has it now: the record is
         // out of date, not wrong: remade from this composition (an ordered fading herb's record built in its first frames gave "scene form: derived false vs composed true")
         ++w.refused[9];
+        R.refused = true;
+        w.deriveNs += ns(t0, tnow());
+        return;
+    }
+    if (dv.scene && pv.valid && dv.pipeline != pv.pipeline && r.cd->kind == d3d9::draws::Kind::InstancedMesh && dev_.isBonePipeline(dv.pipeline) != dev_.isBonePipeline(pv.pipeline)) {
+        // (14.35: an instance-list draw's bone-motion form follows the window its composition was served this frame (the instance's row image: no history, or an object
+        // record) and 14.22's per-frame previous rows; the owned path reads the row image either way (a bone form there = no motion of its own). The record is out of date,
+        // not wrong: remade from this composition, counted as "bone form (remade)")
+        ++w.refused[12];
         R.refused = true;
         w.deriveNs += ns(t0, tnow());
         return;

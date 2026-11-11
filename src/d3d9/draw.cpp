@@ -2061,8 +2061,10 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
         // (the composing draw was told "covered" and took no forms for its state, or has no motion of its own: the replay repeats that, no refusal loop)
         replayStill = true;
     } else if (boneMode_ == 1 && !boneOfCached(c) && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid &&
-               c.kind == draws::Kind::Skinned && gbuf_.active && gbuf_.motion != nullptr &&
+               (c.kind == draws::Kind::Skinned || (c.kind == draws::Kind::StaticMesh && rigidMotionOn())) && gbuf_.active && gbuf_.motion != nullptr &&
                !nocapOld()) {
+        // (14.35: a static mesh retained while its forms were being built (boneObs 2) or before it was a rigid-motion candidate likewise: else the cached packet kept the
+        // plain form while a fresh composition, and the owned record made from one, took the bone forms: "pipeline" DIFFERING on the owned records' check frames)
         obsBonePending_ = false;
         obsRigidStill_ = false;
         const bool predicted = bonePredict(c.kind, c.phase);
@@ -2074,6 +2076,25 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
         obsRigidStill_ = false;
         if (predicted) {
             replayStale_ = true;  // (the packet is out of date: the caller makes it again from this composition, with the forms: no refusal next frame)
+            ++boneStats.replayBoneRefused;
+            ++replayStats.why[8];
+            ++replayStats.refused;
+            return false;
+        }
+    } else if (boneMode_ == 1 && boneOfCached(c) && c.kind == draws::Kind::InstancedMesh && rigidMotionOn() && c.phase.view == scene::View::Main &&
+               c.phase.pass == scene::Pass::Solid && owned_ != nullptr && owned_->w[0][2].kind == OwnedWindows::Kind::Object && !nocapOld()) {
+        // 14.35: an instance-list draw retained WITH the bone forms (made in a frame its instance moved: 14.22's previous rows) whose window has no history now (an
+        // instance row image): a fresh composition takes the plain form; replaying the stale packet kept the owned record made from it in a refusal loop
+        obsBonePending_ = false;
+        obsRigidStill_ = false;
+        const bool predicted = bonePredict(c.kind, c.phase);
+        const bool pending = obsBonePending_;
+        bonePushPrev_ = {};
+        rigidPrev_ = {};
+        obsBonePending_ = false;
+        obsRigidStill_ = false;
+        if (!predicted && !pending) {
+            replayStale_ = true;
             ++boneStats.replayBoneRefused;
             ++replayStats.why[8];
             ++replayStats.refused;

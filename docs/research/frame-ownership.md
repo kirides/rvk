@@ -3711,9 +3711,65 @@ The inputs repeat often (frozen spots, the walk's pauses), but the **element lis
 
 **CPU.** In-process timers, inventory open, one session toggled on / owned twice: an owned flush **45 - 49 us** against **185 - 220 us** for the lean composed flush (composition + 33 draws + the after state): ~0.15 ms per frame per open page. perf-ab (`-Key native.own_gui -A on -B owned`, savegame + inventory, 4 pairs): CPU engine+HAL 8.82 -> 8.77 ms (-0.05, z -0.3), GPU 3.91 -> 4.09 (+0.18, z +0.6): inside the noise. Sky: an owned dome 6 - 7 us vs a composed one 5 - 9 us (the dome's composition was already the reading of its inputs, which the stamp has to re-read); perf-ab `-Key native.own_sky -A on -B owned`: hold CPU 18.39 -> 18.67 (+0.29, sd 0.9), jungle 10.27 -> 10.02 (-0.24), GPU 4.41 -> 4.40 / 5.42 -> 5.27: no effect resolvable, as expected.
 
-**Found, not this stage.** The all-on spots run tripped `owned static turned off: 6 draws DIFFERING` on an Animation context's solid op (`pipeline: 1259683920 vs 3388382320`, GI draw): an F6 / F-VAR issue of the owned lists, independent of the sky / GUI (both draw outside them).
+**Found, not this stage.** The all-on spots run tripped `owned static turned off: 6 draws DIFFERING` on an Animation context's solid op (`pipeline: 1259683920 vs 3388382320`, GI draw): an F6 / F-VAR issue of the owned lists, independent of the sky / GUI (both draw outside them). Fixed in 14.35 (a stale bone-motion decision).
 
 **Left.** None of 14.24's points; the decals are owned since 14.28. The sky record saves no CPU (documented above); the cube faces stay six draws by measurement.
+
+### 14.35 The "pipeline" DIFFERING of 14.34: retained draws kept a stale bone-motion decision (2026-11-11; no new setting, `RVK_BONE_DERIVE_OFF=1` = the old behaviour)
+
+**Field.** `pipeline` of an owned record's draw (record-derived `CachedDraw::scenePipeline` vs the composed scene form). The extended DIFFERING detail
+(`... gbufWanted true boneMotion false boneObs 2, bone forms: derived false composed true, bone window true history true`) named it: the two pipelines are the **bone-motion
+form** (14.13 / 14.15 b: the G-buffer motion variant + the vertex shader's second run on the previous bone image / object record) and the **plain G-buffer form** of the same draw.
+The "GI draw" of 14.34 was the G-buffer material pass (`giDraw` = G-buffer write with GI on), not a GI variant choice; the lighting code of both forms is the same.
+
+**Cause.** The bone-motion decision is made per composition (`bonePredict` + `sceneDecide`: window 2 a bone image / object record with a history, the four bone forms built,
+the G-buffer's material pass), but neither the owned derivation (`deriveScene`) nor the packet cache's replay re-made it:
+1. *Skinned parts* (the reported case: "Animation ctx" = `eCRenderContextAnimation2`, harbour_night, reproduced with a cold SPIR-V cache): a record composed while the part's
+   bone forms were still being built (`boneObs 2`) kept the plain form; once the forms existed every composition took the bone form, every check frame differed, owned static
+   turned off after 6 - 10 draws.
+2. *Static meshes* (rigid motion, cold cache): a packet retained with `boneObs 2` was replayed plain forever (replayDraw re-predicted only skinned draws), while the owned
+   record made from a fresh composition had the bone form.
+3. *Instance-list draws* (F2f): their composition is served either the instance's row image (no history: plain) or an object record (history: bone form), and 14.22's
+   per-frame previous rows in the frame an instance moved; the owned path always reads the row image, so record and composition disagree in either direction.
+
+**Fix** (`Device::boneFormsNow`, bone_motion.cpp; `deriveScene` + `ownedDrawSig`; `replayDraw`; records' check in static_ops_records.cpp):
+* `deriveScene` re-decides skinned parts (bone image window) and static meshes (object record window) from the window the owned path serves now (the records' check passes
+  the part's image served this frame / the object record) and refuses (variant, 4) when the decision moved: the record is remade from the composition; `ownedDrawSig`
+  carries the decision, so a persistent owned draw is re-derived (and refused) the frame it moves. Draws told "still" / "declined" (`boneObs` 1 / 3) are not re-decided
+  (the replay repeats them: no refusal loop).
+* `replayDraw` re-predicts static meshes retained without the forms like the skinned ones (14.22), and refuses an instance-list bone packet whose prediction is now plain.
+* Instance-list draws are not re-decided (their composition's window is not the owned path's); when only the bone form differs, the records' check remakes the record
+  (`not derived: ... bone form (remade) N`), the owned draw of such a record reads the row image's absent history = no motion of its own, like the still instance it is.
+* rvk.log: `native: bone motion (5 s)` ends `retained draws refused for the decision now (run): forms gained N, lost M`; the first refusals per direction are logged
+  (`d3d9: retained <kind> draw refused: the composition takes / no longer takes the bone-motion forms now (...)`).
+
+**Visible impact (before).** Colour and depth: none (same pixel shader lighting, same geometry). On owned frames between check frames the stale part / mesh was drawn without
+its own motion vectors (plain form: camera motion only), so FSR / frame generation reprojected a moving NPC's part as if it stood still (9 of 10 frames at `lean_check=10`) until
+the stage turned off; after that, all-on Full lost the owned static path for the rest of the session (the CPU of every owned stage built on it). Frozen rvkcompare spots cannot
+show it (no actor moves); measured in the logs: main solid actors were 98.7 % owned in the failing window (a1).
+
+**Evidence** (all-on list of 14.34 + `owned_instances / owned_ordered / owned_shadow_views / rt_records / own_particles=on / owned_decals=on / own_collection=on / own_extract=on /
+own_sky=owned / own_gui=owned`, `-Mode full -PlayerDefaults`, frame generation on, spots harbour_night, beach_night_storm, sea_horizon, jungle, harbour_docks; logs
+`rvk-work/scratch/anm/`):
+
+| run | build | cache | result |
+|---|---|---|---|
+| a1 | fix off (`RVK_BONE_DERIVE_OFF=1`) | cold | owned static turned off: 10 draws DIFFERING (skinned, `boneObs 2`, composed bone form) |
+| b3, b4 | skinned fix only | cold | owned static turned off: 11 / 1 draws (static mesh / instance list, rigid forms) |
+| b5, b6, j2 | + rigid, instance lists decided | cold | DIFFERING 0, but a refusal loop of ~108 / s at jungle (instance lists: composition window != owned window) |
+| f1 - f5 | final | cold, warm, cold, warm, cold | **DIFFERING 0, owned static never turned off, MISS / DIFFERING of every stage 0**, refusals 0 - 200 per run (once, while forms build) |
+
+| w1 | final, `rvk_rtwalk` (actors animate) | warm | DIFFERING 0, never turned off, 6 refusals |
+| d0, d1 | final, D3D12 (warm-up jungle + the 5 spots) | cold / warm | DIFFERING 0, never turned off, no device removal |
+
+`rvk_tests`, `rvk_d3d9test` and `rvk_rhitest` (`--validation`, both backends) pass.
+
+**Picture check** (p1: jungle, pub_interior, harbour_docks, harbour_night, `upscale.mode=off`, frame generation off, `native.picture_check=true`; bone motion is inactive
+there, no motion target): ok in every settled window except **harbour_night: FAILED, colour 6.9 % of the pixels (depth 0, box x 350 .. 1599) against a control of 0.04 %**.
+Not this change: identical with `RVK_BONE_DERIVE_OFF=1` (p0) and with the fix (p2); bisected in single harbour_night runs: the 14.34 extras off (q1) / the
+ordered + instances + shadow views + own sky / GUI off (q2) / `owned_actors=false` (r3) still FAIL, **`native.owned_trees=false` (r4) = ok** (0.05 % vs 0.05 %);
+`lighting.clustered=false` leaves nothing owned to compare (r1). An open owned-trees issue at night with the light table (tree lighting of the owned runs), not investigated
+here.
 
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 

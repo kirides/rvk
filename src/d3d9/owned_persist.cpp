@@ -207,6 +207,11 @@ std::uint64_t Device::ownedDrawSig(const CachedDraw& c, const void* const* strea
         h = hmix(h, same ? 0xfeedfaceull : (0x100000000ull | packWord()));
     }
     h = hmix(hmix(h, c.packet.count | static_cast<std::uint64_t>(c.packet.first) << 32), static_cast<std::uint32_t>(c.packet.vertexOffset));  // (the record's args)
+    if (boneMode_ == 1 && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
+        // 14.35: the composition's bone-motion decision now (its forms finished building after the record was made): a change re-derives, deriveScene refuses the stale form
+        const OwnedWindows::Win& w2 = ow.w[0][2];
+        h = hmix(h, static_cast<std::uint64_t>(boneFormsNow(c, w2.base, w2.kind, c.v.gbufWanted) + 2) << 40);
+    }
     static constexpr std::uint32_t kStage[4][2] = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};
     for (const auto& sw : kStage) {
         const OwnedWindows::Win& w = ow.w[sw[0]][sw[1]];
@@ -320,7 +325,7 @@ int Device::ownedDerive(const CachedDraw& c, const DeriveIn& in, const OwnedWind
         }
     }
     SceneView sv;
-    const int why = deriveScene(c, in, sv);
+    const int why = deriveScene(c, in, sv, &ow);
     if (why != 0) return refuse(why);
     if (c.scenePipeline2 == GamePipeline::None || !(c.packet.batchable || c.ordered)) return refuse(9);
     if (checkView) {

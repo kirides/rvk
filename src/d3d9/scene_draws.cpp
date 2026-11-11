@@ -466,7 +466,7 @@ int Device::variantRefusal(int site, const CachedDraw& c) {
 // F2c-2: a record's draw as a SceneView, without the composition's results of this frame: the retained packet (`c`: the record's own copy) is validated
 // like replayBuild does against the record's own shaders / buffers / textures, the DrawBlock is derived from the record's textures, sampler states,
 // alpha test and pass-set c5 plus the per-frame inputs (viewport, jitter, depth remap, LOD bias)
-int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out) {
+int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out, const OwnedWindows* ow) {
     out = {};
     if (!c.valid || c.vs == nullptr || c.ps == nullptr || c.vs->module != c.vsModule || c.ps->module != c.fsModule) return 1;
     if (phases_.current() != c.phase) return 2;
@@ -500,6 +500,34 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
     if (c.v.gate && !gbufTaken && ((c.v.staticOk && in.ambientLit) != c.v.wanted)) return variantRefusal(4, c);
     if (!c.v.wanted && !c.v.gbufWanted && uberAskedNow(*c.ps) != c.v.uberAsked) return variantRefusal(7, c);
     if (c.boneMotion && (!boneOfCached(c) || !gbufTaken)) return variantRefusal(8, c);  // 14.13: the bone-motion forms need the G-buffer's motion target and material pass  // S-1a: the ubershader module the draw was offered (or the setting) moved
+    {
+        // 14.35: the bone-motion decision of the composition now (the part's bone image has a history or not) against the retained draw's: a skinned part whose record was
+        // made in a frame without a history (its first serve after a teleport / cache-in) took the plain forms and kept them while every composition took the bone forms
+        // (check frames: "pipeline" DIFFERING, owned static turned off; owned frames: the part without its own motion)
+        static const bool off = [] {
+            char v[8];
+            return GetEnvironmentVariableA("RVK_BONE_DERIVE_OFF", v, sizeof(v)) != 0;
+        }();
+        rhi::GpuRef win2 = in.vsWin2;
+        OwnedWindows::Kind win2Kind = in.vsWin2Kind;
+        if (win2.null() && ow != nullptr) {
+            win2 = ow->w[0][2].base;
+            win2Kind = ow->w[0][2].kind;
+        }
+        const int boneNow = off ? -1 : boneFormsNow(c, win2, win2Kind, gbufTaken);
+        if (boneNow >= 0 && (boneNow == 1) != c.boneMotion) {
+            ++(boneNow == 1 ? boneDeriveStats.refusedGained : boneDeriveStats.refusedLost);
+            static std::atomic<int> logged[2]{};
+            if (logged[boneNow].fetch_add(1, std::memory_order_relaxed) < 8) {
+                spdlog::info("d3d9: retained {} draw refused: the composition {} the bone-motion forms now (retained boneMotion {}, boneObs {}, scenePending {}, gbufWanted {}; "
+                             "pipelines v1 {} v2 {}; window 2 kind {}, history {}, scene active {}, rigid {}, gbuf taken {})",
+                             draws::name(c.kind), boneNow == 1 ? "takes" : "no longer takes", c.boneMotion, c.boneObs, c.v.scenePending, c.v.gbufWanted,
+                             static_cast<std::uint32_t>(c.scenePipeline), static_cast<std::uint32_t>(c.scenePipeline2), static_cast<int>(win2Kind), !historyOf(win2).null(), sceneActive(),
+                             rigidMotionOn(), gbufTaken);
+            }
+            return variantRefusal(9, c);
+        }
+    }
     if (c.v.gate && c.v.wanted && !gbufTaken) {
         // the variant the draw was offered (None while it was still being built): a module that exists now makes the draw take another pixel shader and pipeline (variant(): read only)
         const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
@@ -728,7 +756,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
         }
     }
     SceneView sv;
-    const int deriveWhy = deriveScene(c, in, sv);
+    const int deriveWhy = deriveScene(c, in, sv, &ow);
     lap(mc.deriveNs);
     if (deriveWhy != 0) return refuse(deriveWhy);
     if (!(v2 ? c.scenePipeline2 != GamePipeline::None : sv.scene) || !(c.packet.batchable || c.ordered)) return refuse(9);
