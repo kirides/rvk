@@ -106,7 +106,9 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     const bool staticLike = kind == draws::Kind::StaticMesh ||
                             (sceneInstances_ && sceneV2_ && kind == draws::Kind::InstancedMesh && (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0 && (streams_[0].freq & STREAMSOURCE_INSTANCEDATA) == 0);
     const bool shadowPhase = sceneShadows_ && sceneV2_ && (kind == draws::Kind::StaticMesh || tree || actor) && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
-    if (!shadowPhase && ((!staticLike && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !v2only && !actor) || phase.view != scene::View::Main ||
+    // F9 / F14 (native.owned_ordered): an order-dependent static mesh draw (prepareDraw's orderedNow_: not batchable, main view, solid / alpha / refracted pass)
+    const bool ordered = orderedNow_ && sceneV2_;
+    if (!shadowPhase && !ordered && ((!staticLike && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !v2only && !actor) || phase.view != scene::View::Main ||
                          (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass))) {
         return;
     }
@@ -120,7 +122,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     const auto pending = [&] {
         if (capture_ != nullptr) lastVariant_.scenePending = true;
     };
-    if (!packet_.batchable || !rendering_ || !geomOk) {
+    if (!(packet_.batchable || ordered) || !rendering_ || !geomOk) {
         ++sceneStats_.fbNotBatchable;
         return;
     }
@@ -200,7 +202,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     }
     // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
-    if (sceneV2_ && (staticLike || v2only || actor)) {
+    if (sceneV2_ && (staticLike || v2only || actor || ordered)) {
         const rhi::ShaderModule vs2 = variant(vs_, vsSlot2);
         const rhi::ShaderModule fs2 = psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneView2Of(sceneFs));
         if (vs2 == rhi::ShaderModule::None || (fs2 == rhi::ShaderModule::None && !psDropped_)) {
@@ -577,6 +579,12 @@ bool Device::observersWantLighting() const {
 // the register images the windows hold (their CPU twins) into the register file, for the observers that read material constants of the draw (the RT scene's
 // uv map); the caller restores the file after its owned draws
 void Device::loadOwnedRegisters(const OwnedWindows& ow) {
+    if (ownedRegSnap_ == 1) {
+        // (F9 / F14: the ordered path's snapshot, taken before the first load)
+        std::memcpy(ownedRegSnapVs_, vsF_, sizeof(vsF_));
+        std::memcpy(ownedRegSnapPs_, psF_, sizeof(psF_));
+        ownedRegSnap_ = 2;
+    }
     for (std::uint32_t stage = 0; stage < 2; ++stage) {
         const std::uint32_t* first = stage == 0 ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
         for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
@@ -650,7 +658,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
     const int deriveWhy = deriveScene(c, in, sv);
     lap(mc.deriveNs);
     if (deriveWhy != 0) return refuse(deriveWhy);
-    if (!(v2 ? c.scenePipeline2 != GamePipeline::None : sv.scene) || !c.packet.batchable) return refuse(9);
+    if (!(v2 ? c.scenePipeline2 != GamePipeline::None : sv.scene) || !(c.packet.batchable || c.ordered)) return refuse(9);
     if (v2) {
         // the view block holds what the draw's own derivation would have put in the DrawBlock (posFix incl. jitter + depth remap, c5.xyz): a view changed since the slot was set refuses
         const shader::abi::ViewBlock2& vb = sceneViews_.shadow[ow.viewSlot];
@@ -740,6 +748,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
         p.push.psWin[w] = drawWin_[1][w].bits;
     }
     p.push.psWin[1] = db.ref.plus(static_cast<std::int64_t>(offsetof(shader::abi::DrawBlock, psC5)) - 5 * 16).bits;
+    if (!(p.batchable && rendering_)) flushBatch();  // (F9 / F14: an ordered draw's record must not join the pending batch's sceneRecs_: the batch goes first)
     if (v2) {
         if (!ensureSceneRefV2(ow.viewSlot) || !toScenePacket(p, c.scenePipeline2, static_cast<std::int32_t>(ow.viewSlot), std::bit_cast<std::uint32_t>(b.psC5[3]))) return refuse(15);
         ++st.drawnV2;

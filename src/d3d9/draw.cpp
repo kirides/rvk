@@ -1618,6 +1618,13 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                             !geom.userPointer && rs_[RS_ALPHABLENDENABLE] == 0 && workDyn_.depthTest != 0 && workDyn_.stencilTest == 0 &&
                             (z == VK_COMPARE_OP_LESS || z == VK_COMPARE_OP_LESS_OR_EQUAL || z == VK_COMPARE_OP_EQUAL ||
                          z == VK_COMPARE_OP_GREATER || z == VK_COMPARE_OP_GREATER_OR_EQUAL);
+        // F9 / F14 (native.owned_ordered): an order-dependent static mesh draw of the main view (the solid list's blended / no-z-write draws, the alpha / refracted lists' mesh
+        // draws): no batch, but scene forms for the ordered owned path (drawn at its op's place, never regrouped)
+        // (F2f's instance-list draws too: one render instance, not hardware-instanced, while native.owned_instances gives them the static meshes' scene forms)
+        const bool instList = sceneInstances_ && k == draws::Kind::InstancedMesh && (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0 && (streams_[0].freq & STREAMSOURCE_INSTANCEDATA) == 0;
+        orderedNow_ = sceneOrdered_ && !packet_.batchable && (k == draws::Kind::StaticMesh || k == draws::Kind::Refracted || instList) && phase.view == scene::View::Main &&
+                      (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::Alpha || phase.pass == scene::Pass::Refracted) && !replaced && tint == 0 &&
+                      customVertices_ == 0 && geom.indexed && !geom.userPointer;
     }
     // F2b-1: the main view's static draws issued by the static ops may be drawn as scene draws (scene_draws.cpp); submitPacket makes the packet
     if (sceneActive()) {
@@ -1713,6 +1720,7 @@ void Device::fillCapture(const DrawPacket& p) {
     c.scenePipeline = scenePipe_;
     c.scenePipeline2 = scenePipe2_;
     c.scenePipelinePull = scenePipe2_ != GamePipeline::None ? scenePipePull_ : GamePipeline::None;
+    c.ordered = orderedNow_ && !p.batchable && scenePipe2_ != GamePipeline::None;  // F9 / F14
     c.boneMotion = sceneBone_;
     c.pull = {};
     if (c.scenePipelinePull != GamePipeline::None && pullFetch_.valid == shader::abi::kVertexFetchValid) {
@@ -2041,7 +2049,8 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
     draws_.count(c.kind, c.phase.view);
     ++replayStats.replayed;
     if (probe_ != nullptr) probeBlock_ = b;
-    if (c.scenePipeline != GamePipeline::None && sceneActive() && p.batchable && rendering_ && ensureSceneRef()) {
+    if (c.scenePipeline != GamePipeline::None && sceneActive() && (p.batchable || c.ordered) && rendering_ && ensureSceneRef()) {
+        if (!p.batchable) flushBatch();  // (F9 / F14: see submitPacket)
         if (toScenePacket(p, c.scenePipeline)) ++sceneStats_.replayedSceneDraws;
         ++sceneStats_.candidates;
     }
@@ -2244,6 +2253,9 @@ void Device::submitPacket(DrawPacket& p) {
     p.dyn = internDyn(workDyn_);
     if (capture_ != nullptr) fillCapture(p);
     if (scenePipe_ != GamePipeline::None) {
+        // (a scene draw that is not batchable - F9 / F14's ordered draws - is recorded after the pending batch, alone: the batch goes first, before the draw's record joins
+        // sceneRecs_, the records of the batch's scene draws)
+        if (!(p.batchable && rendering_)) flushBatch();
         toScenePacket(p, scenePipe_);
         scenePipe_ = GamePipeline::None;
     }
@@ -2252,8 +2264,10 @@ void Device::submitPacket(DrawPacket& p) {
 }
 
 void Device::submitInterned(DrawPacket& p) {
+    if (orderedPending_) orderedFlushPending();  // (F9 / F14: a pending run of ordered owned draws comes before this packet)
     if (p.scene != 0 && !(p.batchable && rendering_)) {
-        // (not expected: scene draws are only made for batchable draws inside a scope) a run of its own
+        // a run of its own (F9 / F14: the ordered draws' composed scene form; the caller flushed the pending batch BEFORE toScenePacket put the draw's record into
+        // sceneRecs_: p.scene indexes that list, which a flush empties)
         batch_.push_back(p);
         flushBatch();
         return;
@@ -2278,6 +2292,7 @@ void Device::submitInterned(DrawPacket& p) {
 
 // The upload ring could not take a user-pointer draw's data (a ring chunk could not be created): the draw is dropped
 void Device::flushBatch() {
+    if (orderedPending_) orderedFlushPending();  // (F9 / F14: a pending run of ordered owned draws is queued before what flushes the batch: a clear, a scope end)
     if (batch_.empty()) return;
     RVK_ZONE("Device::flushBatch");
     const std::uint32_t n = static_cast<std::uint32_t>(batch_.size());

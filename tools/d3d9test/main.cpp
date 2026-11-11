@@ -2123,6 +2123,217 @@ mov oC0, r0
         std::printf("  owned bulk observers: %llu flushes, %llu records, %llu entered, %llu left\n", static_cast<unsigned long long>(dev.ownedBulkStats.flushes), static_cast<unsigned long long>(dev.ownedBulkStats.records),
                     static_cast<unsigned long long>(dev.ownedBulkStats.entered), static_cast<unsigned long long>(dev.ownedBulkStats.left));
     }
+    // 7. F9 / F14 (frame-ownership.md 14.20, native.owned_ordered): blended draws whose result depends on their order (four quads over the same pixels, alpha blending, two pixel
+    // shaders = two pipelines alternating A B A B): with setSceneOrdered they get their scene forms although they are not batchable (CachedDraw::ordered); an ORDERED flush keeps
+    // them as four runs (four indirect calls) and equals the normal draws byte for byte; the same items in an unordered flush are merged into two buckets (A A B B) and
+    // differ (the case is sensitive to the order)
+    {
+        static const char* kPsB = R"(
+ps_3_0
+dcl_color v0
+mul r0, v0, c5
+mov oC0, r0
+)";
+        const auto psB = shaderFrom(dev, kPsB);
+        std::vector<Vertex> ov;
+        const std::uint32_t colors[4] = {0xFFE02010u, 0xFF10D030u, 0xFF2040F0u, 0xFFF0F0F0u};
+        for (std::uint32_t k = 0; k < 4; ++k) {
+            ov.push_back({-0.6f, 0.6f, 0.5f, 1, colors[k], 0, 0});
+            ov.push_back({0.6f, 0.6f, 0.5f, 1, colors[k], 1, 0});
+            ov.push_back({-0.6f, -0.6f, 0.5f, 1, colors[k], 0, 1});
+            ov.push_back({0.6f, -0.6f, 0.5f, 1, colors[k], 1, 1});
+        }
+        auto vbo = dev.createBuffer(static_cast<std::uint32_t>(ov.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+        std::memcpy(vbo->lock(0, 0, 0), ov.data(), ov.size() * sizeof(Vertex));
+        vbo->unlock();
+        const auto beginO = [&] {
+            f.reset();
+            dev.drawTag() = {};
+            dev.drawTag().source = draws::Source::Mesh;
+            dev.phases().push(scene::View::Main, scene::Pass::Alpha);
+            dev.setVertexShader(vsV);
+            dev.setStreamSource(0, vbo.get(), 0, sizeof(Vertex));
+            dev.setIndices(ib.get());
+            dev.setRenderState(RS_ALPHABLENDENABLE, 1);
+            dev.setRenderState(RS_SRCBLEND, BLEND_SRCALPHA);
+            dev.setRenderState(RS_DESTBLEND, BLEND_INVSRCALPHA);
+            dev.setRenderState(RS_ZWRITEENABLE, 0);
+            setRegs(regs[0]);
+        };
+        const auto psOf = [&](std::uint32_t k) { return (k & 1u) != 0 ? psB : psV; };
+        beginO();
+        for (std::uint32_t k = 0; k < 4; ++k) {
+            dev.setPixelShader(psOf(k));
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+        }
+        const Pixels refO = end("ownedo_ref");
+        dev.setSceneOrdered(true);
+        std::vector<Device::CachedDraw> cdo(4);
+        bool readyO = static_cast<bool>(psB);
+        for (int i = 0; i < 1200 && readyO; ++i) {
+            beginO();
+            dev.setSceneIssue(true);
+            for (std::uint32_t k = 0; k < 4; ++k) {
+                dev.setPixelShader(psOf(k));
+                dev.beginCapture(&cdo[k]);
+                dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+                dev.endCapture();
+            }
+            end("ownedo_capture");
+            bool all4 = true;
+            for (const auto& c : cdo) all4 = all4 && c.valid && c.ordered && !c.packet.batchable && c.scenePipeline2 != GamePipeline::None;
+            if (all4) break;
+            if (i == 1199) readyO = false;
+            Sleep(50);
+        }
+        if (!readyO) {
+            std::printf("  FAIL owned ordered: the blended draws never got their ordered v2 scene forms\n");
+            ++g_failures;
+        } else {
+            std::uint32_t oslots[4];
+            for (auto& s : oslots) s = tab.alloc();
+            const auto frameO = [&](const char* name, bool ordered, std::uint64_t& callsO) {
+                beginO();
+                dev.setSceneIssue(true);
+                std::vector<Device::OwnedItem> items;
+                for (std::uint32_t k = 0; k < 4; ++k) {
+                    dev.setPixelShader(psOf(k));
+                    Device::DeriveIn in;
+                    in.streams[0] = vbo.get();
+                    in.strides[0] = sizeof(Vertex);
+                    in.indices = ib.get();
+                    std::memcpy(in.psC5, regs[0].ps5, sizeof(in.psC5));
+                    Device::OwnedPersist out;
+                    const int rc = dev.ownedDerive(cdo[k], in, windowsOf(3), tab.blockRef(oslots[k]), tab.zeroRef(), true, out);
+                    if (rc != 0) {
+                        std::printf("  FAIL owned ordered (%s): quad %u derive returned %d\n", name, k, rc);
+                        ++g_failures;
+                        continue;
+                    }
+                    tab.write(oslots[k], out.rec, out.blk);
+                    items.push_back({&cdo[k], out.bucketKey, oslots[k]});
+                }
+                const auto s0 = dev.sceneStats();
+                Device::OwnedArena arena;
+                if (!dev.ownedReserve(static_cast<std::uint32_t>(items.size()), arena) ||
+                    !dev.ownedFlush(items, arena, 3, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity, ordered)) {
+                    std::printf("  FAIL owned ordered (%s): the flush was refused\n", name);
+                    ++g_failures;
+                }
+                callsO = dev.sceneStats().indirectCalls - s0.indirectCalls;
+                return end(name);
+            };
+            std::uint64_t callsO = 0;
+            bad(refO, frameO("ownedo_ordered", true, callsO), "ordered flush of four blended draws");
+            if (callsO != 4) {
+                std::printf("  FAIL owned ordered: %llu indirect calls for the runs A B A B (expected 4)\n", static_cast<unsigned long long>(callsO));
+                ++g_failures;
+            }
+            const Pixels merged = frameO("ownedo_merged", false, callsO);
+            std::uint32_t nd = 0;
+            for (std::size_t i = 0; i < refO.bgra.size() && i < merged.bgra.size(); ++i) nd += refO.bgra[i] != merged.bgra[i];
+            if (callsO != 2 || nd == 0) {
+                std::printf("  FAIL owned ordered: the unordered flush made %llu calls (expected 2) and differs in %u bytes (expected > 0: the case must see the order)\n",
+                            static_cast<unsigned long long>(callsO), nd);
+                ++g_failures;
+            }
+            bad(refO, frameO("ownedo_ordered_again", true, callsO), "ordered flush again");
+            // the pending run (StaticOps' runs of ordered ops): quads 0..2 derived and left pending behind Device::setOrderedHook, quad 3 drawn the normal way: the device must
+            // queue the run before quad 3's packet (submitInterned's hook), so the picture is the reference's
+            {
+                struct Run {
+                    Device* dev = nullptr;
+                    std::vector<Device::OwnedItem> items;
+                    Device::OwnedArena arena;
+                    int calls = 0;
+                    bool ok = false;
+                } run;
+                run.dev = &dev;
+                beginO();
+                dev.setSceneIssue(true);
+                for (std::uint32_t k = 0; k < 3; ++k) {
+                    dev.setPixelShader(psOf(k));
+                    Device::DeriveIn in;
+                    in.streams[0] = vbo.get();
+                    in.strides[0] = sizeof(Vertex);
+                    in.indices = ib.get();
+                    std::memcpy(in.psC5, regs[0].ps5, sizeof(in.psC5));
+                    Device::OwnedPersist out;
+                    if (dev.ownedDerive(cdo[k], in, windowsOf(3), tab.blockRef(oslots[k]), tab.zeroRef(), true, out) != 0) {
+                        std::printf("  FAIL owned ordered (pending run): quad %u derive refused\n", k);
+                        ++g_failures;
+                        continue;
+                    }
+                    tab.write(oslots[k], out.rec, out.blk);
+                    run.items.push_back({&cdo[k], out.bucketKey, oslots[k]});
+                }
+                dev.setSceneIssue(false);
+                const bool reserved = dev.ownedReserve(4, run.arena);
+                dev.setOrderedHook(
+                    [](void* ctx) {
+                        Run& r = *static_cast<Run*>(ctx);
+                        ++r.calls;
+                        r.ok = r.dev->ownedFlush(r.items, r.arena, 3, gpuscene::drawrecords().recordsRef(), gpuscene::drawrecords().recordsShadow(), gpuscene::DrawRecordTable::kCapacity, true);
+                    },
+                    &run);
+                dev.setOrderedPending(reserved);
+                dev.setPixelShader(psOf(3));
+                dev.drawIndexedPrimitive(PT_TRIANGLELIST, 12, 0, 4, 0, 2);  // (quad 3: the hook queues the run first)
+                const Pixels pr = end("ownedo_pending_run");
+                dev.setOrderedHook(nullptr, nullptr);
+                if (run.calls != 1 || !run.ok || dev.orderedPending()) {
+                    std::printf("  FAIL owned ordered (pending run): the hook ran %d times, flush ok %d, still pending %d\n", run.calls, run.ok, dev.orderedPending());
+                    ++g_failures;
+                }
+                bad(refO, pr, "a pending run queued before the next normal draw");
+            }
+            std::printf("  owned ordered: four blended draws in A B A B order: ordered flush = the normal draws, unordered (merged) flush differs in %u bytes\n", nd);
+            for (const std::uint32_t s : oslots) tab.release(s);
+            // the COMPOSED scene forms in the solid pass: opaque draws (batchable: they wait in the batch with their records) and blended ones (ordered: recorded alone, after
+            // the batch) interleaved over the same pixels; the result must be the normal draws' (a blended draw's record joining the batch's record list, or the batch
+            // regrouped around it, would draw the wrong order or read a wrong record)
+            const auto drawMix = [&](bool scene) {
+                f.reset();
+                dev.drawTag() = {};
+                dev.drawTag().source = draws::Source::Mesh;
+                dev.phases().push(scene::View::Main, scene::Pass::Solid);
+                dev.setVertexShader(vsV);
+                dev.setStreamSource(0, vbo.get(), 0, sizeof(Vertex));
+                dev.setIndices(ib.get());
+                setRegs(regs[0]);
+                dev.setSceneIssue(scene);
+                for (std::uint32_t k = 0; k < 4; ++k) {
+                    const bool blend = (k & 1u) != 0;
+                    dev.setRenderState(RS_ALPHABLENDENABLE, blend ? 1u : 0u);
+                    dev.setRenderState(RS_SRCBLEND, BLEND_SRCALPHA);
+                    dev.setRenderState(RS_DESTBLEND, BLEND_INVSRCALPHA);
+                    dev.setRenderState(RS_ZWRITEENABLE, blend ? 0u : 1u);
+                    dev.setPixelShader(psOf(k));
+                    dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+                }
+            };
+            drawMix(false);
+            const Pixels refM = end("ownedo_mix_ref");
+            bool mixed = false;
+            for (int i = 0; i < 400 && !mixed; ++i) {
+                const std::uint64_t sd0 = dev.sceneStats().sceneDraws;
+                drawMix(true);
+                const Pixels pm = end("ownedo_mix_scene");
+                if (dev.sceneStats().sceneDraws - sd0 == 4) {
+                    mixed = true;
+                    bad(refM, pm, "composed scene forms, opaque + blended interleaved");
+                } else {
+                    Sleep(25);
+                }
+            }
+            if (!mixed) {
+                std::printf("  FAIL owned ordered: the interleaved opaque / blended draws never all became scene draws\n");
+                ++g_failures;
+            }
+        }
+        dev.setSceneOrdered(false);
+        dev.release(std::move(vbo));
+    }
     // F2c-4c: the GPU compaction made the arguments of every flush above, and the check frames' read-backs (every frame here) found them equal to the CPU's
     if (gpuCompact) {
         for (int i = 0; i < 4; ++i) {

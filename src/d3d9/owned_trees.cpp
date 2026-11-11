@@ -159,6 +159,7 @@ std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& 
 
 bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions,
                              const VegInstances* inst) {
+    if (orderedPending_) orderedFlushPending();  // (F9 / F14: a pending ordered run goes first, before this flush's scratch is in use)
     ++treeFlushStats.flushes;
     if (items.empty()) return true;
     const std::uint32_t n = static_cast<std::uint32_t>(items.size());

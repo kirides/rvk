@@ -977,6 +977,37 @@ public:
     // static meshes' (their VS window 2 is an instance row image or an object record), and a rigid one with an object history takes the scene bone forms instead of the push form
     void setSceneInstances(bool on) { if (on != sceneInstances_) ++variantEpoch_; sceneInstances_ = on; }
     bool sceneInstances() const { return sceneInstances_; }
+    // F9 / F14 (frame-ownership.md 14.20, native.owned_ordered): the main view's order-dependent static mesh draws (the solid list's blended / no-z-write draws, the alpha and
+    // refracted lists' mesh draws) get their scene forms too although they are not batchable: the owned path draws them at their op's place in the engine's order
+    // (an ordered ownedFlush: one indirect command per run of consecutive equal buckets, recorded after the pending batch), never grouped by pipeline
+    void setSceneOrdered(bool on) { if (on != sceneOrdered_) ++variantEpoch_; sceneOrdered_ = on; }
+    bool sceneOrdered() const { return sceneOrdered_; }
+    // (an ordered owned draw: the bulk observers' contract (plain opaque static draws) does not hold; its observers see it per draw)
+    void setOwnedBulkSuspended(bool on) { ownedBulkSuspended_ = on; }
+    // F9 / F14: a run of ordered owned draws is pending (consecutive ordered ops of a list, one flush for all): anything else the device records first queues the run
+    // (submitInterned, flushBatch: every draw, clear, scope end, copy), so the run stays at its place in the frame. `fn(ctx)` queues it (and clears the flag)
+    using OrderedHook = void (*)(void*);
+    void setOrderedHook(OrderedHook fn, void* ctx) {
+        orderedHook_ = fn;
+        orderedHookCtx_ = ctx;
+    }
+    void setOrderedPending(bool on) { orderedPending_ = on && orderedHook_ != nullptr; }
+    bool orderedPending() const { return orderedPending_; }
+    void orderedFlushPending() {
+        if (!orderedPending_) return;
+        orderedPending_ = false;
+        orderedHook_(orderedHookCtx_);
+    }
+    // F9 / F14: the register file is saved the first time an observer loads an owned draw's windows into it (loadOwnedRegisters) while armed; restore puts it back (the
+    // ordered ops restore per op without copying 8 KiB per op)
+    void ownedRegsArm() { ownedRegSnap_ = 1; }
+    void ownedRegsRestore() {
+        if (ownedRegSnap_ == 2) {
+            setVertexShaderConstantF(0, ownedRegSnapVs_[0], kVsFloatConsts);  // (through the setters: the stage blocks are marked as the writes say)
+            setPixelShaderConstantF(0, ownedRegSnapPs_[0], kPsFloatConsts);
+        }
+        ownedRegSnap_ = 0;
+    }
     // ---- bone-history motion (native.bone_motion = off | on | compare, frame-ownership.md 14.13; d3d9/bone_motion.cpp). On: a skinned main-view solid draw whose VS window 2 is
     // a bone table image with history is drawn with the bone-motion forms (its vertex shader runs the translated program a second time on the previous frame's image: the previous
     // world position for the G-buffer's motion), so object motion / the RT scene need no vertex capture of it and its owned form stays owned. Compare: the captures as before and
@@ -1134,6 +1165,7 @@ public:
         // S-4 (native.vertex_pull): the pulled form's pipeline (scenePipeline2's pixel shader + the SceneVsPull vertex shader, the ref stream as the only vertex input)
         // and the draw's VertexFetch block (valid = kVertexFetchValid when every input can be pulled); None / invalid = the draw keeps its vertex input
         GamePipeline scenePipelinePull = GamePipeline::None;
+        bool ordered = false;     // F9 / F14 (native.owned_ordered): not batchable, its scene forms were made for the ordered owned path (drawn at its op's place)
         bool boneMotion = false;  // 14.13 (native.bone_motion): the scene forms above are the bone-motion forms (the record's prevVs = the bone window's history image)
         shader::abi::VertexFetch pull{};
         rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;  // vsModule: the one drawn with (the engine's, or the billboards' fade variant); fsModule: the engine's
@@ -1258,7 +1290,12 @@ public:
     };
     std::uint64_t ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok) const;
     std::uint64_t ownedEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok);
-    bool ownedEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;  // the check frames: nothing the derivation reads moved since `epoch` (no state is touched)
+    bool ownedEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;
+    // F9 / F14: the env epoch of an ordered pass segment (`index` = kOwnedEnvOrdered + 0 solid list, 1 refracted, 2 alpha). The ordered ops sit between composed ops that leave
+    // other device state behind (sampler rows the derivation does not own): an index keeps the last few hashes with their epochs, so a recurring state gets its old epoch back
+    static constexpr std::size_t kOwnedEnvOrdered = 8;
+    std::uint64_t ownedEnvEpochAt(std::size_t index, bool solid, std::uint32_t viewSlot, bool& ok);
+    bool ownedEnvSameAt(std::size_t index, bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;  // the check frames: nothing the derivation reads moved since `epoch` (no state is touched)
     std::uint64_t ownedDrawSig(const CachedDraw& c, const void* const* streams, const std::uint32_t* strides, const void* indices, const void* const* tex, bool ambientLit, const OwnedWindows& ow, bool& allowed);
     // the DrawRecord + DrawBlock of a derived draw (pure: no register file, no device constants): 14 a window the shaders read is not served, 15 a null address
     int ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWindows& ow, rhi::GpuRef blockAddress, rhi::GpuRef zeroBlock, OwnedPersist& out);
@@ -1328,7 +1365,10 @@ public:
     // true = every item drawn (queued as indirect packets); false = nothing queued (no rendering scope / a guard), the caller composes the items' ops
     // `shadow` / `slotCount`: the records table's CPU twin: an item whose slot is out of range or whose record was never written (no block address) is refused (GPU safety)
     gpuscene::OwnedCompact::CullItem cullCheckItem(const shader::abi::DrawRecord& rec, std::uint32_t viewSlot, std::uint32_t pos, std::uint32_t bucket);
-    bool ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount);
+    // `ordered` (F9 / F14): the items keep the engine's order exactly: a bucket is a run of consecutive items with one key (no merging of non-adjacent ones) and every packet is
+    // recorded at once after the pending batch (not batchable: never regrouped by pipeline)
+    bool ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount,
+                    bool ordered = false);
     struct OwnedPersistStats {
         std::uint64_t derived = 0, refused = 0, observed = 0, buckets = 0, packets = 0, items = 0, bucketKeyClash = 0;
     } ownedPersistStats;
@@ -1913,6 +1953,13 @@ private:
     std::uint32_t psWindowMinEnd_ = 0;
     // F2c-4b: the bulk observation lists (owned_persist.cpp)
     bool ownedBulkOn_ = true;  // RVK_F2C4B_PERDRAW=1 = off (A/B: the per-draw path)
+    bool ownedBulkSuspended_ = false;  // F9 / F14: an ordered owned op is being drawn (its draws are observed per draw)
+    OrderedHook orderedHook_ = nullptr;
+    void* orderedHookCtx_ = nullptr;
+    bool orderedPending_ = false;
+    int ownedRegSnap_ = 0;  // 0 off, 1 armed, 2 taken
+    float ownedRegSnapVs_[kVsFloatConsts][4]{};
+    float ownedRegSnapPs_[kPsFloatConsts][4]{};
     std::vector<OwnedRecordView> ownedBulk_;
     std::vector<std::uint32_t> ownedBulkIds_[2];        // this pass's ids per kind (z, solid): the next pass's `left` is made from them
     std::vector<std::uint32_t> ownedBulkPrevIds_[2];
@@ -2140,6 +2187,8 @@ private:
     bool sceneShadows_ = false;
     bool sceneActors_ = false;
     bool sceneInstances_ = false;
+    bool sceneOrdered_ = false;   // F9 / F14 (setSceneOrdered)
+    bool orderedNow_ = false;     // prepareDraw: the draw being prepared is an ordered scene candidate (not batchable, the ordered path may own it)
     void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk,
                      rhi::ShaderModule fsBeforeDrop);
     // false: an address the scene shader reads is null, the packet stays a normal one. `viewSlot` >= 0: a scene ABI v2 packet (the record carries no view windows, c5w =
@@ -2239,6 +2288,10 @@ private:
     std::uint64_t treeEnvHash_[8] = {}, treeEnvEpoch_[8] = {}, treeEnvCounter_ = 0;  // F4-3 (per tree view slot: 14 / 15 main z / solid, 8..11 the cascades' z: treeEnvIndex)
     static std::size_t treeEnvIndex(bool solid, std::uint32_t viewSlot) { return viewSlot >= 8 && viewSlot < 12 ? 2 + (viewSlot - 8) : viewSlot == 12 || viewSlot == 13 ? 6 + (viewSlot - 12) : (solid ? 1 : 0); }
     static constexpr std::size_t kOwnedEnvSlots = 8;
+    struct OrderedEnv {  // F9 / F14: the recent (hash, epoch) pairs of an ordered segment's env index
+        std::uint64_t hash[4] = {}, epoch[4] = {};
+        std::uint32_t next = 0;
+    } ownedEnvOrdered_[3];
     static std::size_t ownedEnvIndex(std::uint32_t viewSlot) { return viewSlot < kOwnedEnvSlots ? viewSlot : kOwnedEnvSlots - 1; }
     std::uint64_t ownedEnvHash_[kOwnedEnvSlots] = {}, ownedEnvEpoch_[kOwnedEnvSlots] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per view slot (0 main z, 1 main solid, 4.. cascades; F3-1)
     std::vector<std::uint32_t> ownedBucketOf_, ownedBucketStart_, ownedBucketCursor_;   // ownedFlush's scratch

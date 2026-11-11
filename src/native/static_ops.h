@@ -152,6 +152,13 @@ public:
     // hardware batches too) get op records whose stamp holds the instance list; their draws' VS window 2 are instance row images
     void setOwnedInstances(bool on);
     bool ownedInstancesOn() const { return ownedInstances_ && ownedPersistent_; }
+    // native.owned_ordered (frame-ownership.md 14.20, F9 + F14; static_ops_ordered.cpp): the main view's order-dependent mesh ops (the solid list's blended terrain layers and
+    // no-z-write draws, the alpha / refracted lists' mesh ops, sorted back to front by the engine every frame) get op records too and, on the owned frames, are drawn from their
+    // persistent DrawRecords AT THEIR OP'S PLACE (the engine's slot is skipped; an ordered flush, one indirect command per run of consecutive equal buckets) instead of being
+    // composed; the engine's own sort result is the order. Needs owned_persistent (+ owned_static, the scene ABI v2 view table)
+    void setOwnedOrdered(bool on);
+    bool ownedOrderedOn() const { return ownedOrdered_ && ownedPersistent_ && ownedStatic_; }
+    void orderedFlushRun();  // the pending run of ordered draws as one ordered flush (also the device's hook: Device::setOrderedHook)
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
     bool ownedListOk(void* db, List list);
     // an op of the raw (unsorted) list: true = its record is valid, the op leaves the engine's list
@@ -897,6 +904,47 @@ private:
     };
     InstStats instW_;
     bool ownedInstances_ = false;
+    // F9 / F14 (static_ops_ordered.cpp)
+    bool ownedOrdered_ = false;
+    bool orderedGroupNow(const Op* op) const;                             // the op being composed is one the ordered path records (Mesh group alpha / refracted, main view)
+    bool orderedPlace(const Op& op);                                     // opEnterImpl: true = drawn from its records at its place (the slot is skipped)
+    int orderedValid(const Op& op, const orec::OpRecord& rec);           // -1 = the record holds for this op now, else the reason (OrdWhy)
+    bool orderedPassBegin(const Op& op, const orec::OpRecord& rec);      // the view windows / slot / scope of the op's list (once per list and view)
+    void orderedReport();
+    struct OrderedRun {
+        bool active = false;
+        std::uint64_t serial = 0, epoch = 0;
+        std::uint32_t slot = 0;
+    } ordRun_;
+    std::vector<d3d9::Device::OwnedItem> ordItems_;
+    d3d9::Device::OwnedArena ordArena_;
+    std::uint64_t ordSerial_ = 0;
+    struct OrderedPass {
+        std::uint64_t serial = 0;
+        std::uint64_t frame = ~0ull, viewSerial = 0;
+        std::uint8_t list = 0xff;
+        bool ok = false;
+        std::uint32_t slot[2] = {};       // the plain view's slot, the depth-bias view-projection's (F14: depth-bias materials)
+        bool okDb = false;
+        std::size_t envIndex = 0;
+        std::uint64_t viewStamp = 0;
+        d3d9::OwnedWindows viewWin[2];
+    } ordPass_;
+    struct OrderedStats {
+        // per list: 0 solid, 1 refracted, 2 alpha
+        std::uint64_t seen[3] = {}, owned[3] = {}, draws[3] = {}, composed[3] = {}, noRecord[3] = {}, notOrdered[3] = {};
+        std::uint64_t why[3][12] = {};      // OrdWhy: why a recorded op was composed instead
+        std::uint64_t excluded[3][orec::kExclCount] = {};  // recEnter / recComposed: not recorded, by reason
+        std::uint64_t flushes = 0, buckets = 0, flushFailed = 0, envNew = 0, passes = 0, recordsBuilt[3] = {};
+        std::uint64_t drawWhy[3][4] = {};   // a draw refused: ownedDrawOpPersistent's fallback (0 view, 1 materials, 2 object window, 3 a draw refused)
+        std::uint64_t devWhy[3][24] = {};   // ... of the refused draws: the device's derivation codes (ownedReplayStats::why)
+        std::uint64_t observer[3] = {}, tableFull[3] = {}, notRetained[3] = {};
+        std::uint64_t runs = 0, lostDraws = 0, flushNs = 0;
+        std::uint64_t ns = 0;
+    } ordW_;
+    std::uint64_t ordTotalOwned_ = 0;  // (the run's ordered ops owned: the stage line's window difference)
+    std::int32_t persistEnvIndex_ = -1;  // (ownedDrawOpPersistent: the env index the draw's Persist is stamped with; -1 = the view slot's)
+    std::vector<const void*> recLightmaps_;  // (F9 / F14: the BindLightmaps(1) calls of a composition a record is built from)
     std::uint32_t ownedDrawIndex_ = 0;  // (the composed draw setOwnedFor is called for)
     void actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Win& out, bool& served);
     // check frames (recDraw): the image the composed draw wrote into the bone table equals one built from the engine's palette now
@@ -927,7 +975,7 @@ private:
         std::uint64_t seen = 0;                                   // ops of the lists that were looked at (mesh ops)
         std::uint64_t leftExcl[orec::kExclCount] = {};            // not eligible, by reason
         std::uint64_t leftStamp[orec::kStampFields] = {};         // the record's stamp differs, by first field
-        std::uint64_t leftNoRecord = 0, leftView = 0, leftAudit = 0, leftNotOwnable = 0, leftScene = 0;
+        std::uint64_t leftNoRecord = 0, leftView = 0, leftAudit = 0, leftNotOwnable = 0, leftScene = 0, leftOrdered = 0;
         std::uint64_t fallback[kFallback] = {};                   // owned ops composed late: materials, view, object window, refused draw, ...
         std::uint64_t touches = 0, lightmaps = 0, stream3 = 0;
         std::uint64_t compactNs = 0, selectNs = 0, buildNs = 0, submitNs = 0, sideNs = 0, matNs = 0, prepNs = 0;

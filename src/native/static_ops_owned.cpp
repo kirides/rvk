@@ -70,7 +70,7 @@ void StaticOps::OwnedStats::add(const OwnedStats& o) {
     checkViews += o.checkViews; warmupViews += o.warmupViews; gatedViews += o.gatedViews; leanFrames += o.leanFrames; seen += o.seen;
     for (std::size_t i = 0; i < orec::kExclCount; ++i) leftExcl[i] += o.leftExcl[i];
     for (std::size_t i = 0; i < orec::kStampFields; ++i) leftStamp[i] += o.leftStamp[i];
-    leftNoRecord += o.leftNoRecord; leftView += o.leftView; leftAudit += o.leftAudit; leftNotOwnable += o.leftNotOwnable; leftScene += o.leftScene;
+    leftNoRecord += o.leftNoRecord; leftView += o.leftView; leftAudit += o.leftAudit; leftNotOwnable += o.leftNotOwnable; leftScene += o.leftScene; leftOrdered += o.leftOrdered;
     for (std::size_t i = 0; i < kFallback; ++i) fallback[i] += o.fallback[i];
     touches += o.touches; lightmaps += o.lightmaps; stream3 += o.stream3;
     compactNs += o.compactNs; selectNs += o.selectNs; buildNs += o.buildNs; submitNs += o.submitNs; sideNs += o.sideNs; matNs += o.matNs; prepNs += o.prepNs;
@@ -241,6 +241,10 @@ bool StaticOps::ownedSelect(const Op& op) {
     }
     const orec::OpRecord& rec = *it->second;
     rec.lastSeen = dev_.stats().frames;
+    if (rec.ordered) {
+        ++W.leftOrdered;  // F9 (native.owned_ordered): an order-dependent op stays in the list; its slot draws it from its records at its place (orderedPlace)
+        return false;
+    }
     if (rec.actor) {
         // F6-1: an actor record is owned only while the setting is on (its draws need the persistent path); its stamp is read in full every frame
         if (!ownedActorsOn()) return false;
@@ -1007,7 +1011,6 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             return false;
         }
     }
-    (void)viewSlot;
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag baseTag = tag;
@@ -1054,7 +1057,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             why = kFbRefused;
             return false;
         }
-        bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig;
+        bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig && P.viewSlot == viewSlot;
         const bool scrub = reuse && scrubStride != 0 && (persistPassDraw_++ % scrubStride) == scrubPhase;
         if (!reuse || scrub) {
             if (!P.handle.has()) {
@@ -1102,6 +1105,8 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             P.epoch = epoch;
             P.sig = sig;
             P.bucket = out.bucketKey;
+            P.viewSlot = viewSlot;
+            P.envIndex = persistEnvIndex_;  // (F9 / F14: an ordered segment's env index)
         } else {
             ++S.reused;
         }
@@ -1133,7 +1138,7 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     gpuscene::ViewTable& vt = gpuscene::viewtable();
     const bool solid = rec.key.list == static_cast<std::uint8_t>(List::Solid);
-    const std::uint32_t viewSlot = ownedSlotOfKey(rec.key.view, solid);
+    const std::uint32_t viewSlot = rec.ordered ? P.viewSlot : ownedSlotOfKey(rec.key.view, solid);  // (F9 / F14: the slot the ordered draw was derived for)
     d3d9::OwnedWindows viewWin;
     d3d9::OwnedWindows::Win objWin;
     if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !ownedObjWindow(rec, r, objWin))) {
@@ -1145,7 +1150,8 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     ownedBuildWindows(r, viewWin, objWin, p, false, dw);
     bool allowed = false;
     const std::uint64_t sig = dev_.ownedDrawSig(*r.cd, r.streams, r.strides, r.indices, r.tex, in.ambientLit, dw, allowed);
-    if (!allowed || P.sig != sig || !dev_.ownedEnvSame(solid, viewSlot, P.epoch)) {
+    const bool envSame = P.envIndex >= 0 ? dev_.ownedEnvSameAt(static_cast<std::size_t>(P.envIndex), true, viewSlot, P.epoch) : dev_.ownedEnvSame(solid, viewSlot, P.epoch);
+    if (!allowed || P.sig != sig || !envSame) {
         ++S.checkSkipped;  // (the owned path would derive this draw again)
         return;
     }
@@ -1172,6 +1178,7 @@ void StaticOps::ownedAutoOffMiss(std::uint64_t miss) {
 
 void StaticOps::ownedReport() {
     actorReport();  // F6-1
+    orderedReport();  // F9 / F14 (before the window's view count is reset)
     if (f2c4::enabled() && ownedStatic_) {
         // item 6: the distinct buckets of every live record (every 5 s: a walk over the record map)
         f2c4::Counters& m = f2c4::counters();
@@ -1252,6 +1259,7 @@ void StaticOps::ownedReport() {
         if (w.leftView != 0) left += std::format("; view stamp {}", w.leftView);
         if (w.leftScene != 0) left += std::format("; not a scene draw {}", w.leftScene);
         if (w.leftAudit != 0) left += std::format("; read log {}", w.leftAudit);
+        if (w.leftOrdered != 0) left += std::format("; ordered (drawn from records at their place, counted as owned when drawn) {}", w.leftOrdered);
     }
     const double nv = static_cast<double>(frames);
     spdlog::info(
