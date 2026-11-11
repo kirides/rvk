@@ -2030,6 +2030,13 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
         std::vector<float> sorted = iv;
         std::ranges::nth_element(sorted, sorted.begin() + sorted.size() / 2);
         const float med = sorted[sorted.size() / 2];
+        {
+            // F15-1 (frame-ownership.md 14.20): the interval's frame-time distribution (hitch gate: p99 / max)
+            std::vector<float> all = iv;
+            std::ranges::sort(all);
+            const auto at = [&](double q) { return all[std::min(all.size() - 1, static_cast<std::size_t>(q * static_cast<double>(all.size() - 1) + 0.5))]; };
+            spdlog::info("perf: frame intervals (ms): n {} p50 {:.2f} p95 {:.2f} p99 {:.2f} max {:.2f}", all.size(), at(0.5), at(0.95), at(0.99), all.back());
+        }
         const float limit = std::max(med * 2.0f, med + 4.0f);
         std::size_t count = 0, last = 0, gapSum = 0, gapMin = SIZE_MAX, gapMax = 0;
         double sumIv = 0, sumCpu = 0, sumPresent = 0, sumSlot = 0, nCpu = 0, nPresent = 0, nSlot = 0;

@@ -117,6 +117,7 @@ struct State {
     Pend pend;
     bool tripped = false;                // a DIFFERING: vegetation stays composed
     std::uint32_t logged = 0;
+    std::string gate;                    // the last view's unmet condition of the vegetation's own readiness ("" = none; the stage line names it)
     std::uint64_t scrubTick = 0;
     std::uint64_t differingSeen = 0;
     // pass scratch

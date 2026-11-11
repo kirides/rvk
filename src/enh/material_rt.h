@@ -90,6 +90,7 @@ public:
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
     bool ownedTreesOk() const override { return true; }  // (F-VAR: reads the sun / fog registers only, never asks for a capture)
     bool ownedVegOk() const override { return true; }  // (F-VAR2: tallies registers only; the owned vegetation batches are shown through ownedVegObserve)
+    const char* observerName() const override { return "material rt"; }
     Registers registersRead() const override { return Registers::MaterialLighting; }  // F-VAR: the sun (DirLight, PS window 3) and the fog constants (PS window 0)
     void observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) override;
 

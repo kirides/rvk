@@ -250,6 +250,10 @@ void StaticOps::recEnter(const Op& op) {
     ret::gLog = nullptr;
     if (!ownedRecords_ || !recs_) return;
     orec::Store& R = *recs_;
+    // (always a fresh log: an excluded op leaves its reads behind, and a record rebuilt for a post-composition stamp (recComposed) would take them as its
+    // own; measured: actor illumination reads in static mesh records = the "MISS (audit)" disagreements, frame-ownership.md 14.18)
+    R.readLog = {};
+    R.logging = false;
     R.active = R.building = R.auditBad = R.diffInOp = R.refused = R.wantOwnable = R.ordered = false;
     recLightmaps_.clear();
     R.cur = nullptr;
@@ -328,6 +332,7 @@ void StaticOps::recEnter(const Op& op) {
     recCollect_ = ownedStatic_;  // (the touches / stream 3 lists of every composed eligible op: a record can be made from any composition)
     if (R.building) {
         R.readLog = {};
+        R.logging = true;
         ret::gLog = &R.readLog;  // (the composition's reads: the signal audit of the next frames)
     }
 }
@@ -384,13 +389,18 @@ void StaticOps::recAudit(const Op& op) {
         if (R.auditLogged < 24 && bad != nullptr) {
             ++R.auditLogged;
             const auto base = reinterpret_cast<std::uintptr_t>(rec.anchors[std::min<std::size_t>(cls, 7)]);
-            spdlog::info("native: owned records: audit: the read log says changed while the stamps hold ({}): {} read of {} bytes at {} (offset {:#x} into the {}), was {:#x}, now {:#x}",
+            spdlog::info("native: owned records: audit: the read log says changed while the stamps hold ({}): {} read of {} bytes at {} (offset {:#x} into the {}), was {:#x}, now {:#x}{}",
                          describe(op), bad->kind == 1 ? "block" : "word", bad->size, static_cast<const void*>(bad->addr), reinterpret_cast<std::uintptr_t>(bad->addr) - base,
                          orec::kAuditNames[cls], bad->value, [&] {
                              std::uint64_t v = 0;
                              if (bad->kind == 0 && bad->size <= 8) readAt(bad->addr, 0, v);
+                             if (bad->kind == 0 && bad->size < 8) v &= (1ull << (8 * bad->size)) - 1;  // (the read's own bytes, not the next word's)
                              return v;
-                         }());
+                         }(),
+                         (bad->pc != nullptr ? "; read at d3d9.dll + " + ret::siteText(bad->pc) : std::string{}) +
+                             std::format("; the stamp's illumination {} (light list {}), record anchors {} {} {} {}", static_cast<const void*>(R.stamp.illumPs != nullptr ? static_cast<const U8*>(R.stamp.illumPs) + 0x78 : nullptr),
+                                         static_cast<const void*>(R.stamp.illumPs != nullptr ? ptr(static_cast<U8*>(const_cast<void*>(static_cast<const void*>(R.stamp.illumPs))) + 0x78, 0) : nullptr),
+                                         rec.anchors[2], rec.anchors[3], rec.anchors[4], rec.anchors[6]));
         }
     }
     w.auditNs += ns(t0, tnow());
@@ -978,7 +988,7 @@ void StaticOps::recEnd(const Op& op) {
     rec->lastSeen = rec->builtFrame;
     if (!rec->actor && !rec->instances) depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints (an actor record is verified by its full stamp every frame)
     rec->ownable = recCollect_ || leanCollect_;
-    if (ret::gLog == nullptr && !R.readLog.v.empty()) {
+    if (ret::gLog == nullptr && R.logging && !R.readLog.v.empty()) {
         ret::finalize(R.readLog.v);
         if (!R.readLog.failed) rec->reads = std::move(R.readLog.v);
     }

@@ -369,6 +369,16 @@ std::string Registry::needsReasonDepth(const Setting& s, int depth) const {
 
 std::string Registry::needsReason(const Setting& s) const { return needsReasonDepth(s, 0); }
 
+std::string Registry::unmetNeedKeys(const Setting& s) const {
+    std::string out;
+    for (const Need& n : s.spec_.needs) {
+        const Setting* p = nullptr;
+        if (needMet(n, p)) continue;
+        out += std::format("{}{}{}{}", out.empty() ? "" : ", ", n.key, n.negate ? "!=" : "=", n.value);
+    }
+    return out;
+}
+
 std::vector<std::string> Registry::dependentsOf(std::string_view key) const {
     std::vector<std::string> out;
     for (const auto& s : settings_) {

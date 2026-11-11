@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace rvk::native::ret {
@@ -17,6 +18,7 @@ struct ReadRec {
     std::uint64_t value = 0;  // kind 0: the 1 / 2 / 4 / 8 bytes; kind 1: hash of `size` bytes
     std::uint32_t size = 0;
     std::uint32_t kind = 0;
+    const void* pc = nullptr;  // the reading site (only with RVK_AUDIT_SITES=1: the audit names it, `llvm-symbolizer --obj=d3d9.dll 0x180000000+<offset>`)
 };
 
 struct ReadLog {
@@ -28,6 +30,12 @@ struct ReadLog {
 inline ReadLog* gLog = nullptr;
 
 std::uint64_t hashBytes(const void* p, std::size_t n);
+
+// RVK_AUDIT_SITES=1: every logged read carries the address of its reading site (a call of the non-inlined sitePc from the inlined log functions)
+bool sitesOn();  // (read at first use: -Environment values are set in DllMain, after the static initialisers)
+const void* sitePc();
+// the reading site's call chain as offsets in d3d9.dll ("reader < caller < ..."; `llvm-symbolizer --obj=d3d9.dll 0x180000000+<offset>`)
+std::string siteText(const void* site);
 
 // one scoped pause of the logging (reads that are values re-read at every replay)
 struct NoLog {
@@ -44,7 +52,7 @@ inline void logWord(const void* p, std::size_t off, std::size_t size, std::uint6
         l->failed = true;
         return;
     }
-    l->v.push_back({static_cast<const std::uint8_t*>(p) + off, bits, static_cast<std::uint32_t>(size), 0});
+    l->v.push_back({static_cast<const std::uint8_t*>(p) + off, bits, static_cast<std::uint32_t>(size), 0, sitesOn() ? sitePc() : nullptr});
 }
 
 inline void logBlock(const void* p, std::size_t off, const void* data, std::size_t n, bool ok) {
@@ -53,7 +61,7 @@ inline void logBlock(const void* p, std::size_t off, const void* data, std::size
         l->failed = true;
         return;
     }
-    l->v.push_back({static_cast<const std::uint8_t*>(p) + off, hashBytes(data, n), static_cast<std::uint32_t>(n), 1});
+    l->v.push_back({static_cast<const std::uint8_t*>(p) + off, hashBytes(data, n), static_cast<std::uint32_t>(n), 1, sitesOn() ? sitePc() : nullptr});
 }
 
 // sorts and de-duplicates a log (the same location read many times)

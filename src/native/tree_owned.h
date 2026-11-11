@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -135,6 +136,7 @@ struct State {
     std::vector<Inst> plan;             // check frames: the plan made at the op's entry
     bool checkOp = false;
     std::uint32_t logged = 0;
+    std::string gate;                   // the last view's unmet condition of the trees' own readiness ("" = none; the stage line names it)
     std::uint64_t lastFrameChecked = ~0ull;
     // pass scratch
     std::vector<Inst> inst;
