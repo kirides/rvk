@@ -12,6 +12,7 @@
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/owned_compact.h"
 #include "native/f10_request.h"
+#include "native/f10_extract.h"
 #include "native/own_post.h"
 #include "native/static_ops.h"
 
@@ -152,6 +153,16 @@ void StaticOps::stagesReport() {
         line += stage("own_collection", st.setting != 0, st.armed != 0 && st.armed == st.setting, st.setting == 2 ? c : a,
                       st.setting == 2 ? std::format("compare: {} contexts compared; run DIFFERING {}", c, st.differing)
                                       : std::format("on: {} contexts requested natively, {} z / solid ops deferred, {} compared; run DIFFERING {}", a, d, c, st.differing));
+    }
+    // F10-2: the main view's ExtractFromFrustum done natively (native.own_extract; acted = views extracted natively in the window, compare: views compared)
+    {
+        static std::uint64_t lastLive = 0, lastCmp = 0;
+        const f10x::StageState st = f10x::stageState();
+        const std::uint64_t a = st.live - lastLive, c = st.compared - lastCmp;
+        lastLive = st.live;
+        lastCmp = st.compared;
+        line += stage("own_extract", st.setting != 0, st.armed != 0 && st.armed == st.setting, st.setting == 2 ? c : a,
+                      std::format("{} views extracted natively, {} compared; run DIFFERING {}", a, c, st.differing));
     }
     // 14.13: bone-history motion (native.bone_motion, restart; acted = skinned solid draws drawn with the bone-motion forms, composed + owned records, in the window)
     {

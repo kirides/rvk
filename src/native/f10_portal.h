@@ -202,7 +202,13 @@ inline void intersect(const float* cur, const float* nxt, float t, float* out) {
     out[1] = cur[1] + diff[1] * t;
     out[2] = cur[2] + diff[2] * t;
 }
+// set when a clip would write a 41st vertex (the engine's fixed polygon would overflow): the caller does not trust the walk (F10-2 falls back to the engine)
+inline thread_local bool g_polyOverflow = false;
 inline void emit(Poly& out, const float* v, std::int32_t id) {
+    if (out.n >= 40) {
+        g_polyOverflow = true;
+        return;
+    }
     std::memcpy(out.v[out.n], v, 12);
     out.id[out.n] = id;
     ++out.n;
