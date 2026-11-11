@@ -1245,11 +1245,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "Developer switch (cost measurements of rt.reflections): 1 cut-outs solid, 2 no shadow rays, 4 no "
-                       "screen-space fallback, 8 hits unshaded.",
+                       "screen-space fallback, 8 hits unshaded, 16 one-query traces (no opaque-first split), "
+                       "32 compare one-query vs opaque-first on the same ray (differing reflection = magenta, exact tie = yellow, shadow = cyan; "
+                       "rvk.log `enh: water.rt: compare` on Vulkan; 16 + 32 = the one query against itself), 64 the RT scene's "
+                       "hardware batches take the bytecode fallback material (the pre-fix behaviour, A/B).",
         .type = Type::Int,
         .defaultValue = 0,
         .min = 0,
-        .max = 15,
+        .max = 127,
         .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
         .page = "Debug", .section = "Debug views",
     });

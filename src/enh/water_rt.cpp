@@ -1,5 +1,13 @@
 #include "enh/water_rt.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -153,7 +161,12 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     p.info[3] = n;
     p.trace[0] = t.traceFlags | ((tweaks_ & 1) != 0 ? 1u : 0u);
     p.trace[1] = (tweaks_ & 2) != 0 ? 0u : t.shadows;
-    p.trace[2] = static_cast<std::uint32_t>(tweaks_);
+    // RVK_RT_ONEQUERY=1: the one-query traces for the whole session (= tweak 16; rt-reflections.md 3.3.1)
+    static const bool oneQuery = [] {
+        char v[8]{};
+        return GetEnvironmentVariableA("RVK_RT_ONEQUERY", v, sizeof(v)) > 0 && v[0] == '1';
+    }();
+    p.trace[2] = static_cast<std::uint32_t>(tweaks_) | (oneQuery ? 16u : 0u);
     p.trace[3] = static_cast<std::uint32_t>(debug_);
     p.reach[0] = t.reach;
     p.reach[1] = 0.0015f;  // a slightly wider cone than a mirror's (the water is never quite still)
@@ -178,6 +191,42 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     push.h.passId = passId_;
     push.params[0] = pa.ref.low();
     push.params[1] = pa.ref.high();
+    // tweak 32 (rt-reflections.md 3.3.1): the differing rays of the compare, read back (a frame or two late) and logged every 60 frames
+    // (Vulkan only: a D3D12 readback heap cannot be written by a shader; there the compare shows in the picture only)
+    if ((tweaks_ & 32) != 0 && dev_.rhi() != nullptr && dev_.rhi()->caps().backend == rhi::Backend::Vulkan) {
+        constexpr std::uint64_t kDiagBytes = 64 + 16 * 128;
+        if (diag_ == nullptr) {
+            diag_ = dev_.rhi()->createBuffer({kDiagBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "water.rt compare"});
+            if (diag_ != nullptr) std::memset(diag_->map(), 0, kDiagBytes);
+            diagFrame_ = frame;
+        }
+        if (diag_ != nullptr) {
+            if (frame >= diagFrame_ + 60) {
+                diag_->invalidate();
+                const auto* w = static_cast<const std::uint32_t*>(diag_->map());
+                const std::uint32_t n = w[0];
+                diagRays_ += n;
+                spdlog::info("enh: water.rt: compare: {} differing rays in 60 frames (run {})", n, diagRays_);
+                for (std::uint32_t i = 0; i < std::min(n, 16u); ++i) {
+                    const std::uint32_t* r = w + 16 + i * 32;
+                    float v[16];
+                    std::memcpy(v, r, sizeof(v));
+                    const std::uint32_t* d = r + 16;
+                    spdlog::info("enh: water.rt: compare ray o ({:.2f} {:.2f} {:.2f}) dir ({:.4f} {:.4f} {:.4f}) w0 {:.4f} spread {:.5f} max {:.0f}: one query hit {} t {:.4f} rec {} prim {} bary ({:.4f} {:.4f}); "
+                                 "opaque-first hit {} t {:.4f} rec {} prim {} bary ({:.4f} {:.4f}); opaque only hit {} t {:.4f} rec {} prim {}; one-query record flags 0x{:x} uvSet 0x{:x} alpha 0x{:x} "
+                                 "segments {} instance {}, its alpha test again {}; trace flags {}",
+                                 v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], d[0], v[9], d[1], d[2], v[12], v[13], d[3], v[10], d[4], d[5], v[14], v[15], d[6], v[11], d[7], d[8], d[9], d[10],
+                                 d[11], d[14], d[15], d[12], d[13]);
+                }
+                std::memset(diag_->map(), 0, kDiagBytes);
+                diag_->flush();
+                diagFrame_ = frame;
+            }
+            const auto ref = diag_->shaderRefRw(0);
+            push.pad[0] = ref[0];
+            push.pad[1] = ref[1];
+        }
+    }
 
     RhiScope rs(dev_, cmd);
     if (!rs) {

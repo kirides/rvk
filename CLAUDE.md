@@ -191,7 +191,7 @@ acts with `water.enabled` + `water.reflections=ssr`; off = SSR): compute pass `w
 (image size, bodies), `enh: water: body ... plane ...` (each body's fitted plane; error > 150 = no RT). Debug:
 `water.debug=reflection_source` (green screen reuse, blue shaded hit, yellow SSR, black cube) / `reflection_shaded` (every
 hit shaded: exposure check) / `reflection`; hidden `rt.reflection_tweaks` (1 cut-outs solid, 2 no shadow rays, 4 no SSR
-fallback, 8 unshaded). Compare SSR vs RT: `.\scripts\water-compare.ps1 -EngineSetting 'water.enabled=true','rt.reflections=off'
+fallback, 8 unshaded, 16 one-query traces instead of opaque-first (= `RVK_RT_ONEQUERY=1`), 32 compare both on the same ray (magenta / rvk.log `enh: water.rt: compare`), 64 the pre-fix batch material; rt-reflections.md 3.3.1: on Vulkan `rvkSize2D` of a lane-varying index is wrong, the RT records carry texture sizes). Compare SSR vs RT: `.\scripts\water-compare.ps1 -EngineSetting 'water.enabled=true','rt.reflections=off'
 -Setting 'rt.reflections=medium'` (add `'water.debug=reflection'` to both for the reflection alone). Costs: A/B inside one
 spot hold (`run.ps1 -Mods rvkcompare -Param 'spots=lake_jungle','freeze_wait=4800' -Perf -WindowSize 1920x1080
 -Commands '4400: set rt.reflections off','5200: set rt.reflections medium'`; the hold starts near frame 3,800; `perf:`

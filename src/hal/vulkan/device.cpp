@@ -951,6 +951,7 @@ void HalDevice::applyWater() {
         s.rtTier = rt == "low" ? 1 : rt == "medium" ? 2 : rt == "high" ? 3 : 0;
     }
     if (rs.rtReflectionTweaks != nullptr) s.rtTweaks = static_cast<int>(rs.rtReflectionTweaks->asInt());
+    if (rtScene_ != nullptr) rtScene_->setBatchHeuristic((s.rtTweaks & 64) != 0);
     const std::string_view d = rs.waterDebug->asEnum();
     s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : d == "sea_floor" ? 6 : d == "waves" ? 7 : d == "reflection_source" ? 8 : d == "reflection_shaded" ? 9 : 0;
     water_->apply(s);
