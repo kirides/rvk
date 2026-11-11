@@ -105,8 +105,10 @@ public:
     std::uint64_t windowDraws() const { return windowDraws_; }
     // F2c-3: the poll of slot `slot`'s record without a composed draw (an owned op): re-reads the record once per frame like checkDraw's poll; false: no such record / unreadable
     bool pollOwned(std::uint32_t slot, TexFn tex, void* texCtx);
-    // F2c-2: the record's structure version (texture slots / sampler states, counts, state words, flags, graph ids; not the pool bytes); unique per change
-    std::uint32_t structVersion(std::uint32_t slot) const { return slot < structVer_.size() ? structVer_[slot] : 0; }
+    // F2c-2: the record's structure version (texture slots / sampler states, counts, state words, flags, graph ids; not the pool bytes); unique per change.
+    // 0 for a free slot: the idle sweep releases a record without a new version (a re-allocation makes one), so a retained consumer whose (slot, version) hash
+    // no longer holds knows its record was released or re-allocated since (owned trees: the templates are stale, not DIFFERING; billboards' per-frame shortcut)
+    std::uint32_t structVersion(std::uint32_t slot) const { return slot < structVer_.size() && slot < key_.size() && key_[slot] != nullptr ? structVer_[slot] : 0; }
 
     // once per present: uploads, read-back verification, idle sweep, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
