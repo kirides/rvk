@@ -799,6 +799,18 @@ void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit
     }
 }
 
+std::uint64_t treeLightSig(const std::uint8_t* illum, std::uint32_t ns) {
+    std::uint64_t sig = 1469598103934665603ull ^ ns;
+    for (std::uint32_t e = 0; e < ns && e < 2; ++e) {
+        for (std::size_t k = 0; k < 6; ++k) {
+            std::uint64_t w;
+            std::memcpy(&w, illum + 0x10 + 0x40 * static_cast<std::size_t>(e) + 8 * k, 8);
+            sig = (sig ^ w) * 1099511628211ull;
+        }
+    }
+    return sig;
+}
+
 TreeRange treeRange(TreeGeometry g, bool hardware, std::uint32_t count, std::uint16_t strip, std::uint16_t start, std::uint16_t vertsPerInstance,
                     std::uint16_t leafIndices) {
     TreeRange r;

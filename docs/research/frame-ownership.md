@@ -3769,7 +3769,48 @@ there, no motion target): ok in every settled window except **harbour_night: FAI
 Not this change: identical with `RVK_BONE_DERIVE_OFF=1` (p0) and with the fix (p2); bisected in single harbour_night runs: the 14.34 extras off (q1) / the
 ordered + instances + shadow views + own sky / GUI off (q2) / `owned_actors=false` (r3) still FAIL, **`native.owned_trees=false` (r4) = ok** (0.05 % vs 0.05 %);
 `lighting.clustered=false` leaves nothing owned to compare (r1). An open owned-trees issue at night with the light table (tree lighting of the owned runs), not investigated
-here.
+here. **Solved in 14.36.**
+
+### 14.36 The harbour_night picture check FAILED of 14.35: owned SpeedTrees were lit per instance, the composition per merged batch (2026-11-11; no new setting, `-Environment 'RVK_TREE_LIGHT_CUTS=1'` = tree batches cut on the light signature in both paths)
+
+**Cause.** `composeTree` draws a solid tree batch with the illumination of the batch's LAST instance (the engine's own rule: its batches end on a different light list or on
+an instance with per-object lights, so in the engine every tree with static lights is drawn alone). Under table lighting `planTreeBatches` merges more (gpu-scene.md 9.9 /
+9.10: the light list no longer cuts, and since round 3 an instance whose static lights the table holds gets light signature 0, "the table lights its pixels by position").
+That premise does not hold any more since finding 3 of 9.10: the variant keeps an engine register light in its slot at the object's own weight (0.2 .. 2.0) and fills only the
+empty slots from the table, so every tree of a merged batch is lit by the last tree's lamp registers. The owned pass (F4-3, 7.25) took a lighting entry per instance from the
+instance's OWN illumination - more faithful to the engine, but not what the composition draws: at harbour_night the torch-lit trees by the houses differ on 6.9 % of the
+pixels (colour only, depth equal). The owned trees' check frames compared rows, buckets and instance order with the composition, not the lighting, so nothing but the
+picture check saw it.
+
+**Proof.** Composed frames with the old signature rule restored (`RVK_TREE_KNOWN_MERGE_OFF=1`, an experiment build): harbour_night ok, owned 0.044 % vs control 0.042 %.
+A screenshot pair in one session (old build, frame 4003 owned, `set native.owned_trees false` at 4100, frame 4303 composed): 1.3 % of the pixels differ (> 6 / 255, max 31),
+all on the foreground tree left of the house (owned darker / greener, the composed batch warmer from a neighbour's torch); crop `rvk-work\scratch\trn\s0_crop.png`. The same pair with the fix: 6 pixels
+(max 12 / 255, noise), crop `s1_crop.png`.
+
+**Fix (the owned pass follows the composition; `src/native/static_ops_trees_owned.cpp`).** `treePlan` batches the solid pass's planned instances with the composition's own
+`planTreeBatches` (per op for branches / fronds with the strip rule, per leaf LOD for leaves; limit = render buffer +0x128 + type; the plan takes only instances with a light
+list, no dynamic lights, no static SH and table-known static lights, so ownLights / staticSh never cut) and gives every instance its batch's last instance as `lightIllum`;
+the pass takes the lighting entry from `lightIllum` (fewer distinct entries per chunk, nothing else changes). The check frames now compare it too: the composition hands
+each instance its batch's lighting illumination (`treeCompInstance`), a difference counts as `DIFFERING ... lighting N` in `native: owned trees [...] (5 s)` and turns the
+owned trees off like a row difference. The signature rule moved into `sc::treeLightSig` (shared by both paths). **Cutting the merge instead was measured and not taken:**
+with the light signature honoured (`RVK_TREE_LIGHT_CUTS=1`, now an A/B knob that both paths follow) the composed solid tree batches grow at jungle 152 k -> 236 - 263 k
+per 5 s (+55 - 70 %, ~+300 batches per frame, ~1 us each in the composed Full path, which is the default with `native.owned_trees` off), harbour_night 68 k -> 96 k, harbour_docks
+13.0 k -> 14.2 k; it would light each tree with its own lamps (the engine's look at night) at that CPU price. Decision left to the user; the default keeps the gated Full picture.
+
+**Results** (private copy `risen-test-vk-trn`, the anm all-on set + `upscale.mode=off`, frame generation off, `native.picture_check=true`, freeze_wait 1800; settled windows):
+
+| spot | before (old build) | after |
+|---|---|---|
+| harbour_night | FAILED 6.87 - 6.93 % vs control 0.04 - 0.13 % | ok 0.038 - 0.039 % vs 0.037 - 0.045 % |
+| harbour_night_north (new explicit rvkcompare spot: harbour_night's place looking north) | FAILED 2.21 % vs 0.045 % | ok 0.042 % vs 0.043 % |
+| jungle / harbour_docks / pub_interior | ok | ok (0.059 / 0.032 - 0.042 / 0.173 % against controls 0.059 / 0.034 - 0.044 / 0.172 %) |
+| torch_hero (night, no merged lit batch in view) | ok | ok 0.034 - 0.039 % |
+| `RVK_TREE_LIGHT_CUTS=1` arm, harbour_night + north | - | ok (0.043 - 0.068 % / 0.040 - 0.043 %) |
+| D3D12, jungle + harbour_night + north (after a warm-up run; two runs) | - | ok in every settled window but two single ones, neither trees: run 1 the first window at harbour_night's arrival FAILED 0.165 % vs 0.049 % with 2,076 depth pixels (geometry), run 2 the jungle window of its capture burst at the hold's end FAILED 12.97 % full-frame colour vs 0.05 % (116 views); not investigated |
+
+Owned trees DIFFERING 0 (rows 0, lighting 0, counts 0, templates 0), MISS 0 in every run, every other stage's MISS / DIFFERING 0; owned trees draw 96 - 97 % of the main view's
+tree ops at the night spots. beach_night_storm is no picture-check spot (`freeze = false` + thunder: the clock runs, the sea and the lightning move; it FAILs with
+`native.owned_trees=false` too). `rvk_tests`, `rvk_rhitest --validation`, `rvk_d3d9test --validation` (Vulkan + D3D12) pass.
 
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 

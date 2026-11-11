@@ -1370,7 +1370,7 @@ private:
         std::uint64_t ops = 0, zeroOps = 0, hardware = 0, software = 0, instances = 0, batches = 0, sortedCopies = 0, undrawnBatches = 0;
         std::array<std::uint64_t, 4> types{};  // branches, fronds, leaf cards, leaf meshes
         std::array<std::uint64_t, 7> splits{};  // solid-pass tree batch cuts by reason: limit, strip, list, sun, static ambient / lights, other
-        std::uint64_t knownLights = 0;  // tree instances whose static lights the table holds (their batch no longer ends on them)
+        std::uint64_t knownLights = 0;  // tree instances whose static lights the table holds (their batch no longer ends on them; RVK_TREE_LIGHT_CUTS=1: it does, frame-ownership.md 14.36)
         std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
         std::uint64_t vegNodesNs = 0, vegConvNs = 0, vegIssueNs = 0, vegIssueOps = 0;  // F7-1 measurement: node walk, read + convert, issue() of vegetation ops
@@ -1390,8 +1390,9 @@ private:
     bool treeEnsureRamp();
     void treeCompBegin(const Op& op, bool zpass, std::uint32_t type, const std::uint8_t* rb, const std::uint8_t* material, const std::uint8_t* shader, bool hardware, bool tableMerge, const std::uint8_t* queue, std::int32_t n, const std::uint8_t* wrapper);
     void treeCompBatch(std::size_t drawsBefore, std::uint64_t key);
-    void treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, std::uint64_t key, bool sun, std::uint32_t slot);
+    void treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, const std::uint8_t* lightIllum, std::uint64_t key, bool sun, std::uint32_t slot);
     void treeCompEnd(const Op& op);
+    void treeLightBatches(std::vector<tro::Inst>& out, const std::vector<std::uint64_t>& sigs, std::size_t first, std::size_t end, std::uint8_t limit, bool byStrip);
     bool treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why);
     bool treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass);
     int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase, tro::Stats& W, std::uint64_t& scrubTick, const char* what);

@@ -24,9 +24,18 @@
 #include "enh/light_table.h"
 #include "native/f4_measure.h"
 #include "native/static_ops.h"
+#include "native/tree_rows.h"
 #include "core/settings.h"
 
 namespace rvk::native {
+
+bool tro::lightCuts() {
+    static const bool on = [] {
+        char b[8] = {};
+        return GetEnvironmentVariableA("RVK_TREE_LIGHT_CUTS", b, sizeof(b)) != 0 && b[0] == '1';
+    }();
+    return on;
+}
 
 namespace {
 
@@ -381,24 +390,22 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         }
         if (tableMerge && statLights) {
             const std::uint32_t ns = static_cast<std::uint32_t>(buf[1] >> 40 & 0xff);  // illum +0xd
-            // lights the table holds (the far level reaches 96,000 units) light this instance's pixels by position: they no longer tie it to its batch
+            // lights the table holds (the far level reaches 96,000 units) no longer tie the instance to its batch. Not exact: the variant keeps an engine register light
+            // in its slot at the object's own weight (gpu-scene.md 9.10 finding 3), so the batch's LAST instance's lamps light every tree of the batch; the owned trees
+            // follow the same batches (treePlan: lightIllum), RVK_TREE_LIGHT_CUTS=1 cuts on the light signature instead (frame-ownership.md 14.36)
             bool allKnown = ns >= 1 && ns <= 2 && enh::LightTable::registryComplete();
             for (std::uint32_t e = 0; allKnown && e < ns; ++e) {
                 float p[3];
                 std::memcpy(p, &buf[2 + 8 * e], sizeof(p));
                 allKnown = enh::LightTable::lightKnown(p);
             }
-            if (allKnown) {
+            if (allKnown) ++st.knownLights;
+            if (allKnown && !tro::lightCuts()) {
                 x.lightSig = 0;
-                ++st.knownLights;
             } else if (ns > 2) {
                 x.ownLights = true;
             } else {
-                std::uint64_t sig = 1469598103934665603ull ^ ns;
-                for (std::uint32_t e = 0; e < ns; ++e) {
-                    for (std::size_t k = 0; k < 6; ++k) sig = (sig ^ buf[2 + 8 * e + k]) * 1099511628211ull;
-                }
-                x.lightSig = sig;
+                x.lightSig = sc::treeLightSig(reinterpret_cast<const std::uint8_t*>(buf), ns);
             }
         }
     };
@@ -470,7 +477,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 writeWorld(k, world);
                 const float v[2] = {get<float>(tree, 0x6c), vy};
                 writeTreeInstance(k, v);
-                if (trOn && tro_->checkOp) treeCompInstance(tree, illumOf(inst[b.first + k].queueIndex), bkey, tableMerge && inst[b.first + k].sun, k);
+                if (trOn && tro_->checkOp) treeCompInstance(tree, illumOf(inst[b.first + k].queueIndex), zpass ? nullptr : illumOf(inst[b.first + b.count - 1].queueIndex), bkey, tableMerge && inst[b.first + k].sun, k);
             }
             }
             st.instances += b.count;
@@ -558,7 +565,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                     writeWorld(k, world);
                     writeAlpha(k, alpha[b.first + k]);
                     writeTreeInstance(k, v);
-                    if (trOn && tro_->checkOp) treeCompInstance(tree, illumOf(inst[b.first + k].queueIndex), bkey, tableMerge && inst[b.first + k].sun, k);
+                    if (trOn && tro_->checkOp) treeCompInstance(tree, illumOf(inst[b.first + k].queueIndex), zpass ? nullptr : illumOf(inst[b.first + b.count - 1].queueIndex), bkey, tableMerge && inst[b.first + k].sun, k);
                 }
                 }
                 st.instances += b.count;

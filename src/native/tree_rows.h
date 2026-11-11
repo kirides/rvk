@@ -30,4 +30,8 @@ constexpr std::uint64_t chunkBase(std::uint32_t chunk) { return static_cast<std:
 // the identity ramp's element p (stream 1, instance rate): the local instance index
 constexpr float rampValue(std::uint32_t position) { return static_cast<float>(position % kChunkInstances); }
 
+// RVK_TREE_LIGHT_CUTS=1 (read once): the solid tree batches end on a differing light signature also when the table holds the lights (every tree lit by its own
+// register lamps, ~1.6 x the composed batches at jungle); default: such instances merge and the batch's last instance lights it (frame-ownership.md 14.36)
+bool lightCuts();
+
 }  // namespace rvk::native::tro

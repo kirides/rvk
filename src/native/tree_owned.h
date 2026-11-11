@@ -96,6 +96,8 @@ struct OpRec {
 struct Inst {
     const std::uint8_t* tree = nullptr;
     const std::uint8_t* illum = nullptr;
+    const std::uint8_t* lightIllum = nullptr;  // solid pass: the illumination that lights it = the LAST instance of the batch the composition draws it in
+                                               // (planTreeBatches' table merge; frame-ownership.md 14.36), null in z passes
     std::uint64_t key = 0;
     float row[16] = {};                 // c32 + 4 p .. c35 + 4 p
     bool sun = false;
@@ -110,7 +112,7 @@ struct Stats {
     std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, no draws, other
     std::uint64_t derived = 0, reused = 0, refused = 0, tableFull = 0;
     // check frames: the composition against the plan and the templates
-    std::uint64_t checkOps = 0, checkInst = 0, checkRowDiff = 0, checkKeyDiff = 0, checkCountDiff = 0, checkDraws = 0, checkTplDiff = 0, checkMiss = 0, checkMissCompared = 0;
+    std::uint64_t checkOps = 0, checkInst = 0, checkRowDiff = 0, checkLightDiff = 0, checkKeyDiff = 0, checkCountDiff = 0, checkDraws = 0, checkTplDiff = 0, checkMiss = 0, checkMissCompared = 0;
     std::uint64_t planNs = 0, tplNs = 0, rowNs = 0, flushNs = 0, sideNs = 0, takeNs = 0;
     void add(const Stats& o);
 };
