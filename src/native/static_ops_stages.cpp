@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/settings.h"
+#include "enh/rt_scene.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/owned_compact.h"
 #include "native/static_ops.h"
@@ -70,6 +71,16 @@ void StaticOps::stagesReport() {
         last = acted;
         line += stage("own_foliage", settingOn(rs.nativeOwnFoliage), ownFoliage_, a, std::format("{} grass instances thinned", a));
         foliageReport();
+    }
+    // F4-5: the RT scene's animated SpeedTrees by compute (native.tree_wind; acted = tree instances evaluated by the compute pass in the window)
+    {
+        static std::uint64_t lastJobs = 0, lastOwned = 0;
+        const enh::TreeWindState tw = enh::treeWindState();
+        const std::uint64_t a = tw.jobs - lastJobs, o = tw.owned - lastOwned;
+        lastJobs = tw.jobs;
+        lastOwned = tw.owned;
+        const bool twSetting = rs.nativeTreeWind != nullptr && rs.nativeTreeWind->asInt() != 0;
+        line += stage("tree_wind", twSetting, tw.armed, a, std::format("{} tree instances by compute, {} of them from owned runs", a, o));
     }
     // 14.13: bone-history motion (native.bone_motion, restart; acted = skinned solid draws drawn with the bone-motion forms, composed + owned records, in the window)
     {

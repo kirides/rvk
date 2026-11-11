@@ -2869,6 +2869,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeTreeWind = &reg.add({
+        .key = "native.tree_wind",
+        .label = "Native frame: SpeedTree wind by compute (RT scene)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F4-5 (docs/research/frame-ownership.md 14.17; Full): the ray tracing scene's animated SpeedTrees (RT shadows' wind, GI foliage) take their swaying "
+                       "positions from a compute pass that runs the trees' vertex shader wind (wind matrices, leaf rock / rustle, leaf cards and meshes) over each instance's "
+                       "vertex buffer instead of a vertex shader capture of the composed draw, so the trees stay owned (native.owned_trees) with ray tracing on. Compare = the "
+                       "captures of the composed draws too, both compared on the GPU (rvk.log `rt: tree wind (5 s)`: max error in world units). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the vertex captures"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeBoneMotion = &reg.add({
         .key = "native.bone_motion",
         .label = "Native frame: bone-history motion",

@@ -509,6 +509,7 @@ struct RendererSettings {
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
     Setting* nativeBoneMotion = nullptr;       // native.bone_motion: off | on | compare (frame-ownership.md 14.13: the skinned draws' per-object motion from the bone table's history, restart)
     Setting* nativeOwnFoliage = nullptr;       // native.own_foliage: S-5 grass distance thinning tied to lod.view (Full)
+    Setting* nativeTreeWind = nullptr;         // native.tree_wind: off | on | compare (F4-5, frame-ownership.md 14.17: the RT scene's animated SpeedTrees by compute, no capture; Full)
     Setting* nativeVertexPull = nullptr;       // native.vertex_pull: S-4 vertex pulling of the persistent owned draws (no vertex input: one indirect command per pipeline x state x index binding)
     Setting* nativeDepthZ = nullptr;          // native.depth_z: depth-only z passes (S-6: no pixel shader / colour attachment where nothing reads them; the R32F depth map derived from the hardware depth)
     Setting* nativeOwnPost = nullptr;         // native.own_post: the post chain on our own shaders (S-7: the luminance chain in one dispatch)

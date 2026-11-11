@@ -11,6 +11,7 @@
 #include "d3d9/scene.h"
 #include "enh/rt_lod.h"
 #include "enh/rt_registry.h"
+#include "enh/tree_wind.h"
 #include "shader/abi.h"
 #include "test.h"
 
@@ -297,4 +298,58 @@ TEST(rt_registry_pinned_never_stale) {
     CHECK(reg.size() == 1 && reg.find(rt::instanceKey(1, a)) != nullptr && reg.counters().aged == 1 && reg.counters().tooFar == 1);
     reg.find(rt::instanceKey(1, a))->pinned = false;
     CHECK(reg.age(cam, 5001, 501.0, l, nullptr) == 1 && reg.size() == 0);
+}
+
+// F4-5 (frame-ownership.md 14.17): the SpeedTree wind by compute: the vertex class of a declaration and the CPU reference of the vertex shader's position
+TEST(tree_wind_layout_classes_and_refusals) {
+    namespace tw = rvk::enh::treewind;
+    const std::vector<tw::Element> branch = {{0, 0, 2, 0, 0}, {0, 12, 5, 2, 0}, {0, 16, 3, 1, 0}, {0, 32, 1, 5, 0}, {1, 0, 0, 5, 4}};
+    tw::Layout l = tw::layoutOf(branch, 0);
+    CHECK(l.ok && l.cls == tw::kWind && l.words[tw::kIndices0] == (12u | 5u << 16) && l.words[tw::kTex0] == (32u | 1u << 16) && l.words[tw::kWeights2] == tw::kAbsent);
+    CHECK(!tw::layoutOf(branch, 2).ok);  // leaves need BLENDWEIGHT2
+    const std::vector<tw::Element> mesh = {{0, 0, 2, 0, 0}, {0, 12, 5, 2, 0}, {0, 16, 3, 1, 0}, {0, 32, 3, 1, 2}, {0, 48, 2, 3, 1}, {0, 60, 2, 3, 2}};
+    CHECK(tw::layoutOf(mesh, 3).ok && tw::layoutOf(mesh, 3).cls == tw::kLeafMesh);
+    const std::vector<tw::Element> cards = {{0, 0, 2, 0, 0}, {0, 12, 5, 2, 0}, {0, 16, 3, 1, 0}, {0, 32, 3, 1, 1}, {0, 48, 3, 1, 2}};
+    CHECK(tw::layoutOf(cards, 2).ok && tw::layoutOf(cards, 2).cls == tw::kLeafCards);
+    CHECK(tw::layoutOf(cards, 1).ok && tw::layoutOf(cards, 1).cls == tw::kWind);  // fronds: the wind only, whatever else is declared
+    const std::vector<tw::Element> noPos = {{0, 0, 3, 0, 0}, {0, 16, 5, 2, 0}, {0, 20, 3, 1, 0}};
+    CHECK(!tw::layoutOf(noPos, 0).ok);  // POSITION must be FLOAT3 at offset 0
+    const std::vector<tw::Element> badType = {{0, 0, 2, 0, 0}, {0, 12, 13, 2, 0}, {0, 16, 3, 1, 0}};
+    CHECK(!tw::layoutOf(badType, 0).ok);  // UDEC3 is not decoded
+}
+
+TEST(tree_wind_reference_matches_the_shader_math) {
+    namespace tw = rvk::enh::treewind;
+    float k[tw::kConsts][4] = {};
+    // wind matrix 1 = a 90 degree turn about y (columns c17..c19 = rows of v * M), the instance's rows = identity + translation (100, 200, 300)
+    k[3][2] = 1.0f, k[4][1] = 1.0f, k[5][0] = -1.0f;
+    k[17][0] = 1.0f, k[17][3] = 100.0f;
+    k[18][1] = 1.0f, k[18][3] = 200.0f;
+    k[19][2] = 1.0f, k[19][3] = 300.0f;
+    tw::Vertex v;
+    v.pos[0] = 1.0f, v.pos[1] = 2.0f, v.pos[2] = 3.0f;
+    v.indices0[0] = 1.0f;
+    float w[3];
+    v.weights0[0] = 0.0f;  // no wind: the rest pose through the rows
+    tw::world(k, v, tw::kWind, w);
+    CHECK(w[0] == 101.0f && w[1] == 202.0f && w[2] == 303.0f);
+    v.weights0[0] = 1.0f;  // full wind: (dot(p, c17), dot(p, c18), dot(p, c19)) = (3, 2, -1)
+    tw::world(k, v, tw::kWind, w);
+    CHECK(w[0] == 103.0f && w[1] == 202.0f && w[2] == 299.0f);
+    v.weights0[0] = 0.5f;
+    tw::world(k, v, tw::kWind, w);
+    CHECK(std::fabs(w[0] - 102.0f) < 1e-4f && std::fabs(w[2] - 301.0f) < 1e-4f);
+    // leaf cards, no rock / rustle (c32 = 0), the leaf angle matrix = identity, no rotations: the corner (w1.y * w2.y, w1.x * w2.z, 0) is added
+    v.weights0[0] = 0.0f;
+    k[9][0] = 1.0f, k[10][1] = 1.0f, k[11][2] = 1.0f;
+    v.weights1[0] = 2.0f, v.weights1[1] = 3.0f, v.weights1[2] = 0.0f, v.weights1[3] = 0.0f;
+    v.weights2[1] = 5.0f, v.weights2[2] = 7.0f, v.weights2[3] = 0.0f;
+    tw::world(k, v, tw::kLeafCards, w);
+    CHECK(std::fabs(w[0] - 116.0f) < 1e-4f && std::fabs(w[1] - 216.0f) < 1e-4f && std::fabs(w[2] - 303.0f) < 1e-4f);
+    // a leaf mesh with the mesh matrix rows (x, -cross(x, z) = y, z) = identity, no rock: the offset is w2.xyz
+    v.normal1[0] = 1.0f, v.normal1[1] = 0.0f, v.normal1[2] = 0.0f;
+    v.normal2[0] = 0.0f, v.normal2[1] = 0.0f, v.normal2[2] = 1.0f;
+    v.weights2[0] = 1.0f, v.weights2[1] = 2.0f, v.weights2[2] = 4.0f;
+    tw::world(k, v, tw::kLeafMesh, w);
+    CHECK(std::fabs(w[0] - 102.0f) < 1e-4f && std::fabs(w[1] - 204.0f) < 1e-4f && std::fabs(w[2] - 307.0f) < 1e-4f);
 }
