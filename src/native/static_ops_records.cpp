@@ -183,6 +183,9 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
     U8* entity = ptr(ctx, 0x10);
     const std::uint32_t sub = op.raw.desc & 0xffu, node = op.raw.desc >> 8;
     const bool solid = op.list == List::Solid;
+    // F9 / F14 (native.owned_ordered): an alpha / refracted list op is drawn at its own place (the engine's order): lit like a solid op, its sort id / fade are the engine's business
+    const bool orderedList = (op.list == List::Alpha || op.list == List::Refracted) && ownedOrderedOn();
+    const bool lit = solid || orderedList;
     orec::Excl ex = orec::Excl::Count;
     const auto reason = [&](orec::Excl e) {
         if (ex == orec::Excl::Count) ex = e;
@@ -201,12 +204,12 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
         reason(get<std::uint8_t>(res, 0xa0) != 0 && n >= 2 && !lightmaps ? orec::Excl::Instanced : orec::Excl::InstanceList);
     }
     if ((get<std::uint32_t>(entity, 0x28) & 0xe00000u) != 0) reason(orec::Excl::Overlay);
-    if (!(op.raw.fade >= 1.0f)) reason(orec::Excl::Fade);
+    if (!(op.raw.fade >= 1.0f) && !orderedList) reason(orec::Excl::Fade);  // (an ordered op: the fade is in the stamp and the object window)
     if (!orec::hierarchyOwned()) {
         if (get<std::int32_t>(ctx, 0x34) > 0) reason(orec::Excl::Hierarchy);
         if (node != 0 && node != kStaticOpNone) reason(orec::Excl::NodeOp);
     }
-    if (solid) {
+    if (lit) {
         U8* illumPs = ptr(entity, 0xf8);
         U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
         if (!instOp && (illum == nullptr || ptr(illum, 0) == nullptr)) reason(orec::Excl::NoList);  // (an instance op: its instances' illuminations, instanceExclusion)
@@ -225,7 +228,7 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
                 reason(orec::Excl::ShaderClass);
                 continue;
             }
-            if (solid && orec::hierarchyOwned()) {
+            if (solid && orec::hierarchyOwned() && !ownedOrderedOn()) {  // (F9: with native.owned_ordered they are recorded and drawn at their place)
                 // F2d: a blended solid-list shader (the landscape's terrain layers) is refused after its composition (recComposed: blended / no z write draw): ask before it,
                 // or every frame composes it with a read log and builds a record that is dropped again (the old Hierarchy reason used to hide this)
                 sc::BlendInputs b;
@@ -236,8 +239,8 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
                 // (the terrain layers blend with TradeAlphaAsSolid set: isBlended is false for them, the states still blend)
                 if (sc::blendsAtFadeOne(b) || sc::isBlended(b)) reason(orec::Excl::Blended);
             }
-            if (get<std::uint8_t>(shader, 0x2b8) != 0) reason(orec::Excl::SortId);
-            if (get<std::uint8_t>(shader, 0x78) != 0) reason(orec::Excl::DepthBias);  // (the owned view block holds the plain view-projection in c0..c3)
+            if (get<std::uint8_t>(shader, 0x2b8) != 0 && !orderedList) reason(orec::Excl::SortId);
+            if (get<std::uint8_t>(shader, 0x78) != 0 && !orderedList) reason(orec::Excl::DepthBias);  // (the owned view block holds the plain view-projection in c0..c3; F14: an ordered op reads the dbvp slot)
         }
     }
     return ex;
@@ -251,7 +254,8 @@ void StaticOps::recEnter(const Op& op) {
     // own; measured: actor illumination reads in static mesh records = the "MISS (audit)" disagreements, frame-ownership.md 14.18)
     R.readLog = {};
     R.logging = false;
-    R.active = R.building = R.auditBad = R.diffInOp = R.refused = R.wantOwnable = false;
+    R.active = R.building = R.auditBad = R.diffInOp = R.refused = R.wantOwnable = R.ordered = false;
+    recLightmaps_.clear();
     R.cur = nullptr;
     R.f2dCls = -1;
     R.postDone = false;
@@ -264,8 +268,10 @@ void StaticOps::recEnter(const Op& op) {
                            g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] && op.list == List::ZPass;
     // F6-1 (native.owned_actors): the skinned actors' ops are recorded too (the Actors group in the main view; the cascades' z ops with owned_shadows)
     const bool actorOp = op.kind == OpKind::Animation && ownedActorsOn();
-    if ((viewKind_ == ViewKind::Main ? g_ != &groups_[static_cast<std::size_t>(actorOp ? Group::Actors : Group::Static)] : !shadowRec) || (op.kind != OpKind::Mesh && !actorOp) || inNonOp_ ||
-        (op.list != List::ZPass && op.list != List::Solid)) {
+    // F9 / F14 (native.owned_ordered): the main view's alpha / refracted mesh ops (the Mesh group) are recorded too
+    const bool orderedOp = orderedGroupNow(&op);
+    if ((viewKind_ == ViewKind::Main ? g_ != &groups_[static_cast<std::size_t>(actorOp ? Group::Actors : Group::Static)] && !orderedOp : !shadowRec) || (op.kind != OpKind::Mesh && !actorOp) || inNonOp_ ||
+        (op.list != List::ZPass && op.list != List::Solid && !orderedOp)) {
         return;
     }
     const auto t0 = tnow();
@@ -282,6 +288,7 @@ void StaticOps::recEnter(const Op& op) {
     }
     if (ex != orec::Excl::Count) {
         ++w.excluded[static_cast<std::size_t>(ex)];
+        if (orderedOp || (op.list == List::Solid && ownedOrderedOn())) ++ordW_.excluded[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2][static_cast<std::size_t>(ex)];
         R.map.erase(R.key);
         w.stampNs += ns(t0, tnow());
         return;
@@ -406,8 +413,11 @@ void StaticOps::recComposed(const Op& op, Skip s) {
     orec::Store& R = *recs_;
     orec::Stats& w = R.stats(R.key.view != 0);
     const auto t0 = tnow();
+    const std::size_t oli = op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2;
+    const bool orderedOk = ownedOrderedOn() && op.list != List::ZPass && R.key.view == 0;  // (F9 / F14)
     const auto exclude = [&](orec::Excl e) {
         ++w.excluded[static_cast<std::size_t>(e)];
+        if (orderedOk && (op.list != List::Solid || R.ordered || e == orec::Excl::Blended)) ++ordW_.excluded[oli][static_cast<std::size_t>(e)];
         R.map.erase(R.key);
         R.active = false;
         R.cur = nullptr;
@@ -416,11 +426,29 @@ void StaticOps::recComposed(const Op& op, Skip s) {
         exclude(orec::Excl::NotComposed);
         return;
     }
-    const bool solid = op.list == List::Solid;
+    const bool solid = op.list != List::ZPass;  // (the lit lists: solid, and with native.owned_ordered alpha / refracted)
     const bool lightImages = gpuscene::lightingimages().active();
+    // F9 / F14: an alpha / refracted op is always ordered; a solid one when a draw blends or writes no depth (the terrain layers)
+    R.ordered = orderedOk && op.list != List::Solid;
+    if (orderedOk && op.list == List::Solid) {
+        for (std::size_t k = 0; k < drawCount_; ++k) {
+            const sc::DrawDesc& d = *draws_[k];
+            if (d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) R.ordered = true;
+        }
+    }
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
-        if (d.inheritMask != 0 || !d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed || (solid && lightImages && d.lightEntry == gpuscene::kNoEntry)) {
+        // (F14: an alpha / refracted draw without a lighting entry is an unlit one (the waterfalls' sheets): its derivation refuses if the shader reads the lighting window)
+        const bool needEntry = solid && lightImages && !(R.ordered && op.list != List::Solid);
+        if (d.inheritMask != 0 || !d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed || (needEntry && d.lightEntry == gpuscene::kNoEntry)) {
+            if (R.ordered) {
+                static int logged = 0;
+                if (logged < 8) {
+                    ++logged;
+                    spdlog::info("native: owned ordered: {} not recorded (draw level): draw {} inherit mask {:#x}, CPU bytes {}, CPU stream {}, indexed {}, light entry {}, material '{}'", describe(op), k, d.inheritMask,
+                                 d.vertexBytes.size(), d.cpuStream, d.indexed, d.lightEntry, d.tagMaterialName != nullptr ? d.tagMaterialName : "");
+                }
+            }
             exclude(orec::Excl::DrawLevel);
             return;
         }
@@ -428,7 +456,7 @@ void StaticOps::recComposed(const Op& op, Skip s) {
     for (std::size_t k = 0; k < drawCount_; ++k) {
         // (F2c-3: an owned op's draws are opaque and write depth: drawn before the engine's other ops, in any order among themselves)
         const sc::DrawDesc& d = *draws_[k];
-        if (d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) {
+        if (!R.ordered && (d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0)) {
             static int logged = 0;
             if (logged < 12) {
                 ++logged;
@@ -694,11 +722,16 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
             }
         }
         // view-level windows (VS 0 / 1, PS 0): the view block's slot is a per-view input; taken from the first draw of the view (and list), compared with the others
-        const std::uint64_t vkey = recViewSerial_ * 2 + (rec.key.list == static_cast<std::uint8_t>(List::Solid) ? 1u : 0u);
+        // (F9 / F14: per list, and a depth-bias record's view (c0..c3 = dbvp) apart from the plain one)
+        const std::uint64_t vkey = recViewSerial_ * 32 + (static_cast<std::uint64_t>(rec.key.list) << 1) + (rec.dbvp ? 1u : 0u);
         if (R.viewSerial != vkey) {
             R.viewSerial = vkey;
             R.viewWin = ownedWin_;
             R.viewWinValid = true;
+        }
+        // (a window the list's first draw was not offered - an instance-rate draw gets no VS window 1 - is taken from the first draw that has it)
+        for (const auto [st, wi] : {std::pair<int, int>{0, 0}, {0, 1}, {1, 0}}) {
+            if (R.viewWin.w[st][wi].kind == d3d9::OwnedWindows::Kind::None && ownedWin_.w[st][wi].kind != d3d9::OwnedWindows::Kind::None) R.viewWin.w[st][wi] = ownedWin_.w[st][wi];
         }
         dw.w[0][0] = R.viewWin.w[0][0];
         dw.w[1][0] = R.viewWin.w[1][0];
@@ -796,6 +829,18 @@ void StaticOps::recEnd(const Op& op) {
         // (the entry must be the packet of THIS draw: an entry of an earlier description - a morph pick that moved - would give the record the old vertex input)
         if (pe == packets_.end() || !pe->second.cd.valid || !pe->second.desc || !packetSameDesc(d, *pe->second.desc)) {
             ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
+            if (R.ordered) ++ordW_.notRetained[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2];
+            if (R.ordered) {
+                // (diagnostics: each material once, after the first world frames: water's draws are the enhanced water's replacer by design)
+                static std::vector<std::string> seenNames;
+                const std::string mname = d.tagMaterialName != nullptr ? d.tagMaterialName : "";
+                if (dev_.stats().frames > 600 && seenNames.size() < 24 && std::find(seenNames.begin(), seenNames.end(), mname) == seenNames.end()) {
+                    seenNames.push_back(mname);
+                    spdlog::info("native: owned ordered: {} draw {} not retained (water {}): packet {}, valid {}, same description {}, material '{}'", describe(op), k, d.tagWater, pe != packets_.end(),
+                                 pe != packets_.end() && pe->second.cd.valid, pe != packets_.end() && pe->second.desc && packetSameDesc(d, *pe->second.desc),
+                                 d.tagMaterialName != nullptr ? d.tagMaterialName : "");
+                }
+            }
             R.map.erase(R.key);
             R.active = false;
             w.buildNs += ns(t0, tnow());
@@ -828,7 +873,12 @@ void StaticOps::recEnd(const Op& op) {
         r.lightHoldsAll = d.lightHoldsAll;
         r.vsSet = d.vsSet;
         r.psSet = d.psSet;
-        r.vs1Offered = actorRec ? true : ownedObjects_ && op_ != nullptr && op_->entity != nullptr && !(d.streams[0].buffer != nullptr && d.streams[0].freq != 1);
+        {
+            // (setOwnedFor's rule: no window 1 / 2 for a draw with an instance-rate stream on ANY stream; F9 / F14: the alpha list's herbs carry one on stream 1)
+            bool inst = false;
+            for (const auto& st : d.streams) inst = inst || (st.buffer != nullptr && st.freq != 1);
+            r.vs1Offered = actorRec ? true : ownedObjects_ && op_ != nullptr && op_->entity != nullptr && !inst;
+        }
         r.tagSubMesh = d.tagSubMesh;
         r.tagMaterial = d.tagMaterial;
         r.tagMeshResource = d.tagMeshResource;
@@ -837,6 +887,26 @@ void StaticOps::recEnd(const Op& op) {
         r.zPass = d.zPass;
         r.passFlags = d.passFlags;
         r.scene = k < R.probes.size() && R.probes[k].valid;
+        if (R.ordered && !r.vs1Offered && !actorRec) {
+            static int loggedV = 0;
+            if (loggedV < 8) {
+                ++loggedV;
+                spdlog::info("native: owned ordered: draw {} of {} has an instance-rate stream (no VS windows 1 / 2): freq {:#x} {:#x} {:#x} {:#x}, buffers {} {} {} {}, material '{}'", k, describe(op),
+                             d.streams[0].freq, d.streams[1].freq, d.streams[2].freq, d.streams[3].freq, d.streams[0].buffer, d.streams[1].buffer, d.streams[2].buffer, d.streams[3].buffer,
+                             d.tagMaterialName != nullptr ? d.tagMaterialName : "");
+            }
+        }
+        if (R.ordered && !r.scene) {
+            // (F9 / F14 diagnostics: an ordered op's draw without a scene form: the op stays composed; which draws they are)
+            static int logged = 0;
+            if (logged < 16) {
+                ++logged;
+                spdlog::info("native: owned ordered: draw {} of {} without a scene form: kind {} phase {}/{}, batchable {}, ordered {}, v1 pipeline {}, v2 pipeline {}, capture {}, blend {} z write {} src {} dst {}, material '{}'",
+                             k, describe(op), d3d9::draws::name(r.cd->kind), d3d9::scene::name(r.cd->phase.view), d3d9::scene::name(r.cd->phase.pass), r.cd->packet.batchable, r.cd->ordered,
+                             static_cast<std::uint64_t>(r.cd->scenePipeline), static_cast<std::uint64_t>(r.cd->scenePipeline2), k < R.probes.size() && R.probes[k].capture, d.states[sc::StBlend],
+                             d.states[sc::StZWrite], d.states[sc::StSrc], d.states[sc::StDst], d.tagMaterialName != nullptr ? d.tagMaterialName : "");
+            }
+        }
         if (actorRec) {
             ++actorW_.drawsBuilt;
             if (!r.scene) ++actorW_.drawNoScene;
@@ -901,6 +971,32 @@ void StaticOps::recEnd(const Op& op) {
             w.buildNs += ns(t0, tnow());
             return;
         }
+    }
+    if (R.ordered) {
+        // F14: a depth-bias material's draws read the depth-bias view-projection in c0..c3 (the view's dbvp slot); an op that mixes them with plain draws is not retained
+        std::size_t dbDraws = 0, plainDraws = 0;
+        const bool dbDiffers = std::memcmp(view_.dbvp, view_.vp, sizeof(view_.vp)) != 0;
+        for (std::size_t k = 0; k < drawCount_; ++k) {
+            const sc::DrawDesc& d = *draws_[k];
+            if ((d.vsSet[0] & 0xfu) == 0) continue;
+            const bool db = dbDiffers && std::memcmp(d.vsF[0], view_.dbvp, sizeof(view_.dbvp)) == 0;
+            ++(db ? dbDraws : plainDraws);
+        }
+        if (dbDraws != 0 && plainDraws != 0) {
+            ++w.excluded[static_cast<std::size_t>(orec::Excl::DepthBias)];
+            ++ordW_.excluded[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2][static_cast<std::size_t>(orec::Excl::DepthBias)];
+            R.map.erase(R.key);
+            R.active = false;
+            w.buildNs += ns(t0, tnow());
+            return;
+        }
+        rec->dbvp = dbDraws != 0;
+        // F9 / F14: drawn at its place; the slot's BindLightmaps(1) calls as this composition made them (an alpha / refracted op's mesh binds its lightmaps too)
+        rec->ordered = true;
+        rec->bindLightmaps = !recLightmaps_.empty();
+        rec->lightmapRes = rec->bindLightmaps ? recLightmaps_.front() : nullptr;
+        rec->stream3 = false;
+        ++ordW_.recordsBuilt[op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2];
     }
     rec->builtFrame = dev_.stats().frames;
     rec->lastSeen = rec->builtFrame;

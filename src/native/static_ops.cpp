@@ -319,6 +319,7 @@ void StaticOps::ShadowStats::add(const ShadowStats& o) {
 }
 
 void StaticOps::viewEnd() {
+    orderedFlushRun();  // F9 / F14: a pending run of ordered draws (the end of the view's last list)
     finishOp();
     simulatedOp_ = nullptr;
     inView_ = false;
@@ -858,6 +859,7 @@ void StaticOps::noteListLights(const std::uint8_t* list) {
 // eCMeshResource2::BindLightmaps 0x764220 (the admin's s4 / s5 slots updated as SetLightmap does)
 std::uint32_t StaticOps::bindLightmaps(const std::uint8_t* res) {
     if (leanCollect_ && res != nullptr) leanLightmaps_.push_back(res);  // O2a: the engine's BindLightmaps(1) at the lean commit
+    if (recCollect_ && res != nullptr && std::find(recLightmaps_.begin(), recLightmaps_.end(), res) == recLightmaps_.end()) recLightmaps_.push_back(res);  // F9 / F14: an ordered record's side effect
     std::uint32_t combi = 0;
     if (f2c::on() && f2c::opActive()) {
         std::uint64_t h = 1469598103934665603ull;
@@ -1280,7 +1282,7 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
         // (the admin pool's c12..c30 as the composition holds them: every register a draw composed there is a copy of the mirror's)
         vs1Regs = mirror_.adminVs + 12;
         // (F3-1: a cascade's static mesh z ops are candidates too, while native.owned_shadows is on)
-        const bool staticGroup = g_ == &groups_[static_cast<std::size_t>(Group::Static)] ||
+        const bool staticGroup = g_ == &groups_[static_cast<std::size_t>(Group::Static)] || orderedGroupNow(op_) ||
                                  (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
         const bool staticMesh = op_ != nullptr && staticGroup && op_->kind == OpKind::Mesh && op_->entity != nullptr && !inNonOp_;
         // F6-1 (7.40): a skinned actor draw of the main view (the Actors group) or a cascade (with owned_shadows): VS window 1 from the view block, VS window 2 from the bone table
@@ -2248,6 +2250,7 @@ void StaticOps::opEnterImpl(const Op& op) {
     leanBegin(group);
     if (f2c::on() && group == Group::Static && viewKind_ == ViewKind::Main) f2cClassify(op);
     if (ownedBb_ && bbReplay(op)) return;  // F4-1: an owned billboard op: drawn from its record
+    if (ownedOrdered_ && orderedPlace(op)) return;  // F9 / F14: an ordered op drawn from its records at its place (the slot is skipped)
     recEnter(op);
     bbEnter(op);
     const Skip s = composeOp(op);
@@ -2629,7 +2632,7 @@ void StaticOps::issue() {
     const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && !tagOverride_ &&
                          ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)] ||
                                            (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]) ||
-                                           (ownedVegOps_ && g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)]))) ||
+                                           (ownedVegOps_ && g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)]) || orderedGroupNow(op_))) ||
                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
     const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
                                   (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
@@ -2656,7 +2659,7 @@ void StaticOps::issue() {
     // (F3-1: the cascades' ops too while native.owned_shadows is on: their retained draws are the ones the owned path replays)
     const bool sceneIssue = sceneDraws_ && ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue() || treeSceneIssue() ||
                                                                                     (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]) ||
-                                           vegSceneIssue())) ||
+                                           vegSceneIssue() || orderedGroupNow(op_))) ||
                                             (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
     dev_.setSceneIssue(sceneIssue);
     const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;

@@ -75,6 +75,14 @@ void StaticOps::stagesReport() {
     line += stage("owned_instances", settingOn(rs.nativeOwnedInstances), ownedInstancesOn(), instW_.ownedOps, std::format("{} instance ops / {} draws owned", instW_.ownedOps, instW_.ownedDraws),
                   needsOf(rs.nativeOwnedInstances, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), gateMain);
     instReport();
+    // F9 + F14 (native.owned_ordered): acted = order-dependent ops drawn from their records at their place in the window (solid + refracted + alpha lists)
+    {
+        static std::uint64_t last = 0;
+        const std::uint64_t a = ordTotalOwned_ - last;
+        last = ordTotalOwned_;
+        line += stage("owned_ordered", settingOn(rs.nativeOwnedOrdered), ownedOrderedOn(), a, std::format("{} ordered ops owned", a),
+                      needsOf(rs.nativeOwnedOrdered, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), gateMain);
+    }
     line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained), needsOf(rs.nativeOwnedVegetation, {}));
     const std::uint64_t vegViews = vro_ ? vro_->window.ownedViews : 0;
     line += stage("owned_vegetation_ops", settingOn(rs.nativeOwnedVegetationOps), ownedVegOps_, vegViews, std::format("{} owned views", vegViews),

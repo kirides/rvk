@@ -252,6 +252,7 @@ add_library(rvk_core STATIC
     src/native/static_ops_actors.cpp
     src/native/static_ops_actors_owned.cpp
     src/native/static_ops_inst_owned.cpp
+    src/native/static_ops_ordered.cpp
     src/native/static_ops_trees.cpp
     src/native/static_compose.h
     src/native/static_ops.cpp

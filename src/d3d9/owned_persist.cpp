@@ -95,6 +95,28 @@ std::uint64_t Device::ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok)
     return h;
 }
 
+std::uint64_t Device::ownedEnvEpochAt(std::size_t index, bool solid, std::uint32_t viewSlot, bool& ok) {
+    const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
+    OrderedEnv& e = ownedEnvOrdered_[(index - kOwnedEnvOrdered) % std::size(ownedEnvOrdered_)];
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (e.epoch[i] != 0 && e.hash[i] == h) return e.epoch[i];
+    }
+    const std::uint32_t at = e.next++ & 3u;
+    e.hash[at] = h;
+    e.epoch[at] = ++ownedEnvCounter_;
+    return e.epoch[at];
+}
+
+bool Device::ownedEnvSameAt(std::size_t index, bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const {
+    bool ok = false;
+    const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
+    const OrderedEnv& e = ownedEnvOrdered_[(index - kOwnedEnvOrdered) % std::size(ownedEnvOrdered_)];
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (e.epoch[i] != 0 && e.hash[i] == h) return e.epoch[i] == epoch;
+    }
+    return false;
+}
+
 std::uint64_t Device::ownedEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok) {
     const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
     const std::size_t k = ownedEnvIndex(viewSlot);
@@ -289,7 +311,7 @@ int Device::ownedDerive(const CachedDraw& c, const DeriveIn& in, const OwnedWind
     SceneView sv;
     const int why = deriveScene(c, in, sv);
     if (why != 0) return refuse(why);
-    if (c.scenePipeline2 == GamePipeline::None || !c.packet.batchable) return refuse(9);
+    if (c.scenePipeline2 == GamePipeline::None || !(c.packet.batchable || c.ordered)) return refuse(9);
     if (checkView) {
         const shader::abi::ViewBlock2& vb = sceneViews_.shadow[ow.viewSlot];
         if (std::memcmp(vb.posFix, sv.block.posFix, sizeof(vb.posFix)) != 0 || std::memcmp(vb.c5, in.psC5, 3 * sizeof(float)) != 0) return refuse(19);
@@ -312,7 +334,7 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
     }
     if (observers_.empty() && !opaqueObserver) return true;
     // the observers' turn: bulk observers (observeOwned, once per pass) get a record view, the others see the draw now
-    const bool eligible = ownedBulkOn_ && ownedBulkEligible(c);
+    const bool eligible = ownedBulkOn_ && !ownedBulkSuspended_ && ownedBulkEligible(c);
     std::uint32_t wanted = 0;
     bool perDraw = opaqueObserver;
     for (std::size_t i = 0; i < observers_.size(); ++i) {
@@ -570,7 +592,9 @@ void Device::cullCheckFinish(gpuscene::OwnedCompact::CullItem& ci) {
     ci.exact = true;
 }
 
-bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount) {
+bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount,
+                        bool ordered) {
+    if (orderedPending_) orderedFlushPending();  // (F9 / F14: a pending ordered run goes first: the scratch below is the device's, a flush may not nest in another)
     if (items.empty()) return true;
     const std::uint32_t n = static_cast<std::uint32_t>(items.size());
     if (!arena.valid() || n > arena.capacity || recordsRef.null() || !sceneViewsReady() || viewSlot >= sceneViews_.slots) return false;
@@ -578,7 +602,12 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     if (frameBlock.null() || shadow == nullptr) return false;
     for (const OwnedItem& it : items) {
         // (every address the shaders will read from the slot: it must hold a written record with a block address and its draw must be a scene draw of ours)
-        if (it.cd == nullptr || it.slot >= slotCount || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 || shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == GamePipeline::None) {
+        // (F9 / F14, GPU safety: an ordered draw with an instance-rate vertex stream would read it at firstInstance = the record's list index: out of its buffer)
+        bool instRate = false;
+        if (it.cd != nullptr && it.cd->ordered) {
+            for (std::uint32_t b = 0; b < it.cd->vi.bindingCount && b < rhi::kMaxVertexBindings; ++b) instRate = instRate || it.cd->vi.bindings[b].perInstance != 0;
+        }
+        if (it.cd == nullptr || instRate || it.slot >= slotCount || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 || shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == GamePipeline::None) {
             ++ownedPersistStats.refused;
             return false;
         }
@@ -648,10 +677,13 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         static thread_local std::vector<Slot> table;
         table.assign(cap, {});
         const std::uint32_t mask = cap - 1;
+        std::uint64_t prevKey = 0;
         for (std::uint32_t i = 0; i < n; ++i) {
             const std::uint64_t key = pulledOf[i] != 0 ? ownedPullKey(*items[i].cd, viewSlot) : items[i].bucket;
             std::uint32_t at = static_cast<std::uint32_t>((key * 0x9E3779B97F4A7C15ull) >> 40) & mask;
             while (table[at].bucket != 0xffffffffu && table[at].key != key) at = (at + 1) & mask;
+            if (ordered && i != 0 && key != prevKey) table[at].bucket = 0xffffffffu;  // (F9 / F14: a key seen before an other key starts a bucket of its own: the order is kept)
+            prevKey = key;
             if (table[at].bucket == 0xffffffffu) {
                 table[at] = {key, buckets++};
                 ownedBucketKeys_.push_back(key);
@@ -820,6 +852,7 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         m.pipeline = pulledB ? c.scenePipelinePull : c.scenePipeline2;
         m.op = DrawPacket::Op::DrawIndexedIndirect;
         m.scene = 0;
+        if (ordered) m.batchable = false;  // (F9 / F14: recorded now, after the pending batch)
         m.count = count;
         m.instances = 1;
         m.first = 0;

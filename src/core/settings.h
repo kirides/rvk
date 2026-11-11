@@ -502,6 +502,7 @@ struct RendererSettings {
     Setting* nativeOwnedTrees = nullptr;  // native.owned_trees: the main view's SpeedTree ops owned (frame-ownership.md 7.25, F4-2 / F4-3)
     Setting* nativeClusterCullShadows = nullptr;  // native.cluster_cull_shadows: the cull of the owned draws of clustered meshes in the sun cascades (frame-ownership.md 7.37, F3-2)
     Setting* nativeOwnedInstances = nullptr;  // native.owned_instances: instance lists + hardware batches owned (frame-ownership.md 14.19, F2f)
+    Setting* nativeOwnedOrdered = nullptr;  // native.owned_ordered: the order-dependent ops (blended terrain layers, alpha / refracted lists) owned at their place (frame-ownership.md 14.20, F9 + F14)
     Setting* nativeOwnedActors = nullptr;  // native.owned_actors: skinned actor ops owned (frame-ownership.md 7.40, F6-1)
     Setting* nativeOwnedShadows = nullptr;  // native.owned_shadows: the sun cascades' static mesh z ops owned (frame-ownership.md 7.36, F3-1)
     Setting* nativeOwnedVegetation = nullptr;  // native.owned_vegetation: the vegetation ops' instance streams retained in persistent GPU buffers (frame-ownership.md 7.40, F7-1)

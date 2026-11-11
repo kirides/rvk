@@ -158,6 +158,8 @@ struct Persist {
     SlotHandle handle;
     bool valid = false;
     std::uint64_t epoch = 0, sig = 0, bucket = 0;
+    std::uint32_t viewSlot = 0;   // F9 / F14: the view slot the content was derived for
+    std::int32_t envIndex = -1;   // ... and its env index (-1 = the view slot's: Device::ownedEnvEpoch; else Device::ownedEnvEpochAt)
     d3d9::OwnedWindows ow;  // the draw's windows as the last frame built them (the observers' CPU twin; the view windows are patched per pass)
 };
 
@@ -226,6 +228,8 @@ struct OpRecord {
     bool actor = false;
     gpuscene::BoneKey actorKey;
     std::uint32_t actorBones = 0;
+    bool ordered = false;    // F9 / F14 (native.owned_ordered): an order-dependent op (blended / no z write / alpha / refracted list): never compacted, drawn at its place
+    bool dbvp = false;       // F14: its draws read the depth-bias view-projection in c0..c3 (a depth-bias material): the view's dbvp slot
     bool instances = false;  // F2f: a render-instance op (node 0xffffff): its draws' window 2 are instance row images, its stamp holds the instance list
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
@@ -340,6 +344,7 @@ struct Store {
     bool diffInOp = false;                   // a draw of the op differed (attributes an audit disagreement)
     bool wantOwnable = false;                // the record valid at entry was built without the side-effect lists: rebuilt from this composition (F2c-3)
     bool refused = false;                    // a derivation was refused for a reason that makes the record stale (module, variant, binding, texture)
+    bool ordered = false;                    // F9 / F14: the record being built is an ordered one
     Key key;
     Stamp stamp;                             // the stamp read at entry
     int rebuildWhy = -1;                     // the first stamp field that differed at entry (-1: none)
