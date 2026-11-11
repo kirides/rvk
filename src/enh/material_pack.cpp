@@ -1,6 +1,7 @@
 #include "enh/material_pack.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -607,7 +608,13 @@ bool MaterialPack::adopt() {
 MaterialPack::Hit MaterialPack::finish(Hit h, std::string_view key) {
     if (h.word == 0) return {};
     if (h.texture != nullptr) {
-        const std::uint32_t slot = h.texture->bindlessSlot() & kWordSlotMask;
+        const std::uint32_t full = h.texture->bindlessSlot();
+        if (!slotFitsWord(full)) {  // D3D12's heap is 65536 entries; the word keeps 14 bits: no entry rather than another texture
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) spdlog::warn("enh: materials: pack map '{}' sits in heap slot {} (> {}): the pack word cannot address it, entry ignored", key, full, kWordSlotMask);
+            return {};
+        }
+        const std::uint32_t slot = full;
         if (slot == 0) return {};
         h.word = (h.word & ~kWordSlotMask) | slot;
     }

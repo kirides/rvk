@@ -92,6 +92,17 @@ TEST(matpack_word_roundtrip) {
     CHECK(std::fabs(s.emissive - 0.25f) < 1e-6f);
 }
 
+TEST(matpack_word_slot_range) {
+    for (const std::uint32_t slot : {1u, 2u, 255u, 8192u, 16383u}) {
+        CHECK(slotFitsWord(slot));
+        const Decoded d = decodeWord(encodeWord(slot, true, Constants{}, 0.7f));
+        CHECK(d.slot == slot && d.present && d.orm && !d.derived);
+    }
+    for (const std::uint32_t slot : {16384u, 16385u, 65535u}) CHECK(!slotFitsWord(slot));  // not encodable: MaterialPack::finish drops the entry
+    const Decoded dv = decodeWord(encodeDerivedWord(0.5f));
+    CHECK(dv.derived && dv.slot == 0 && dv.present);
+}
+
 TEST(matpack_word_constants_only) {
     Constants c;
     c.roughness = 0.4f;

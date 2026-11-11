@@ -81,6 +81,7 @@ bool hasRule(const Manifest& m, std::string_view key);  // an exact / wildcard r
 
 // ---- the pack word ---------------------------------------------------------------------------------------------------------------
 inline constexpr std::uint32_t kWordSlotMask = 0x3FFFu;  // bindless 2D slots are < 16384 (vk::Bindless::kMax2D)
+inline constexpr bool slotFitsWord(std::uint32_t slot) { return slot <= kWordSlotMask; }  // (D3D12 heap slots reach 65535: those cannot be encoded)
 inline constexpr std::uint32_t kWordPresent = 1u << 14;
 inline constexpr std::uint32_t kWordOrm = 1u << 15;       // layout ORM (else roughness in R)
 inline constexpr std::uint32_t kWordGlass = 1u << 30;     // glass: full reflection (no light cap), the engine's diffuse stays
