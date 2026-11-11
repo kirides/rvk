@@ -4,6 +4,7 @@
 //   rvk_fxtool corpus <dir>                  parse every fx_*.bin, decode the shaders, compare every constant table with
 //                                            D3DXGetShaderConstantTable, evaluate every preshader, print statistics
 //   rvk_fxtool compile <file.fx> <out.bin> [NAME=VALUE ...]   compile an .fx source with D3DX's effect compiler
+//   rvk_fxtool extract <file> <dir>          every shader of the effect as raw bytecode (<dir>/{vs,ps}MM_<stem>_s<k>.bin, k = "shader #k")
 //
 // d3dx9_39.dll is used only as a CPU reference (effect compiler, constant tables); no device is created.
 
@@ -288,6 +289,30 @@ int cmdDump(const fs::path& file, bool listing) {
     return 0;
 }
 
+// every shader of an effect as raw bytecode: <dir>/{vs,ps}<MM>_<stem>_s<k>.bin (k = the index of the dump's "shader #k"); `rvk_shadertool export <dir> <out>`
+// translates them (the ports in shaders/post are checked against those with rvk_shadereq)
+int cmdExtract(const fs::path& file, const fs::path& dir) {
+    bool compiled = false;
+    std::string errors;
+    const auto data = loadEffect(file, &compiled, &errors);
+    const EffectResult r = parseEffect(data);
+    if (!r.ok()) {
+        std::printf("FAIL %s: %s\n", file.string().c_str(), r.error.c_str());
+        return 1;
+    }
+    fs::create_directories(dir);
+    int n = 0;
+    for (std::size_t k = 0; k < r.effect.shaders.size(); ++k) {
+        const Shader& s = r.effect.shaders[k];
+        const std::string name =
+            std::format("{}{}{}_{}_s{}.bin", s.stage == rvk::shader::Stage::Vertex ? "vs" : "ps", s.major, s.minor, file.stem().string(), k);
+        std::ofstream(dir / name, std::ios::binary).write(reinterpret_cast<const char*>(s.tokens.data()), static_cast<std::streamsize>(s.tokens.size() * 4));
+        ++n;
+    }
+    std::printf("%d shaders written to %s\n", n, dir.string().c_str());
+    return 0;
+}
+
 int cmdCompile(const fs::path& in, const fs::path& out, const std::vector<std::string>& defs) {
     if (!D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");
@@ -550,6 +575,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 3 && std::strcmp(argv[1], "corpus") == 0) {
         return cmdCorpus(argv[2]);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "extract") == 0) {
+        return cmdExtract(argv[2], argv[3]);
     }
     if (argc >= 4 && std::strcmp(argv[1], "compile") == 0) {
         return cmdCompile(argv[2], argv[3], std::vector<std::string>(argv + 4, argv + argc));

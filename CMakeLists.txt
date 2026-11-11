@@ -214,6 +214,8 @@ add_library(rvk_core STATIC
     src/native/own_post.cpp
     src/native/own_post_groups.cpp
     src/native/own_post_units.cpp
+    src/native/own_post_fx.cpp
+    src/native/effect_ops_fx.cpp
     src/native/own_post.h
     src/native/effect_ops.h
     src/native/frame_desc.cpp
@@ -283,6 +285,8 @@ add_library(rvk_core STATIC
     src/engine/scene_hooks.h
     src/engine/exposure.cpp
     src/engine/exposure.h
+    src/engine/image_effects.cpp
+    src/engine/image_effects.h
     src/engine/hemisphere.cpp
     src/engine/hemisphere.h
     src/engine/exit_guard.cpp

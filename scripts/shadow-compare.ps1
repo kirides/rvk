@@ -16,6 +16,8 @@ param(
     [string[]]$EngineSetting = @(),
     # render mode of both runs (run.ps1 -Mode): wrapper (default; old name vulkan) or full
     [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
+    # backend of both runs (run.ps1 -Api; was passed without being declared: every run failed the ValidateSet)
+    [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,

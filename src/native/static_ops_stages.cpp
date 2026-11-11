@@ -11,6 +11,7 @@
 #include "enh/rt_scene.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/owned_compact.h"
+#include "native/own_post.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -91,6 +92,18 @@ void StaticOps::stagesReport() {
         last = acted;
         const bool boneSetting = rs.nativeBoneMotion != nullptr && rs.nativeBoneMotion->startValue() != 0.0;
         line += stage("bone_motion", boneSetting, dev_.boneMotion() != 0, a, std::format("{} skinned solid draws / records", a));
+    }
+    // S-7 .. S-7d: the post chain, the shadow mask / SSAO chain / PSSM pass and the terrain blur on our own shaders (native.own_post; acted = draws on the
+    // effect ports + S-7c units + kernel runs in the window; compare counts as armed)
+    {
+        static std::uint64_t last = 0;
+        const std::uint64_t acts = ownPostActs();
+        const std::uint64_t a = acts >= last ? acts - last : acts;
+        last = acts;
+        const int want = rs.nativeOwnPost != nullptr ? static_cast<int>(rs.nativeOwnPost->asInt()) : 0;
+        const int have = ownPostMode();
+        line += stage("own_post", want != 0, have != 0 && have == want, a,
+                      std::format("{}: {} effect draws / kernel runs on our shaders", have == 2 ? "compare" : "on", a));
     }
     // S-1a: the HLSL ubershader (debug.ubershader; the owned-shader line holds the per-kind counts)
     const bool uberSetting = settingOn(rs.ubershader), uberCode = dev_.ubershader();

@@ -136,8 +136,7 @@ void EffectOps::issueLean(bool draw) {
             if (own) applyDevice(*draws_[k]);
             continue;  // S-7: a held unit (own_post): the state as for a draw, nothing drawn
         }
-        if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
-        else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
+        drawComposed(d);  // (S-7d: the ports)
         if (own) applyDevice(*draws_[k]);
         ++stats_->issuedDraws;
     }

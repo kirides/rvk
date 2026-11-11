@@ -194,7 +194,29 @@ void OwnPost::recordCompare(rhi::CommandList& cmd, const char* name, rhi::Textur
     if (e.width != e2.width || e.height != e2.height) return;
     const std::uint32_t pitch = rhi::bufferRowPitch(ours.desc().format, e.width);
     const std::uint32_t pitch2 = rhi::bufferRowPitch(engine.desc().format, e.width);
-    if (pitch != pitch2 || pitch < 4 * e.width) return;  // (8-bit RGBA / BGRA images only)
+    // (8-bit RGBA / BGRA; S-7d: float16 / float32 images of 1 .. 4 channels, the same format on both sides)
+    int kind = -1, comps = 4;
+    const auto classify = [&](VkFormat f) {
+        switch (f) {
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_UNORM: return std::pair{0, 4};
+        case VK_FORMAT_R16_SFLOAT: return std::pair{1, 1};
+        case VK_FORMAT_R16G16_SFLOAT: return std::pair{1, 2};
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return std::pair{1, 4};
+        case VK_FORMAT_R32_SFLOAT: return std::pair{2, 1};
+        case VK_FORMAT_R32G32_SFLOAT: return std::pair{2, 2};
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return std::pair{2, 4};
+        default: return std::pair{-1, 0};
+        }
+    };
+    const auto [ka, ca] = classify(ours.desc().format);
+    const auto [kb, cb] = classify(engine.desc().format);
+    kind = ka;
+    comps = ca;
+    if (ka < 0 || ka != kb || ca != cb || pitch != pitch2) {
+        if (unsupportedLogged_++ < 4) spdlog::info("native: own post: compare of '{}' skipped: formats {} / {} not comparable", name, static_cast<int>(ours.desc().format), static_cast<int>(engine.desc().format));
+        return;
+    }
     const auto align = [](std::uint64_t v) { return (v + 511) & ~std::uint64_t{511}; };
     const std::uint64_t bytes = align(static_cast<std::uint64_t>(pitch) * e.height), bytes2 = align(static_cast<std::uint64_t>(pitch2) * e.height);
     if (cmpCursor_[slot] + bytes + bytes2 > kSlotBytes) return;
@@ -212,7 +234,9 @@ void OwnPost::recordCompare(rhi::CommandList& cmd, const char* name, rhi::Textur
     p.offEngine = static_cast<std::uint32_t>(base + bytes);
     p.engineBgra = engine.desc().format == VK_FORMAT_B8G8R8A8_UNORM;
     p.oursBgra = ours.desc().format == VK_FORMAT_B8G8R8A8_UNORM;
-    p.channels = channels;
+    p.channels = kind == 0 ? channels : comps;
+    p.kind = kind;
+    p.comps = comps;
     p.group = group >= 0 ? group : std::string_view(name) == "bloom" || std::string_view(name) == "bright" || std::string_view(name) == "glow" || std::string_view(name) == "streak"
                   ? static_cast<int>(OwnGroup::Bloom)
                   : static_cast<int>(OwnGroup::DofMid);
@@ -226,6 +250,59 @@ void OwnPost::evalCompares(std::uint32_t slot) {
     const auto* base = static_cast<const std::uint8_t*>(cmpBuf_->map());
     for (const Pending& p : cmpPending_[slot]) {
         GroupStats& g = gstats_[static_cast<std::size_t>(p.group)];
+        if (p.kind != 0) {
+            // S-7d: float images (the mask chain's depth / SSAO / variance targets): per value |a - b| / max(|a|, |b|, 1e-6); a pixel is "off" above 1e-5 in
+            // any channel; maxStep stays 0 (no 8-bit steps)
+            double sumDiff = 0.0, sumEng = 0.0, worst = 0.0;
+            std::uint64_t off = 0;
+            const auto value = [&](const std::uint8_t* row, std::uint32_t i) -> double {
+                if (p.kind == 2) {
+                    float f;
+                    std::memcpy(&f, row + i * 4, 4);
+                    return f;
+                }
+                std::uint16_t hbits;
+                std::memcpy(&hbits, row + i * 2, 2);
+                const std::uint32_t s = (hbits >> 15) & 1u, ex = (hbits >> 10) & 31u, m = hbits & 1023u;
+                const double mag = ex == 0 ? std::ldexp(static_cast<double>(m), -24) : ex == 31 ? (m != 0 ? std::nan("") : INFINITY) : std::ldexp(1024.0 + m, static_cast<int>(ex) - 25);
+                return s != 0 ? -mag : mag;
+            };
+            for (std::uint32_t y = 0; y < p.h; ++y) {
+                const std::uint8_t* a = base + p.offOurs + static_cast<std::size_t>(y) * p.pitch;
+                const std::uint8_t* b = base + p.offEngine + static_cast<std::size_t>(y) * p.pitch;
+                for (std::uint32_t x = 0; x < p.w; ++x) {
+                    bool pixelOff = false;
+                    for (int c = 0; c < p.comps; ++c) {
+                        const double va = value(a, x * static_cast<std::uint32_t>(p.comps) + static_cast<std::uint32_t>(c));
+                        const double vb = value(b, x * static_cast<std::uint32_t>(p.comps) + static_cast<std::uint32_t>(c));
+                        double rel = 0.0;
+                        if (std::isnan(va) || std::isnan(vb)) rel = std::isnan(va) && std::isnan(vb) ? 0.0 : 1.0;
+                        else if (va != vb) rel = std::abs(va - vb) / std::max({std::abs(va), std::abs(vb), 1e-6});
+                        if (std::isfinite(va) && std::isfinite(vb)) {
+                            sumDiff += std::abs(va - vb);
+                            sumEng += std::abs(vb);
+                        }
+                        worst = std::max(worst, rel);
+                        if (rel > 1e-5) pixelOff = true;
+                    }
+                    if (pixelOff) ++off;
+                }
+            }
+            const double rel = sumDiff / std::max(sumEng, 1e-12);
+            GroupStats& n = named_[p.name];
+            for (GroupStats* s : {&n, &g}) {
+                ++s->compared;
+                s->sumRel += rel;
+                s->maxRel = std::max(s->maxRel, worst);
+                s->pixels += static_cast<std::uint64_t>(p.w) * p.h;
+                s->offPixels += off;
+            }
+            if (worst > 1e-4) {
+                ++g.differing;
+                if (g.differing <= 6) spdlog::info("native: own post: {} differs: worst value rel {:.3g}, {} of {} pixels above 1e-5", p.name, worst, off, static_cast<std::uint64_t>(p.w) * p.h);
+            }
+            continue;
+        }
         double sumDiff = 0.0, sumEng = 0.0;
         std::uint32_t maxStep = 0;
         std::uint64_t ch1[4]{}, ch2[4]{};

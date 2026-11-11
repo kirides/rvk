@@ -622,6 +622,7 @@ bool EffectOps::effectBegin(void* filterPtr) {
         }
         if (pu != PostUnit::None) ownUnitBegin(pu, hold);
     }
+    fxCompareBegin();  // S-7d (Compare): the unit's draws on the ports into a scratch copy of its target, before the engine's
     if (unitTake_) {
         predictAfter(false);
         if (leanUnit()) {
@@ -715,6 +716,7 @@ void EffectOps::ownUnitBegin(PostUnit u, bool& hold) {
         return;
     }
     own_->countUnit(u, true);
+    if (const d3d9::Shader* v = own_->fxPort(ownPatched_->vs)) ownPatched_->vs = v;  // S-7d: the unit's vertex shader port too (what On draws)
     ownPatched_->rt0 = scratch;
     ownPatched_->depth = nullptr;
     cmpUnit_ = u;
@@ -752,8 +754,7 @@ void EffectOps::issueOne(const fxc::EffectDraw& d) {
     issuing_ = true;
     issueIndex_ = ~std::size_t{0};  // (ownDraw has no composition for it)
     applyDevice(d);
-    if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
-    else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
+    drawComposed(d);
     issuing_ = savedIssuing;
     issueIndex_ = savedIndex;
     tag = savedTag;
@@ -778,8 +779,7 @@ void EffectOps::flushLum() {
     for (int k = 0; k < n; ++k) {
         const fxc::EffectDraw& d = *grpRec_[static_cast<std::size_t>(k)];
         applyDevice(d);
-        if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
-        else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
+        drawComposed(d);  // (S-7d: a group that broke off draws its units with the ports)
     }
     issuing_ = false;
     issueIndex_ = savedIndex;
@@ -1097,8 +1097,7 @@ void EffectOps::issue(bool draw) {
             ownKind_[k] = static_cast<std::uint8_t>(d3d9::draws::Kind::Post);
             continue;
         }
-        if (d.indexed) dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
-        else dev_.drawPrimitive(d.primType, d.startVertex, d.primCount);
+        drawComposed(d);
         ++stats_->issuedDraws;
     }
     issuing_ = false;
@@ -1146,7 +1145,7 @@ void EffectOps::ownDraw(const d3d9::DrawTapInfo& t) {
     if (stats_ == nullptr || issueIndex_ >= drawCount_) return;
     if (ownKind_.size() < drawCount_) ownKind_.resize(drawCount_);
     ownKind_[issueIndex_] = static_cast<std::uint8_t>(t.kind);
-    if (unitCompare_) compareDraw(ownSwap_ && issueIndex_ == 0 ? *ownPatched_ : *draws_[issueIndex_], t, true);
+    if (unitCompare_) compareDraw(portActive_ ? *portPatched_ : ownSwap_ && issueIndex_ == 0 ? *ownPatched_ : *draws_[issueIndex_], t, true);
 }
 
 bool EffectOps::engineDraw(const d3d9::DrawTapInfo& t) {
@@ -1175,6 +1174,7 @@ bool EffectOps::engineDraw(const d3d9::DrawTapInfo& t) {
 }
 
 void EffectOps::finishUnit() {
+    finishFxCompare();  // S-7d: the engine's draws of the unit are done
     if (unit_ != Unit::Copy && stats_ != nullptr && unitCompare_ && !leanSkipped_ && engineDraws_ != drawCount_) {
         ++stats_->counts.mismatches[static_cast<std::size_t>(fxc::Field::DrawCount)];
         if (mismatchLogged_++ < 24) spdlog::info("native: effect draws: {}: {} engine draws, {} composed", unitName_, engineDraws_, drawCount_);
