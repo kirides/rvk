@@ -144,6 +144,12 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
             U8* h0 = ptr(subs + 0x48 * static_cast<std::size_t>(sub), 0x40) + 0x28 * static_cast<std::size_t>(node);
             h = mix(mix(mixPtr(h, h0), static_cast<std::uint32_t>(get<std::int32_t>(h0, 0x20))), static_cast<std::uint32_t>(get<std::int32_t>(ptr(h0, 0), 0x20)));
         }
+        // F2f: a render-instance op draws its resource's instance list (matrix, switch, illumination, flags of every instance, in the sorted order the composition reads)
+        if (node == kStaticOpNone && ownedInstancesOn()) {
+            const auto ti = Clock::now();
+            h = mix(h, instanceStamp(res));
+            instW_.stampNs += ns(ti, Clock::now());
+        }
         st.geom = h;
     }
     const std::uint32_t slot = engine::scenetable::find(entity);
@@ -182,7 +188,10 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
         if (ex == orec::Excl::Count) ex = e;
     };
     if (res == nullptr || entity == nullptr) reason(orec::Excl::NotComposed);
-    if (node == kStaticOpNone && res != nullptr) {
+    const bool instOp = node == kStaticOpNone && res != nullptr && ownedInstancesOn() && solid;  // F2f
+    if (instOp) {
+        if (const orec::Excl ie = instanceExclusion(res); ie != orec::Excl::Count) reason(ie);
+    } else if (node == kStaticOpNone && res != nullptr) {
         const std::int32_t n = get<std::int32_t>(res, 0xb8);
         bool lightmaps = false;
         for (std::uint32_t i = 0; i < 2; ++i) {
@@ -200,7 +209,7 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
     if (solid) {
         U8* illumPs = ptr(entity, 0xf8);
         U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
-        if (illum == nullptr || ptr(illum, 0) == nullptr) reason(orec::Excl::NoList);
+        if (!instOp && (illum == nullptr || ptr(illum, 0) == nullptr)) reason(orec::Excl::NoList);  // (an instance op: its instances' illuminations, instanceExclusion)
         if (!tableLit_) reason(orec::Excl::NotTableLit);
     }
     if (res != nullptr && ex == orec::Excl::Count) {
@@ -300,7 +309,7 @@ void StaticOps::recEnter(const Op& op) {
         } else {
             R.rebuildWhy = d;
             if (rec.actor) ++actorW_.stampRebuilds;
-            if (!rec.actor) depNoteCheckFrame(op, rec, d);  // F2e-1: a difference nobody announced = EVENT MISS (an actor record has no events: its full stamp is its validity)
+            if (!rec.actor && !rec.instances) depNoteCheckFrame(op, rec, d);  // (F2f: an instance list changes without an event: no EVENT MISS)  // F2e-1: a difference nobody announced = EVENT MISS (an actor record has no events: its full stamp is its validity)
         }
     }
     w.stampNs += ns(t0, tnow());
@@ -319,7 +328,14 @@ void StaticOps::recEnter(const Op& op) {
 // what the stamps do not see (frame-ownership.md 7.21 addendum): the illumination's table slot (kept alive while the op is looked at: the idle sweep must not free
 // the slot of an op that is drawn without being composed) and the loads that were pending when the record was built. Resident records: one slot compare.
 int StaticOps::recLiveWhy(const orec::OpRecord& rec) {
-    if (rec.illumSlot != gpuscene::kNoSlot && !gpuscene::illumtable().slotLive(rec.anchors[3], rec.illumSlot)) return static_cast<int>(orec::kStampFields) + 4;
+    if (rec.instances) {
+        // F2f: every draw's illumination is its render instance's (the slots of all of them are kept alive)
+        for (const orec::DrawRec& d : rec.draws) {
+            if (d.illumSlot != gpuscene::kNoSlot && !gpuscene::illumtable().slotLive(d.illumPtr, d.illumSlot)) return static_cast<int>(orec::kStampFields) + 4;
+        }
+    } else if (rec.illumSlot != gpuscene::kNoSlot && !gpuscene::illumtable().slotLive(rec.anchors[3], rec.illumSlot)) {
+        return static_cast<int>(orec::kStampFields) + 4;
+    }
     if (!rec.watch.empty() && !ret::validate(rec.watch.data(), rec.watch.size())) return static_cast<int>(orec::kStampFields) + 5;
     // F5-1: a draw was composed while its range's cluster build was pending (the build has finished or failed since: composed again, it takes the clustered copy) or drew with a
     // clustered copy that is gone (the index buffer's copy was replaced, the setting went off)
@@ -649,7 +665,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         d3d9::OwnedWindows dw;
         gpuscene::materialtable().fillWindows(r.matSlot, r.vsSet.data(), r.psSet.data(), dw);
         if (r.vs1Offered && (rec.actor || (ownedObjects_ && gpuscene::objecttable().active()))) {
-            if (!ownedObjWindow(rec, dw.w[0][2])) dw.w[0][2] = d3d9::OwnedWindows::Win{};
+            if (!ownedObjWindow(rec, r, dw.w[0][2])) dw.w[0][2] = d3d9::OwnedWindows::Win{};
         }
         gpuscene::LightingImages& li = gpuscene::lightingimages();
         if (li.active() && r.illumSlot != gpuscene::kNoSlot) {
@@ -795,6 +811,7 @@ void StaticOps::recEnd(const Op& op) {
         r.maskValue = d.maskValue;
         r.matSlot = d.matSlot;
         r.illumSlot = d.illumSlot;
+        r.illumPtr = d.illumPtr;
         r.lightN = d.lightN;
         r.lightFirst = d.lightFirst;
         r.lightTableLit = d.lightTableLit;
@@ -864,9 +881,20 @@ void StaticOps::recEnd(const Op& op) {
         }
         for (const LeanStream3& x : leanStream3_) rec->stream3Prims.push_back({x.primitive, x.on});
     }
+    // F2f (native.owned_instances): a render-instance op's draws get their window 2 images (the composed registers of each draw)
+    if (!actorRec && ownedInstancesOn() && (op.raw.desc >> 8) == kStaticOpNone) {
+        rec->instances = true;
+        if (!instanceRows(*rec)) {
+            ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
+            R.map.erase(R.key);
+            R.active = false;
+            w.buildNs += ns(t0, tnow());
+            return;
+        }
+    }
     rec->builtFrame = dev_.stats().frames;
     rec->lastSeen = rec->builtFrame;
-    if (!rec->actor) depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints (an actor record is verified by its full stamp every frame)
+    if (!rec->actor && !rec->instances) depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints (an actor record is verified by its full stamp every frame)
     rec->ownable = recCollect_ || leanCollect_;
     if (ret::gLog == nullptr && !R.readLog.v.empty()) {
         ret::finalize(R.readLog.v);

@@ -148,6 +148,10 @@ public:
     // records and are drawn from persistent DrawRecords; the per-frame part is the bone table's image of the part
     void setOwnedActors(bool on);
     bool ownedActorsOn() const { return ownedActors_ && !ownedActorsTripped_ && ownedPersistent_; }
+    // native.owned_instances (frame-ownership.md 14.19, F2f; static_ops_inst_owned.cpp): the main view's render-instance ops (node 0xffffff) composed one draw per instance (the
+    // hardware batches too) get op records whose stamp holds the instance list; their draws' VS window 2 are instance row images
+    void setOwnedInstances(bool on);
+    bool ownedInstancesOn() const { return ownedInstances_ && ownedPersistent_; }
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
     bool ownedListOk(void* db, List list);
     // an op of the raw (unsorted) list: true = its record is valid, the op leaves the engine's list
@@ -877,7 +881,23 @@ private:
     // the bone window the owned draw reads (serves the image once per frame and key); false = refused (`why`: a Fallback code)
     bool ownedActorWindow(const Op& op, const orec::OpRecord& rec, d3d9::OwnedWindows::Win& out, int& why);
     // the object / bone window of a record's draws for the check frames' derivations
-    bool ownedObjWindow(const orec::OpRecord& rec, d3d9::OwnedWindows::Win& out) const;
+    bool ownedObjWindow(const orec::OpRecord& rec, const orec::DrawRec& r, d3d9::OwnedWindows::Win& out) const;
+    // F2f (static_ops_inst_owned.cpp)
+    std::uint64_t instanceStamp(const std::uint8_t* res);              // the render instance list as the composition will read it (sorted), hashed
+    orec::Excl instanceExclusion(const std::uint8_t* res);              // Excl::Count = an ownable instance op
+    bool instanceUnbatch() const;                                       // composeSolid draws the hardware batches per instance
+    void instanceServeComposed(const sc::DrawDesc& d);                  // setOwnedFor: window 2 of a composed instance draw = its record's row image
+    bool instanceRows(orec::OpRecord& rec);                             // recEnd: every draw's row image (false: the op is not retainable)
+    void instanceSideEffects(const orec::OpRecord& rec);                // the slot's render-instance sort
+    void instReport();
+    struct InstStats {
+        std::uint64_t ops = 0, unbatchedOps = 0, unbatchedInstances = 0, recordsBuilt = 0, rowsRefused = 0, served = 0, notServed = 0, sorts = 0, ownedOps = 0, ownedDraws = 0;
+        std::uint64_t excluded[orec::kExclCount] = {};
+        std::uint64_t stampNs = 0;
+    };
+    InstStats instW_;
+    bool ownedInstances_ = false;
+    std::uint32_t ownedDrawIndex_ = 0;  // (the composed draw setOwnedFor is called for)
     void actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Win& out, bool& served);
     // check frames (recDraw): the image the composed draw wrote into the bone table equals one built from the engine's palette now
     void actorVerify(const Op& op, const orec::OpRecord& rec, bool& differs, std::string& detail);

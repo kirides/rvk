@@ -261,7 +261,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         return false;
     }
     // F2e-1 (7.30): a record no engine event touched is valid on its polled inputs alone (depFast); a marked one, or the 1 in 16 of the rolling scrub, runs the full stamp
-    const bool events = depEvents() && !rec.actor;
+    const bool events = depEvents() && !rec.actor && !rec.instances;  // (F2f: an instance list changes without an engine event: its full stamp every frame)
     int fast = -2;
     if (events) fast = depFast(op, rec);
     if (fast >= 0) {
@@ -387,6 +387,7 @@ void StaticOps::ownedSideEffects(const orec::OpRecord& rec) {
         static_cast<hal::vulkan::HalPrimitive*>(x.primitive)->EnableStream(3, x.on);
         ++W.stream3;
     }
+    if (rec.instances) instanceSideEffects(rec);  // F2f: eCRenderContextMesh::Render's render-instance sort
 }
 
 // one op from its record: false = not drawn (why: a Fallback code), anything queued before the refusal stays (opaque draws: a repeat changes nothing)
@@ -405,7 +406,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
     // the object record: the entity's matrix as the signals hold it (the draw's composed rows would be these), the fade 1 of a z draw / the op's
     // (7.27: off the check frames a record current by the scene table's signals is served without reading the entity's matrix)
     d3d9::OwnedWindows::Win objWin;
-    if (entity == nullptr) {
+    if (entity == nullptr || rec.instances) {  // (F2f: an instance op is drawn by the persistent path only)
         why = kFbObject;
         return false;
     }
@@ -985,6 +986,9 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             return false;
         }
         ++actorW_.drawn;
+    } else if (rec.instances) {
+        // F2f: every draw's window 2 is its own instance row image (below)
+        ++instW_.ownedOps;
     } else if (gpuscene::verifyFrame() || !gpuscene::objecttable().serveFast(entity, 0x1eu, op.list == List::ZPass ? 1.0f : op.raw.fade, objWin)) {
         float world[16];
         if (!engine::safeRead(entity + 0x60, world, sizeof(world))) {
@@ -1022,7 +1026,15 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
         };
         const gpuscene::ComposeParams p = paramsOf(r);
         const bool amb = ownedAmbientLit(r, p);
-        ownedBuildWindows(r, viewWin, objWin, p, true, P.ow);
+        d3d9::OwnedWindows::Win rowWin;
+        if (rec.instances && !gpuscene::rowtable().windowFor(r.row.slot, r.row.bits, rowWin)) {
+            ++S.refused;
+            restoreTag();
+            why = kFbObject;
+            return false;
+        }
+        ownedBuildWindows(r, viewWin, rec.instances ? rowWin : objWin, p, true, P.ow);
+        if (rec.instances) ++instW_.ownedDraws;
         // the device state the draw is derived under: its shaders, the tag the observers / replacers / the pack's word look at
         if (dev_.vertexShader() != cd.vs) dev_.setVertexShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(cd.vs)));
         if (dev_.pixelShader() != cd.ps) dev_.setPixelShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(cd.ps)));
@@ -1124,7 +1136,7 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     const std::uint32_t viewSlot = ownedSlotOfKey(rec.key.view, solid);
     d3d9::OwnedWindows viewWin;
     d3d9::OwnedWindows::Win objWin;
-    if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !ownedObjWindow(rec, objWin))) {
+    if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !ownedObjWindow(rec, r, objWin))) {
         ++S.checkSkipped;
         return;
     }

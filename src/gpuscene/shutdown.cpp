@@ -10,6 +10,7 @@
 #include "gpuscene/material_table.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/object_table.h"
+#include "gpuscene/row_table.h"
 #include "gpuscene/owned_compact.h"
 #include "gpuscene/view_table.h"
 #include "gpuscene/window_tables.h"
@@ -26,6 +27,7 @@ void releaseGpuObjects(d3d9::Device& dev) {
     meshparts().releaseGpu();
     materialtable().releaseGpu();
     objecttable().releaseGpu();
+    rowtable().releaseGpu();
     viewtable().releaseGpu();
     windowtables().releaseGpu();
     bbtable().releaseGpu();

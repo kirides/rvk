@@ -16,6 +16,7 @@ $script:StageOfSetting = [ordered]@{
     'native.owned_trees'           = 'owned_trees'
     'native.owned_shadows'         = 'owned_shadows'
     'native.owned_actors'          = 'owned_actors'
+    'native.owned_instances'       = 'owned_instances'
     'native.owned_vegetation'      = 'owned_vegetation'
     'native.owned_vegetation_ops'  = 'owned_vegetation_ops'
     'native.clusters'              = 'clusters'

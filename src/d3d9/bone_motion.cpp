@@ -289,7 +289,8 @@ bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
     const bool skinned = kind == draws::Kind::Skinned;
     const bool rigid = (kind == draws::Kind::StaticMesh || kind == draws::Kind::InstancedMesh) && rigidMotionOn();  // 14.15 b
     if (!skinned && !rigid) return false;
-    const bool push = kind == draws::Kind::InstancedMesh;  // (no scene form for the kind: the push form, prevVs in the push block)
+    // (no scene form for the kind: the push form, prevVs in the push block; F2f: with native.owned_instances an issued instance-list draw has the scene forms)
+    const bool push = kind == draws::Kind::InstancedMesh && !(sceneInstances_ && sceneActive());
     if ((!push && !sceneActive()) || !gbuf_.active || gbuf_.motion == nullptr || owned_ == nullptr || vs_.get() == nullptr) return false;
     // (the forms' validity word is chosen per shader (boneVsOptions): a palette-indexing shader reads a bone image's c231, any other an object record's c36; a shader
     // whose addressing does not match its window's table never takes the forms: an object record read at c231 would leave the record, GPU safety)

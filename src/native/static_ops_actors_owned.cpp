@@ -332,8 +332,9 @@ void StaticOps::actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Wi
     }
 }
 
-bool StaticOps::ownedObjWindow(const orec::OpRecord& rec, d3d9::OwnedWindows::Win& out) const {
+bool StaticOps::ownedObjWindow(const orec::OpRecord& rec, const orec::DrawRec& r, d3d9::OwnedWindows::Win& out) const {
     if (rec.actor) return gpuscene::bonetable().windowFor(rec.actorKey, out);
+    if (rec.instances) return gpuscene::rowtable().windowFor(r.row.slot, r.row.bits, out);  // F2f: the draw's instance row image
     return gpuscene::objecttable().windowFor(rec.stamp.objSlot, out);
 }
 

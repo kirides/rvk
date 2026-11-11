@@ -14,6 +14,7 @@
 #include "core/cluster_cull.h"
 #include "core/f5_measure.h"
 #include "gpuscene/object_table.h"
+#include "gpuscene/row_table.h"
 #include "d3d9/scene_hash.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/draw_record_table.h"
@@ -534,7 +535,7 @@ void Device::cullCheckFinish(gpuscene::OwnedCompact::CullItem& ci) {
     const gpuscene::ClusterRow* rows = gpuscene::clusterstore().rowsAt(rowFirst, rowCount);
     float world[12];
     if (rows == nullptr || ci.viewSlot >= sceneViews_.slots) return;
-    if (!(cullWorldRowsHook_ && cullWorldRowsHook_(ci.win2, world)) && !gpuscene::objecttable().worldRowsAt(ci.win2, world)) return;
+    if (!(cullWorldRowsHook_ && cullWorldRowsHook_(ci.win2, world)) && !gpuscene::objecttable().worldRowsAt(ci.win2, world) && !gpuscene::rowtable().worldRowsAt(ci.win2, world)) return;  // (F2f: an instance row image)
     float regs[4][4];
     std::memcpy(regs, sceneViews_.shadow[ci.viewSlot].vs0, sizeof(regs));
     f5::ObjView ov;

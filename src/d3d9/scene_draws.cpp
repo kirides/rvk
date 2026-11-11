@@ -102,8 +102,11 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     const bool v2only = tree || veg;
     // F6-1 (native.owned_actors): the skinned actors' draws get the scene forms like the static meshes' (v1 for the composed draws, v2 for the owned path)
     const bool actor = sceneActors_ && sceneV2_ && kind == draws::Kind::Skinned;
+    // F2f (native.owned_instances): an instance-list draw (one render instance, not hardware-instanced) is a static mesh draw for the scene forms
+    const bool staticLike = kind == draws::Kind::StaticMesh ||
+                            (sceneInstances_ && sceneV2_ && kind == draws::Kind::InstancedMesh && (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0 && (streams_[0].freq & STREAMSOURCE_INSTANCEDATA) == 0);
     const bool shadowPhase = sceneShadows_ && sceneV2_ && (kind == draws::Kind::StaticMesh || tree || actor) && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
-    if (!shadowPhase && ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !v2only && !actor) || phase.view != scene::View::Main ||
+    if (!shadowPhase && ((!staticLike && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !v2only && !actor) || phase.view != scene::View::Main ||
                          (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass))) {
         return;
     }
@@ -135,7 +138,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     // (14.15 b, native.rigid_motion: a static mesh's solid draw whose window 2 is an object record with a history takes the same forms)
     const bool bone = obsBone_ && boneMode_ == 1 && phase.pass == scene::Pass::Solid && gbufWrite_ && gbuf_.motion != nullptr && owned_ != nullptr && !lodVs &&
                       ((actor && owned_->w[0][2].kind == OwnedWindows::Kind::Bones) ||
-                       (rigidMotionOn() && kind == draws::Kind::StaticMesh && owned_->w[0][2].kind == OwnedWindows::Kind::Object));
+                       (rigidMotionOn() && staticLike && owned_->w[0][2].kind == OwnedWindows::Kind::Object));
     if (gbufWrite_) base = gbufferSlot(bone);
     else if (giDraw) base = VariantSlot::Gi;
     const VariantSlot sceneFs = sceneSlotOf(base);
@@ -197,7 +200,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     }
     // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
-    if (sceneV2_ && (kind == draws::Kind::StaticMesh || v2only || actor)) {
+    if (sceneV2_ && (staticLike || v2only || actor)) {
         const rhi::ShaderModule vs2 = variant(vs_, vsSlot2);
         const rhi::ShaderModule fs2 = psDropped_ ? rhi::ShaderModule::None : variant(ps_, sceneView2Of(sceneFs));
         if (vs2 == rhi::ShaderModule::None || (fs2 == rhi::ShaderModule::None && !psDropped_)) {
