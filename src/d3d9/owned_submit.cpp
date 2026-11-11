@@ -60,7 +60,7 @@ Device::OwnedWhy Device::submitOwned(const CachedDraw& c, const DeriveIn& in, co
     if (dryRun) {
         // (the derivation validates the packet against the device now: modules, phase, consumers, variants, environment, buffers, textures)
         SceneView probe;
-        const int why = deriveScene(c, in, probe);
+        const int why = deriveScene(c, in, probe, &win);
         if (deriveWhy != nullptr) *deriveWhy = why;
         return why != 0 || !probe.scene ? OwnedWhy::Derive : OwnedWhy::Submitted;
     }
@@ -68,7 +68,7 @@ Device::OwnedWhy Device::submitOwned(const CachedDraw& c, const DeriveIn& in, co
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) return OwnedWhy::Rendering;
     SceneView v;
-    const int why = deriveScene(c, in, v);
+    const int why = deriveScene(c, in, v, &win);
     if (deriveWhy != nullptr) *deriveWhy = why;
     if (why != 0 || !v.scene) return OwnedWhy::Derive;
     if (zeroBlock_.null()) {

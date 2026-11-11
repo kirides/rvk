@@ -443,6 +443,22 @@ bool f62NoMotion() {
 }
 }  // namespace
 
+int Device::boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, bool win2Bones, bool gbufTaken) const {
+    if (boneMode_ != 1 || c.kind != draws::Kind::Skinned || c.phase.view != scene::View::Main || c.phase.pass != scene::Pass::Solid || win2.null() || !win2Bones ||
+        c.vs == nullptr || c.ps == nullptr) {
+        return -1;
+    }
+    // (bonePredict's skinned branch + sceneDecide's `bone`: the G-buffer's material pass with its motion target, scene draws + the actors' scene forms, a palette-indexing
+    // vertex shader, a bone image with a history, the forms built)
+    if (!gbufTaken || gbuf_.motion == nullptr || !sceneActive() || !sceneActors_ || !sceneV2_ || !c.vs->reflection.relativeConstants) return 0;
+    if (gpuscene::bonetable().prevOf(win2).null()) return 0;
+    const VariantSlot fs = sceneSlotOf(gbufferSlot(true));
+    if (fs == VariantSlot::Count) return 0;
+    const auto built = [](const Shader& s, VariantSlot v) { return s.variantState[static_cast<std::size_t>(v)].load(std::memory_order_acquire) == 2; };
+    if (!built(*c.vs, VariantSlot::SceneVsBone) || !built(*c.ps, fs) || !built(*c.vs, VariantSlot::SceneVsBone2) || !built(*c.ps, sceneView2Of(fs))) return 0;
+    return 1;
+}
+
 bool Device::noMotionOf(const CachedDraw& c) const {
     return boneMode_ == 1 && f62NoMotion() && c.kind == draws::Kind::Skinned && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid && !c.v.gbufWanted;
 }
@@ -554,9 +570,9 @@ void Device::boneMotionFrame() {
     const BoneMotionStats& p = boneLast_;
     if (boneMode_ == 1) {
         spdlog::info("native: bone motion (5 s): skinned solid draws predicted {} (forms pending {}, no history {}), drawn with the bone-motion forms: composed {} (v2 retained {}, pulled {}), "
-                     "owned records with a history base {} (without {}), {} bone-motion pipelines",
+                     "owned records with a history base {} (without {}), {} bone-motion pipelines; retained draws refused for the decision now (run): forms gained {}, lost {}",
                      s.predicted - p.predicted, s.pending - p.pending, s.noHistory - p.noHistory, s.chosen - p.chosen, s.chosen2 - p.chosen2, s.chosenPull - p.chosenPull,
-                     s.records - p.records, s.recordsNoPrev - p.recordsNoPrev, bonePipes_.size());
+                     s.records - p.records, s.recordsNoPrev - p.recordsNoPrev, bonePipes_.size(), boneDeriveStats.refusedGained, boneDeriveStats.refusedLost);
         if (rigidMode_) {
             spdlog::info("native: rigid motion (5 s): {}; static solid draws predicted {} (no object window {}, no history {}, forms pending {}); instanced-mesh draws "
                          "with the push form predicted {}, drawn {}; instanced-mesh draws without an object record: row image (still) {}, rows seen last frame {}, moved "
