@@ -767,10 +767,11 @@ void Device::destroy() {
         }
         // F11: the particle expansion forms (variant modules: shared by text)
         for (auto& [key, s] : particleVs_) {
-            if (!s) continue;
+            if (!s || particlePorted_.contains(s.get())) continue;  // (a port's module belongs to native::OwnPost)
             if (const rhi::ShaderModule v = s->module.exchange(rhi::ShaderModule::None); v != rhi::ShaderModule::None && destroyed.insert(v).second) game_->destroyShaderModule(v, false);
         }
         particleVs_.clear();
+        particlePorted_.clear();
         particleVsWhy_.clear();
         for (auto& d : particleDecl_) d.reset();
         // 14.26: the variant modules no shader slot holds any more (reset by resetUberVariants / sourceAttached, replaced by a late request's rebuild, shared by text):
@@ -1769,9 +1770,11 @@ VertexDecl* Device::particleDecl(int kind) {
     return slot.get();
 }
 
-Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, const char** why) {
+Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, const char** why, const Shader* port, bool* portUsed) {
+    if (portUsed != nullptr) *portUsed = false;
+    if (kind != particle::kKindParticle) port = nullptr;
     // (one form per engine shader, kind and the engine declaration's stream-0 layout)
-    std::uint64_t key = reinterpret_cast<std::uintptr_t>(&vs) * 0x9E3779B97F4A7C15ull ^ static_cast<std::uint64_t>(kind) << 60;
+    std::uint64_t key = reinterpret_cast<std::uintptr_t>(&vs) * 0x9E3779B97F4A7C15ull ^ static_cast<std::uint64_t>(kind) << 60 ^ (port != nullptr ? 0x5bd1e995ull << 8 : 0ull);
     if (engineDecl != nullptr) {
         for (const VertexElement& el : engineDecl->elements()) {
             if (el.stream != 0) continue;
@@ -1781,6 +1784,7 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     }
     if (auto it = particleVs_.find(key); it != particleVs_.end()) {
         if (why != nullptr && !it->second) *why = particleVsWhy_[key];
+        if (portUsed != nullptr && it->second) *portUsed = particlePorted_.contains(it->second.get());
         return it->second.get();
     }
     const auto refuse = [&](const char* w) -> Shader* {
@@ -1812,6 +1816,7 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     const std::span<const Field> fields = kind == particle::kKindSkyBillboard ? std::span<const Field>(kSky) : kind == particle::kKindStrip ? std::span<const Field>(kStrip)
                                                                                                                                          : std::span<const Field>(kParticle);
     std::string assign;
+    bool canonical = true;  // every input's field = the one its usage names (what the ports' fixed prologue assumes)
     for (const auto& in : vs.reflection.vertexInputs) {
         if (in.location >= particle::kRecordLocation) return refuse("an input register at or above v8");
         const VertexElement* el = nullptr;
@@ -1825,6 +1830,11 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
         }
         if (f == nullptr) return refuse("an input at an offset / type the expansion does not build");
         assign += std::format(" v{} = {};", in.location, f->expr);
+        static constexpr const char* kCanon[] = {"q.pos", "q.nrm", "q.c0", "q.c1", "q.t0", "q.t1"};
+        const int canonIndex = in.usage == shader::Usage::Position && in.usageIndex == 0 ? 0 : in.usage == shader::Usage::Normal && in.usageIndex == 0 ? 1 :
+                               in.usage == shader::Usage::Color && in.usageIndex == 0 ? 2 : in.usage == shader::Usage::Color && in.usageIndex == 1 ? 3 :
+                               in.usage == shader::Usage::TexCoord && in.usageIndex == 0 ? 4 : in.usage == shader::Usage::TexCoord && in.usageIndex == 1 ? 5 : -1;
+        if (canonIndex < 0 || std::strcmp(kCanon[canonIndex], f->expr) != 0) canonical = false;
     }
     if (vs.reflection.relativeConstants) return refuse("relative constant addressing (it could read the expansion's window)");
     if (vs.reflection.windowEnd[3] != 0) return refuse("it reads VS c232.. (the expansion's constants)");
@@ -1852,7 +1862,9 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
         h ^= static_cast<std::uint8_t>(c);
         h *= 1099511628211ull;
     }
-    const rhi::ShaderModule m = variantModule(vs, o, std::format("particle{:08x}_t{}", static_cast<std::uint32_t>(h ^ (h >> 32)), kTranslatorVersion));
+    const bool usePort = port != nullptr && canonical && port->module.load(std::memory_order_acquire) != rhi::ShaderModule::None;
+    const rhi::ShaderModule m = usePort ? port->module.load(std::memory_order_acquire)
+                                        : variantModule(vs, o, std::format("particle{:08x}_t{}", static_cast<std::uint32_t>(h ^ (h >> 32)), kTranslatorVersion));
     if (m == rhi::ShaderModule::None) return refuse("the expansion form does not build");
     auto s = std::make_shared<Shader>();
     s->stage = vs.stage;
@@ -1869,7 +1881,7 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     s->semantics = vs.semantics;
     s->bytecode = vs.bytecode;
     s->samplerMask = vs.samplerMask;
-    s->hash = vs.hash ^ (0x9a27000000000000ull + (static_cast<std::uint64_t>(kind) << 44));
+    s->hash = vs.hash ^ ((usePort ? 0x9b27000000000000ull : 0x9a27000000000000ull) + (static_cast<std::uint64_t>(kind) << 44));
     s->tintFailed = true;
     s->lodFailed = true;
     for (auto& v : s->variantState) v.store(3, std::memory_order_relaxed);
@@ -1878,6 +1890,8 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
     spdlog::info("native: own particles: vertex shader {:016x} -> its GPU expansion form ({}; {} inputs:{}; declaration{})", vs.hash,
                  kind == particle::kKindSkyBillboard ? "sky billboards" : kind == particle::kKindStrip ? "strips" : "particles", vs.reflection.vertexInputs.size(), assign, els);
     particleVs_.emplace(key, s);
+    if (usePort) particlePorted_.insert(s.get());
+    if (portUsed != nullptr) *portUsed = usePort;
     return s.get();
 }
 

@@ -581,6 +581,7 @@ private:
         float twinMaxAbs = 0.0f;
         std::string why;
         std::uint64_t cpuUs = 0, cpuTimed = 0;
+        std::uint64_t portDraws = 0, translatedDraws = 0;  // 14.28 addendum: particle GPU forms on the ge_particle ports / on the translated engine shaders
     } ptWindow_;
     std::uint32_t ptTwinLogged_ = 0;
     std::unique_ptr<d3d9::Buffer> ptIb_, ptDummy_;

@@ -61,7 +61,7 @@ void OwnPost::setSceneMode(Scene which, Mode m) {
     Mode& cur = sceneMode_[static_cast<std::size_t>(which)];
     if (cur == m) return;
     cur = m;
-    if (m != Mode::Off && which != Scene::Particles) buildFxPorts();  // (F11 uses no port)
+    if (m != Mode::Off) buildFxPorts();  // (14.29: the particles use the ge_particle ports)
     spdlog::info("native: own {}: {}", which == Scene::Sky ? "sky" : which == Scene::Gui ? "gui" : "particles", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
 }
 

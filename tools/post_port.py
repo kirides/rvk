@@ -36,7 +36,52 @@ FAMILIES = [
 SINGLES = [
     ('vs20_98629e7bbba95f12', 'sky', 'dome', 'ge_skydome_2_0.fx VS (eCShaderVersionSkyDome_2_0 +0x1b0)'),
     ('ps20_38851f343d71da1e', 'sky', 'dome', 'ge_skydome_2_0.fx PS (eCShaderVersionSkyDome_2_0 +0x1d0)'),
+    # 14.28 addendum (own particles): ge_particle_2_0.fx (eCShaderVersionParticle): the vertex shaders are ported in their GPU-expansion form (EXPAND_FAMILIES: the
+    # prologue of Device::particleVs, shaders/include/rvk_particle.hlsli, is part of the port); the lit ones appear only in a rvk_rare / rvk_spells corpus
+    ('vs20_04929cb82716b77c', 'particle', 'vs_unlit', 'ge_particle_2_0.fx VS, unlit, one texture (eCShaderVersionParticle +0x1b0..)'),
+    ('vs20_60faa4ebe3d86b65', 'particle', 'vs_unlit_blend', 'ge_particle_2_0.fx VS, unlit, two textures blended by the vertex colour alpha'),
+    ('vs20_6e471f76fa15c52a', 'particle', 'vs_dirlight', 'ge_particle_2_0.fx VS, one directional light + ambient (LightingStyle lit)'),
+    ('ps20_eb41d0e19e965023', 'particle', 'ps_plain', 'ge_particle_2_0.fx PS, one texture, no fog (eCShaderVersionParticle +0x2f0)'),
+    ('ps20_9a24395316e6e10a', 'particle', 'ps_fog', 'ge_particle_2_0.fx PS, one texture, fog (+0x300)'),
+    ('ps20_3add35a94a540348', 'particle', 'ps_blend', 'ge_particle_2_0.fx PS, two textures blended by the vertex colour alpha, no fog'),
 ]
+# families whose vertex shaders carry the particle expansion (Device::particleVs's prologue for kKindParticle)
+USAGE_FIELD = {('position', ''): 'q.pos', ('normal', ''): 'q.nrm', ('color', ''): 'q.c0', ('color', '1'): 'q.c1', ('texcoord', ''): 'q.t0', ('texcoord', '1'): 'q.t1'}
+
+
+def expansion_assign(text):
+    """the `v<n> = q.<field>;` list of Device::particleVs for a particle vertex shader (from the listing's dcl lines)"""
+    out = ''
+    for m in re.finditer(r'^// dcl_(position|normal|color|texcoord)(\d*) v(\d+)\s*$', text, re.M):
+        f = USAGE_FIELD.get((m.group(1), m.group(2) if m.group(2) not in ('', '0') else ''))
+        if f is None:
+            raise ValueError('particle vertex shader: input %s%s has no expansion field' % (m.group(1), m.group(2)))
+        out += ' v%s = %s;' % (m.group(3), f)
+    return out
+
+
+def expansion_prologue(assign):
+    return ('    { RvkParticleVertex q = rvkParticleExpand(rvk_in.rvk_vertexId, rvk_in.rvk_pr0, rvk_in.rvk_pr1, rvk_in.rvk_pr2, rvk_in.rvk_pr3, rvk_in.rvk_pr4, '
+            'rvk_in.rvk_pr5, rvk_in.rvk_pr6, rvk_in.rvk_pr7.x);%s }' % assign)
+
+
+def expansion_inputs(struct):
+    """RvkVsIn + the record's TEXCOORD8..15 stream (extraInputs of Device::particleVs)"""
+    lines = struct.splitlines()
+    extra = ['    [[vk::location(%d)]] float4 rvk_pr%d : ATTR%d;' % (8 + k, k, 8 + k) for k in range(8)]
+    at = max(i for i, l in enumerate(lines) if 'ATTR' in l) + 1
+    return '\n'.join(lines[:at] + extra + lines[at:])
+
+
+def inject_expansion(text, assign):
+    """the translated vertex shader with the expansion hooks the translator would add (the `a` side of --check)"""
+    text = text.replace('#include "rvk_draw.hlsli"', '#include "rvk_draw.hlsli"\n#include "rvk_particle.hlsli"', 1)
+    m = re.search(r'^struct RvkVsIn \{.*?^\};', text, re.S | re.M)
+    text = text[:m.start()] + expansion_inputs(m.group(0)) + text[m.end():]
+    i = text.index('RvkVsOut VSMain(')
+    j = text.index('    rvk_main();\n', i)
+    return text[:j] + expansion_prologue(assign) + '\n' + text[j:]
+
 # pixel shaders with a hand-written S-7c port (shaders/post/post_*.frag.hlsl, native::OwnPost::unitDraw): not generated
 # (--check proves those too: the hand port against the translated shader)
 S7C = {('hdr', 'ToneMap'): 'post/post_tonemap.frag', ('hdr', 'HDRI'): 'post/post_hdri.frag', ('dof', 'DoFDown'): 'post/post_dofdown.frag',
@@ -119,7 +164,7 @@ def dense_varyings(struct):
     return '\n'.join([lines[0]] + keep + [vary[n] for n in sorted(vary)] + [lines[-1]])
 
 
-def convert(text, vertex, title, techs, ref='S-7d (docs/research/frame-ownership.md 14.18)', static_pos=False):
+def convert(text, vertex, title, techs, ref='S-7d (docs/research/frame-ownership.md 14.18)', static_pos=False, expand=None):
     """the translator's HLSL -> the port's text"""
     lines = text.splitlines()
     body = [l for l in lines if not l.startswith('//')]
@@ -171,9 +216,18 @@ def convert(text, vertex, title, techs, ref='S-7d (docs/research/frame-ownership
         names = ctab_names(text)
         if names:
             head.append('// Registers / samplers (the engine\'s constant table): %s.' % '; '.join(names))
-        return '\n'.join(head + ['#include "post_port.hlsli"', ''] + structs + [''] + consts + ([''] if consts else []) + glob + [''] +
+        incs = ['#include "post_port.hlsli"']
+        if expand is not None:
+            # 14.28 addendum: the GPU particle expansion in front of the program (the prologue of Device::particleVs, kKindParticle)
+            incs.append('#include "rvk_particle.hlsli"')
+            structs = [expansion_inputs(structs[0])] + structs[1:]
+            head.append('// The particle expansion (shaders/include/rvk_particle.hlsli) replaces the vertex inputs; the engine\'s own program follows it.')
+            ent_lines = [(expansion_prologue(expand) + '\n    rvk_program();') if l.strip() == 'rvk_main();' else l for l in ent_lines]
+        else:
+            ent_lines = [l.replace('rvk_main();', 'rvk_program();') for l in ent_lines]
+        return '\n'.join(head + incs + [''] + structs + [''] + consts + ([''] if consts else []) + glob + [''] +
                          ['void rvk_program() {'] + main.rstrip('\n').splitlines() + ['}', ''] +
-                         ['%s {' % sig] + [l.replace('rvk_main();', 'rvk_program();') for l in ent_lines] + ['}', ''])
+                         ['%s {' % sig] + ent_lines + ['}', ''])
     out_ent = ['    const RvkDrawData rvk_draw = rvkLoadDraw();'] + decls
     for l in ent_lines[1:]:
         if l.strip() == 'rvk_main();':
@@ -233,7 +287,7 @@ def main():
     for stem, fam, nm, use in SINGLES:
         stage = stem[:2]
         data = open(os.path.join(a.corpus, stem + '.bin'), 'rb').read()
-        fname = '%s_%s_single_s0.bin' % (stem[:4], fam)
+        fname = '%s_%s_single_s0.bin' % (stem, fam)
         open(os.path.join(bins, fname), 'wb').write(data)
         key = fnv1a(data)
         if key in ports:
@@ -251,9 +305,13 @@ def main():
         vertex = p['stage'] == 'vs'
         src = os.path.join(hlsl, p['bin'][:-4] + ('.vs.hlsl' if vertex else '.ps.hlsl'))
         text = open(src, encoding='utf-8').read()
-        title = ('%s shader #%d of the %s effect' % ('vertex' if vertex else 'pixel', p['idx'], p['fam'])) if p['fam'] != 'sky' else ('%s shader of the sky dome (ge_skydome_2_0.fx, shader pool)' % ('vertex' if vertex else 'pixel'))
-        ref = 'F12 / F13 (docs/research/frame-ownership.md 14.24)' if p['fam'] in ('sky', 'gui') else 'S-7d (docs/research/frame-ownership.md 14.18)'
-        port = convert(text, vertex, title, p['uses'], ref, p['fam'] in ('sky', 'gui'))
+        title = ('%s shader #%d of the %s effect' % ('vertex' if vertex else 'pixel', p['idx'], p['fam'])) if p['fam'] not in ('sky', 'particle') else (
+            '%s shader of the sky dome (ge_skydome_2_0.fx, shader pool)' % ('vertex' if vertex else 'pixel') if p['fam'] == 'sky' else
+            '%s shader of the particles (ge_particle_2_0.fx, shader pool)' % ('vertex' if vertex else 'pixel'))
+        ref = ('F12 / F13 (docs/research/frame-ownership.md 14.24)' if p['fam'] in ('sky', 'gui') else
+               'own particles (docs/research/frame-ownership.md 14.28, particle ports)' if p['fam'] == 'particle' else 'S-7d (docs/research/frame-ownership.md 14.18)')
+        p['assign'] = expansion_assign(text) if vertex and p['fam'] == 'particle' else None
+        port = convert(text, vertex, title, p['uses'], ref, p['fam'] in ('sky', 'gui', 'particle'), p['assign'])
         fname = p['name'] + ('.vert.hlsl' if vertex else '.frag.hlsl')
         with open(os.path.join(out_dir, fname), 'w', encoding='utf-8', newline='\n') as fh:
             fh.write(port)
@@ -287,6 +345,11 @@ def check(ports, order, a):
         p = ports[key]
         a_spv = os.path.join(spv, p['name'] + '_a.spv')
         b_spv = os.path.join(spv, p['name'] + '_b.spv')
+        if p.get('assign') is not None:
+            # (the translated shader with the expansion hooks the translator adds: Device::particleVs's form)
+            inj = os.path.join(spv, p['name'] + '_inj.vs.hlsl')
+            open(inj, 'w', encoding='utf-8').write(inject_expansion(open(p['src'], encoding='utf-8').read(), p['assign']))
+            p['src'] = inj
         run([shtool, 'hlsl', p['src'], '-o', a_spv])
         run([shtool, 'hlsl', p['embedded'], '-o', b_spv])
         if p['stage'] == 'ps':
@@ -335,7 +398,7 @@ def vs_check_cmd(eq, p, a_spv, b_spv, a):
     ta = open(p['src'], encoding='utf-8').read()
     tb = open(os.path.join(ROOT, 'shaders', p['embedded'] + '.hlsl'), encoding='utf-8').read()
     outs = sorted(int(m.group(1)) for m in re.finditer(r'rvk_out(\d+)\s*:\s*VARY', ta))
-    ins = sorted(int(m.group(1)) for m in re.finditer(r'\[\[vk::location\((\d+)\)\]\] float4 v\d+ : ATTR', ta))
+    ins = sorted(int(m.group(1)) for m in re.finditer(r'\[\[vk::location\((\d+)\)\]\] float4 (?:v|rvk_pr)\d+ : ATTR', ta))
     files = {}
     for tag, text in (('a', ta), ('b', tb.replace('#include "post_port.hlsli"', '#include "post/fx/post_port.hlsli"'))):
         f = os.path.join(spv, '%s_%s.vs.hlsl' % (p['name'], tag))
