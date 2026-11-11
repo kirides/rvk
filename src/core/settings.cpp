@@ -2979,6 +2979,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnExtract = &reg.add({
+        .key = "native.own_extract",
+        .label = "Native frame: own extraction (main view's visible set)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F10-2 (docs/research/frame-ownership.md 14.33; Full): the main view's eCFrustumDatabase::ExtractFromFrustum (portal walk, occluders, the "
+                       "rooms seen from outside, the sector tree query) is done by the renderer on the engine's live data, in the engine's order: the element "
+                       "list, the extract stamps and the final beam are written as the engine leaves them and the engine's function is not called. Check frames "
+                       "(native.owned_check) and Compare run the engine's function and compare the element list (identities and order), the final beam and the "
+                       "occluders' silhouette polygons (rvk.log `native: own extract (5 s)`: DIFFERING must stay 0, a difference turns the stage off). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the engine's extraction"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeBoneMotion = &reg.add({
         .key = "native.bone_motion",
         .label = "Native frame: bone-history motion",

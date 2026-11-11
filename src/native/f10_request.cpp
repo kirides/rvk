@@ -687,6 +687,13 @@ void onPresent() {
     g_diffLog = 8;
 }
 
+void* mainDb() { return g_mainDb; }
+
+bool nextViewIsCheck() {
+    const std::uint64_t frame = g_frameAtView + (g_presents - g_presentsAtView);
+    return sc::leanFrameKind(frame, g_checkInterval) != sc::LeanFrame::Lean;
+}
+
 StageState stageState() {
     StageState s;
     s.setting = settingMode();

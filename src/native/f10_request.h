@@ -85,6 +85,10 @@ bool takeDeferred(void* db, std::uint8_t list, std::vector<Deferred>& out);
 bool listSetCount(void* db, std::uint8_t list, std::int32_t count);
 // once per present (engine thread): the 5 s report
 void onPresent();
+// F10-2 (native.own_extract): the main view's database of the last Execute (null before the first) and whether the next main view falls on a check /
+// warm-up frame of native.owned_check (the same prediction the request pass uses)
+void* mainDb();
+bool nextViewIsCheck();
 // the stage line (static_ops_stages.cpp): setting / armed / acted
 struct StageState {
     int setting = 0;   // native.own_collection
