@@ -19,6 +19,7 @@
 #include "d3d9/device.h"
 #include "engine/scene_hooks.h"
 #include "native/coverage.h"
+#include "native/f10_request.h"
 #include "native/frame_desc.h"
 
 namespace rvk::native {
@@ -110,7 +111,11 @@ private:
     Attribution attr_;
     std::vector<RawOp> raw_;
     // F2c-3: the main view's raw z / solid list after the ops of valid records were taken out (compactOwned)
-    void compactOwned(void* db, List list, const std::uint8_t* data, std::int32_t& count);
+    // (returns whether it rewrote the engine's array; F10-1: `data` may move when the array grows for the deferred ops it keeps)
+    bool compactOwned(void* db, List list, const std::uint8_t*& data, std::int32_t& count);
+    // F10-1 (native.own_collection): the deferred z / solid ops of the main view, merged into raw_ at their positions
+    std::vector<f10req::Deferred> deferred_;
+    std::vector<RawOp> merged_;
     std::vector<RawOp> ownedKept_;
     std::vector<Op> ownedOps_;
     std::vector<std::uint8_t> ownedMark_;

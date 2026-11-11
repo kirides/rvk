@@ -228,6 +228,7 @@ bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade, std
         v.clear();
     }
     ownedView_ = {};
+    if (vkind == ViewKind::Main) ownedGateOpenMain_ = false;
     if (!ownedStatic_) return false;
     ++W.views;
     ++late1s_.views[vkind == ViewKind::Main ? 0 : 1];
@@ -256,6 +257,7 @@ bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade, std
         if (g != G::Count) gate = static_cast<int>(g);
     }
     const bool ready = gate < 0;
+    if (vkind == ViewKind::Main) ownedGateOpenMain_ = ready;
     {
         // the gate's state per view kind, logged once per change (with how many views the previous state lasted)
         const std::size_t k = vkind == ViewKind::Main ? 0 : 1;

@@ -142,6 +142,9 @@ public:
     bool ownedPersistentOn() const { return ownedPersistent_; }
     // a main view begins (frame tap, before the lists are read): false = no compaction this view (setting / prerequisites / a check frame)
     bool ownedViewBegin(void* db, void* desc);
+    // F10-1 (native.own_collection): whether the last main view passed the owned path's gate (prerequisites, observers; check frames do not close it), native.owned_check
+    bool ownedGateWasOpen() const { return ownedGateOpenMain_; }
+    int ownedCheckInterval() const { return ownedCheck_; }
     // native.owned_shadows (frame-ownership.md 7.36, F3-1): the sun cascades' static mesh z ops are owned like the main view's. A cascade view begins (before its list is read):
     // false = nothing leaves its list (setting / prerequisites / a check frame / a cascade the view table has no slot for)
     void setOwnedShadows(bool on);
@@ -935,6 +938,7 @@ private:
     // F2c-3 (static_ops_owned.cpp)
     bool ownedStatic_ = false, ownedTripped_ = false;
     int ownedCheck_ = 10;
+    bool ownedGateOpenMain_ = false;  // (F10-1: ownedViewBegin's gate of the last main view)
     struct OwnedView {
         bool active = false, adminKnown = false, zColor = false;
         std::uint64_t frame = 0;

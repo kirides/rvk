@@ -599,6 +599,8 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     // F2c-3: a main view with owned ops (not with the observe hooks: they check the lists against the requests)
     bool ownedFrame = kind == ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_ && statics_->ownedViewBegin(db, desc);
     if (kind == ViewKind::Main) dev_.setMainViewOwned(ownedFrame);  // (frame-ownership.md 7.47: the picture check)
+    // F10-1 (native.own_collection): the next request passes of this database are predicted from this view (owned / the owned path's gate / the check frames)
+    if (kind == ViewKind::Main && statics_ != nullptr && staticsWanted_) f10req::noteMainView(db, ownedFrame, statics_->ownedGateWasOpen(), dev_.stats().frames, statics_->ownedCheckInterval());
     // F3-1 (native.owned_shadows): a cascade's z list, the same machinery (op records keyed per cascade, view table slot 4 + cascade)
     // (F3-4, native.owned_shadow_views: the terrain map and the point-light atlas's cells too: the cell = the view's index among the frame's views of its kind)
     const std::int32_t cell = static_cast<std::int32_t>(desc_.view) - 1;
@@ -611,14 +613,41 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
         desc_.first[l] = static_cast<std::uint32_t>(desc_.ops.size());
         // ExecuteShadowMap runs the z list only (the shadow request fills no other list it executes)
         if (shadow && l != 0) continue;
-        if (!readAt(db, kListOffset[l] + 8, data) || !readAt(db, kListOffset[l] + 0x10, count) || data == nullptr || count <= 0 ||
-            static_cast<std::uint32_t>(count) > kMaxListOps) {
-            continue;
+        // F10-1 (native.own_collection): the z / solid ops the native request deferred (they are not in the engine's list) are merged at the positions the
+        // engine would have written them; the owned ones are taken below, the rest is written into the engine's list in that order
+        if (kind == ViewKind::Main && l < 2 && f10req::takeDeferred(db, static_cast<std::uint8_t>(l), deferred_)) {
+            if (!readAt(db, kListOffset[l] + 8, data) || !readAt(db, kListOffset[l] + 0x10, count) || count < 0 || static_cast<std::uint32_t>(count) > kMaxListOps) {
+                data = nullptr;
+                count = 0;
+            }
+            raw_.resize(static_cast<std::size_t>(count));
+            if (count > 0 && (data == nullptr || !safeRead(data, raw_.data(), raw_.size() * sizeof(RawOp)))) raw_.clear();
+            f10req::mergeDeferred(raw_.data(), static_cast<std::uint32_t>(raw_.size()), deferred_, merged_);
+            raw_.swap(merged_);
+            count = static_cast<std::int32_t>(raw_.size());
+            bool rewritten = false;
+            if (ownedFrame && statics_->ownedListOk(db, static_cast<List>(l))) rewritten = compactOwned(db, static_cast<List>(l), data, count);
+            if (!rewritten) {
+                // (nothing taken: the merged list is the engine's list)
+                if (!f10req::listSetCount(db, static_cast<std::uint8_t>(l), count) || !readAt(db, kListOffset[l] + 8, data) ||
+                    (count > 0 && !engine::safeWrite(const_cast<std::uint8_t*>(data), raw_.data(), raw_.size() * sizeof(RawOp)))) {
+                    spdlog::error("native: own collection: the merged {} list could not be written ({} ops)", name(static_cast<List>(l)), count);
+                }
+            }
+            if (count <= 0 || data == nullptr) {
+                desc_.liveData[l] = data;
+                continue;
+            }
+        } else {
+            if (!readAt(db, kListOffset[l] + 8, data) || !readAt(db, kListOffset[l] + 0x10, count) || data == nullptr || count <= 0 ||
+                static_cast<std::uint32_t>(count) > kMaxListOps) {
+                continue;
+            }
+            raw_.resize(static_cast<std::size_t>(count));
+            if (!safeRead(data, raw_.data(), raw_.size() * sizeof(RawOp))) continue;
+            // F2c-3 (native.owned_static): the ops of valid records leave the engine's list before it is sorted; they are drawn from their records when the pass begins
+            if (ownedFrame && (l == 0 || l == 1) && statics_->ownedListOk(db, static_cast<List>(l))) compactOwned(db, static_cast<List>(l), data, count);
         }
-        raw_.resize(static_cast<std::size_t>(count));
-        if (!safeRead(data, raw_.data(), raw_.size() * sizeof(RawOp))) continue;
-        // F2c-3 (native.owned_static): the ops of valid records leave the engine's list before it is sorted; they are drawn from their records when the pass begins
-        if (ownedFrame && (l == 0 || l == 1) && statics_->ownedListOk(db, static_cast<List>(l))) compactOwned(db, static_cast<List>(l), data, count);
         if (count <= 0) {
             desc_.liveData[l] = data;
             continue;
@@ -652,7 +681,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
 // F2c-3: the raw (unsorted) list `list` of the main view: the ops whose record is valid (StaticOps::ownedSelect) are taken out of the engine's array in place
 // (the others keep their relative order, the count shrinks) and handed to StaticOps sorted by the engine's comparator; `raw_` / `count` become the kept list,
 // so the snapshot, the sort copy and the attribution describe exactly what Execute will run
-void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::int32_t& count) {
+bool FrameTap::compactOwned(void* db, List list, const std::uint8_t*& data, std::int32_t& count) {
     const auto t0 = std::chrono::steady_clock::now();
     const bool measure = f2c4::enabled();
     ownedMark_.assign(raw_.size(), 0);
@@ -673,22 +702,36 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         ownedOps_.push_back(op);
     }
     const auto tSelect = std::chrono::steady_clock::now();
-    if (ownedOps_.empty()) return;
+    if (ownedOps_.empty()) return false;
     ownedKept_.clear();
     for (std::size_t i = 0; i < raw_.size(); ++i) {
         if (ownedMark_[i] == 0) ownedKept_.push_back(raw_[i]);
     }
     // the engine's array, in place: the kept ops in their original order
     const std::int32_t kept = static_cast<std::int32_t>(ownedKept_.size());
+    {
+        // F10-1: raw_ may hold deferred ops the engine's array has no room for (the merged list is longer than the array's capacity)
+        const std::size_t off = kListOffset[static_cast<std::size_t>(list)];
+        std::int32_t capacity = 0;
+        readAt(db, off + 0x14, capacity);
+        if (kept > capacity || (data == nullptr && kept > 0)) {
+            if (!f10req::listSetCount(db, static_cast<std::uint8_t>(list), kept) || !readAt(db, off + 8, data) || data == nullptr) {
+                ownedOps_.clear();
+                return false;
+            }
+        }
+    }
     if (!ownedKept_.empty() && !engine::safeWrite(const_cast<std::uint8_t*>(data), ownedKept_.data(), ownedKept_.size() * sizeof(RawOp))) {
         ownedOps_.clear();
-        return;
+        return false;
     }
     if (!engine::safeWrite(static_cast<std::uint8_t*>(db) + kListOffset[static_cast<std::size_t>(list)] + 0x10, &kept, sizeof(kept))) {
-        // (the array was rewritten but its count could not be: put the original back)
-        engine::safeWrite(const_cast<std::uint8_t*>(data), raw_.data(), raw_.size() * sizeof(RawOp));
+        // (the array was rewritten but its count could not be: put the original back when it fits)
+        std::int32_t capacity = 0;
+        readAt(db, kListOffset[static_cast<std::size_t>(list)] + 0x14, capacity);
+        if (raw_.size() <= static_cast<std::size_t>(std::max(capacity, 0))) engine::safeWrite(const_cast<std::uint8_t*>(data), raw_.data(), raw_.size() * sizeof(RawOp));
         ownedOps_.clear();
-        return;
+        return false;
     }
     const auto tRewrite = std::chrono::steady_clock::now();
     // the owned ops in the engine's sort order of their list
@@ -732,6 +775,7 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
     }
     statics_->ownedTake(list, std::move(ownedOps_), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tEnd - t0).count()));
     ownedOps_.clear();
+    return true;
 }
 
 std::uint32_t FrameTap::passBegin(bool solid) {
