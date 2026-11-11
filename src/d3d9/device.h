@@ -80,6 +80,7 @@ struct TextureDesc {
     std::uint32_t format = 0;  // D3DFORMAT
     std::uint32_t usage = 0;   // USAGE_*
     std::uint32_t pool = POOL_MANAGED;
+    bool lowHeapSlot = false;  // the bindless slot must be < 16384 (material pack maps; TextureDesc::lowHeapSlot)
 };
 
 class Surface;

@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "rhi/d3d12/d3d12_test_hooks.h"
+#include "rhi/d3d12/heap_alloc.h"
 #include "rhi/d3d_formats.h"
 #include "rhi/game_device.h"
 #include "test.h"
@@ -136,4 +137,23 @@ TEST(d3d12_raster_key_depth_bias_rounds_away_from_zero) {
     DynamicStateValues e = d;
     e.depthBias[0] = 9.0f;
     CHECK(t::rasterKeysEqual(d, e));
+}
+
+TEST(d3d12_heap_allocator_low_range) {
+    rvk::rhi::HeapAllocator a;
+    a.next = 3;
+    a.limit = 100;
+    a.reserveLow(10, 14);
+    for (int i = 0; i < 7; ++i) CHECK(a.alloc() < 10);  // 3..9
+    CHECK(a.alloc() == 14);                              // hops over [10, 14)
+    for (std::uint32_t want = 10; want < 14; ++want) CHECK(a.allocLow() == want);
+    CHECK(a.allocLow() == 0);  // full
+    a.release(12);             // back to the low list
+    CHECK(a.allocLow() == 12);
+    a.release(5);
+    CHECK(a.alloc() == 5);
+    CHECK(a.allocLow() == 0);
+    std::uint32_t n = 0;
+    while (a.alloc() != 0) ++n;
+    CHECK(n == 85);  // 15..99
 }

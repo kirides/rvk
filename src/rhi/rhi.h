@@ -92,6 +92,8 @@ struct TextureDesc {
     bool cube = false;
     // How shaders see the channels of the sampled view (L8 -> r r r 1 ...; all IDENTITY = as stored). Storage views and attachments ignore it.
     VkComponentMapping swizzle{};
+    // Ask for a heap index below 16384 (D3D12: a reserved low range, best effort; Vulkan: always the case). For shader-side words that keep the slot in 14 bits.
+    bool lowHeapSlot = false;
 };
 
 // One mip level of one array layer (cube face); copies address textures with it. 3D textures have layer 0 only.
