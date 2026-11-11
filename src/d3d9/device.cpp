@@ -1382,6 +1382,56 @@ std::string moduleLabel(bool names, shader::Stage stage, std::uint64_t hash, std
 }
 }  // namespace
 
+namespace {
+thread_local const MaterialSource* t_pendingSource = nullptr;
+thread_local bool t_pendingUsed = false;
+// the pending request names a shader of its stage only (profiles 0..7 pixel, 8..11 vertex), and only one without a source
+void attachPending(Shader& s) {
+    const MaterialSource* p = t_pendingSource;
+    if (p == nullptr || (p->profile >= 8) != (s.stage == shader::Stage::Vertex)) return;
+    const MaterialSource* expected = nullptr;
+    if (s.source.compare_exchange_strong(expected, p, std::memory_order_acq_rel)) t_pendingUsed = true;
+}
+}  // namespace
+
+namespace {
+std::atomic<Device*> g_sourceDevice{nullptr};  // the device whose variants a late request resets (Device::setUbershader)
+}  // namespace
+
+// 14.22: a shader got the engine's request after some of its variants were built from the bytecode alone (the engine created the shader before it asked the pool
+// for it, and F15-1's pipeline keys of earlier runs queue the variants at the shader's creation): those variants are forgotten so that the next request builds them
+// with the request (the ubershader form). The old modules stay alive (pipelines hold them), as in resetUberVariants; a draw retained with one is remade
+// (`variant module arrived since`). Slots being built are redone by the variant worker itself (hadSource)
+void notifySourceAttached(Shader& s) {
+    Device* d = g_sourceDevice.load(std::memory_order_acquire);
+    if (d != nullptr) d->sourceAttached(s);
+}
+
+void Device::sourceAttached(Shader& s) {
+    if (!ubershader_.load(std::memory_order_relaxed) || destroying_.load(std::memory_order_acquire)) return;
+    const std::uint32_t uber = s.uberSlots.load(std::memory_order_acquire);
+    std::uint32_t reset = 0;
+    const std::lock_guard lock(variantMutex_);
+    for (std::size_t i = 0; i < kVariantSlots; ++i) {
+        if ((uber >> i & 1u) != 0 || s.variantState[i].load(std::memory_order_acquire) != 2) continue;
+        const VariantSlot slot = static_cast<VariantSlot>(i);
+        if (slot == VariantSlot::Capture || slot == VariantSlot::BoneVs) continue;  // (never the ubershader: provider slots / the capture variant)
+        s.variants[i].store(rhi::ShaderModule::None, std::memory_order_release);
+        s.variantState[i].store(0, std::memory_order_release);
+        reset |= 1u << i;
+    }
+    if (reset != 0) {
+        ++uberLateReset_;
+        if (uberLateReset_ <= 8) spdlog::info("native: owned shaders: shader {:016x} got the engine's request after variants (slots {:#x}) were built without it: rebuilt with it", s.hash, reset);
+    }
+}
+
+void setPendingMaterialSource(const MaterialSource* s) {
+    t_pendingSource = s;
+    t_pendingUsed = false;
+}
+bool pendingMaterialSourceUsed() { return t_pendingUsed; }
+
 std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> bytecode) {
     RVK_ZONE("Device::createShader");
     const std::size_t bytes = shader::byteLength(bytecode.data(), bytecode.size());
@@ -1396,6 +1446,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     {
         const std::lock_guard lock(shaderMutex_);
         if (auto it = shaders_.find(hash); it != shaders_.end()) {
+            attachPending(*it->second);  // (14.22)
             return it->second;
         }
     }
@@ -1426,6 +1477,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     s->reflection = hlsl.reflection;
     s->bytecode.assign(tokens.begin(), tokens.end());
     s->hash = hash;
+    attachPending(*s);  // 14.22: before any variant of it can be queued (the shader workers' prewarm of known pipeline keys)
     s->semantics = shaderSemantics(tokens, s->reflection);
     for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
         if (s->reflection.samplers[slot] != shader::TextureType::Unknown) s->samplerMask |= 1u << slot;
@@ -1723,6 +1775,7 @@ void Device::setUbershaderSkip(std::uint32_t mask) { g_uberSkip.store(mask, std:
 
 void Device::setUbershader(bool on) {
     const bool changed = ubershader_.load(std::memory_order_relaxed) != on;
+    if (on) g_sourceDevice.store(this, std::memory_order_release);  // (14.22: late engine requests reset this device's variants)
     ++variantEpoch_;
     ubershader_.store(on, std::memory_order_relaxed);
     if (on) setVariantProvider(VariantSlot::Base, {std::format("base_t{}", kTranslatorVersion), &uberBaseOptions});
@@ -2083,13 +2136,28 @@ void Device::variantWorker() {
             variantIdleCv_.notify_all();
         };
         shader::TranslateOptions o;
+        const bool hadSource = job.shader->source.load(std::memory_order_acquire) != nullptr;
         if (!provider.options || !provider.options(*job.shader, o)) {
             job.shader->variantState[i].store(3, std::memory_order_release);
             done();
             continue;
         }
         bool viaUber = false;
-        const rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion), &viaUber);
+        rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion), &viaUber);
+        // 14.22: the engine's request arrived while this variant was being built from the bytecode alone (a shader the engine created before it asked the pool for it):
+        // the variant is built again with the request (the ubershader form when it covers it). Variants already built are reset by sourceAttached
+        if (!viaUber && !hadSource && ubershader_.load(std::memory_order_relaxed) && job.shader->source.load(std::memory_order_acquire) != nullptr) {
+            shader::TranslateOptions o2;
+            if (provider.options(*job.shader, o2) && o2.uber) {
+                bool via2 = false;
+                const rhi::ShaderModule m2 = variantModule(*job.shader, o2, std::format("{}_t{}", provider.tag, kTranslatorVersion), &via2);
+                if (m2 != rhi::ShaderModule::None) {
+                    m = m2;
+                    viaUber = via2;
+                    ++uberLateSource_;
+                }
+            }
+        }
         if (m == rhi::ShaderModule::None) {
             ++variantsFailed_;
             spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);

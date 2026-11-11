@@ -1028,8 +1028,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     scenePipePull_ = GamePipeline::None;
     sceneBone_ = false;
     bonePushPrev_ = {};
+    rigidPrev_ = {};
     obsBone_ = false;
     obsBonePending_ = false;
+    obsRigidStill_ = false;
     packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
@@ -1137,7 +1139,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // 14.13 (native.bone_motion): the draw will take the bone-motion forms: its observers need no vertex capture for its motion (boneMotionDraw)
     obsBonePending_ = false;
-    obsBone_ = boneMode_ == 1 && bonePredict(kind, phase);
+    obsRigidStill_ = false;
+    obsBone_ = boneMode_ == 1 && bonePredict(kind, phase, &geom);
     if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         const bool f2cStatic = native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
                                (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::DepthPrepass);
@@ -1737,6 +1740,8 @@ void Device::fillCapture(const DrawPacket& p) {
     c.scenePipeline2 = scenePipe2_;
     c.scenePipelinePull = scenePipe2_ != GamePipeline::None ? scenePipePull_ : GamePipeline::None;
     c.boneMotion = sceneBone_;
+    // (predicted but the scene decision still building its pipelines = pending, not declined: the replay asks again)
+    c.boneObs = sceneBone_ ? 0 : obsBone_ ? (lastVariant_.scenePending ? 2 : 1) : obsBonePending_ ? 2 : obsRigidStill_ ? 3 : 0;
     c.pull = {};
     if (c.scenePipelinePull != GamePipeline::None && pullFetch_.valid == shader::abi::kVertexFetchValid) {
         c.pull = pullFetch_;
@@ -1987,6 +1992,37 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
         ++replayStats.refused;
         return false;
     }
+    // 14.22: a skinned main solid draw retained WITHOUT the bone-motion forms (cached in a frame its part had no history yet, or while its forms were being built)
+    // whose forms it would take now: the replayed packet has no motion of its own, so the RT scene would ask for a capture (and the replay be refused every frame).
+    // The normal path draws it with the forms (and retains it again with them); observers are shown it there, once. (Rigid draws keep their replays: a still object
+    // has no motion of its own, a moving one changes its stamp and is composed.) A draw whose composing observers were told "covered" is told so again
+    rigidPrev_ = {};
+    bool replayPending = false, replayStill = false;  // (the forms are being built / a rigid draw without motion of its own: its observers need no capture)
+    if (boneMode_ == 1 && !boneOfCached(c) && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid &&
+        (c.kind == draws::Kind::Skinned || c.kind == draws::Kind::StaticMesh || c.kind == draws::Kind::InstancedMesh) && gbuf_.active && gbuf_.motion != nullptr &&
+        !nocapOld() && (c.boneObs == 1 || c.boneObs == 3)) {
+        // (the composing draw was told "covered" and took no forms for its state, or has no motion of its own: the replay repeats that, no refusal loop)
+        replayStill = true;
+    } else if (boneMode_ == 1 && !boneOfCached(c) && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid &&
+               c.kind == draws::Kind::Skinned && gbuf_.active && gbuf_.motion != nullptr &&
+               !nocapOld()) {
+        obsBonePending_ = false;
+        obsRigidStill_ = false;
+        const bool predicted = bonePredict(c.kind, c.phase);
+        replayPending = obsBonePending_;
+        replayStill = obsRigidStill_;
+        bonePushPrev_ = {};
+        rigidPrev_ = {};
+        obsBonePending_ = false;
+        obsRigidStill_ = false;
+        if (predicted) {
+            replayStale_ = true;  // (the packet is out of date: the caller makes it again from this composition, with the forms: no refusal next frame)
+            ++boneStats.replayBoneRefused;
+            ++replayStats.why[8];
+            ++replayStats.refused;
+            return false;
+        }
+    }
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) {
@@ -2016,7 +2052,8 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             captureInstances_ = false;
             const bool f2cStatic = native::f2c::on() && c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main &&
                                    (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
-            obsBonePending_ = false;
+            obsBonePending_ = replayPending;
+            obsRigidStill_ = replayStill;
             obsBone_ = boneOfCached(c) && c.scenePipeline != GamePipeline::None && sceneActive();  // (14.13: the replayed packet is the bone-motion scene form)
             const CoverQuery cq = coverOf(q);
             obsSite_ = CaptureSite::Retained;  // (capture census)
@@ -2270,6 +2307,7 @@ void Device::submitPacket(DrawPacket& p) {
         toScenePacket(p, scenePipe_);
         scenePipe_ = GamePipeline::None;
     }
+    rigidPrev_ = {};  // (14.22: the previous block belongs to this draw only; the owned flushes / replays after it must not see it)
     submitInterned(p);
     p.scene = 0;
 }

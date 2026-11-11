@@ -138,7 +138,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     // (14.15 b, native.rigid_motion: a static mesh's solid draw whose window 2 is an object record with a history takes the same forms)
     const bool bone = obsBone_ && boneMode_ == 1 && phase.pass == scene::Pass::Solid && gbufWrite_ && gbuf_.motion != nullptr && owned_ != nullptr && !lodVs &&
                       ((actor && owned_->w[0][2].kind == OwnedWindows::Kind::Bones) ||
-                       (rigidMotionOn() && staticLike && owned_->w[0][2].kind == OwnedWindows::Kind::Object));
+                       (rigidMotionOn() && staticLike && (owned_->w[0][2].kind == OwnedWindows::Kind::Object || !rigidPrev_.null())));  // (14.22: or a per-frame previous block)
     if (gbufWrite_) base = gbufferSlot(bone);
     else if (giDraw) base = VariantSlot::Gi;
     const VariantSlot sceneFs = sceneSlotOf(base);
@@ -318,6 +318,19 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         }
         ++sceneStats_.uberDecided[static_cast<std::size_t>(kind)][static_cast<std::size_t>(why)];
         ++sceneStats_.uberVsDecided[static_cast<std::size_t>(kind)][vsForm];
+        // 14.22: a covered request whose scene form was built translated (the "failed" column): named once per shader x slot (the first 32)
+        if ((why == UberWhy::Failed || vsForm == 2) && uberFailLogged_ < 32) {
+            const Shader& sh = why == UberWhy::Failed ? *ps_ : *vs_;
+            const VariantSlot slot = why == UberWhy::Failed ? (scenePipe2_ != GamePipeline::None ? sceneView2Of(sceneFs) : sceneFs)
+                                                            : (scenePipe2_ != GamePipeline::None ? vsSlot2 : lodVs ? VariantSlot::SceneVsLod : vsSlot1);
+            if (uberFailSeen_.insert(sh.hash * 64 + static_cast<std::uint64_t>(slot)).second) {
+                ++uberFailLogged_;
+                const MaterialSource* src = sh.source.load(std::memory_order_acquire);
+                spdlog::info("native: owned shaders: translated scene form of a covered request: {} {} shader {:016x} slot {} ({} {}), uber slots {:#x}, kind {}, pass {}", sh.stage == shader::Stage::Pixel ? "pixel" : "vertex",
+                             why == UberWhy::Failed ? "(pixel failed)" : "(vertex failed)", sh.hash, static_cast<unsigned>(slot), src != nullptr ? src->file : std::string("?"),
+                             src != nullptr ? src->entry : std::string("?"), sh.uberSlots.load(std::memory_order_acquire), draws::name(kind), scene::name(phase.pass));
+            }
+        }
     }
 }
 
@@ -385,7 +398,7 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t vi
     r.draw = p.push.draw;
     r.prevVs = p.push.prevVsConsts;
     // 14.13: a bone-motion form reads the previous frame's bone image (only a VS window 2 base the bone table handed out has one; else 0 = no motion of its own)
-    if (bonePipe(pipeline)) r.prevVs = historyOf(rhi::GpuRef{p.push.vsWin[2]}).bits;  // (14.15 b: or the object table's history of a rigid draw's record)
+    if (bonePipe(pipeline)) r.prevVs = !rigidPrev_.null() ? rigidPrev_.bits : historyOf(rhi::GpuRef{p.push.vsWin[2]}).bits;  // (14.15 b: or the object table's history of a rigid draw's record; 14.22: the draw's previous block)
     r.drawId = p.push.drawId;
     r.flags = p.push.flags;
     if (v2) {
@@ -743,6 +756,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             captureRequestRw_ = {};
             captureInstances_ = false;
             obsBonePending_ = false;
+            obsRigidStill_ = boneMode_ == 1 && !c.boneMotion && (c.boneObs == 1 || c.boneObs == 3);  // (14.22)
             obsBone_ = boneOfCached(c);  // (14.13)
             bool loaded = false;
             const CoverQuery cq = coverOf(q);
@@ -1024,7 +1038,9 @@ void Device::sceneReport() {
                                 draws::name(static_cast<draws::Kind>(k)), ot, o[1], o[0], o[2], o[3], o[4], o[5], o[6], dt, d[1], d[0], d[2], d[3], d[4], d[5], d[6]);
             line += std::format(" [{} vertex: owned uber {} translated {} failed {}; decided uber {} translated {} failed {}]", draws::name(static_cast<draws::Kind>(k)), vo[1], vo[0], vo[2], vd[1], vd[0], vd[2]);
         }
-        spdlog::info("native: owned shaders (5 s): HLSL ubershader on, translated builds after an ubershader failure {} (run total):{}", uberFallbacks_.load(), line.empty() ? std::string(" no scene draws") : line);
+        spdlog::info("native: owned shaders (5 s): HLSL ubershader on, translated builds after an ubershader failure {}, late engine requests: {} variants rebuilt in flight / {} shaders' variants reset "
+                     "(run totals):{}",
+                     uberFallbacks_.load(), uberLateSource_.load(), uberLateReset_.load(), line.empty() ? std::string(" no scene draws") : line);
     }
     sceneLast_ = s;
 }

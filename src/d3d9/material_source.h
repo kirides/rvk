@@ -21,4 +21,11 @@ struct MaterialSource {
     std::vector<std::pair<std::string, std::string>> macros;  // sorted by name, as the engine hashes them
 };
 
+// 14.22: the request whose compile is running on this thread (engine/material_source's detour): Device::createShader attaches it to the shader it creates (or finds without a
+// source) before the shader's variants can be queued. Null outside the call
+void setPendingMaterialSource(const MaterialSource* s);
+class Shader;
+void notifySourceAttached(Shader& s);  // 14.22: a request was attached to an existing shader (its variants built without it are rebuilt)
+bool pendingMaterialSourceUsed();  // a shader took the pending request since setPendingMaterialSource (it holds the pointer: keep the object alive)
+
 }  // namespace rvk::d3d9
