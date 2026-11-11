@@ -66,6 +66,7 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
         }
     }
     td.swizzle = fmt_.swizzle;
+    td.lowHeapSlot = desc_.lowHeapSlot;
     tex_ = dev_.game().createTexture(td);
     if (!tex_) {
         return;

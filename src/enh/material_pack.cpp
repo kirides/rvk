@@ -507,6 +507,7 @@ std::unique_ptr<d3d9::Texture> MaterialPack::createMap(const Entry& e, const Sna
         return nullptr;
     }
     d3d9::TextureDesc d;
+    d.lowHeapSlot = true;  // the pack word keeps the slot in 14 bits (D3D12: the reserved low range)
     std::unique_ptr<d3d9::Texture> tex;
     std::uint64_t size = 0;
     if (lower(file.extension().string()) == ".dds") {

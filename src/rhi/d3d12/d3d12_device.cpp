@@ -39,6 +39,7 @@
 #include "core/gpu_events.h"
 #include "core/caps.h"
 #include "rhi/d3d12/d3d12_ffx.h"
+#include "rhi/d3d12/heap_alloc.h"
 #include "rhi/game_device.h"
 #include "rhi/rhi.h"
 #include "shader/embedded.h"
@@ -57,6 +58,7 @@ constexpr std::uint32_t kUavRing = 2048;        // the last entries of that heap
 constexpr std::uint32_t kUavRingPerSlot = kUavRing / rhi::kFramesInFlight;
 constexpr std::uint32_t kViewRing = 512;        // single transient SRVs (blits), before the UAV ring: kViewRing / kFramesInFlight per frame slot
 constexpr std::uint32_t kReservedSlots = 3;     // 0 = 2D default, 1 = cube default, 2 = 3D default (a texel (0, 0, 0, 1) of that dimension)
+constexpr std::uint32_t kLowSlotBegin = 14336, kLowSlotEnd = 16384;  // reserved for TextureDesc::lowHeapSlot (the pack word addresses 14 bits); other resources hop over it
 constexpr std::uint32_t kSamplerHeapSize = 2048;
 constexpr std::uint32_t kRtvCount = 128, kDsvCount = 32;
 
@@ -368,28 +370,6 @@ class D3D12DeviceImpl;
 struct AsSpan {
     std::int32_t chunk = -1;  // -1 = none (a dedicated resource)
     std::uint64_t offset = 0, size = 0;
-};
-
-// a CPU-writable range of descriptors of a heap with a free list
-struct HeapAllocator {
-    std::uint32_t next = 1;  // 0 is reserved (the default descriptor; the texture heap reserves kReservedSlots)
-    std::uint32_t limit = 0;
-    std::vector<std::uint32_t> freeList;
-    std::mutex mutex;
-    std::uint32_t alloc() {
-        const std::lock_guard lock(mutex);
-        if (!freeList.empty()) {
-            const std::uint32_t i = freeList.back();
-            freeList.pop_back();
-            return i;
-        }
-        return next < limit ? next++ : 0;
-    }
-    void release(std::uint32_t i) {
-        if (i == 0) return;
-        const std::lock_guard lock(mutex);
-        freeList.push_back(i);
-    }
 };
 
 class D3DBuffer final : public Buffer {
@@ -726,6 +706,7 @@ public:
         dsvInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         srvAlloc_.next = kReservedSlots;
         srvAlloc_.limit = kHeapSize - kUavRing - kViewRing;
+        srvAlloc_.reserveLow(kLowSlotBegin, kLowSlotEnd);
         samplerAlloc_.limit = kSamplerHeapSize;
         // entry 0 of the texture heap: a null SRV until the default texture below exists
         {
@@ -1502,7 +1483,8 @@ bool D3DTexture::create() {
         if (isArray()) {  // (no whole-array view: heapSampled is layer 0, see rhi.h)
             slot_ = heapSampledLayer(0);
         } else {
-            slot_ = dev_.srvAlloc().alloc();
+            slot_ = desc_.lowHeapSlot ? dev_.srvAlloc().allocLow() : 0u;
+            if (slot_ == 0) slot_ = dev_.srvAlloc().alloc();  // (the low range is full: any slot, the caller checks the index)
             D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
             sd.Format = srvFormat(desc_.format);
             sd.Shader4ComponentMapping = srvMapping(desc_);

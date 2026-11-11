@@ -166,7 +166,12 @@ void testTextures(rhi::Device& dev, const Shaders& sh) {
     // (a cube's layers are forced to 6)
     auto cube = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {4, 4, 1}, 1, 1, kSampled, "rhi cube", true});
     auto volume = dev.createTexture({VK_IMAGE_TYPE_3D, VK_FORMAT_R8G8B8A8_UNORM, {4, 4, 4}, 1, 1, kSampled, "rhi volume"});
-    auto mips = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {8, 8, 1}, 4, 1, kSampled, "rhi mips"});
+    // many ordinary textures first, then the mip texture asks for a LOW heap slot (< 16384: the material pack word keeps 14 bits); it is sampled below
+    std::vector<std::unique_ptr<rhi::Texture>> filler;
+    for (int i = 0; i < 300; ++i) filler.push_back(dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {1, 1, 1}, 1, 1, kSampled, "rhi filler"}));
+    rhi::TextureDesc mipDesc{VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {8, 8, 1}, 4, 1, kSampled, "rhi mips"};
+    mipDesc.lowHeapSlot = true;
+    auto mips = dev.createTexture(mipDesc);
     auto array = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {4, 4, 1}, 1, 3, kSampled, "rhi array"});
     auto out = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, {16, 1, 1}, 1, 1, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                   "rhi tex out"});
@@ -182,6 +187,7 @@ void testTextures(rhi::Device& dev, const Shaders& sh) {
     check(cube->desc().layers == 6 && cube->heapSampled() != 0 && volume->heapSampled() != 0 && mips->heapSampled() != 0 &&
               array->heapSampled() != 0 && array->heapSampledLayer(1) != 0 && array->heapSampledLayer(2) != 0 && array->heapSampledLayer(3) == 0,
           "heap indices of the texture kinds");
+    check(mips->heapSampled() != 0 && mips->heapSampled() < 16384, std::format("low heap slot texture: slot {} (< 16384)", mips->heapSampled()));
     check(array->heapSampledLayer(0) == array->heapSampled() && array->heapSampledLayer(1) != array->heapSampledLayer(2), "array layer heap indices");
 
     // contents: upload offsets are multiples of 512 (the DX12 placement alignment)
