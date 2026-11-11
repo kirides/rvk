@@ -379,13 +379,13 @@ private:
         bool built = false, failed = false;
     } box_;
     bool ensureBox(rhi::CommandList& cl);
-    std::uint64_t lastSkippedTiny_ = 0, lastBoxed_ = 0;
+    std::uint64_t lastSkippedTiny_ = 0;
     int lodBias_ = 0;
     std::vector<std::uint64_t> proxyJobs_;       // BLAS ids with a queued job
     std::uint64_t proxyBytes_ = 0;               // of blasBytes_
     std::uint32_t proxiesBuilt_ = 0;
     std::uint64_t proxyTrianglesOriginal_ = 0, proxyTrianglesKept_ = 0, proxyJobsDone_ = 0, proxyJobsFailed_ = 0;  // totals over the proxies built
-    double proxyJobMs_ = 0.0, proxyGatherMs_ = 0.0, proxyBuildMs_ = 0.0;
+    double proxyGatherMs_ = 0.0, proxyBuildMs_ = 0.0;
     std::uint64_t proxyGatherTriangles_ = 0;     // this frame's gathers (budget)
     std::uint64_t proxyGatherFrame_ = 0;
     // the snapshot of the last frame's TLAS by distance band and kind (taken on the frame a stats line is due)

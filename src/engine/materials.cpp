@@ -12,7 +12,8 @@ namespace {
 constexpr std::size_t kDiffuseProxy = 0x2e0, kOpacityProxy = 0x310, kNormalProxy = 0x3d0, kSelfIllumProxy = 0x340, kSpecularProxy = 0x370, kSpecularPowerProxy = 0x3a0;
 constexpr std::size_t kProxyElement = 8, kProxySwizzle = 0x28;
 constexpr std::size_t kBlendMode = 0x50, kMaskReference = 0x58;
-constexpr std::size_t kSamplerBase = 0x219, kSamplerCount = 0x21b;
+constexpr std::size_t kSamplerBase = 0x219;
+[[maybe_unused]] constexpr std::size_t kSamplerCount = 0x21b;  // layout record (the sampler count byte)
 constexpr std::size_t kPoolImage = 0xf8 + 0x20, kPoolStride = 0x28;
 // eCColorSrcSampler
 constexpr std::size_t kSamplerSlot = 0x98, kSamplerTexCoordSource = 0xa8, kSamplerUvSet = 0xc8;

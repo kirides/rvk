@@ -47,8 +47,32 @@ if(RVK_TRACY)
 endif()
 find_path(STB_INCLUDE_DIR stb_image_write.h REQUIRED)
 
+# RVK_PEDANTIC (preset clang-pedantic, docs/research/clang-pedantic.md): clang-cl only, extra warnings that catch UB-class bugs; MSVC unchanged
+option(RVK_PEDANTIC "clang-cl: -Wall -Wextra -Wpedantic + UB-class warnings" OFF)
+option(RVK_UBSAN "clang-cl: -fsanitize=undefined" OFF)
+set(RVK_PEDANTIC_FLAGS "")
+if(RVK_PEDANTIC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(RVK_PEDANTIC_FLAGS
+        # every -W goes through /clang: (clang-cl's own -Wall means -Weverything; /clang: options come last, so the -Wno- ones win over -Wextra)
+        /clang:-Wall /clang:-Wextra /clang:-Wpedantic
+        /clang:-Wuninitialized /clang:-Wsometimes-uninitialized /clang:-Wconditional-uninitialized
+        /clang:-Wcast-align /clang:-Wshadow-uncaptured-local /clang:-Wimplicit-fallthrough /clang:-Wformat=2 /clang:-Wnull-dereference
+        /clang:-Wshorten-64-to-32 /clang:-Wundefined-reinterpret-cast /clang:-Warray-bounds-pointer-arithmetic /clang:-Wunreachable-code-aggressive
+        # noise for this codebase: /Zc: flags clang ignores; Vulkan structs are brace-initialised with the fields that matter (designated or not);
+        # SEH (__try) / __uuidof (IID_PPV_ARGS) are intended MSVC extensions; AMD's headers carry MSVC pragmas; the CRT's *_s advice
+        -Wno-unused-command-line-argument /clang:-Wno-missing-field-initializers /clang:-Wno-missing-designated-field-initializers
+        /clang:-Wno-language-extension-token /clang:-Wno-unknown-pragmas -D_CRT_SECURE_NO_WARNINGS
+        /clang:-Wno-c++98-compat /clang:-Wno-c++98-compat-pedantic /clang:-Wno-nonportable-system-include-path)
+    # vcpkg headers are not ours: system includes (/imsvc) silence them
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/imsvc${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include>)
+endif()
+if(RVK_UBSAN AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Trap mode: clang's standalone UBSan runtime is built /MT and lld-link rejects it against our /MD (RuntimeLibrary mismatch), so a
+    # failed check is a ud2 (STATUS_ILLEGAL_INSTRUCTION; run under a debugger / WER dump for the location). vptr needs the runtime: off; "function" reads the bytes before a callee, which the tests' hand-made machine-code stubs (engine / JIT-like code called through a typed pointer) do not have: off.
+    add_compile_options(-fsanitize=undefined -fno-sanitize=vptr,function -fsanitize-trap=undefined)
+endif()
 function(rvk_warnings target)
-    target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /Zc:preprocessor /EHsc)
+    target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /Zc:preprocessor /EHsc ${RVK_PEDANTIC_FLAGS})
 endfunction()
 
 # ---------------------------------------------------------------------------------------------
@@ -581,6 +605,9 @@ target_include_directories(rvk_rhi_d3d12 PRIVATE third_party/imgui_dx12 third_pa
 target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid d3dcompiler imgui::imgui)
 # Dear ImGui's DX12 backend, vendored from the imgui release vcpkg installs (third_party/imgui_dx12: built on the Agility headers like the rest of the backend)
 set_source_files_properties(third_party/imgui_dx12/imgui_impl_dx12.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3;${RVK_VENDORED_OPT}")
+if(RVK_PEDANTIC)
+    set_property(SOURCE third_party/imgui_dx12/imgui_impl_dx12.cpp APPEND PROPERTY COMPILE_OPTIONS "-w")  # vendored: imgui's own warnings
+endif()
 # d3d12.dll / dxgi.dll are delay-loaded by everything that links the backend: the Vulkan-only path never loads them
 target_link_libraries(rvk_rhi_d3d12 PUBLIC delayimp)
 target_link_options(rvk_rhi_d3d12 INTERFACE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll /DELAYLOAD:d3dcompiler_47.dll)

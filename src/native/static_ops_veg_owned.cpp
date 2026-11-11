@@ -44,7 +44,6 @@ inline T get(const void* p, std::size_t off, T fallback = T{}) {
     return readAt(p, off, v) ? v : fallback;
 }
 inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
-inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
 inline std::uint64_t ns(Clock::time_point a, Clock::time_point b) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()); }
 inline std::uint64_t mixh(std::uint64_t h, std::uint64_t v) {
     h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -230,7 +229,7 @@ void StaticOps::vegCompBegin(const Op& op) {
     leanTouches_.clear();
 }
 
-void StaticOps::vegCompNote(const Op& op, const std::vector<sc::GrassDraw>& draws, const std::uint8_t* nodes, std::uint32_t total, bool wind, bool lift, float ax, float ay) {
+void StaticOps::vegCompNote(const Op& /*op*/, const std::vector<sc::GrassDraw>& draws, const std::uint8_t* nodes, std::uint32_t total, bool wind, bool lift, float ax, float ay) {
     vro::State& V = *vro_;
     vro::Pend& P = V.pend;
     if (!P.rec) return;

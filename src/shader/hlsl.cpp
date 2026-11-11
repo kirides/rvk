@@ -14,7 +14,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstring>
 #include <format>
@@ -906,7 +905,7 @@ private:
             // than the vertex shader writes still lands on the same registers (zero-initialised fillers)
             if (varyingFillers() && (!locs.empty() || extraVaryLocation(opt_.extraOutputs) > 0)) {
                 // (a variant's extra varying sits after them: it must land on the same register on both sides)
-                const std::uint32_t top = std::max<std::int64_t>(locs.empty() ? -1 : static_cast<std::int64_t>(*locs.rbegin()), extraVaryLocation(opt_.extraOutputs) - 1);
+                const std::uint32_t top = static_cast<std::uint32_t>(std::max<std::int64_t>(locs.empty() ? -1 : static_cast<std::int64_t>(*locs.rbegin()), extraVaryLocation(opt_.extraOutputs) - 1));
                 for (std::uint32_t l = 0; static_cast<std::int64_t>(l) <= static_cast<std::int64_t>(top); ++l) locs.insert(l);
             }
             bool extraDone = false;
@@ -942,7 +941,7 @@ private:
             if (varyingFillers() && (!lines.empty() || extraVaryLocation(opt_.extraInputs) > 0)) {
                 const std::int64_t top = std::max<std::int64_t>(lines.empty() ? 0 : static_cast<std::int64_t>(lines.rbegin()->first), extraVaryLocation(opt_.extraInputs));
                 for (std::int64_t l = 0; l < top; ++l) {
-                    if (!lines.contains(l) && l != extraVaryLocation(opt_.extraInputs)) lines[l] = std::format("    [[vk::location({})]] float4 rvk_pad{} : VARY{};\n", l, l, l);
+                    if (const auto key = static_cast<std::uint32_t>(l); !lines.contains(key) && l != extraVaryLocation(opt_.extraInputs)) lines[key] = std::format("    [[vk::location({})]] float4 rvk_pad{} : VARY{};\n", l, l, l);
                 }
             }
             // a variant's extra varying keeps its register: below the highest input it goes in between (the plain vertex shader's twin pads it)

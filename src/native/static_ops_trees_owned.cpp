@@ -74,7 +74,7 @@ inline void column(const float m[16], std::uint32_t k, float out[4]) {
 
 constexpr std::uint32_t kRampLen = 16384;           // instance positions per pass (the identity ramp's length)
 constexpr std::uint32_t kViewSlotTreeZ = 14, kViewSlotTreeSolid = 15;
-constexpr std::uint32_t kViewSlotTreeCascade0 = 8;  // F4-4: slots 8..11 (the view table's dynamic slots are not used by anything; every v2 slot must stay < 16)
+[[maybe_unused]] constexpr std::uint32_t kViewSlotTreeCascade0 = 8;  // F4-4: slots 8..11 (the view table's dynamic slots are not used by anything; every v2 slot must stay < 16)
 constexpr std::uint32_t kRowRegs = 4;               // c32 .. c35 per instance
 
 inline gpuscene::ComposeParams paramsOfTpl(const orec::DrawRec& r) {

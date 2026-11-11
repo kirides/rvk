@@ -183,7 +183,6 @@ private:
     bool configured_ = false;           // swapchain model: the generator is configured (callbacks attached)
     bool lastEnabled_ = false;
     std::uint64_t lastFrameId_ = 0;
-    std::uint64_t lastLogSwapchain_ = 0;
     std::uint64_t frames_ = 0, shown_ = 0, resets_ = 0, cuts_ = 0, blocked_ = 0, ringWaits_ = 0;
     double ringWaitMs_ = 0.0;
     double lastLog_ = -1e9;

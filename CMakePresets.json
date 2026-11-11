@@ -50,6 +50,31 @@
       }
     },
     {
+      "name": "clang-pedantic",
+      "displayName": "clang-cl pedantic (Ninja, RelWithDebInfo optimized + RVK_PEDANTIC warnings; build-clang-pedantic; run from a VS x64 developer shell; docs/research/clang-pedantic.md)",
+      "inherits": "ninja",
+      "binaryDir": "${sourceDir}/build-clang-pedantic",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "RVK_PEDANTIC": "ON",
+        "RVK_PCH": "OFF",
+        "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO": "/DEBUG /INCREMENTAL:NO",
+        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO": "/DEBUG /INCREMENTAL:NO",
+        "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO": "/DEBUG /INCREMENTAL:NO"
+      }
+    },
+    {
+      "name": "clang-ubsan",
+      "displayName": "clang-cl -fsanitize=undefined (Ninja, RelWithDebInfo optimized; build-clang-ubsan; build rvk_tests / rvk_d3d9test only; docs/research/clang-pedantic.md)",
+      "inherits": "clang-pedantic",
+      "binaryDir": "${sourceDir}/build-clang-ubsan",
+      "cacheVariables": {
+        "RVK_PEDANTIC": "OFF",
+        "RVK_UBSAN": "ON"
+      }
+    },
+    {
       "name": "public-release",
       "displayName": "Public Release (Ninja, RelWithDebInfo linked without /INCREMENTAL, /OPT:REF /OPT:ICF; CI + nightly)",
       "inherits": "ninja",
@@ -65,6 +90,8 @@
     { "name": "debug", "configurePreset": "default", "configuration": "Debug" },
     { "name": "release", "configurePreset": "default", "configuration": "RelWithDebInfo" },
     { "name": "clang-o0", "configurePreset": "clang-o0", "configuration": "RelWithDebInfo" },
+    { "name": "clang-pedantic", "configurePreset": "clang-pedantic", "configuration": "RelWithDebInfo" },
+    { "name": "clang-ubsan", "configurePreset": "clang-ubsan", "configuration": "RelWithDebInfo" },
     { "name": "public-release", "configurePreset": "public-release", "configuration": "RelWithDebInfo" }
   ]
 }
