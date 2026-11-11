@@ -90,9 +90,14 @@ std::uint32_t recordAlpha(std::uint32_t flags, std::uint32_t data, const RtMater
 
 RtScene::RtScene(d3d9::Device& device) : dev_(device) {
     registry_.onAdded = [this](const rt::Registry::Instance& in) {
-        if (Blas* b = findBlas(in.blas)) ++b->refs;
+        ++sceneEvents_;
+        if (Blas* b = findBlas(in.blas)) {
+            ++b->refs;
+            in.user = b;
+        }
     };
     registry_.onRemoved = [this](const rt::Registry::Instance& in) {
+        ++sceneEvents_;
         if (Blas* b = findBlas(in.blas); b != nullptr && b->refs > 0) --b->refs;
         if (in.pinned) tableInstanceRemoved(in.key);
     };
@@ -142,6 +147,11 @@ void RtScene::deactivate() {
     passId_ = passId2_ = passId3_ = 0;
     logStats(true);
     tableClear();
+    f81_.clear();
+    f81c_.clear();
+    treeTpl_.clear();
+    f81PrevDigest_.clear();
+    ++exclEpoch_;
     registry_.clear();
     dropDynamic(true, 0);
     destroySkin();
@@ -213,6 +223,7 @@ std::string RtScene::describe(std::uint64_t frame, std::uint32_t index) const {
 void RtScene::setViews(std::uint8_t mask) {
     if (mask == views_) return;
     views_ = mask;
+    ++exclEpoch_;
     registry_.clear();
     spdlog::info("rt: scene: sources {}", mask == 3 ? "main view + sun cascades" : mask == 1 ? "main view" : "sun cascades");
 }
@@ -302,16 +313,18 @@ bool RtScene::engineSubMeshes(const d3d9::ReplaceQuery& q, std::vector<EngineSub
 // the bytecode heuristic (never masked: the masked vegetation batches entered the TLAS opaque; frame-ownership.md 14.19.1).
 // The op's sub-mesh +0x38 is the material the per-instance path (eCSubMesh::Render) tags; the draw's index range must lie
 // inside the sub-mesh's (+0x28 first index, +0x2c count).
-const void* RtScene::batchMaterial(const d3d9::ReplaceQuery& q) {
-    if (q.tag == nullptr || !q.instanced || q.tag->source != d3d9::draws::Source::Mesh || q.tag->material != nullptr || q.tag->context == nullptr ||
-        (q.tag->opDesc >> 8) != 0xffffffu || q.primitiveType != 4) {
+const void* RtScene::batchMaterial(const d3d9::ReplaceQuery& q) { return batchMaterialOf(q.tag, q.instanced, q.primitiveType, q.first, q.primitives); }
+
+const void* RtScene::batchMaterialOf(const d3d9::draws::Tag* tag, bool instanced, std::uint32_t primitiveType, std::uint32_t qFirst, std::uint32_t qPrimitives) {
+    if (tag == nullptr || !instanced || tag->source != d3d9::draws::Source::Mesh || tag->material != nullptr || tag->context == nullptr ||
+        (tag->opDesc >> 8) != 0xffffffu || primitiveType != 4) {
         return nullptr;
     }
-    const std::uint32_t sub = q.tag->opDesc & 0xffu;
+    const std::uint32_t sub = tag->opDesc & 0xffu;
     const void* mesh = nullptr;
     const std::uint8_t* subs = nullptr;
     std::int32_t count = 0;
-    if (!engine::readAt(q.tag->context, 0x28, mesh) || mesh == nullptr || !engine::readAt(mesh, 0x58, subs) || subs == nullptr ||
+    if (!engine::readAt(tag->context, 0x28, mesh) || mesh == nullptr || !engine::readAt(mesh, 0x58, subs) || subs == nullptr ||
         !engine::readAt(mesh, 0x60, count) || count <= 0 || count > 4096 || static_cast<std::int32_t>(sub) >= count) {
         return nullptr;
     }
@@ -319,7 +332,7 @@ const void* RtScene::batchMaterial(const d3d9::ReplaceQuery& q) {
     std::uint32_t range[2]{};
     const void* material = nullptr;
     if (!engine::safeRead(s + 0x28, range, sizeof(range)) || !engine::readAt(s, 0x38, material) || material == nullptr) return nullptr;
-    const std::uint64_t first = q.first, end = first + 3ull * q.primitives;
+    const std::uint64_t first = qFirst, end = first + 3ull * qPrimitives;
     if (first < range[0] || end > static_cast<std::uint64_t>(range[0]) + range[1]) return nullptr;
     return material;
 }
@@ -387,20 +400,50 @@ std::uint8_t RtScene::viewBit(View v) const { return v == View::Main ? 1 : v == 
 
 void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (!active_) return;
+    const bool timed = dev.perfEnabled();
+    const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    // F8-1 census (frame-ownership.md 14.30): observe() calls by kind x view / pass x source (composed / owned), their time and sightings
+    const int ck = q.kind == Kind::StaticMesh ? 0 : q.kind == Kind::InstancedMesh ? 1 : q.kind == Kind::SpeedTree ? 2 : q.kind == Kind::Skinned ? 3 : 4;
+    const int cv = q.phase.view == View::Shadow ? 3 : q.phase.view != View::Main ? 3 : q.phase.pass == Pass::DepthPrepass ? 0 : q.phase.pass == Pass::Solid ? 1 : 2;
+    ObsCensus& cen = census_[ck][cv][dev.ownedReplayActive() ? 1 : 0];
+    ++cen.calls;
+    struct Timer {
+        RtScene& s;
+        ObsCensus& c;
+        bool on;
+        std::chrono::steady_clock::time_point t0;
+        std::uint64_t sight0;
+        ~Timer() {
+            c.sightings += s.iv_.sightings - sight0;
+            if (!on) return;
+            const double ms = msSince(t0);
+            s.iv_.observeMs += ms;
+            c.ms += ms;
+        }
+    } timer{*this, cen, timed, t0, iv_.sightings};
     if (q.kind == Kind::Skinned) {
         observeSkinned(dev, q);
         return;
     }
-    const bool timed = dev.perfEnabled();
-    const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    struct Timer {
+    // F8-1: the observation coversDraw armed records the record's script (f81Finish at the end: kept, compared on a check frame)
+    struct F81Recorder {
         RtScene& s;
-        bool on;
-        std::chrono::steady_clock::time_point t0;
-        ~Timer() {
-            if (on) s.iv_.observeMs += msSince(t0);
+        d3d9::Device& dev;
+        bool on = false;
+        ~F81Recorder() {
+            if (on) s.f81Finish(dev);
         }
-    } timer{*this, timed, t0};
+    } f81rec{*this, dev};
+    if (f81Arm_.valid) {
+        f81Scratch_.sights.clear();
+        f81Scratch_.reached = f81Scratch_.bad = f81Scratch_.valid = false;
+        f81Scratch_.instanced = f81Scratch_.fromStream = false;
+        f81Scratch_.n = 0;
+        f81Rec_ = &f81Scratch_;
+        f81rec.on = true;
+    }
+    treeTplArm_ = nullptr;  // (treeRunFast arms the full observation below when it wants the template learned)
+    if (f81On_ && q.kind == Kind::SpeedTree && q.phase.view == View::Main && q.phase.pass == Pass::Solid && treeRunFast(dev, q)) return;
     ++iv_.observed;
     const auto skip = [&] { ++iv_.skipped; };
     const bool speedTree = q.kind == Kind::SpeedTree;
@@ -596,6 +639,27 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     b->lastUsedFrame = frame;
     b->lastUsedTime = now;
     if (mainOpaque) b->opaqueMainFrame = frame;
+    if (f81Rec_ != nullptr) {
+        F81Script& r = *f81Rec_;
+        r.reached = true;
+        r.blas = b->id;
+        r.material = materialId;
+        r.rank = materialRank;
+        r.mainOpaque = mainOpaque;
+        r.matSig = RtMaterials::signature(qm);
+        r.tagMaterial = q.tag != nullptr ? q.tag->material : nullptr;
+        r.engineMaterial = single ? engineTag.material : nullptr;
+        r.engineBatch = single && q.instanced;
+        r.engineDepth = single && !q.instanced;
+        r.entity = q.tag != nullptr ? q.tag->entity : nullptr;
+        r.opDesc = q.tag != nullptr ? q.tag->opDesc : 0;
+        r.cls = tableClass(q.phase);
+        // not replayable: a SpeedTree (wind / tree sets: observed per run), a glass pane, a leaf range, no material (resolve is asked again every time), a draw with
+        // per-triangle engine materials of a merged range (engine segments, refreshed by the full observation)
+        if (speedTree || b->glass || b->animatedOnly || glassDraw) r.bad = true, ++f8s_.glass;
+        if (materialId == 0) r.bad = true, ++f8s_.noMaterial;
+        if (q.tag != nullptr && q.tag->material == nullptr && !single && (q.phase.view == View::Shadow || q.phase.pass == Pass::DepthPrepass)) r.bad = true, ++f8s_.unreplayable;
+    }
 
     // beyond the radius (bounds known once built): not taken (the registry would age it out again at once)
     const d3d9::scene::CameraBlock& camBlock = dev.camera().valid ? dev.camera() : dev.lastCamera();
@@ -627,8 +691,13 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     };
     if (!q.instanced) {
         rt::Rows rows;
-        if (!rowsAt(kInstanceDataBase + 1, rows) || outside(rows)) return skip();
+        const bool finiteRows = rowsAt(kInstanceDataBase + 1, rows);
         const std::uint64_t owner = q.tag != nullptr ? rt::ownerKey(q.tag->entity, q.tag->opDesc) : 0;
+        if (f81Rec_ != nullptr) {
+            if (!finiteRows) f81Rec_->bad = true;
+            else f81Rec_->sights.push_back({rt::instanceKey(b->id, rows), owner, rows, kInstanceDataBase + 1, flags, alphaWord, view});
+        }
+        if (!finiteRows || outside(rows)) return skip();
         ++iv_.sightings;
         // F8-0 check frame: the instance as it stands before this sighting (what a covered draw would have left untouched)
         rt::Registry::Instance pre;
@@ -655,15 +724,15 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // instanced batch: instance i reads g_vInstanceData[floor(4 v) + 1 ..] with v = its TEXCOORD4 (the instance stream)
     const std::uint32_t n = std::min(q.instances, kMaxBatch);
     float index[kMaxBatch];
-    bool fromStream = false;
-    const d3d9::Device::StreamSource src = dev.streamSource(static_cast<std::uint32_t>(layout.instanceStream));
-    if (src.buffer != nullptr && src.stride >= 4) {
-        std::uint8_t bytes[kMaxBatch * 64];
-        const std::uint32_t span = (n - 1) * src.stride + layout.instanceOffset + 4;
-        if (src.stride <= 64 && span <= sizeof(bytes) && src.buffer->readCpu(src.offset, span, bytes)) {
-            for (std::uint32_t i = 0; i < n; ++i) std::memcpy(&index[i], bytes + i * src.stride + layout.instanceOffset, 4);
-            fromStream = true;
-        }
+    bool fromStream = readInstanceIndex(dev, layout.instanceStream, layout.instanceOffset, n, index);
+    if (f81Rec_ != nullptr) {
+        F81Script& r = *f81Rec_;
+        r.instanced = true;
+        r.fromStream = fromStream;
+        r.stream = layout.instanceStream;
+        r.streamOffset = layout.instanceOffset;
+        r.n = n;
+        r.index.assign(index, index + (fromStream ? n : 0));
     }
     if (!fromStream && speedTree && treeWind_ != 0) {
         // F4-5: the trees' instance stream is an identity ramp in every draw (the engine's 256-float one or ours, StaticOps::treeEnsureRamp; `instance stream check`
@@ -685,7 +754,12 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         const std::uint32_t reg = kInstanceDataBase + static_cast<std::uint32_t>(std::floor(4.0f * v + 0.5f)) + 1;
         if (reg + 2 >= kInstanceDataEnd) continue;
         rt::Rows rows;
-        if (!rowsAt(reg, rows) || outside(rows)) continue;
+        const bool finiteRows = rowsAt(reg, rows);
+        if (f81Rec_ != nullptr) {
+            if (!finiteRows) f81Rec_->bad = true;
+            else f81Rec_->sights.push_back({rt::instanceKey(b->id, rows), 0, rows, reg, flags, alphaWord, view});
+        }
+        if (!finiteRows || outside(rows)) continue;
         ++iv_.sightings;
         auto sr = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, 0, flags, alphaWord, view, frame, now);
         rt::Registry::Instance* in = sr.first;
@@ -695,6 +769,47 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (in != nullptr && speedTree && q.phase.view == View::Main && q.phase.pass == Pass::Solid) treeSetNote(dev, *in);
         // the capture's instance k is the batch's k-th instance (the instance stream is 0, 1, 2, ...)
         if (in != nullptr && treeBatchOk && v == static_cast<float>(i)) observeTree(dev, q, *b, *in, rows, treeBatch, i, n);
+    }
+    if (treeTplArm_ != nullptr && speedTree && q.phase.view == View::Main && q.phase.pass == Pass::Solid) {
+        // F8-1: what this full observation of an owned tree run decided once for the whole batch (the template of the next runs)
+        TreeTpl nt;
+        bool identity = fromStream;
+        for (std::uint32_t i = 0; i < n && identity; ++i) identity = index[i] == static_cast<float>(i);
+        nt.valid = identity && materialId != 0 && !b->glass && q.tag != nullptr && !single;
+        nt.leaf = leaf;
+        nt.animated = animated_;
+        nt.key = key;
+        nt.blas = b->id;
+        nt.matSig = RtMaterials::signature(qm);
+        nt.material = materialId;
+        nt.flags = flags;
+        nt.alphaWord = alphaWord;
+        nt.exclEpoch = exclEpoch_;
+        nt.rank = materialRank;
+        nt.view = view;
+        nt.tagMaterial = q.tag != nullptr ? q.tag->material : nullptr;
+        nt.salt = static_cast<std::uint8_t>((reinterpret_cast<std::uintptr_t>(treeTplArm_) * 0x9E3779B97F4A7C15ull) >> 56);
+        TreeTpl& t = treeTpl_[treeTplArm_];
+        if (treeTplCompare_ && t.valid && nt.valid) {
+            ++tts_.compared;
+            const bool same = t.key == nt.key && t.blas == nt.blas && t.matSig == nt.matSig && t.flags == nt.flags && t.alphaWord == nt.alphaWord && t.rank == nt.rank &&
+                              t.view == nt.view && t.leaf == nt.leaf &&
+                              (t.material == nt.material || [&] {
+                                  const RtMaterial* x = materials_.get(t.material);
+                                  const RtMaterial* y = materials_.get(nt.material);
+                                  return x == nullptr || (y != nullptr && x->albedo == y->albedo && x->opacity == y->opacity && x->uvSet == y->uvSet && x->alpha == y->alpha && x->masked == y->masked);
+                              }());
+            if (same) {
+                ++tts_.matched;
+            } else {
+                ++tts_.differing;
+                if (tts_.differing <= 4) spdlog::warn("rt: scene records: DIFFERING tree template (BLAS {} -> {}, material {} -> {}, flags 0x{:x} -> 0x{:x})", t.blas, nt.blas, t.material, nt.material, t.flags, nt.flags);
+            }
+        }
+        if (nt.valid) ++tts_.learned;
+        t = nt;
+        treeTplArm_ = nullptr;
+        treeTplCompare_ = false;
     }
     if (!instanceIndexChecked_ && fromStream && iv_.observed > 2000) {
         instanceIndexChecked_ = true;
@@ -847,6 +962,14 @@ void RtScene::tableInstanceRemoved(std::uint64_t instKey) {
 }
 
 bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
+    f81Arm_.valid = false;
+    bool entryDecides = false;  // (an F8-0 entry exists for the draw: it decides, as before F8-1)
+    const bool covered = tableCover(d, entryDecides);
+    if (covered || entryDecides || !f81On_) return covered;
+    return f81Cover(d);
+}
+
+bool RtScene::tableCover(const d3d9::CoverQuery& d, bool& entryDecides) {
     if (!tableOn_ || !active_ || d.kind != Kind::StaticMesh || d.instanced || d.blending || d.primitiveType != 4 || d.tag == nullptr ||
         d.tag->entity == nullptr || d.vertexBuffer == nullptr || d.indexBuffer == nullptr) {
         return false;
@@ -865,6 +988,7 @@ bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
             break;
         }
         const TableEntry& e = it->second;
+        entryDecides = true;
         if (e.entity != d.tag->entity || e.opDesc != d.tag->opDesc) {
             ++ts_.fallIdent;
             break;
@@ -913,6 +1037,15 @@ bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
 // period; check frames always take the long way. Everything else is the per-draw procedure of ownedObserve: the pre-filter, then the full observation.
 void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
     if (!active_) return;
+    const auto tb0 = dev.perfEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    struct BulkTimer {
+        RtScene& s;
+        bool on;
+        std::chrono::steady_clock::time_point t0;
+        ~BulkTimer() {
+            if (on) s.bulkMs_ += msSince(t0);
+        }
+    } bulkTimer{*this, dev.perfEnabled(), tb0};
     ++bs_.calls;
     bs_.left += f.leftCount;
     const std::uint64_t frame = dev.frameValue();
@@ -941,7 +1074,17 @@ void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
         cq.tag = &r.tag;
         cq.textures = cd.tex;
         coveredEntry_ = nullptr;
-        if (coversDraw(cq) && coveredEntry_ != nullptr) {
+        f81Cur_ = {true, r.id, &cd, r.sig, r.epoch, r.changed, r.ow};
+        struct CurReset {
+            F81Key& k;
+            ~CurReset() { k.valid = false; }
+        } curReset{f81Cur_};
+        const bool coveredNow = coversDraw(cq);
+        if (coveredNow && coveredEntry_ == nullptr) {
+            ++bs_.covered;  // (F8-1: the record's script replayed)
+            continue;
+        }
+        if (coveredNow && coveredEntry_ != nullptr) {
             oc.cd = &cd;
             oc.entity = r.tag.entity;
             oc.opDesc = r.tag.opDesc;
@@ -962,6 +1105,539 @@ void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
         observe(dev, scope.query());
         ++bs_.observed;
     }
+}
+
+bool RtScene::readInstanceIndex(d3d9::Device& dev, int stream, std::uint32_t offset, std::uint32_t n, float* index) const {
+    if (stream < 0 || n == 0 || n > kMaxBatch) return false;
+    const d3d9::Device::StreamSource src = dev.streamSource(static_cast<std::uint32_t>(stream));
+    if (src.buffer == nullptr || src.stride < 4) return false;
+    std::uint8_t bytes[kMaxBatch * 64];
+    const std::uint32_t span = (n - 1) * src.stride + offset + 4;
+    if (src.stride > 64 || span > sizeof(bytes) || !src.buffer->readCpu(src.offset, span, bytes)) return false;
+    for (std::uint32_t i = 0; i < n; ++i) std::memcpy(&index[i], bytes + i * src.stride + offset, 4);
+    return true;
+}
+
+// ---- F8-1: the RT scene from the owned record set (frame-ownership.md 14.30) ------------------------------------------------------------------------------------
+
+namespace {
+std::atomic<bool> g_recordsArmed{false};
+std::atomic<std::uint64_t> g_recordsReplayed{0};
+}  // namespace
+
+RtRecordsState rtRecordsState() { return {g_recordsArmed.load(std::memory_order_relaxed), g_recordsReplayed.load(std::memory_order_relaxed)}; }
+
+void RtScene::setRecordReplay(bool on) {
+    {
+        char buf[8];
+        f81TlasAlways_ = GetEnvironmentVariableA("RVK_F81_TLAS", buf, sizeof(buf)) != 0;
+    }
+    if (on == f81On_) return;
+    f81On_ = on;
+    f81_.clear();
+    f81c_.clear();
+    treeTpl_.clear();
+    treeTplArm_ = nullptr;
+    f81Arm_.valid = false;
+    f81Rec_ = nullptr;
+    f81PrevDigest_.clear();
+    f81PrevFrame_ = 0;
+    g_recordsArmed.store(on, std::memory_order_relaxed);
+    spdlog::info("rt: scene records: {} (owned draws' sightings replayed from their record scripts; check frame every {} frames, relearn every {})", on ? "on" : "off",
+                 kRecordCheck, kRecordRelearn);
+}
+
+// the VS register `reg` .. reg + 2 as an owned window's CPU image holds them (null: no image there / not covered / across two windows)
+const float* RtScene::windowRows(const d3d9::OwnedWindows& ow, std::uint32_t reg) {
+    for (std::uint32_t w = 0; w < abi::kConstWindows; ++w) {
+        const std::uint32_t first = abi::kVsWindowFirst[w], end = abi::kVsWindowFirst[w + 1];
+        if (reg < first || reg >= end) continue;
+        if (reg + 2 >= end) return nullptr;
+        const d3d9::OwnedWindows::Win& x = ow.w[0][w];
+        if (x.kind == d3d9::OwnedWindows::Kind::None || x.image == nullptr || reg + 3 > first + x.covered) return nullptr;
+        return x.image + 4 * static_cast<std::size_t>(reg - first);
+    }
+    return nullptr;
+}
+
+// the owned record a draw belongs to: the bulk path's record view, else the per-draw owned observation's (null for composed draws)
+RtScene::F81Key RtScene::f81Key(const d3d9::CoverQuery&) const {
+    if (f81Cur_.valid) return f81Cur_;
+    const d3d9::Device::OwnedObsInfo* info = dev_.ownedObsInfo();
+    const d3d9::OwnedWindows* ow = dev_.ownedWindows();
+    if (dev_.ownedObsDraw() == nullptr) {
+        // a composed draw issued now: keyed by what it draws (the tag's context / op, its buffers, range, shaders, declaration, view / pass)
+        const d3d9::ReplaceQuery* q = const_cast<d3d9::Device&>(dev_).immediateQuery();
+        if (q == nullptr || dev_.ownedReplayActive() || q->tag == nullptr || q->vertexBuffer == nullptr || q->indexBuffer == nullptr) return {};
+        std::uint64_t h = f81State(*q);
+        const auto mix = [&h](std::uint64_t v) {
+            h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+            h ^= h >> 31;
+        };
+        mix(reinterpret_cast<std::uintptr_t>(q->tag->context));
+        mix(reinterpret_cast<std::uintptr_t>(q->tag->entity));
+        mix(q->tag->opDesc);
+        mix(q->vertexBuffer->ref().id);
+        mix(q->indexBuffer->ref().id);
+        // (+ the first instance's rows: a hardware batch composed per instance issues one draw of the same identity per instance, each its own script)
+        {
+            const float* w = ow != nullptr ? windowRows(*ow, kInstanceDataBase + 1) : nullptr;
+            const float* rows = w != nullptr ? w : dev_.vsConstant(kInstanceDataBase + 1);
+            std::uint64_t bits[6];
+            std::memcpy(bits, rows, sizeof(bits));
+            for (const std::uint64_t v : bits) mix(v);
+        }
+        F81Key k{true, 0, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(h | 1)), 0, 0, false, ow};
+        k.composed = true;
+        k.imm = q;
+        return k;
+    }
+    if (info == nullptr) {
+        // a composed draw's packet replay (no owned record: its registers are the composition's, live in the register file)
+        if (dev_.ownedReplayActive()) return {};
+        F81Key k{true, 0, dev_.ownedObsDraw(), 0, 0, false, ow};
+        k.composed = true;
+        return k;
+    }
+    if (ow == nullptr) return {};
+    return {true, info->id, dev_.ownedObsDraw(), info->sig, info->epoch, info->changed, ow};
+}
+
+RtScene::F81Script& RtScene::f81Script(const F81Key& k) {
+    if (k.composed) {
+        if (f81c_.size() > 65536) f81c_.clear();  // (retained draws come and go: a bound, the scripts are relearned)
+        return f81c_[k.cd];
+    }
+    if (k.id >= f81_.size()) f81_.resize(static_cast<std::size_t>(k.id) + 256);
+    return f81_[k.id];
+}
+
+// where the observation reads a sighting's rows: an owned draw's window images (its registers are only loaded when it is observed); a composed replay's live
+// register file (the composition's), or its owned object window when it has one (observe(): ReplaceQuery::objectRows)
+const float* RtScene::f81Rows(const F81Key& k, std::uint32_t reg) const {
+    if (k.ow != nullptr) {
+        if (const float* w = windowRows(*k.ow, reg)) return w;
+        if (!k.composed) return nullptr;
+    }
+    if (!k.composed || reg + 2 >= 256) return nullptr;
+    return dev_.vsConstant(reg);
+}
+
+// the retained draw's states the script's flags / data word / sightings follow from (alpha test, depth bias / write, instancing, declaration, shaders, range)
+std::uint64_t RtScene::f81State(const d3d9::ReplaceQuery& q) {
+    std::uint64_t h = 0x84222325CBF29CE4ull;
+    const auto mix = [&h](std::uint64_t v) {
+        h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    };
+    mix((q.alphaTest ? 1u : 0u) | (q.depthBias ? 2u : 0u) | (q.depthWrite ? 4u : 0u) | (q.blending ? 8u : 0u) | (q.instanced ? 16u : 0u) | (static_cast<std::uint64_t>(q.primitiveType) << 8));
+    mix(q.alphaFunc | (static_cast<std::uint64_t>(q.alphaRef) << 8) | (static_cast<std::uint64_t>(q.instances) << 16) | (static_cast<std::uint64_t>(q.kind) << 40));
+    mix(reinterpret_cast<std::uintptr_t>(q.decl));
+    mix(reinterpret_cast<std::uintptr_t>(q.engineVs));
+    mix(reinterpret_cast<std::uintptr_t>(q.enginePs));
+    mix(q.first | (static_cast<std::uint64_t>(q.primitives) << 32));
+    mix(static_cast<std::uint32_t>(q.baseVertex) | (static_cast<std::uint64_t>(q.vertexOffset) << 32));
+    mix(q.vertexStride | (static_cast<std::uint64_t>(q.phase.view) << 32) | (static_cast<std::uint64_t>(q.phase.pass) << 40));
+    return h;
+}
+
+bool RtScene::f81Cover(const d3d9::CoverQuery& d) {
+    if (!active_ || d.blending || d.primitiveType != 4 || d.tag == nullptr || (d.kind != Kind::StaticMesh && d.kind != Kind::InstancedMesh)) return false;
+    const std::uint8_t cls = tableClass(d.phase);
+    if (cls == 0) return false;
+    const F81Key k = f81Key(d);
+    if (!k.valid) return false;  // (a composed draw)
+    const bool timed = dev_.perfEnabled();
+    const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    struct Timer {
+        double& ms;
+        bool on;
+        std::chrono::steady_clock::time_point t0;
+        ~Timer() {
+            if (on) ms += msSince(t0);
+        }
+    } timer{f8s_.ms, timed, t0};
+    const int ci = cls == 1 ? 0 : cls == 2 ? 1 : 2;
+    ++f8s_.asked[ci];
+    f8s_.composedAsked += k.composed ? 1 : 0;
+    F81Script& s = f81Script(k);
+    const std::uint64_t frame = dev_.frameValue();
+    const bool check = frame % kRecordCheck == 0;
+    const std::uint64_t state = f81State(k.imm != nullptr ? *k.imm : static_cast<const d3d9::Device::CachedDraw*>(k.cd)->query);
+    const bool same = s.valid && s.cd == k.cd && s.sig == k.sig && s.epoch == k.epoch && s.entity == d.tag->entity && s.opDesc == d.tag->opDesc &&
+                      s.tagMaterial == d.tag->material && s.cls == cls && s.exclEpoch == exclEpoch_ && s.state == state;
+    bool replay = false;
+    if (!s.valid) ++f8s_.fallNew;
+    else if (!same) ++f8s_.fallInvalid;
+    else if (k.changed) ++f8s_.fallChanged;
+    else if (check || (tableCompare_ && tableCompareFrame(frame))) ++f8s_.fallCheck;
+    else if ((frame + s.salt) % kRecordRelearn == 0) ++f8s_.fallRelearn;
+    else replay = f81Replay(s, d, k, true);
+    if (replay) {
+        ++f8s_.replayed[ci];
+        f8s_.composedReplayed += k.composed ? 1 : 0;
+        g_recordsReplayed.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    // the full observation that follows records the record's script (compared with the stored one on a check frame)
+    f81Arm_ = k;
+    f81ArmCompare_ = check && same && !k.changed && f81Replay(s, d, k, false);  // (compared only where the replay would have run)
+    return false;
+}
+
+// every guard first, then the effects (a failed guard leaves the scene untouched: the draw is observed in full)
+bool RtScene::f81Replay(F81Script& s, const d3d9::CoverQuery& d, const F81Key& k, bool apply) {
+    Blas* b = findBlas(s.blas);
+    if (b == nullptr || b->state == BlasState::Failed || b->glass || b->animatedOnly) {
+        if (apply) ++f8s_.fallBlas;
+        return false;
+    }
+    const std::uint64_t frame = dev_.frameValue();
+    // the rows the draw's windows hold now = the script's (byte for byte: the instance keys, owners and spheres follow from them)
+    for (const F81Sight& g : s.sights) {
+        const float* src = f81Rows(k, g.reg);
+        if (src == nullptr || std::memcmp(src, g.rows.data(), sizeof(g.rows)) != 0) {
+            if (apply) ++f8s_.fallRows;
+            return false;
+        }
+    }
+    // the draw's buffers (their generations: a new GPU copy = another BLAS) and its material inputs (shaders, the bound textures, the tag's / engine's material)
+    {
+        const d3d9::ResourceRef vr = d.vertexBuffer != nullptr ? d.vertexBuffer->ref() : d3d9::ResourceRef{};
+        const d3d9::ResourceRef ir = d.indexBuffer != nullptr ? d.indexBuffer->ref() : d3d9::ResourceRef{};
+        const rt::BlasKey& bk = b->key;
+        if (d.vertexBuffer == nullptr || d.indexBuffer == nullptr || bk.vb != vr.id || bk.vbGen != vr.generation || bk.ib != ir.id || bk.ibGen != ir.generation ||
+            bk.vertexOffset != d.vertexOffset || bk.stride != d.vertexStride || bk.first != d.first || bk.primitives != d.primitives || bk.baseVertex != d.baseVertex) {
+            if (apply) ++f8s_.fallBlas;
+            return false;
+        }
+        const void* tagMaterial = (s.engineDepth || s.engineBatch) ? s.engineMaterial : d.tag->material;
+        if (RtMaterials::signature(d.engineVs, d.enginePs, tagMaterial, d.textures) != s.matSig) {
+            if (apply) ++f8s_.fallMaterial;
+            return false;
+        }
+    }
+    // an instanced draw: the instance indices observe() would read now = the script's (they pick the rows' registers)
+    if (s.instanced) {
+        float index[kMaxBatch];
+        const bool fromStream = readInstanceIndex(dev_, s.stream, s.streamOffset, s.n, index);
+        if (fromStream != s.fromStream || (fromStream && std::memcmp(index, s.index.data(), sizeof(float) * s.n) != 0)) {
+            if (apply) ++f8s_.fallRows;
+            return false;
+        }
+    }
+    // the engine material of a depth-only / batch draw (learnEngineMaterials): the same pointer, not due for its re-check
+    if (s.engineDepth && (b->engineChecked == 0 || b->engineDead || frame >= b->engineChecked + kMaterialRefresh * 4 || b->engineSingle != s.engineMaterial)) {
+        if (apply) ++f8s_.fallEngine;
+        return false;
+    }
+    if (s.engineBatch && (batchHeuristic_ || batchMaterialOf(d.tag, d.instanced, d.primitiveType, d.first, d.primitives) != s.engineMaterial)) {
+        if (apply) ++f8s_.fallEngine;
+        return false;
+    }
+    // the material slot materialOf would hit: same signature, alive, not due for its refresh
+    Blas::MaterialSlot* slot = nullptr;
+    for (Blas::MaterialSlot& m : b->materials) {
+        if (m.id == s.material && m.sig == s.matSig) slot = &m;
+    }
+    const RtMaterial* mat = slot != nullptr ? materials_.get(slot->id) : nullptr;
+    if (slot == nullptr || mat == nullptr || mat->dead || frame >= slot->resolved + kMaterialRefresh) {
+        if (apply) ++f8s_.fallMaterial;
+        return false;
+    }
+    // the cascades' rule for ranges the main view draws blended (observe: a recent blended draw and no recent opaque one = not part of the scene)
+    if (!s.mainOpaque && !blendedKeys_.empty()) {
+        if (const auto it = blendedKeys_.find(b->key); it != blendedKeys_.end() && it->second + kOpaqueRecent >= frame && b->opaqueMainFrame + kOpaqueRecent < frame) {
+            if (apply) ++f8s_.fallBlended;
+            return false;
+        }
+    }
+    if (!apply) return true;  // (a check frame's question: would the record have been replayed?)
+    // the effects of observe(): materialOf's slot hit (+ its memo), the BLAS's use stamps, each sighting
+    const double now = dev_.secondsSinceCreate();
+    slot->used = frame;
+    slot->rank = std::max(slot->rank, s.rank);
+    const bool overlay = slot->overlay;
+    b->memoFrame = frame;
+    b->memoSig = s.matSig;
+    b->memoRank = s.rank;
+    b->memoBlending = false;
+    b->memoId = slot->id;
+    b->memoOverlay = overlay;
+    b->lastUsedFrame = frame;
+    b->lastUsedTime = now;
+    if (s.mainOpaque) b->opaqueMainFrame = frame;
+    const d3d9::scene::CameraBlock& camBlock = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
+    for (const F81Sight& g : s.sights) {
+        if (camBlock.valid && limits_.radius > 0.0f && b->bounds.valid()) {
+            const rt::Sphere sp = rt::worldSphere(b->bounds, g.rows);
+            const float dx = sp.c[0] - camBlock.position[0], dy = sp.c[1] - camBlock.position[1], dz = sp.c[2] - camBlock.position[2];
+            if (std::sqrt(dx * dx + dy * dy + dz * dz) - sp.r > limits_.radius) continue;  // (beyond the radius: observe skips the sighting too)
+        }
+        ++iv_.sightings;
+        ++f8s_.sights;
+        auto sr = registry_.see(g.key, b->id, g.rows, g.owner, g.flags, g.data, g.view, frame, now);
+        rt::Registry::Instance* in = sr.first;
+        if (sr.second) noteNewInstance(*b, frame);
+        if (in != nullptr) applyMaterial(*in, s.material, s.rank, overlay, frame);
+        if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
+    }
+    return true;
+}
+
+bool RtScene::f81Same(const F81Script& a, const F81Script& b, const char*& what) const {
+    what = nullptr;
+    if (a.blas != b.blas) what = "BLAS";
+    else if (a.sights.size() != b.sights.size()) what = "instance count";
+    else if (a.mainOpaque != b.mainOpaque || a.rank != b.rank || a.engineMaterial != b.engineMaterial) what = "draw class / engine material";
+    else if (a.material != b.material) {
+        // (a re-resolved slot gives a new id: the same content is the same record)
+        const RtMaterial* x = materials_.get(a.material);
+        const RtMaterial* y = materials_.get(b.material);
+        const bool same = x != nullptr && y != nullptr && x->albedo == y->albedo && x->opacity == y->opacity && x->sampler == y->sampler && x->uvSet == y->uvSet &&
+                          x->alpha == y->alpha && x->masked == y->masked && x->colour == y->colour && std::memcmp(x->uvMap, y->uvMap, sizeof(x->uvMap)) == 0;
+        if (!same && x != nullptr) what = "material";
+    }
+    if (what == nullptr) {
+        for (std::size_t i = 0; i < a.sights.size(); ++i) {
+            const F81Sight& p = a.sights[i];
+            const F81Sight& q = b.sights[i];
+            if (p.key != q.key || p.reg != q.reg) what = "instance key";
+            else if (std::memcmp(p.rows.data(), q.rows.data(), sizeof(p.rows)) != 0) what = "transform";
+            else if (p.flags != q.flags) what = "flags (mask)";
+            else if (p.data != q.data || p.view != q.view || p.owner != q.owner) what = "data / view / owner";
+            if (what != nullptr) break;
+        }
+    }
+    return what == nullptr;
+}
+
+// the end of an armed observation: the script is the record's (a check frame compares it with the stored one first)
+void RtScene::f81Finish(d3d9::Device& dev) {
+    F81Script& r = f81Scratch_;
+    f81Rec_ = nullptr;
+    const F81Key k = f81Arm_;
+    f81Arm_.valid = false;
+    if (!k.valid || k.cd == nullptr) return;
+    F81Script& s = f81Script(k);
+    // the rows came from the windows the record owns (else a replay could not check them)
+    bool windows = true;
+    for (const F81Sight& g : r.sights) {
+        const float* src = f81Rows(k, g.reg);
+        if (src == nullptr || std::memcmp(src, g.rows.data(), sizeof(g.rows)) != 0) windows = false;
+    }
+    if (!windows) ++f8s_.noWindow;
+    const bool ok = r.reached && !r.bad && windows;
+    if (f81ArmCompare_ && s.valid && ok) {
+        ++f8s_.compared;
+        const char* what = nullptr;
+        if (f81Same(s, r, what)) {
+            ++f8s_.matched;
+        } else {
+            ++f8s_.differing;
+            if (f81FirstDiff_ == nullptr) f81FirstDiff_ = what;
+            if (f8s_.differing <= 8) {
+                spdlog::warn("rt: scene records: DIFFERING script of record {} ({} sightings -> {}, BLAS {} -> {}, material {} -> {}): {}", k.id, s.sights.size(), r.sights.size(), s.blas, r.blas,
+                             s.material, r.material, what != nullptr ? what : "?");
+            }
+        }
+    }
+    f81ArmCompare_ = false;
+    if (!ok) {
+        s.valid = false;
+        if (!r.reached) ++f8s_.unreplayable;
+        return;
+    }
+    ++f8s_.learned;
+    const std::uint8_t cls = s.cls;
+    s.sights.swap(r.sights);
+    s.cd = k.cd;
+    s.sig = k.sig;
+    s.epoch = k.epoch;
+    s.blas = r.blas;
+    s.material = r.material;
+    s.rank = r.rank;
+    s.matSig = r.matSig;
+    s.mainOpaque = r.mainOpaque;
+    s.tagMaterial = r.tagMaterial;
+    s.engineMaterial = r.engineMaterial;
+    s.engineDepth = r.engineDepth;
+    s.engineBatch = r.engineBatch;
+    s.instanced = r.instanced;
+    s.fromStream = r.fromStream;
+    s.stream = r.stream;
+    s.streamOffset = r.streamOffset;
+    s.n = r.n;
+    s.index.swap(r.index);
+    s.exclEpoch = exclEpoch_;
+    s.learned = dev.frameValue();
+    s.state = f81State(k.imm != nullptr ? *k.imm : static_cast<const d3d9::Device::CachedDraw*>(k.cd)->query);
+    s.salt = static_cast<std::uint8_t>(tableMix(k.id, 0xF81) >> 40);
+    s.valid = true;
+    (void)cls;
+    s.entity = r.entity;
+    s.opDesc = r.opDesc;
+    s.cls = r.cls;
+}
+
+// the TLAS compare of a check frame (observe path) with the frame before it (record path): the world instances by id with a hash of everything the GPU sees of them
+// (transform, mask, flags, BLAS address, record words); only while the camera stood still (else instances legitimately age / appear)
+void RtScene::f81TlasDigest(std::vector<F81Digest>& digest, const float camera[3]) {
+    const std::uint64_t frame = dev_.frameValue();
+    if (frame % kRecordCheck == 0 && f81PrevFrame_ + 1 == frame && !f81PrevDigest_.empty()) {
+        if (std::memcmp(camera, f81PrevCamera_, sizeof(f81PrevCamera_)) != 0) {
+            ++f8s_.tlasSkipped;
+        } else if (sceneEvents_ != f81PrevEvents_) {
+            ++f8s_.tlasEvents;  // (an instance came / went, a BLAS was built / dropped between the two builds)
+        } else {
+            ++f8s_.tlasPairs;
+            std::size_t i = 0, j = 0, diff = 0;
+            while (i < digest.size() || j < f81PrevDigest_.size()) {
+                const auto note = [&](const char* what, const F81Digest* now, const F81Digest* before) {
+                    ++diff;
+                    if (f8s_.tlasLogged >= 12) return;
+                    ++f8s_.tlasLogged;
+                    const F81Digest& e = now != nullptr ? *now : *before;
+                    spdlog::info("rt: scene records: TLAS difference (check frame {}): instance #{} {} at ({:.0f}, {:.0f}, {:.0f}): mask 0x{:x} / 0x{:x}, flags 0x{:x} / 0x{:x}, BLAS 0x{:x} / 0x{:x}, "
+                                 "albedo {} / {}, alpha 0x{:x} / 0x{:x} (check frame / frame before)",
+                                 frame, e.id, what, e.t[0], e.t[1], e.t[2], now ? now->mask : 0u, before ? before->mask : 0u, now ? now->flags : 0u, before ? before->flags : 0u,
+                                 now ? now->as : 0ull, before ? before->as : 0ull, now ? now->albedo : 0u, before ? before->albedo : 0u, now ? now->alpha : 0u, before ? before->alpha : 0u);
+                };
+                if (j >= f81PrevDigest_.size() || (i < digest.size() && digest[i].id < f81PrevDigest_[j].id)) {
+                    note("only in the check frame", &digest[i], nullptr);
+                    ++i;
+                } else if (i >= digest.size() || f81PrevDigest_[j].id < digest[i].id) {
+                    note("only in the frame before", nullptr, &f81PrevDigest_[j]);
+                    ++j;
+                } else {
+                    if (digest[i].hash != f81PrevDigest_[j].hash) note("content differs", &digest[i], &f81PrevDigest_[j]);
+                    ++i;
+                    ++j;
+                }
+            }
+            f8s_.tlasInstances += digest.size();
+            f8s_.tlasDiffering += diff;
+            if (diff != 0 && f8s_.tlasDiffering == diff) {
+                spdlog::warn("rt: scene records: TLAS of check frame {} differs from the frame before in {} of {} world instances (still camera)", frame, diff, digest.size());
+            }
+        }
+    }
+    f81PrevDigest_.swap(digest);
+    f81PrevEvents_ = sceneEvents_;
+    std::memcpy(f81PrevCamera_, camera, sizeof(f81PrevCamera_));
+    f81PrevFrame_ = frame;
+}
+
+void RtScene::logRecords(double frames) {
+    if (!f81On_ && !f81TlasAlways_ && f8s_.asked[0] + f8s_.asked[1] + f8s_.asked[2] == 0) return;
+    const F81Stats& t = f8s_;
+    const auto sum3 = [](const std::uint64_t (&a)[3]) { return a[0] + a[1] + a[2]; };
+    const std::uint64_t asked = sum3(t.asked), replayed = sum3(t.replayed);
+    std::size_t scripts = 0;
+    for (const F81Script& s : f81_) scripts += s.valid ? 1 : 0;
+    for (const auto& [cd, s] : f81c_) scripts += s.valid ? 1 : 0;
+    spdlog::info("rt: scene records (5 s): {}; per frame: owned draws asked {:.0f}, replayed from their scripts {:.0f} ({:.1f} %; main solid {}/{}, z {}/{}, cascades {}/{}; composed packet replays {}/{}), sightings replayed {:.0f}, "
+                 "{:.3f} ms; scripts {} (learned {}); observed in full: new {}, record changed {}, rewritten {}, relearn {}, check frame {}, rows moved {}, BLAS {}, material slot {}, engine material {}, "
+                 "blended range {}; not replayable: no sighting stage {}, no material {}, rows not from the windows {}, SpeedTree / glass {}; compare: {} scripts compared, matched {}, DIFFERING {}{}; "
+                 "TLAS check frames vs the frame before (still camera, no scene event) {} ({} instances), differing instances {}, skipped: camera moved {}, scene event {}",
+                 f81On_ ? "on" : "off", static_cast<double>(asked) / frames, static_cast<double>(replayed) / frames, asked != 0 ? 100.0 * static_cast<double>(replayed) / static_cast<double>(asked) : 0.0,
+                 t.replayed[0], t.asked[0], t.replayed[1], t.asked[1], t.replayed[2], t.asked[2], t.composedReplayed, t.composedAsked, static_cast<double>(t.sights) / frames, t.ms / frames, scripts, t.learned, t.fallNew,
+                 t.fallInvalid, t.fallChanged, t.fallRelearn, t.fallCheck, t.fallRows, t.fallBlas, t.fallMaterial, t.fallEngine, t.fallBlended, t.unreplayable, t.noMaterial, t.noWindow,
+                 t.glass, t.compared, t.matched, t.differing, f81FirstDiff_ != nullptr ? std::format(" (first: {})", f81FirstDiff_) : std::string(), t.tlasPairs, t.tlasInstances,
+                 t.tlasDiffering, t.tlasSkipped, t.tlasEvents);
+    if (tts_.runs != 0) {
+        spdlog::info("rt: scene records: owned SpeedTree runs (5 s, per frame): {:.0f} runs, {:.0f} from their templates ({:.1f} %), {:.0f} sightings; templates {} (learned {}), refused {}; "
+                     "compare: {} templates compared, matched {}, DIFFERING {}",
+                     static_cast<double>(tts_.runs) / frames, static_cast<double>(tts_.fast) / frames, 100.0 * static_cast<double>(tts_.fast) / static_cast<double>(tts_.runs),
+                     static_cast<double>(tts_.sightings) / frames, treeTpl_.size(), tts_.learned, tts_.refused, tts_.compared, tts_.matched, tts_.differing);
+    }
+    tts_ = {};
+    f8s_ = {};
+    f81FirstDiff_ = nullptr;
+}
+
+
+// ---- F8-1: owned SpeedTree runs from their templates -----------------------------------------------------------------------------------------------------------------
+
+bool RtScene::treeTplGuards(const TreeTpl& t, const d3d9::ReplaceQuery& q, const rt::BlasKey& key, Blas*& b, Blas::MaterialSlot*& slot) {
+    const std::uint64_t frame = dev_.frameValue();
+    b = nullptr;
+    slot = nullptr;
+    if (!t.valid || t.exclEpoch != exclEpoch_ || t.animated != animated_ || !(t.key == key) || q.tag == nullptr || q.tag->material != t.tagMaterial || q.tag->opDesc > 1 != t.leaf) return false;
+    b = findBlas(t.blas);
+    if (b == nullptr || b->state == BlasState::Failed || !(b->key == key) || b->glass) return false;
+    if (RtMaterials::signature(q) != t.matSig) return false;
+    for (Blas::MaterialSlot& m : b->materials) {
+        if (m.id == t.material && m.sig == t.matSig) slot = &m;
+    }
+    const RtMaterial* mat = slot != nullptr ? materials_.get(slot->id) : nullptr;
+    return slot != nullptr && mat != nullptr && !mat->dead && frame < slot->resolved + kMaterialRefresh;
+}
+
+bool RtScene::treeRunFast(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
+    const void* cd = dev.ownedObsDraw();
+    if (cd == nullptr || dev.ownedObsInfo() != nullptr || !q.instanced || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.vertexBuffer->ringCopied() ||
+        q.indexBuffer->ringCopied()) {
+        return false;
+    }
+    ++tts_.runs;
+    const std::uint64_t frame = dev.frameValue();
+    TreeTpl& t = treeTpl_[cd];
+    const bool check = frame % kRecordCheck == 0;
+    const rt::BlasKey key = keyOf(q);
+    Blas* b = nullptr;
+    Blas::MaterialSlot* slot = nullptr;
+    const bool guards = treeTplGuards(t, q, key, b, slot);
+    if (!guards || check || (frame + t.salt) % kRecordRelearn == 0) {
+        if (t.valid && !guards) ++tts_.refused;
+        treeTplArm_ = cd;
+        treeTplCompare_ = check && guards;
+        treeTplScratch_ = {};
+        return false;
+    }
+    ++tts_.fast;
+    // materialOf's slot hit + memo, the BLAS's stamps (as observe() leaves them)
+    const double now = dev.secondsSinceCreate();
+    slot->used = frame;
+    slot->rank = std::max(slot->rank, t.rank);
+    const bool overlay = slot->overlay;
+    b->memoFrame = frame;
+    b->memoSig = t.matSig;
+    b->memoRank = t.rank;
+    b->memoBlending = false;
+    b->memoId = slot->id;
+    b->memoOverlay = overlay;
+    b->lastUsedFrame = frame;
+    b->lastUsedTime = now;
+    b->opaqueMainFrame = frame;  // (the main view's solid pass)
+    if (t.leaf) b->animatedOnly = true;
+    const d3d9::scene::CameraBlock& camBlock = dev.camera().valid ? dev.camera() : dev.lastCamera();
+    const std::uint32_t n = std::min(q.instances, kMaxBatch);
+    TreeBatch treeBatch;
+    const bool treeBatchOk = animated_;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        // (the identity instance stream of the owned runs: instance i = row i, observe()'s ramp case)
+        const std::uint32_t reg = kInstanceDataBase + 4 * i + 1;
+        if (reg + 2 >= kInstanceDataEnd) continue;
+        rt::Rows rows;
+        for (std::uint32_t r = 0; r < 3; ++r) std::memcpy(&rows[r * 4], dev.vsConstant(reg + r), sizeof(float) * 4);
+        if (!rt::finite(rows)) continue;
+        if (camBlock.valid && limits_.radius > 0.0f && b->bounds.valid()) {
+            const rt::Sphere sp = rt::worldSphere(b->bounds, rows);
+            const float dx = sp.c[0] - camBlock.position[0], dy = sp.c[1] - camBlock.position[1], dz = sp.c[2] - camBlock.position[2];
+            if (std::sqrt(dx * dx + dy * dy + dz * dz) - sp.r > limits_.radius) continue;
+        }
+        ++iv_.sightings;
+        ++tts_.sightings;
+        auto sr = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, 0, t.flags, t.alphaWord, t.view, frame, now);
+        rt::Registry::Instance* in = sr.first;
+        if (sr.second) noteNewInstance(*b, frame);
+        if (in != nullptr) applyMaterial(*in, t.material, t.rank, overlay, frame);
+        if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
+        if (in != nullptr) treeSetNote(dev, *in);
+        if (in != nullptr && treeBatchOk) observeTree(dev, q, *b, *in, rows, treeBatch, i, n);
+    }
+    return true;
 }
 
 // a plain draw of the table's class has just been observed in full (`in` = its registry instance after the sighting): compare it with its entry
@@ -1220,6 +1896,7 @@ void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
     // water by material (all of its meshes) and draw range; alpha-blended meshes by draw range only, and only until the main
     // view draws that range opaque (objects fading in are drawn blended for a while)
     if (water && q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.insert(q.tag->material).second) {
+        ++exclEpoch_;  // (F8-1: the scripts learned before it may hold draws of it)
         spdlog::info("rt: scene: water material {} '{}' left out of the RT scene", q.tag->material,
                      q.tag->materialName != nullptr ? q.tag->materialName : "?");
     }
@@ -1227,6 +1904,7 @@ void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
     const rt::BlasKey key = keyOf(q);
     if (water) {
         if (!waterKeys_.insert(key).second) return;
+        ++exclEpoch_;
         if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) dropBlas(it->second->id, false);
         return;
     }
@@ -1473,6 +2151,7 @@ RtScene::Blas* RtScene::findBlas(std::uint64_t id) {
 void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
     Blas* b = findBlas(id);
     if (b == nullptr) return;
+    ++sceneEvents_;
     registry_.removeBlas(id);
     for (const Blas::MaterialSlot& m : b->materials) materials_.release(m.id);
     b->materials.clear();
@@ -1749,6 +2428,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         geoms.push_back(g);
         builds.push_back({b->as.get(), std::span<const rhi::TriangleGeometry>(&geoms.back(), 1), false});
         b->state = BlasState::Built;
+        ++sceneEvents_;
         ++b->serial;
         blasBytes_ += b->as->storageBytes();
         built.push_back(b->id);
@@ -1784,19 +2464,21 @@ void RtScene::evictOverBudget() {
     const std::uint64_t frame = dev_.frameValue();
     const double now = dev_.secondsSinceCreate();
     // without instances for long: dropped even under the budget
-    std::vector<std::uint64_t> stale;
+    // (the LRU list is only gathered when the memory is over the budget: the walk ran every frame, frame-ownership.md 14.30)
+    const bool over = blasBytes_ > limits_.memoryBudget;
+    staleScratch_.clear();
     std::vector<std::pair<std::uint64_t, std::uint64_t>> lru;  // last used frame, id: unused built BLASes
     for (const auto& [id, b] : blas_) {
         if (b.refs != 0) continue;
         if (frame > b.lastUsedFrame + limits_.blasUnusedFrames && now > b.lastUsedTime + limits_.blasUnusedSeconds) {
-            stale.push_back(id);
-        } else if (b.state == BlasState::Built) {
+            staleScratch_.push_back(id);
+        } else if (over && b.state == BlasState::Built) {
             lru.emplace_back(b.lastUsedFrame, id);
         }
     }
-    for (std::uint64_t id : stale) dropBlas(id, true);
+    for (std::uint64_t id : staleScratch_) dropBlas(id, true);
     // over the budget: the least recently used unused ones until 85 % of it
-    if (blasBytes_ <= limits_.memoryBudget) return;
+    if (blasBytes_ <= limits_.memoryBudget) return;  // (stale drops only free memory: not over before = not over now)
     std::sort(lru.begin(), lru.end());
     const std::uint64_t target = limits_.memoryBudget / 100 * 85;
     for (const auto& [last, id] : lru) {
@@ -2109,6 +2791,7 @@ void RtScene::buildProxies(rhi::CommandList& cl) {
         b->proxy.indices = std::move(buf);
         b->proxy.as = std::move(as);
         b->proxy.state = Blas::Proxy::State::Built;
+        ++sceneEvents_;
         blasBytes_ += b->proxy.bytes;
         proxyBytes_ += b->proxy.bytes;
         ++proxiesBuilt_;
@@ -3206,6 +3889,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     }
     const double msDynamic = msSince(t0) - msPre - msCompact - msBuilds;
 
+    const double msLod0 = msSince(t0);
     // characters built this frame (setDynamic) after the world's instances
     std::uint32_t dynCount = 0;
     for (const DynDraw& d : dynUse_) dynCount += d.built ? 1u : 0u;
@@ -3215,7 +3899,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     if (frame % 16 == 0) {
         // the registry's ghosts of volatile ranges (the TLAS skips them anyway): dropped
         registry_.removeIf([&](const rt::Registry::Instance& in) {
-            const Blas* b = findBlas(in.blas);
+            const Blas* b = blasOf(in);
             return b != nullptr && !in.pinned && b->volatileUntil >= frame && in.lastFrame + 4 * kVolatileKeep < frame;
         });
     }
@@ -3237,11 +3921,11 @@ void RtScene::record(d3d9::PassContext& ctx) {
             if (in.lod == 0 && d < nearest) {
                 nearBlas_.insert(in.blas);
                 if (released_ != 0) {
-                    if (Blas* rb = findBlas(in.blas); rb != nullptr && rb->released) requestRebuild(*rb);
+                    if (Blas* rb = blasOf(in); rb != nullptr && rb->released) requestRebuild(*rb);
                 }
                 continue;
             }
-            Blas* b = findBlas(in.blas);
+            Blas* b = blasOf(in);
             if (b == nullptr || !lodEligible(*b) || (in.flags & abi::kRtRecordAlphaTested) != 0) {
                 in.lod = 0;
                 nearBlas_.insert(in.blas);
@@ -3271,7 +3955,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         }
     }
     const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this, frame, &camera](const rt::Registry::Instance& in) {
-        const Blas* b = findBlas(in.blas);
+        const Blas* b = blasOf(in);
         // an object the cascades draw at another level of detail than the main view: the main view's
         if (b == nullptr || (b->state != BlasState::Built && !b->rebuild) || registry_.supersededBy(in, viewBit(View::Main))) return false;
         if (b->animatedOnly) return false;
@@ -3299,12 +3983,16 @@ void RtScene::record(d3d9::PassContext& ctx) {
     });
     const std::uint32_t worldCount = std::min<std::uint32_t>(static_cast<std::uint32_t>(chosen.size()), tlas_[slot].capacity - dynCount);
     const std::uint32_t n = worldCount + dynCount;
+    const double msSelect = msSince(t0);
     const rhi::RingAlloc ia = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
     const rhi::RingAlloc ra = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
     if (ia.ptr == nullptr || ra.ptr == nullptr) {
         dev_.setRtScene({});
         return;
     }
+    fieldsMemo_.clear();
+    const bool digestFrame = (f81On_ || f81TlasAlways_) && (frame % kRecordCheck == 0 || (frame + 1) % kRecordCheck == 0);
+    digestSrc_.clear();
     auto* insts = static_cast<VkAccelerationStructureInstanceKHR*>(ia.ptr);
     auto* recs = static_cast<abi::RtGeometryRecord*>(ra.ptr);
     std::uint64_t triangles = 0;
@@ -3331,11 +4019,11 @@ void RtScene::record(d3d9::PassContext& ctx) {
     auto& mutableList = registry_.instancesMutable();
     for (std::uint32_t k = 0; k < worldCount; ++k) {
         rt::Registry::Instance& in = mutableList[chosen[k]];
-        Blas& b = *findBlas(in.blas);
+        Blas& b = *blasOf(in);
         // the material (M9 P2): the bindless slots of this frame (a texture that died is gone from the entry)
         const RtMaterial* m = in.material != 0 ? materials_.get(in.material) : nullptr;
         if (m == nullptr || m->dead) m = bestMaterial(b);
-        const MaterialFields mf = materialFields(m);
+        const MaterialFields& mf = fieldsOf(m);
         const std::uint32_t albedoTex = mf.albedoTex;
         const std::uint32_t opacityTex = mf.opacityTex;
         // alpha-tested (the draw's alpha test, fronds, a masked material) and something to test against: non-opaque
@@ -3354,7 +4042,6 @@ void RtScene::record(d3d9::PassContext& ctx) {
         vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                    (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
         vi.accelerationStructureReference = b.as != nullptr ? b.as->address() : 0;  // (released: replaced below by the proxy or the box)
-        insts[k] = vi;
         abi::RtGeometryRecord r{};
         const rt::BlasKey& key = b.key;
         split(b.vbAddress.plus(static_cast<std::int64_t>(key.vertexOffset) + static_cast<std::int64_t>(key.baseVertex) * key.stride).ref, r.vertices);
@@ -3388,7 +4075,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 for (const Blas::Segment& seg : b.segments) {
                     const Blas* sub = seg.blas != 0 ? findBlas(seg.blas) : nullptr;
                     const RtMaterial* sm = sub != nullptr ? bestMaterial(*sub) : seg.material != 0 ? materials_.get(seg.material) : nullptr;
-                    const MaterialFields sf = materialFields(sm);
+                    const MaterialFields& sf = fieldsOf(sm);
                     abi::RtMaterialSegment e{};
                     e.firstPrimitive = seg.firstPrimitive;
                     e.primitiveCount = seg.primitiveCount;
@@ -3425,7 +4112,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
             } else if (rung == 1) {
                 if (b.proxy.state == Blas::Proxy::State::None) queueProxy(b);
                 if (b.proxy.state == Blas::Proxy::State::Built && b.proxy.level == static_cast<std::uint32_t>(lodBias_)) {
-                    insts[k].accelerationStructureReference = b.proxy.as->address();
+                    vi.accelerationStructureReference = b.proxy.as->address();
                     split(addrOf(*b.proxy.indices).ref, r.indices);
                     instTriangles = b.proxy.triangles;
                     proxied = true;
@@ -3444,13 +4131,13 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 if ((in.flags & abi::kRtRecordSpeedTree) != 0) {
                     for (int a2 = 0; a2 < 3; ++a2) h[a2] *= a2 == tall ? 1.0f : kTreeThin;
                 }
-                auto& mat = insts[k].transform.matrix;
+                auto& mat = vi.transform.matrix;
                 for (int row = 0; row < 3; ++row) {
                     const float* A = &in.rows[row * 4];
                     for (int col = 0; col < 3; ++col) mat[row][col] = A[col] * h[col];
                     mat[row][3] = A[0] * c[0] + A[1] * c[1] + A[2] * c[2] + A[3];
                 }
-                insts[k].accelerationStructureReference = box_.as->address();
+                vi.accelerationStructureReference = box_.as->address();
                 const rhi::GpuAddr base = addrOf(*box_.buffer);
                 split(base.ref, r.vertices);
                 split(base.plus(96).ref, r.indices);
@@ -3467,7 +4154,10 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 boxed = true;
             }
         }
+        // (written once, at the end: the ring is write-combined upload memory, never read back)
+        insts[k] = vi;
         recs[k] = r;
+        if (digestFrame) digestSrc_.push_back({vi, r, in.blas, in.lod});
         triangles += instTriangles;
         if (snap) {
             const std::size_t band = rt::lod::bandOf(distance / 100.0f);
@@ -3486,6 +4176,47 @@ void RtScene::record(d3d9::PassContext& ctx) {
             if (!fresh) it->second = std::min<std::uint8_t>(it->second, static_cast<std::uint8_t>(band));
         }
         if (content != nullptr) content->push_back({in.blas, in.id, r.flags, in.material, {in.rows[3], in.rows[7], in.rows[11]}});
+    }
+    if (digestFrame) {
+        // F8-1: the world instances as the GPU gets them (the check frame's against the frame before; from the CPU copies, not the ring)
+        std::vector<F81Digest> digest;
+        digest.reserve(digestSrc_.size());
+        // what is compared: the transform, mask + instance flags, the BLAS (its id and level-of-detail rung: a compaction / rebuild moves the address, not the
+        // content), the geometry record without its buffer addresses (they follow the BLAS) and without the kind bits 8-15 of its flags (the latest sighting's
+        // draw kind, diagnostics only: no shader reads them; an instance two kinds of draw see flips between them with F8-0's relearn frames in either path)
+        for (DigestSrc& src : digestSrc_) {
+            const VkAccelerationStructureInstanceKHR& vi = src.vi;
+            abi::RtGeometryRecord& r = src.r;
+            std::memset(r.vertices, 0, sizeof(r.vertices));
+            std::memset(r.indices, 0, sizeof(r.indices));
+            r.flags &= ~(0xFFu << abi::kRtRecordKindShift);
+            std::uint64_t h = 0x9E3779B97F4A7C15ull;
+            const auto fold = [&h](const void* p, std::size_t n) {
+                const auto* b = static_cast<const std::uint8_t*>(p);
+                for (std::size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
+            };
+            fold(vi.transform.matrix, sizeof(vi.transform.matrix));
+            const std::uint32_t maskFlags = vi.mask | (vi.flags << 8);
+            fold(&maskFlags, 4);
+            fold(&src.blas, 8);
+            fold(&src.lod, 1);
+            std::memset(r.segments, 0, sizeof(r.segments));  // (the segment table's ring address moves every frame)
+            fold(&r, sizeof(r));
+            F81Digest e;
+            e.id = r.instanceId;
+            e.hash = h;
+            e.as = src.blas;
+            e.mask = maskFlags;
+            e.flags = r.flags;
+            e.albedo = r.albedoTex;
+            e.alpha = r.alpha;
+            e.t[0] = vi.transform.matrix[0][3];
+            e.t[1] = vi.transform.matrix[1][3];
+            e.t[2] = vi.transform.matrix[2][3];
+            digest.push_back(e);
+        }
+        std::sort(digest.begin(), digest.end());
+        f81TlasDigest(digest, camera);
     }
     if (snap) {
         for (const auto& [id, band] : nearestBand) {
@@ -3524,7 +4255,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 if (sb == nullptr || in == nullptr) continue;
                 const RtMaterial* m = in->material != 0 ? materials_.get(in->material) : nullptr;
                 if (m == nullptr || m->dead) m = bestMaterial(*sb);
-                const MaterialFields mf = materialFields(m);
+                const MaterialFields& mf = fieldsOf(m);
                 const bool wantsCut = (in->flags & abi::kRtRecordAlphaTested) != 0 || (m != nullptr && m->masked);
                 const bool alpha = wantsCut && m != nullptr && mf.opacityTex != 0 && (m->uvSet & abi::kRtUvOpacityOpaque) == 0;
                 vi.mask = alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
@@ -3570,7 +4301,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
             r.instanceId = b.id;
             r.alpha = 8u;
             const RtMaterial* m = b.material != 0 ? materials_.get(b.material) : nullptr;
-            const MaterialFields mf = materialFields(m != nullptr && !m->dead ? m : nullptr);
+            const MaterialFields& mf = fieldsOf(m != nullptr && !m->dead ? m : nullptr);
             r.albedoTex = mf.albedoTex;
             r.albedoSampler = mf.albedoSampler;
             r.uvSet = mf.uvSet | abi::kRtUvOpacityOpaque;
@@ -3603,6 +4334,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     iv_.speedTree = speedTrees;
     iv_.segments = segs.size();
 
+    const double msWrite = msSince(t0);
     Tlas& t = tlas_[slot];
     {
         d3d9::RegionScope r(dev_, "rt.tlas build");
@@ -3627,6 +4359,13 @@ void RtScene::record(d3d9::PassContext& ctx) {
     ++iv_.frames;
     const double passMs = msSince(t0);
     iv_.passCpuMs += passMs;
+    // F8-1 census: the pass's parts (upkeep / compactions + BLAS builds + proxies + characters / LOD rungs + selection / instance + record writing / TLAS)
+    recMs_[0] += msPre;
+    recMs_[1] += msDynamic + msCompact + msBuilds;
+    recMs_[2] += msLod0 - (msPre + msCompact + msBuilds + msDynamic);
+    recMs_[3] += msSelect - msLod0;
+    recMs_[4] += msWrite - msSelect;
+    recMs_[5] += passMs - msWrite;
     if (passMs > 50.0) {
         spdlog::info("rt: scene: slow pass: {:.1f} ms CPU ({} BLAS built this interval, {} instances; upkeep {:.1f}, compactions {:.1f}, BLAS builds {:.1f}, characters / trees {:.1f}, "
                      "instances + TLAS {:.1f} ms)",
@@ -3666,6 +4405,29 @@ void RtScene::logStats(bool force) {
                  static_cast<double>(iv_.observed) / f, static_cast<double>(iv_.skipped) / f, static_cast<double>(iv_.sightings) / f, iv_.buildCpuMs / f, iv_.passCpuMs / f,
                  std::string("-PerfFrame: pass rt.scene"));
     logTable(f);
+    logRecords(f);
+    if (dev_.perfEnabled()) {
+        // F8-1 census (frame-ownership.md 14.30): who calls observe() and what it costs, per frame
+        static constexpr const char* kK[5] = {"static", "instanced", "SpeedTree", "skinned", "other"};
+        static constexpr const char* kV[4] = {"main z", "main solid", "main alpha", "shadow"};
+        std::string line;
+        for (int k = 0; k < 5; ++k) {
+            for (int v = 0; v < 4; ++v) {
+                for (int o = 0; o < 2; ++o) {
+                    const ObsCensus& c = census_[k][v][o];
+                    if (c.calls == 0) continue;
+                    line += std::format(" [{} {} {}: {:.0f} calls, {:.3f} ms, {:.0f} sightings]", kK[k], kV[v], o ? "owned" : "composed", static_cast<double>(c.calls) / f, c.ms / f,
+                                        static_cast<double>(c.sightings) / f);
+                }
+            }
+        }
+        spdlog::info("rt: scene census (5 s, per frame): observe{}; observeOwned {:.3f} ms (incl. its observe calls); pass: upkeep {:.3f}, builds / compactions / characters {:.3f}, "
+                     "LOD rungs {:.3f}, selection {:.3f}, instances + records {:.3f}, TLAS {:.3f} ms",
+                     line, bulkMs_ / f, recMs_[0] / f, recMs_[1] / f, recMs_[2] / f, recMs_[3] / f, recMs_[4] / f, recMs_[5] / f);
+    }
+    std::memset(census_, 0, sizeof(census_));
+    bulkMs_ = 0.0;
+    std::fill(std::begin(recMs_), std::end(recMs_), 0.0);
     const RtMaterials::Counters mc = materials_.takeCounters();
     spdlog::info("rt: scene: materials {} (per frame: {:.1f} resolves, {:.3f} ms; interval: {} uv evaluations, graph {} (pool image {}) / bytecode s9 {} / "
                  "no texture {}, approximate {}, failed {}, active shader != material's {}); records: textured {}, untextured {}, cut-out {}, segmented {} ({} segments; "

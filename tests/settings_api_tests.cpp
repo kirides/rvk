@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 158);  // (14.29: native.owned_shadow_views; 14.26: native.own_particles, native.owned_decals; 14.24: native.own_sky, native.own_gui; 14.20: native.owned_ordered; 14.19: native.owned_instances; 14.15: native.rigid_motion; F4-5: native.tree_wind; S-5: native.own_foliage; 14.13: native.bone_motion; S-4: native.vertex_pull) 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
+    CHECK(n == 159);  // (14.30: native.rt_records; 14.29: native.owned_shadow_views; 14.26: native.own_particles, native.owned_decals; 14.24: native.own_sky, native.own_gui; 14.20: native.owned_ordered; 14.19: native.owned_instances; 14.15: native.rigid_motion; F4-5: native.tree_wind; S-5: native.own_foliage; 14.13: native.bone_motion; S-4: native.vertex_pull) 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 96);
     CHECK(info.size == 96);

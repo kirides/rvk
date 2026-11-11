@@ -138,6 +138,11 @@ std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& 
     setStreamSource(1, ramp, 0, 4);
     loadOwnedRegisters(ow);
     treeObservedFrame_ = frameValue();
+    struct RunScope {  // F8-1: the tree run's retained draw for the observers (ownedObsDraw; no record: ownedObsInfo stays null)
+        Device& d;
+        explicit RunScope(Device& dev, const CachedDraw* c) : d(dev) { d.obsDraw_ = c; }
+        ~RunScope() { d.obsDraw_ = nullptr; }
+    } runScope(*this, &c);
     std::uint32_t shown = 0;
     for (std::uint32_t at = 0; at < count; at += kBatch) {
         const std::uint32_t n = std::min(kBatch, count - at);

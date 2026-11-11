@@ -2946,6 +2946,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeRtRecords = &reg.add({
+        .key = "native.rt_records",
+        .label = "Native frame: RT scene from the owned records",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F8-1 (docs/research/frame-ownership.md 14.30; Full, needs native.owned_persistent): the ray tracing scene keeps, per owned persistent draw (static and "
+                       "instanced meshes, main view and sun cascades), what its last full observation added to the scene (instances, transforms, flags, BLAS, material) and "
+                       "replays that while the record, the rows its windows hold and the material are unchanged, instead of observing the draw again; every 10th frame "
+                       "everything is observed in full and compared (rvk.log `rt: scene records (5 s)`: DIFFERING must stay 0). Off by default.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeBoneMotion = &reg.add({
         .key = "native.bone_motion",
         .label = "Native frame: bone-history motion",

@@ -131,6 +131,15 @@ void StaticOps::stagesReport() {
         const bool twSetting = rs.nativeTreeWind != nullptr && rs.nativeTreeWind->asInt() != 0;
         line += stage("tree_wind", twSetting, tw.armed, a, std::format("{} tree instances by compute, {} of them from owned runs", a, o));
     }
+    // F8-1: the RT scene from the owned record set (native.rt_records; acted = owned draws whose sightings were replayed from their scripts in the window)
+    {
+        static std::uint64_t last = 0;
+        const enh::RtRecordsState st = enh::rtRecordsState();
+        const std::uint64_t a = st.replayed - last;
+        last = st.replayed;
+        line += stage("rt_records", settingOn(rs.nativeRtRecords), st.armed, a, std::format("{} owned draws replayed from their record scripts", a),
+                      needsOf(rs.nativeRtRecords, {rs.nativeOwnedPersistent}));
+    }
     // 14.13: bone-history motion (native.bone_motion, restart; acted = skinned solid draws drawn with the bone-motion forms, composed + owned records, in the window)
     {
         static std::uint64_t last = 0;

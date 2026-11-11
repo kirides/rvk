@@ -121,6 +121,9 @@ public:
         // F2c-4b: two unlike rank-4 draws gave this instance different materials in one frame (an instanced + a plain draw, two passes on one range): the last one wins, so the
         // material depends on which draws are observed: such an instance is never held by a table entry (its draws stay on the observed path)
         bool ambiguous = false;
+        // the owner's object for `blas` (RtScene: its Blas node, stable while the instance lives: a BLAS's instances are removed before it goes), set by onAdded;
+        // the per-frame loops read it instead of a lookup by id (frame-ownership.md 14.30)
+        mutable void* user = nullptr;
     };
     struct Counters {
         std::uint64_t added = 0, replaced = 0, aged = 0, tooFar = 0, capped = 0, dropped = 0;
