@@ -94,7 +94,11 @@ inline constexpr int kPortDofDownTm = kPostUnitCount - 1, kPortDofTm = kPostUnit
 
 class OwnPost {
 public:
-    enum class Mode : std::uint8_t { Off, On, Compare };
+    // Owned (F12 / F13 owned records, frame-ownership.md 14.34; native.own_sky / native.own_gui only): On, plus the sky dome / the sprite flushes drawn from
+    // persistent / pulled records on the lean frames (the composition skipped), composed + compared on the check frames
+    enum class Mode : std::uint8_t { Off, On, Compare, Owned };
+    static bool portsOn(Mode m) { return m == Mode::On || m == Mode::Owned; }
+    static const char* modeName(Mode m) { return m == Mode::Off ? "off" : m == Mode::On ? "on" : m == Mode::Compare ? "compare" : "owned"; }
     explicit OwnPost(d3d9::Device& dev);
     ~OwnPost();
     OwnPost(const OwnPost&) = delete;
@@ -178,12 +182,18 @@ public:
     // a composed draw of the class: drawn with our shaders (`ours`) or kept on the engine's (`why`)
     void countScene(Scene which, bool ours, const char* why);
     std::uint64_t sceneActs(Scene which) const { return sceneActs_[static_cast<std::size_t>(which)]; }
+    // F12 / F13 owned records (14.34): units drawn from records (a sky dome draw from its persistent record, a sprite flush from pulled records)
+    void countOwned(Scene which) { ++ownedActs_[static_cast<std::size_t>(which)]; }
+    std::uint64_t ownedActs(Scene which) const { return ownedActs_[static_cast<std::size_t>(which)]; }
     // Compare: a 2D scratch image of `src`'s size and format (any face / level: the sky cube's faces), `tag` keeps two scratch images of one size apart; `copy` = it
     // starts as a copy of `src` (recorded now)
     d3d9::Surface* scratchOf(d3d9::Surface* src, int tag, bool copy);
     // draws skipped so far (a shader still compiling, a D3D12 PSO still building): a compare whose two draws ran while it moved is dropped (counted)
     std::uint64_t drawSkips();
     void countDroppedCompare() { ++droppedCompares_; }
+    // F13 owned records (14.34): the pulled sprite shaders (shaders/post/fx/gui_main_pull.*: the record on instance-rate inputs TEXCOORD8..12, the texture slot
+    // per record) for the gui effect's engine shaders `engineVs` / `enginePs` (only the pair gui_main.vert / .frag has them); false + `why` until built
+    bool guiPulled(const void* engineVs, const void* enginePs, const d3d9::Shader*& vs, const d3d9::Shader*& ps, const char** why);
 
     // counters (rvk.log `native: own post`)
     struct Stats {
@@ -209,7 +219,7 @@ private:
     };
     // ---- F12 / F13 ----
     std::array<Mode, 3> sceneMode_{};
-    std::array<std::uint64_t, 3> sceneActs_{};
+    std::array<std::uint64_t, 3> sceneActs_{}, ownedActs_{};
     struct SceneCounts {
         std::uint64_t draws = 0, ours = 0, left = 0;
         std::string why;
@@ -220,6 +230,12 @@ private:
     std::uint32_t sceneScratchNext_ = 0;
     std::uint64_t droppedCompares_ = 0;
     void reportScene();
+    void buildGuiPulled();
+    std::array<std::future<rhi::ShaderModule>, 2> guiPullBuilding_;
+    std::array<rhi::ShaderModule, 2> guiPullModule_{};
+    std::array<std::uint8_t, 2> guiPullState_{};  // 0 not built, 1 building, 2 ready, 3 failed
+    std::shared_ptr<d3d9::Shader> guiPullVs_, guiPullPs_;
+    const void* guiPullFor_[2]{};
     // ---- S-7d ----
     void buildFxPorts();
     void reportFx();
@@ -311,5 +327,6 @@ OwnPost* ownPost();
 void registerOwnPost(OwnPost* p, OwnPost* only = nullptr);  // (OwnPost's constructor / destructor; `only`: cleared only while it is that one)
 int ownSceneMode(OwnPost::Scene which);
 std::uint64_t ownSceneActs(OwnPost::Scene which);
+std::uint64_t ownSceneOwnedActs(OwnPost::Scene which);
 
 }  // namespace rvk::native

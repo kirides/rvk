@@ -1440,6 +1440,10 @@ public:
     // asks (no side effects), ownedPrepTexture makes it ready exactly as prepareTextures does for a composed draw at the same place (the caller flushed its queued items first)
     bool ownedTextureNeedsPrep(const Texture* t) const;
     void ownedPrepTexture(Texture* t);
+    // F13 owned records (frame-ownership.md 14.34): the bindless slot a 2D sampler of a draw here would read for `t` (made ready for sampling first, as
+    // prepareTextures does; the default texture when it is null / not usable / a target being drawn; the substitution of the upscaler's scene image included):
+    // the slot a pulled sprite record carries. Never 0 (the default texture's slot when nothing else)
+    std::uint32_t sampleSlot2D(Texture* t);
     // F15-1: the variant build queue now: jobs waiting + building, and the run's built / failed totals (the composed-late census)
     void variantQueue(std::size_t& waiting, std::uint64_t& built, std::uint64_t& failed);
     int lastVariantSite() const { return lastVariantSite_; }

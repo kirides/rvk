@@ -33,7 +33,9 @@
 #include "d3d9/fvf.h"
 #include "enh/material_variant.h"
 #include "d3d9/particle_gpu.h"
+#include "native/effect_compose.h"
 #include "native/static_compose.h"
+#include "shader/embedded.h"
 #include "enh/rt_scene.h"
 #include "gpuscene/bone_table.h"
 #include "gpuscene/row_table.h"
@@ -503,6 +505,202 @@ void testInstancing(Fixture& f) {
     expect("instance 1", px, 50, 50, 0x00FF00);
     expect("no instance", px, 10, 10, 0x000000);
     f.dev.release(std::move(inst));
+}
+
+// F13 owned records (frame-ownership.md 14.34, native.own_gui = owned): sprite records pulled by shaders/post/fx/gui_main_pull.* (the records in an instance
+// stream, the corners built by the vertex shader, each record's texture a bindless slot from Device::sampleSlot2D, one draw for every batch) against the same
+// sprites as the composition draws them (CPU quads by fxc::spriteQuad through the engine's sprite vertex layout, one draw per texture batch, the texture bound)
+// with the sprite effect's port gui_main.*, and the translated shaders. Overlapping, rotated, alpha-blended sprites with three textures and an unbound one, linear
+// filtering. The pictures must be bit-identical (0 pixels differ).
+void testOwnGuiRecords(Fixture& f) {
+    namespace fxc = rvk::native::fxc;
+    const char* vsSrc = "vs_2_0\ndcl_position v0\ndcl_color v1\ndcl_texcoord v2\ndp4 oPos.x, v0, c0\ndp4 oPos.y, v0, c1\ndp4 oPos.z, v0, c2\ndp4 oPos.w, v0, c3\n"
+                        "mov oD0, v1\nmov oT0.xy, v2\n";
+    const char* psSrc = "ps_2_0\ndcl v0\ndcl t0.xy\ndcl_2d s0\ntexld r0, t0, s0\nmul r0, r0, v0\nmov oC0, r0\n";
+    auto tvs = shaderFrom(f.dev, vsSrc);
+    auto tps = shaderFrom(f.dev, psSrc);
+    if (!tvs || !tps) {
+        std::printf("  FAIL own gui records: shaders\n");
+        ++g_failures;
+        return;
+    }
+    // our shaders with the translated ones' reflection (as OwnPost::fxPort / guiPulled make them)
+    std::vector<rhi::ShaderModule> modules;
+    const auto ours = [&](const Shader& like, const char* name) -> std::shared_ptr<Shader> {
+        const rhi::ShaderModule m = f.dev.game().createShaderModule({.spirv = rvk::shader::embedded::spirv(name), .dxil = rvk::shader::embedded::dxil(name)}, name);
+        if (m == rhi::ShaderModule::None) return nullptr;
+        modules.push_back(m);
+        auto s = std::make_shared<Shader>();
+        s->stage = like.stage;
+        s->module.store(m, std::memory_order_release);
+        s->reflection = like.reflection;
+        s->semantics = like.semantics;
+        s->bytecode = like.bytecode;
+        s->samplerMask = like.samplerMask;
+        s->hash = like.hash ^ (0x7700000000000000ull + modules.size());
+        s->tintFailed = s->lodFailed = true;
+        for (auto& v : s->variantState) v.store(3, std::memory_order_relaxed);
+        return s;
+    };
+    auto pvs = ours(*tvs, "post/fx/gui_main.vert"), pps = ours(*tps, "post/fx/gui_main.frag");
+    auto qvs = ours(*tvs, "post/fx/gui_main_pull.vert"), qps = ours(*tps, "post/fx/gui_main_pull.frag");
+    if (!pvs || !pps || !qvs || !qps) {
+        std::printf("  FAIL own gui records: the port / pulled shaders do not build\n");
+        ++g_failures;
+        return;
+    }
+    qvs->reflection.vertexInputs.clear();
+    for (std::uint8_t k = 8; k <= 12; ++k) qvs->reflection.vertexInputs.push_back({k, rvk::shader::Usage::TexCoord, k});
+    // the engine's sprite vertex (eCSpriteMesh: FLOAT3 position, D3DCOLOR +0x10, FLOAT2 uv +0x14) and the pulled record (EffectOps::guiPullDecl)
+    const VertexElement spriteDecl[] = {{0, 0x00, DECLTYPE_FLOAT3, 0, 0, 0}, {0, 0x10, DECLTYPE_D3DCOLOR, 0, 10, 0}, {0, 0x14, DECLTYPE_FLOAT2, 0, 5, 0},
+                                        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0}};
+    const VertexElement pullDecl[] = {{1, 0x00, DECLTYPE_FLOAT4, 0, 5, 8}, {1, 0x10, DECLTYPE_FLOAT4, 0, 5, 9}, {1, 0x20, DECLTYPE_FLOAT4, 0, 5, 10},
+                                      {1, 0x30, DECLTYPE_FLOAT2, 0, 5, 11}, {1, 0x38, DECLTYPE_D3DCOLOR, 0, 5, 12}, {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0}};
+    auto sdecl = f.dev.createVertexDecl(spriteDecl);
+    auto qdecl = f.dev.createVertexDecl(pullDecl);
+    // three textures (gradients with alpha) and one record without a texture (the default texture)
+    std::unique_ptr<Texture> tex[3];
+    for (int t = 0; t < 3; ++t) {
+        TextureDesc d;
+        d.width = d.height = 16;
+        d.format = rhi::d3dfmt::A8R8G8B8;
+        tex[t] = f.dev.createTexture(d);
+        std::vector<std::uint32_t> px(256);
+        for (std::uint32_t y = 0; y < 16; ++y) {
+            for (std::uint32_t x = 0; x < 16; ++x) {
+                const std::uint32_t a = 80u + 10u * ((x + y + static_cast<std::uint32_t>(t)) % 16), r = t == 0 ? 16u * x : 40u, g = t == 1 ? 16u * y : 90u * static_cast<std::uint32_t>(t),
+                                    b = t == 2 ? 255u - 16u * x : 16u * y;
+                px[y * 16 + x] = a << 24 | (r & 255u) << 16 | (g & 255u) << 8 | (b & 255u);
+            }
+        }
+        tex[t]->setLevelData(0, 0, {reinterpret_cast<const std::uint8_t*>(px.data()), px.size() * 4}, 16 * 4);
+    }
+    // the records (eCSprite +0xa8 layout): rotated quads in pixels, uv rects, z, colour; texture per record (3 = none)
+    constexpr std::uint32_t kN = 14;
+    const int texOf[kN] = {0, 0, 1, 1, 1, 2, 3, 0, 2, 2, 0, 1, 3, 2};
+    std::vector<std::uint8_t> recs(kN * fxc::kSpriteRecord);
+    for (std::uint32_t i = 0; i < kN; ++i) {
+        std::uint8_t* r = recs.data() + i * fxc::kSpriteRecord;
+        const float cx = 9.3f + 6.1f * static_cast<float>(i % 7), cy = 12.7f + 19.4f * static_cast<float>(i / 7), hx = 7.0f + 0.37f * static_cast<float>(i), hy = 6.3f + 0.21f * static_cast<float>(i);
+        const float a = 0.17f * static_cast<float>(i), c = std::cos(a), s = std::sin(a);
+        const auto corner = [&](float u, float v, std::uint32_t off) {
+            const float x = cx + u * hx * c - v * hy * s, y = cy + u * hx * s + v * hy * c;
+            std::memcpy(r + off, &x, 4);
+            std::memcpy(r + off + 4, &y, 4);
+        };
+        // spriteQuad: vertex 0 = +0x00 (u0 v0), 1 = +0x08 (u1 v0), 2 = +0x18 (u1 v1), 3 = +0x10 (u0 v1)
+        corner(-1, -1, 0x00);
+        corner(1, -1, 0x08);
+        corner(-1, 1, 0x10);
+        corner(1, 1, 0x18);
+        const float uv[4] = {0.03f * static_cast<float>(i), 0.1f, 0.6f + 0.02f * static_cast<float>(i), 0.93f};
+        std::memcpy(r + 0x20, uv, 16);
+        const float z = 0.25f + 0.03f * static_cast<float>(i);
+        std::memcpy(r + 0x30, &z, 4);
+        const std::uint32_t col = (120u + 9u * i) << 24 | (255u - 11u * i) << 16 | (128u + 7u * i) << 8 | (200u - 13u * i);
+        std::memcpy(r + 0x40, &col, 4);
+    }
+    // the reference: per run of one texture a draw of CPU quads (the composition's form)
+    auto vb = f.dev.createBuffer(kN * fxc::kSpriteQuad, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    auto ib = f.dev.createBuffer(kN * 12, 0, POOL_MANAGED, true, false);
+    auto rvb = f.dev.createBuffer(kN * fxc::kGuiRecordStride, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    auto qib = f.dev.createBuffer(16, 0, POOL_MANAGED, true, false);
+    auto dummy = f.dev.createBuffer(64, 0, POOL_MANAGED, false, false);
+    {
+        auto* v = static_cast<std::uint8_t*>(vb->lock(0, 0, LOCK_DISCARD));
+        for (std::uint32_t i = 0; i < kN; ++i) fxc::spriteQuad(recs.data() + i * fxc::kSpriteRecord, 1.0f, v + i * fxc::kSpriteQuad);
+        vb->unlock();
+        auto* p = static_cast<std::uint16_t*>(ib->lock(0, 0, 0));
+        for (std::uint32_t q = 0; q < kN; ++q) fxc::spriteQuadIndices(q, p + 6 * q);
+        ib->unlock();
+        fxc::spriteQuadIndices(0, static_cast<std::uint16_t*>(qib->lock(0, 0, 0)));
+        qib->unlock();
+        std::memset(dummy->lock(0, 0, 0), 0, 64);
+        dummy->unlock();
+    }
+    const float wvp[4][4] = {{1.0f / 32.0f, 0, 0, -1}, {0, -1.0f / 32.0f, 0, 1}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+    const auto states = [&] {
+        f.reset();
+        f.dev.setRenderState(RS_ZENABLE, 0);
+        f.dev.setRenderState(RS_ALPHABLENDENABLE, 1);
+        f.dev.setRenderState(RS_SRCBLEND, BLEND_SRCALPHA);
+        f.dev.setRenderState(RS_DESTBLEND, BLEND_INVSRCALPHA);
+        f.dev.setSamplerState(0, SAMP_MAGFILTER, TEXF_LINEAR);
+        f.dev.setSamplerState(0, SAMP_MINFILTER, TEXF_LINEAR);
+        f.dev.setSamplerState(0, SAMP_ADDRESSU, TADDRESS_CLAMP);
+        f.dev.setSamplerState(0, SAMP_ADDRESSV, TADDRESS_CLAMP);
+        f.dev.setVertexShaderConstantF(0, wvp[0], 4);
+    };
+    Pixels pic[3];
+    for (int pass = 0; pass < 3; ++pass) {
+        states();
+        if (pass < 2) {
+            f.dev.setVertexShader(pass == 0 ? tvs : pvs);
+            f.dev.setPixelShader(pass == 0 ? tps : pps);
+            f.dev.setVertexDecl(sdecl.get());
+            f.dev.setStreamSource(0, vb.get(), 0, fxc::kSpriteVertex);
+            f.dev.setIndices(ib.get());
+            for (std::uint32_t i = 0; i < kN;) {
+                std::uint32_t e = i;
+                while (e < kN && texOf[e] == texOf[i]) ++e;
+                f.dev.setTexture(0, texOf[i] < 3 ? tex[texOf[i]].get() : nullptr);
+                f.dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 4 * i, 4 * (e - i), 6 * i, 2 * (e - i));
+                i = e;
+            }
+        } else {
+            // as EffectOps::guiOwnedIssue: the pulled shaders, the records at instance rate, the quad's 6 indices, the slots per record, ONE draw
+            {
+                auto* q = static_cast<std::uint8_t*>(rvb->lock(0, 0, LOCK_DISCARD));
+                for (std::uint32_t i = 0; i < kN; ++i) {
+                    const std::uint32_t slot = f.dev.sampleSlot2D(texOf[i] < 3 ? tex[texOf[i]].get() : nullptr);
+                    fxc::guiRecord(recs.data() + i * fxc::kSpriteRecord, slot, q + i * fxc::kGuiRecordStride);
+                }
+                rvb->unlock();
+            }
+            f.dev.setTexture(0, tex[0].get());
+            f.dev.setVertexShader(qvs);
+            f.dev.setPixelShader(qps);
+            f.dev.setVertexDecl(qdecl.get());
+            f.dev.setStreamSource(0, dummy.get(), 0, 16);
+            f.dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | kN);
+            f.dev.setStreamSource(1, rvb.get(), 0, fxc::kGuiRecordStride);
+            f.dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
+            f.dev.setIndices(qib.get());
+            f.dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+            f.dev.setStreamSourceFreq(0, 1);
+            f.dev.setStreamSourceFreq(1, 1);
+            f.dev.setStreamSource(1, nullptr, 0, 0);
+        }
+        f.dev.setTexture(0, nullptr);
+        pic[pass] = capture(f.dev, pass == 0 ? "gui_translated" : pass == 1 ? "gui_port" : "gui_pulled");
+    }
+    // the C++ twin of the pulled input assembly is the composition's quad (byte for byte; the w lane is not read)
+    std::uint32_t twinBad = 0;
+    for (std::uint32_t i = 0; i < kN; ++i) {
+        std::uint8_t q[fxc::kSpriteQuad], g[fxc::kGuiRecordStride];
+        fxc::spriteQuad(recs.data() + i * fxc::kSpriteRecord, 1.0f, q);
+        fxc::guiRecord(recs.data() + i * fxc::kSpriteRecord, 5, g);
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            std::uint8_t v[fxc::kSpriteVertex];
+            fxc::guiRecordVertex(g, c, 1.0f, v);
+            twinBad += std::memcmp(v, q + c * fxc::kSpriteVertex, fxc::kSpriteVertex) != 0 ? 1u : 0u;
+        }
+    }
+    std::uint32_t offPort = 0, offPull = 0, lit = 0;
+    for (std::uint32_t y = 0; y < pic[0].h; ++y) {
+        for (std::uint32_t x = 0; x < pic[0].w; ++x) {
+            offPort += (pic[0].at(x, y) & 0xffffff) != (pic[1].at(x, y) & 0xffffff) ? 1u : 0u;
+            offPull += (pic[1].at(x, y) & 0xffffff) != (pic[2].at(x, y) & 0xffffff) ? 1u : 0u;
+            lit += (pic[1].at(x, y) & 0xffffff) != 0 ? 1u : 0u;
+        }
+    }
+    std::printf("  own gui records: port vs translated %u pixels differ, pulled vs port %u, %u lit, twin %u corners differ\n", offPort, offPull, lit, twinBad);
+    if (offPort != 0 || offPull != 0 || lit < 1000 || twinBad != 0) {
+        std::printf("  FAIL own gui records: the pictures are not bit-identical\n");
+        ++g_failures;
+    }
+    for (rhi::ShaderModule m : modules) f.dev.game().destroyShaderModule(m, true);
+    for (auto& t : tex) f.dev.release(std::move(t));
 }
 
 // F11 (frame-ownership.md 14.26, native.own_particles): particle records expanded by the GPU (Device::particleVs = a translated particle-style vertex shader whose
@@ -6129,7 +6327,7 @@ int main(int argc, char** argv) {
         {"clear", testClear},         {"raster rules", testRasterRules}, {"cull", testCull},
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
         {"stencil", testStencil}, {"scope clear", testScopeClear}, {"no-stencil depth", testNoStencilDepth}, {"depth-only pass without a pixel shader (S-6)", testDepthOnlyPass},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
-        {"instancing", testInstancing}, {"retained instance stream (F7-1)", testRetainedInstanceStream}, {"own particles (F11)", testOwnParticles}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
+        {"instancing", testInstancing}, {"retained instance stream (F7-1)", testRetainedInstanceStream}, {"own particles (F11)", testOwnParticles}, {"own gui records (F13 owned)", testOwnGuiRecords}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},

@@ -3058,11 +3058,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "main view's sky op and every face of the sky environment cube) is drawn with our own vertex / pixel shader (shaders/post/fx/sky_dome.*, "
                        "the port of ge_skydome_2_0.fx) instead of the translated engine shader; the stars / sun / moon billboards and the decals are "
                        "material shaders (the HLSL ubershader with debug.ubershader). Compare = the dome is drawn a second time with the port into a scratch "
-                       "copy of its target and the two images are compared (rvk.log `native: own sky`, `image 'sky_dome.frag'`: max 0 steps). Off by default.",
+                       "copy of its target and the two images are compared (rvk.log `native: own sky`, `image 'sky_dome.frag'`: max 0 steps). Owned (14.34; needs native.lean) = "
+                       "On + the dome drawn from a persistent record on the lean frames: its states, samplers and geometry kept, the parameter block (the live "
+                       "registers: camera, sun, weather, time) read from the composed state and rewritten only on change; check frames compose it and compare "
+                       "(rvk.log `native: own sky: owned record`, DIFFERING must stay 0). Off by default.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "on", "compare"},
-        .optionLabels = {"Off", "On", "Compare with the engine's shader"},
+        .options = {"off", "on", "compare", "owned"},
+        .optionLabels = {"Off", "On", "Compare with the engine's shader", "Owned record"},
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
@@ -3075,11 +3078,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "eCSprite::Flush (HUD, menus, inventory, text, cursor, loading screens) are drawn with our own vertex / pixel shader "
                        "(shaders/post/fx/gui_main.*, the port of the sprite effect) over the natively generated quads. Compare = each flush is drawn a second "
                        "time with the port into a scratch copy of its target and the two images are compared (rvk.log `native: own gui`, `image "
-                       "'gui_main.frag'`: bit-identical, max 0 steps). Off by default.",
+                       "'gui_main.frag'`: bit-identical, max 0 steps). Owned (14.34; needs native.lean) = On + every lean frame's flush drawn from pulled records "
+                       "(the queued records in an instance stream, the corners built by shaders/post/fx/gui_main_pull.*, the batch's texture a per-record bindless "
+                       "slot, one draw per run of equal blend states, the clip rect the flush's scissor) with the device state of a template derived from the "
+                       "composition; check frames compose and compare (DIFFERING, image 'gui_main.frag (owned records)'). Off by default.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "on", "compare"},
-        .optionLabels = {"Off", "On", "Compare with the engine's shader"},
+        .options = {"off", "on", "compare", "owned"},
+        .optionLabels = {"Off", "On", "Compare with the engine's shader", "Owned records"},
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });

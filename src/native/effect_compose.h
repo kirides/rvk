@@ -17,6 +17,7 @@
 #include <array>
 #include <bitset>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -182,6 +183,55 @@ void spriteQuadIndices(std::uint32_t q, std::uint16_t out[6]);
 bool spriteBlend(std::uint32_t flags, std::uint32_t& enable, std::uint32_t& src, std::uint32_t& dst);
 // the vertex bytes compared (not the w lane +0xc..+0xf of a vertex: the engine leaves stack data there, the FLOAT3 decl never reads it)
 bool spriteBytesEqual(std::span<const std::uint8_t> a, std::span<const std::uint8_t> b, std::size_t& firstDiff, std::uint64_t& wLanesDiffer);
+
+// ---- F13 owned records (docs/research/frame-ownership.md 14.34, native.own_gui = owned) ----------------------------------------
+// A pulled sprite record (shaders/post/fx/gui_main_pull.vert.hlsl, instance stream TEXCOORD8..12): the engine record's corners + uv (+0x00 .. +0x2f) as they
+// are, z (+0x30), the texture's bindless slot as a float (exact below 2^24), the colour (+0x40) as the D3DCOLOR the vertex had.
+inline constexpr std::uint32_t kGuiRecordStride = 0x40;
+void guiRecord(const std::uint8_t* engineRecord, std::uint32_t textureSlot, std::uint8_t out[kGuiRecordStride]);
+// the C++ twin of the pulled vertex shader's input assembly: corner `c` (0..3) of a pulled record as the engine's sprite vertex (spriteQuad's bytes; the w lane
+// `w`), so tests can prove the record carries the quad
+void guiRecordVertex(const std::uint8_t record[kGuiRecordStride], std::uint32_t c, float w, std::uint8_t out[kSpriteVertex]);
+
+// What one batch's transitions (the sprite effect's pass applied by eCGfxEffect::Execute, then eCGfxVisual::Execute) write into the device: derived from the
+// composition itself by applying it to two poisoned states (a field is written when it changed from either poison; its value must not depend on the poison).
+// The batch's image binds through the texture parameter: its stage is `texStage` (the derivation passes `texSentinel` for it).
+struct WriteSet {
+    bool ok = false;
+    std::string why;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> rs;   // (render state, value)
+    struct Ss {
+        std::uint32_t stage, state, value;
+    };
+    std::vector<Ss> ss;
+    std::vector<std::pair<std::uint32_t, const void*>> textures;  // stages bound to a fixed texture (not the batch image)
+    int texStage = -1;                                          // the stage the batch image binds to (-1: none)
+    struct Reg {
+        std::uint32_t reg = 0, mask = 0;  // the components written (a parameter narrower than a register leaves the rest as it was)
+        std::array<float, 4> v{};
+    };
+    std::vector<Reg> vsF, psF;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> vsB, psB;
+    std::vector<std::pair<std::uint32_t, std::array<std::int32_t, 4>>> vsI, psI;
+    bool vsSet = false, psSet = false;
+    const void* vs = nullptr;
+    const void* ps = nullptr;
+    // the blend states (RS_ALPHABLENDENABLE / RS_SRCBLEND / RS_DESTBLEND) the transitions write (their bit; also part of `rs`)
+    std::uint32_t trioMask = 0;
+    std::array<std::uint32_t, 3> trio{};
+};
+// `apply` = the batch's transitions on a draw state; `texSentinel` = the value the transitions bind for the batch image
+WriteSet deriveWrites(const std::function<void(EffectDraw&)>& apply, const void* texSentinel);
+// `w` applied to a draw state (the batch image `image` at its stage)
+void applyWrites(const WriteSet& w, const void* image, EffectDraw& d);
+// the per-batch blend states (`entry` = the device's at the flush's entry; out[k] = batch k's): SetBlend's, then the pass's components when the batch executes it
+void spriteTrios(const WriteSet& w, std::span<const SpriteBatch> batches, const std::array<std::uint32_t, 3>& entry, std::vector<std::array<std::uint32_t, 3>>& out);
+// the batches merged into draw runs: consecutive drawn batches with equal blend states (their textures ride in the records). `trios[k]` = batch k's blend states
+struct GuiRun {
+    std::uint32_t firstRecord = 0, count = 0;
+    std::array<std::uint32_t, 3> trio{};
+};
+std::vector<GuiRun> guiRuns(std::span<const SpriteBatch> batches, std::span<const std::array<std::uint32_t, 3>> trios);
 
 // ---- comparison -------------------------------------------------------------------------------------------------------------
 

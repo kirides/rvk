@@ -1247,6 +1247,65 @@ TEST(native_sprite_batches_follow_render_batches) {
     CHECK(!fxc::spriteBytesEqual(q, q2, at, wl) && at == 0x10);
 }
 
+// F13 owned records (frame-ownership.md 14.34): the pulled record carries the quad; the transitions' template; the blend states per batch; the draw runs
+TEST(native_gui_owned_records) {
+    namespace fxc = native::fxc;
+    std::uint8_t rec[fxc::kSpriteRecord]{};
+    const float corners[8] = {1, 2, 3, 4, 5, 6, 7, 8}, uv[4] = {0.1f, 0.2f, 0.3f, 0.4f}, z = 0.5f;
+    const std::uint32_t colour = 0x80ff00ffu;
+    std::memcpy(rec, corners, 32);
+    std::memcpy(rec + 0x20, uv, 16);
+    std::memcpy(rec + 0x30, &z, 4);
+    std::memset(rec + 0x38, 0xee, 8);  // (the image pointer: not part of the record)
+    std::memcpy(rec + 0x40, &colour, 4);
+    std::uint8_t q[fxc::kSpriteQuad], g[fxc::kGuiRecordStride];
+    fxc::spriteQuad(rec, 1.0f, q);
+    fxc::guiRecord(rec, 12345, g);
+    float slot = 0.0f;
+    std::memcpy(&slot, g + 0x34, 4);
+    CHECK(slot == 12345.0f);
+    for (std::uint32_t c = 0; c < 4; ++c) {
+        std::uint8_t v[fxc::kSpriteVertex];
+        fxc::guiRecordVertex(g, c, 1.0f, v);
+        CHECK(std::memcmp(v, q + c * fxc::kSpriteVertex, fxc::kSpriteVertex) == 0);
+    }
+    // the template: what the transitions write, nothing else; a value read from the state before is refused
+    static const char sentinel = 0;
+    const void* const shader = &colour;
+    const fxc::WriteSet w = fxc::deriveWrites(
+        [&](fxc::EffectDraw& d) {
+            d.rs[d3d9::RS_ZENABLE] = 0;
+            d.rs[d3d9::RS_ALPHABLENDENABLE] = 1;
+            d.ss[0][d3d9::SAMP_MAGFILTER] = 2;
+            d.textures[0] = &sentinel;
+            d.vsF[1][2] = 3.0f;
+            d.vs = shader;
+            d.ps = shader;
+        },
+        &sentinel);
+    CHECK(w.ok && w.texStage == 0 && w.vsSet && w.psSet && w.vs == shader && w.trioMask == 1 && w.trio[0] == 1);
+    CHECK(w.rs.size() == 2 && w.ss.size() == 1 && w.ss[0].value == 2 && w.vsF.size() == 1 && w.vsF[0].reg == 1 && w.vsF[0].mask == 4u && w.psF.empty() && w.textures.empty());
+    const fxc::WriteSet bad = fxc::deriveWrites([](fxc::EffectDraw& d) { d.rs[d3d9::RS_CULLMODE] = d.rs[d3d9::RS_ZFUNC]; }, &sentinel);
+    CHECK(!bad.ok);
+    const fxc::WriteSet io = fxc::deriveWrites([](fxc::EffectDraw& d) { d.streams[0].offset = 4; }, &sentinel);
+    CHECK(!io.ok);
+    auto d = std::make_unique<fxc::EffectDraw>();
+    int img = 0;
+    fxc::applyWrites(w, &img, *d);
+    CHECK(d->rs[d3d9::RS_ZENABLE] == 0 && d->rs[d3d9::RS_ALPHABLENDENABLE] == 1 && d->textures[0] == &img && d->vsF[1][2] == 3.0f && d->vs == shader);
+    // blend states per batch: SetBlend's, then the pass's component (ALPHABLENDENABLE = 1) where the batch executes it; runs merge equal states
+    int a = 0, b = 0;
+    const fxc::SpriteKey recs[] = {{&a, 0x2000}, {&a, 0x2000}, {&b, 0x2000}, {&b, 0x5000}, {&a, 0x5000}};
+    const fxc::SpritePlan p = fxc::planSprites(recs, 0x1000, 0, 0);
+    std::vector<std::array<std::uint32_t, 3>> trios;
+    fxc::spriteTrios(w, p.batches, {0, 2, 1}, trios);
+    // batch 0 (a, SetBlend 0x2000 + image): (1 by the pass, 5, 2); batch 1 (b, image): same; batch 2 (SetBlend 0x5000: off): (0, 2, 1), batch 3 (a, image): (1 by the pass, 2, 1)
+    CHECK(p.batches.size() == 4 && trios[0] == (std::array<std::uint32_t, 3>{1, 5, 2}) && trios[1] == trios[0] && trios[2] == (std::array<std::uint32_t, 3>{0, 2, 1}) &&
+          trios[3] == (std::array<std::uint32_t, 3>{1, 2, 1}));
+    const std::vector<fxc::GuiRun> runs = fxc::guiRuns(p.batches, trios);
+    CHECK(runs.size() == 3 && runs[0].firstRecord == 0 && runs[0].count == 3 && runs[1].firstRecord == 3 && runs[1].count == 1 && runs[2].count == 1);
+}
+
 TEST(native_coverage_counts_by_source_and_reason) {
     using V = d3d9::scene::View;
     native::Coverage c;

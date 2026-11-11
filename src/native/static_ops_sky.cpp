@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <format>
 
@@ -19,6 +20,7 @@
 #include "engine/memread.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "native/f2c_measure.h"
 #include "native/own_post.h"
 #include "native/static_ops.h"
 #include "gpuscene/material_table.h"
@@ -251,6 +253,49 @@ StaticOps::Skip StaticOps::skyDomeDraw(const std::uint8_t* shader, const std::ui
     d3d9::Shader* vs = shaderOfElement(vsElem);
     d3d9::Shader* ps = shaderOfElement(psElem);
     if (vs == nullptr || ps == nullptr) return Skip::NotCompiled;
+    // F12 owned record (frame-ownership.md 14.34): a lean frame draws the dome from its record (the composition below skipped); every other frame composes it
+    // and refreshes the record (check frames compare first)
+    SkyRecord* rec = nullptr;
+    std::uint64_t stamp = 0;
+    using PClock = std::chrono::steady_clock;
+    const PClock::time_point ct0 = PClock::now();
+    if (OwnPost* own = ownPost(); own != nullptr && own->sceneMode(OwnPost::Scene::Sky) == OwnPost::Mode::Owned) {
+        if (rec_ != nullptr || f2c::on()) {
+            ++skyOwnedW_.composed;
+            if (skyOwnedW_.why.empty()) skyOwnedW_.why = "a retained-record / measurement recorder is on";
+        } else {
+            rec = &skyRecords_[adminStagesUnbound_ ? 1 : 0];
+            stamp = skyStamp(shader, visual, version, vsElem, psElem);
+            if (leanFrame()) {
+                const char* why = !rec->valid ? "no record yet" : rec->stamp != stamp ? "an input changed (stamp)" : rec->desc.vs != vs || rec->desc.ps != ps ? "the shaders changed" : nullptr;
+                if (why == nullptr && skyOwnedDraw(shader, visual, stamp, *rec)) {
+                    ++skyOwnedW_.owned;
+                    skyOwnedW_.ownedNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - ct0).count());
+                    own->countOwned(OwnPost::Scene::Sky);
+                    return Skip::None;
+                }
+                ++skyOwnedW_.composed;
+                if (why != nullptr && rec->valid && rec->stamp != stamp) {
+                    ++skyOwnedW_.stampChanged;
+                    if (skyStampLogged_ < 8) {
+                        std::size_t at = 0;
+                        while (at < skyStampBytes_.size() && at < rec->stampBytes.size() && rec->stampBytes[at] == skyStampBytes_[at]) ++at;
+                        ++skyStampLogged_;
+                        // (offsets: 48 pointers, then the shader object from +0x48 (stamp byte 48 = +0x48), ...)
+                        spdlog::info("native: own sky: owned record ({}): stamp byte {} of {} / {} changed ({} -> {}; stamp bytes 48.. = the shader object's read ranges; frame {})", adminStagesUnbound_ ? "cube" : "main", at, rec->stampBytes.size(), skyStampBytes_.size(),
+                                     at < rec->stampBytes.size() ? rec->stampBytes[at] : 0, at < skyStampBytes_.size() ? skyStampBytes_[at] : 0, dev_.stats().frames);
+                    }
+                }
+                if (skyOwnedW_.why.empty()) skyOwnedW_.why = why != nullptr ? why : "a texture of the record was re-made";
+            }
+        }
+    }
+    std::array<SkyTex, sc::kStages> capture{};
+    struct CaptureScope {
+        std::array<SkyTex, sc::kStages>*& at;
+        ~CaptureScope() { at = nullptr; }
+    } captureScope{skyTexCapture_};
+    if (rec != nullptr) skyTexCapture_ = &capture;
     sc::BlendInputs b;
     b.mode = get<std::int32_t>(shader, 0x50);
     b.maskRef = get<std::uint8_t>(shader, 0x58);
@@ -273,7 +318,205 @@ StaticOps::Skip StaticOps::skyDomeDraw(const std::uint8_t* shader, const std::ui
     d.states = sc::deviceStates(rs, g.visual, get<std::uint32_t>(admin, 0x340));
     constantsInto(d, shader, shader, false);
     if (const Skip s = materialSamplers(d, shader, psElem); s != Skip::None) return s;
-    return adminSamplers(d, shader, ps);
+    if (const Skip s = adminSamplers(d, shader, ps); s != Skip::None) return s;
+    if (rec != nullptr) {
+        skyTexCapture_ = nullptr;
+        // a check frame: the record's form (its states, samplers, geometry; the registers are the composed ones in both) against the composition
+        leanUpdateFrame();
+        if (leanFrameKind_ == sc::LeanFrame::Check && rec->valid && rec->stamp == stamp) {
+            ++skyOwnedW_.checked;
+            std::string why;
+            if (!skyRecordEqual(rec->desc, d, why)) {
+                ++skyOwnedW_.differing;
+                ++skyOwnedDifferingTotal_;
+                if (skyOwnedW_.firstDiff.empty()) skyOwnedW_.firstDiff = why;
+                if (skyOwnedLogged_++ < 12) spdlog::warn("native: own sky: owned record ({}) DIFFERS from the composed dome: {}", adminStagesUnbound_ ? "cube face" : "main view", why);
+            }
+        }
+        rec->desc = d;
+        rec->stamp = stamp;
+        rec->stampBytes = skyStampBytes_;
+        rec->tex = capture;
+        rec->texMask = 0;
+        for (std::uint32_t st = 0; st < sc::kStages; ++st) {
+            if (capture[st].data != nullptr || capture[st].res != nullptr || capture[st].material) rec->texMask |= static_cast<std::uint16_t>(1u << st);
+        }
+        rec->alphaTest = static_cast<std::uint8_t>(rs.alphaTest);
+        rec->alphaRef = rs.alphaRef;
+        rec->valid = true;
+        skyOwnedW_.composedNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - ct0).count());
+        ++skyOwnedW_.composedTimed;
+    }
+    return Skip::None;
+}
+
+std::uint64_t StaticOps::skyStamp(const std::uint8_t* shader, const std::uint8_t* visual, const std::uint8_t* version, const std::uint8_t* vsElem, const std::uint8_t* psElem) const {
+    // (the bytes are kept: a changed stamp names its first differing input in the log)
+    std::vector<std::uint8_t>& out = skyStampBytes_;
+    out.clear();
+    const auto mix = [&](const void* p, std::size_t n) {
+        const auto* b = static_cast<const std::uint8_t*>(p);
+        out.insert(out.end(), b, b + n);
+    };
+    const auto mixp = [&](const void* p) { mix(&p, sizeof(p)); };
+    mixp(shader);
+    mixp(visual);
+    mixp(version);
+    mixp(vsElem);
+    mixp(psElem);
+    mixp(view_.admin);
+    // the shader object: blend inputs (+0x50 / +0x58 / +0x79), the version cap +0x68, the depth-bias flag +0x78, the pools' pointers / counts, the material slots
+    // (+0xf8 + 0x28 k: sampler states, image +0x20), the slot base / count +0x219 / +0x21b, the invalid flag +0x2a8, SunOcclusion +0x324
+    // (only what the composition reads: the engine changes other bytes of the object every frame / on its own frames, e.g. +0x2b8 and the pool header +0xa8)
+    struct Range {
+        std::uint32_t at, n;
+    };
+    static constexpr Range kRead[] = {{0x48, 0x50}, {0x9c, 4}, {0xb0, 8}, {0xc1, 1}, {0xcc, 4}, {0xe0, 8}, {0xf1, 1}, {0xf8, 0x1b8}, {0x2a8, 1}, {0x324, 1}};
+    for (const Range& r : kRead) {
+        std::uint8_t bytes[0x1b8];
+        if (!engine::safeRead(shader + r.at, bytes, r.n)) std::memset(bytes, 0, r.n);
+        mix(bytes, r.n);
+    }
+    // the slots' images and their data (the textures they resolve to are re-checked by skyOwnedDraw)
+    const std::uint32_t slots = std::min<std::uint32_t>(get<std::uint8_t>(shader, 0x21b), 16);
+    for (std::uint32_t k = 0; k < slots; ++k) {
+        U8* res = ptr(shader, 0xf8 + 0x28 * k + 0x20);
+        mixp(res);
+        mixp(res != nullptr ? ptr(res, 0x70) : nullptr);
+        if (res != nullptr && ptr(res, 0x70) == nullptr) mixp(ptr(placeholderTable_, 8 * (get<std::uint8_t>(shader, 0x219) + k)));
+    }
+    mixp(ptr(psElem, 0x38));
+    // the admin: the version +0x170, the invalid count +0x31c, the colour-write / fill state +0x340; its sampler block + overrides (the snapshot), the lightmaps
+    const std::int32_t a170 = get<std::int32_t>(view_.admin, 0x170);
+    const std::uint32_t a31c = get<std::uint32_t>(view_.admin, 0x31c), a340 = get<std::uint32_t>(view_.admin, 0x340);
+    mix(&a170, 4);
+    mix(&a31c, 4);
+    mix(&a340, 4);
+    const std::uint64_t snap = const_cast<StaticOps*>(this)->snapHash();
+    mix(&snap, 8);
+    mixp(mirror_.lightmapSlot[0]);
+    mixp(mirror_.lightmapSlot[1]);
+    const std::uint8_t unbound = adminStagesUnbound_ ? 1 : 0;
+    mix(&unbound, 1);
+    // the visual (+0x10 the primitive's API object, +0x18 .. +0x24 its states, +0x60 a visual shader) and the primitive's ranges / buffers
+    std::uint8_t vb[0x58];
+    if (!engine::safeRead(visual + 0x10, vb, sizeof(vb))) std::memset(vb, 0, sizeof(vb));
+    mix(vb, sizeof(vb));
+    if (const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10)); prim != nullptr) {
+        const auto& dd = prim->drawDesc();
+        const std::uint32_t r[6] = {static_cast<std::uint32_t>(dd.type), static_cast<std::uint32_t>(dd.baseVertexIndex), dd.minVertexIndex, dd.numVertices, dd.startIndex,
+                                    dd.primitiveCount};
+        mix(r, sizeof(r));
+        mixp(prim->vertexDecl());
+        mixp(prim->indexBuffer());
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            const auto v = prim->streamView(i);
+            mixp(v.buffer);
+            const std::uint32_t s[3] = {v.offset, v.stride, v.enabled ? v.freq : 0u};
+            mix(s, sizeof(s));
+        }
+    }
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    for (const std::uint8_t b : out) {
+        h ^= b;
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+bool StaticOps::skyOwnedDraw(const std::uint8_t* shader, const std::uint8_t* visual, std::uint64_t stamp, SkyRecord& r) {
+    (void)visual;
+    (void)stamp;
+    // the textures: re-resolved from the stage's image data (a texture re-made behind the same data: the record is stale, composed)
+    for (std::uint32_t st = 0; st < sc::kStages; ++st) {
+        if ((r.texMask >> st & 1u) == 0) continue;
+        bool ok = false;
+        const void* t = r.tex[st].data != nullptr ? textureOfImageData(r.tex[st].data, ok) : nullptr;
+        const bool inherit = (r.desc.inheritMask >> st & 1u) != 0;
+        if (t != r.desc.samplers[st].texture || (r.tex[st].data != nullptr && ok == inherit)) return false;
+    }
+    // the composition's side effects: the alpha reference register (an alpha-tested dome), ExecuteShaderConstants' touches of the slots' images
+    if (r.alphaTest == 2) mirror_.adminPs[5][3] = static_cast<float>(r.alphaRef) * (1.0f / 256.0f);
+    for (std::uint32_t st = 0; st < sc::kStages; ++st) {
+        if ((r.texMask >> st & 1u) != 0 && r.tex[st].material && r.tex[st].res != nullptr) leanImage(r.tex[st].res, r.tex[st].touched);
+    }
+    sc::DrawDesc& d = newDraw();
+    const auto instance = d.instance;
+    d = r.desc;
+    d.instance = instance;
+    // the parameter block: the live registers from the mirror (the composed state); the record's copy rewritten only when they changed
+    constantsInto(d, shader, shader, false);
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    const auto mixRegs = [&](const auto& live, const float (*regs)[4], std::uint32_t n) {
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (!live.test(i)) continue;
+            const auto* b = reinterpret_cast<const std::uint8_t*>(regs[i]);
+            for (std::size_t k = 0; k < 16; ++k) {
+                h ^= b[k];
+                h *= 0x100000001b3ull;
+            }
+        }
+    };
+    mixRegs(d.vsLive, d.vsF, sc::kVsRegs);
+    mixRegs(d.psLive, d.psF, sc::kPsRegs);
+    if (h != r.paramHash) {
+        r.paramHash = h;
+        std::memcpy(r.desc.vsF, d.vsF, sizeof(d.vsF));
+        std::memcpy(r.desc.psF, d.psF, sizeof(d.psF));
+        ++skyOwnedW_.paramChanges;
+    }
+    return true;
+}
+
+bool StaticOps::skyRecordEqual(const sc::DrawDesc& a, const sc::DrawDesc& b, std::string& why) {
+    if (!packetSameDesc(a, b)) {
+        why = "states / samplers / geometry / shaders";
+        return false;
+    }
+    if (a.vsLive != b.vsLive || a.psLive != b.psLive) {
+        why = "the live registers";
+        return false;
+    }
+    if (a.vsSet != b.vsSet || a.psSet != b.psSet) {
+        why = "the set registers";
+        return false;
+    }
+    if (a.vsB != b.vsB || a.psB != b.psB || std::memcmp(a.vsI, b.vsI, sizeof(a.vsI)) != 0 || std::memcmp(a.psI, b.psI, sizeof(a.psI)) != 0) {
+        why = "bool / int registers";
+        return false;
+    }
+    if (a.alphaFunc != b.alphaFunc || a.alphaRef != b.alphaRef || a.skyDome != b.skyDome || a.vertexBytes != b.vertexBytes || a.indexBytes != b.indexBytes ||
+        a.cpuStream != b.cpuStream || a.maskSet != b.maskSet) {
+        why = "alpha / class fields";
+        return false;
+    }
+    for (std::uint32_t st = 0; st < sc::kStages; ++st) {
+        if (a.samplers[st].texture != b.samplers[st].texture) {
+            why = std::format("the texture of stage {}", st);
+            return false;
+        }
+    }
+    return true;
+}
+
+void StaticOps::skyOwnedReport() {
+    SkyOwnedStats& s = skyOwnedW_;
+    OwnPost* own = ownPost();
+    if ((own != nullptr && own->sceneMode(OwnPost::Scene::Sky) == OwnPost::Mode::Owned) || s.owned != 0 || s.checked != 0) {
+        spdlog::info("native: own sky: owned record (5 s): {} dome draws from the record ({:.2f} us each), {} composed ({:.2f} us each, {} with an input changed){}; "
+                     "parameter block rewritten {} times; check frames: {} compared with the composed dome, DIFFERING {} (run {}){}",
+                     s.owned, s.owned != 0 ? static_cast<double>(s.ownedNs) / 1000.0 / static_cast<double>(s.owned) : 0.0, s.composed,
+                     s.composedTimed != 0 ? static_cast<double>(s.composedNs) / 1000.0 / static_cast<double>(s.composedTimed) : 0.0, s.stampChanged,
+                     s.why.empty() ? std::string() : std::format(" (first reason: {})", s.why), s.paramChanges, s.checked, s.differing, skyOwnedDifferingTotal_,
+                     s.firstDiff.empty() ? std::string() : std::format(" (first: {})", s.firstDiff));
+    }
+    if (s.cubeFaces != 0) {
+        spdlog::info("native: own sky: sky cube faces (5 s): {} faces composed ({:.2f} per frame, {:.2f} us each: stars / sun / moon / dome; the issue cost is the scene ops' [sky cube faces] line)",
+                     s.cubeFaces, static_cast<double>(s.cubeFaces) / static_cast<double>(std::max<std::uint64_t>(1, dev_.stats().frames - s.frame0)),
+                     static_cast<double>(s.cubeFaceNs) / 1000.0 / static_cast<double>(s.cubeFaces));
+    }
+    s = {};
+    s.frame0 = dev_.stats().frames;
 }
 
 StaticOps::Skip StaticOps::composeSky(const Op& op) {
@@ -335,9 +578,13 @@ bool StaticOps::skyCubeBegin(void* skyPs) {
     } else if (U8* a = ptr(dome, 0x220); a == nullptr || !composeView(a, cam)) {
         s = Skip::Unreadable;
     } else {
+        // (14.34 (b): the cube faces' composition cost, measured for the one-pass question)
+        const auto f0 = std::chrono::steady_clock::now();
         adminStagesUnbound_ = true;
         s = composeSkyDraws(sky, cam);
         adminStagesUnbound_ = false;
+        skyOwnedW_.cubeFaceNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - f0).count());
+        ++skyOwnedW_.cubeFaces;
     }
     blendOverrideShader_ = nullptr;
     blendOverride_ = -1;
@@ -472,7 +719,7 @@ bool StaticOps::skyOwnBefore(const sc::DrawDesc& d) {
     if (!ported) return false;
     using d3d9::Shader;
     using d3d9::ShaderRef;
-    if (m == OwnPost::Mode::On) {
+    if (OwnPost::portsOn(m)) {
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(vs)));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(ps)));
         return true;

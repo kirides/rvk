@@ -54,6 +54,8 @@ param(
     # overlay command template of the toggle instead of `set <Key> <value>` (e.g. 'debug pull {0}'); stage states are not asserted then
     [string]$CommandTemplate = '',
     [string]$Out = '',
+    # overlay commands added to every session's schedule (e.g. 'load2+300: key i' = the inventory open over the windows: a menu scene)
+    [string[]]$ExtraCommands = @(),
     [int]$Seconds = 300
 )
 $ErrorActionPreference = 'Stop'
@@ -145,13 +147,14 @@ foreach ($scene in $Scenes) {
             # (+ 4: the next toggle comes after the window's end report: a toggle in the present that closes the window would show in its stage line)
             $t += $Settle + $Window + 4
         }
+        $cmds += $ExtraCommands
         $cmds += "${anchor}+$($t + 60): quit"
         $logs += , @($scene, (Invoke-Session $scene "$scene" ($base + $(if ($CommandTemplate -ne "") { @() } else { "$Key=$A" })) $cmds))
     } else {
         for ($p = 1; $p -le $Pairs; $p++) {
             foreach ($arm in 'A', 'B') {
                 $value = if ($arm -eq 'A') { $A } else { $B }
-                $cmds = @("${anchor}+$($RestartLead + $Settle): perf window $Window ${arm}_$p", "${anchor}+$($RestartLead + $Settle + $Window + 60): quit")
+                $cmds = @("${anchor}+$($RestartLead + $Settle): perf window $Window ${arm}_$p", "${anchor}+$($RestartLead + $Settle + $Window + 60): quit") + $ExtraCommands
                 $logs += , @($scene, (Invoke-Session $scene "${scene}_${arm}$p" ($base + "$Key=$value") $cmds))
             }
         }

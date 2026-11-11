@@ -98,6 +98,10 @@ void EffectOps::leanUpdateFrame() {
 bool EffectOps::leanUnit() {
     leanUpdateFrame();
     if (!leanFrameOn_ || !unitTake_ || drawCount_ == 0 || !after_) return false;
+    return leanSkippable();
+}
+
+bool EffectOps::leanSkippable() {
     if (leanVerified_ == 0) {
         // the statics eCGfxEffect::Execute writes / reads: ms_pActiveEffect 0xc62ae0, ms_bReset 0xbfbf6e, ms_bOptimize 0xc62ad1 (false
         // in the game: every pass applied), the execute callback 0xc62af0 (sSetEffectExecuteCallback: none)

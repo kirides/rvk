@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <memory>
 
 #include "d3d9/defs.h"
 
@@ -383,6 +384,210 @@ bool spriteBlend(std::uint32_t flags, std::uint32_t& enable, std::uint32_t& src,
     case 0x5000: enable = 0, src = 2, dst = 1; return true;
     default: return false;
     }
+}
+
+// ---- F13 owned records ----
+
+void guiRecord(const std::uint8_t* r, std::uint32_t slot, std::uint8_t out[kGuiRecordStride]) {
+    std::memcpy(out, r, 0x34);  // corners, uv, z
+    const auto s = static_cast<float>(slot);
+    std::memcpy(out + 0x34, &s, 4);
+    std::memcpy(out + 0x38, r + 0x40, 4);  // the colour
+    std::memset(out + 0x3c, 0, 4);
+}
+
+void guiRecordVertex(const std::uint8_t rec[kGuiRecordStride], std::uint32_t c, float w, std::uint8_t out[kSpriteVertex]) {
+    // gui_main_pull.vert: xy = corner c of (+0x00, +0x08, +0x18, +0x10), u = (+0x20, +0x28, +0x28, +0x20), v = (+0x24, +0x24, +0x2c, +0x2c)
+    static constexpr std::uint32_t kCorner[4] = {0x00, 0x08, 0x18, 0x10};
+    static constexpr std::uint32_t kU[4] = {0x20, 0x28, 0x28, 0x20};
+    static constexpr std::uint32_t kV[4] = {0x24, 0x24, 0x2c, 0x2c};
+    c &= 3u;
+    std::memcpy(out + 0x00, rec + kCorner[c], 8);
+    std::memcpy(out + 0x08, rec + 0x30, 4);
+    std::memcpy(out + 0x0c, &w, 4);
+    std::memcpy(out + 0x10, rec + 0x38, 4);
+    std::memcpy(out + 0x14, rec + kU[c], 4);
+    std::memcpy(out + 0x18, rec + kV[c], 4);
+}
+
+namespace {
+void poison(EffectDraw& d, std::uint8_t b, std::uintptr_t p) {
+    const std::uint32_t w = 0x01010101u * b;
+    for (std::uint32_t i = 0; i < kRenderStates; ++i) d.rs[i] = (w & 0xffff0000u) | i;
+    for (std::uint32_t st = 0; st < kStages; ++st) {
+        d.textures[st] = reinterpret_cast<const void*>(p + 0x100 + st * 16);
+        for (std::uint32_t s = 0; s < kSamplerStates; ++s) d.ss[st][s] = (w & 0xffff0000u) | st << 8 | s;
+    }
+    std::memset(d.vsF, b, sizeof(d.vsF));
+    std::memset(d.psF, b, sizeof(d.psF));
+    d.vsB.fill(w);
+    d.psB.fill(w);
+    std::memset(d.vsI, b, sizeof(d.vsI));
+    std::memset(d.psI, b, sizeof(d.psI));
+    d.vs = reinterpret_cast<const void*>(p + 1);
+    d.ps = reinterpret_cast<const void*>(p + 2);
+    d.decl = reinterpret_cast<const void*>(p + 3);
+    d.indices = reinterpret_cast<const void*>(p + 4);
+    for (std::uint32_t i = 0; i < 4; ++i) d.streams[i] = {reinterpret_cast<const void*>(p + 8 + i), w, w, w};
+    d.rt0 = reinterpret_cast<const void*>(p + 5);
+    d.depth = reinterpret_cast<const void*>(p + 6);
+    d.viewport = {w, w, w, w, 0.25f, 0.75f};
+    d.rsWritten.reset();
+    d.vsRegsWritten = d.psRegsWritten = 0;
+    d.unsupported = false;
+}
+}  // namespace
+
+WriteSet deriveWrites(const std::function<void(EffectDraw&)>& apply, const void* texSentinel) {
+    WriteSet w;
+    auto a0 = std::make_unique<EffectDraw>(), b0 = std::make_unique<EffectDraw>();
+    poison(*a0, 0xa5, 0xa0000);
+    poison(*b0, 0x5a, 0xb0000);
+    auto a = std::make_unique<EffectDraw>(*a0), b = std::make_unique<EffectDraw>(*b0);
+    apply(*a);
+    apply(*b);
+    const auto fail = [&](std::string why) {
+        w.ok = false;
+        w.why = std::move(why);
+        return w;
+    };
+    if (a->unsupported || b->unsupported) return fail("a pass state the composition does not model");
+    if (a->decl != a0->decl || b->decl != b0->decl || a->indices != a0->indices || b->indices != b0->indices || a->streams != a0->streams || b->streams != b0->streams) {
+        return fail("the transitions set the vertex input");
+    }
+    if (a->rt0 != a0->rt0 || a->depth != a0->depth || !(a->viewport == a0->viewport) || b->rt0 != b0->rt0 || !(b->viewport == b0->viewport)) {
+        return fail("the transitions set the target / viewport");
+    }
+    for (std::uint32_t i = 0; i < kRenderStates; ++i) {
+        if (a->rs[i] == a0->rs[i] && b->rs[i] == b0->rs[i]) continue;
+        if (a->rs[i] != b->rs[i]) return fail(std::format("render state {} depends on the state before", i));
+        w.rs.emplace_back(i, a->rs[i]);
+        const int t = i == d3d9::RS_ALPHABLENDENABLE ? 0 : i == d3d9::RS_SRCBLEND ? 1 : i == d3d9::RS_DESTBLEND ? 2 : -1;
+        if (t >= 0) {
+            w.trioMask |= 1u << t;
+            w.trio[static_cast<std::size_t>(t)] = a->rs[i];
+        }
+    }
+    for (std::uint32_t st = 0; st < kStages; ++st) {
+        if (a->textures[st] != a0->textures[st] || b->textures[st] != b0->textures[st]) {
+            if (a->textures[st] != b->textures[st]) return fail(std::format("the texture of stage {} depends on the state before", st));
+            if (a->textures[st] == texSentinel) {
+                if (w.texStage >= 0) return fail("the batch image binds to two stages");
+                w.texStage = static_cast<int>(st);
+            } else {
+                w.textures.emplace_back(st, a->textures[st]);
+            }
+        }
+        for (std::uint32_t s = 1; s < kSamplerStates; ++s) {
+            if (a->ss[st][s] == a0->ss[st][s] && b->ss[st][s] == b0->ss[st][s]) continue;
+            if (a->ss[st][s] != b->ss[st][s]) return fail(std::format("sampler state {} of stage {} depends on the state before", s, st));
+            w.ss.push_back({st, s, a->ss[st][s]});
+        }
+    }
+    const auto regs = [&](const float (*pa)[4], const float (*pa0)[4], const float (*pb)[4], const float (*pb0)[4], std::uint32_t n, auto& out) {
+        for (std::uint32_t r = 0; r < n; ++r) {
+            if (std::memcmp(pa[r], pa0[r], 16) == 0 && std::memcmp(pb[r], pb0[r], 16) == 0) continue;
+            WriteSet::Reg g;
+            g.reg = r;
+            for (std::uint32_t c = 0; c < 4; ++c) {
+                if (std::memcmp(&pa[r][c], &pa0[r][c], 4) == 0 && std::memcmp(&pb[r][c], &pb0[r][c], 4) == 0) continue;
+                if (std::memcmp(&pa[r][c], &pb[r][c], 4) != 0) return false;
+                g.mask |= 1u << c;
+                g.v[c] = pa[r][c];
+            }
+            out.push_back(g);
+        }
+        return true;
+    };
+    if (!regs(a->vsF, a0->vsF, b->vsF, b0->vsF, kVsRegs, w.vsF) || !regs(a->psF, a0->psF, b->psF, b0->psF, kPsRegs, w.psF)) {
+        return fail("a float register depends on the state before");
+    }
+    for (std::uint32_t r = 0; r < 16; ++r) {
+        for (int ps = 0; ps < 2; ++ps) {
+            const std::uint32_t va = ps ? a->psB[r] : a->vsB[r], va0 = ps ? a0->psB[r] : a0->vsB[r], vb = ps ? b->psB[r] : b->vsB[r], vb0 = ps ? b0->psB[r] : b0->vsB[r];
+            if (va != va0 || vb != vb0) {
+                if (va != vb) return fail("a bool register depends on the state before");
+                (ps ? w.psB : w.vsB).emplace_back(r, va);
+            }
+            const std::int32_t* ia = ps ? a->psI[r] : a->vsI[r];
+            const std::int32_t* ia0 = ps ? a0->psI[r] : a0->vsI[r];
+            const std::int32_t* ib = ps ? b->psI[r] : b->vsI[r];
+            const std::int32_t* ib0 = ps ? b0->psI[r] : b0->vsI[r];
+            if (std::memcmp(ia, ia0, 16) != 0 || std::memcmp(ib, ib0, 16) != 0) {
+                if (std::memcmp(ia, ib, 16) != 0) return fail("an int register depends on the state before");
+                std::array<std::int32_t, 4> v{};
+                std::memcpy(v.data(), ia, 16);
+                (ps ? w.psI : w.vsI).emplace_back(r, v);
+            }
+        }
+    }
+    if (a->vs != a0->vs || b->vs != b0->vs) {
+        if (a->vs != b->vs) return fail("the vertex shader depends on the state before");
+        w.vsSet = true;
+        w.vs = a->vs;
+    }
+    if (a->ps != a0->ps || b->ps != b0->ps) {
+        if (a->ps != b->ps) return fail("the pixel shader depends on the state before");
+        w.psSet = true;
+        w.ps = a->ps;
+    }
+    w.ok = true;
+    return w;
+}
+
+void applyWrites(const WriteSet& w, const void* image, EffectDraw& d) {
+    for (const auto& [i, v] : w.rs) d.rs[i] = v;
+    for (const auto& s : w.ss) d.ss[s.stage][s.state] = s.value;
+    for (const auto& [st, t] : w.textures) d.textures[st] = t;
+    if (w.texStage >= 0) d.textures[static_cast<std::size_t>(w.texStage)] = image;
+    for (const WriteSet::Reg& g : w.vsF) {
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            if ((g.mask >> c & 1u) != 0) d.vsF[g.reg][c] = g.v[c];
+        }
+    }
+    for (const WriteSet::Reg& g : w.psF) {
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            if ((g.mask >> c & 1u) != 0) d.psF[g.reg][c] = g.v[c];
+        }
+    }
+    for (const auto& [r, v] : w.vsB) d.vsB[r] = v;
+    for (const auto& [r, v] : w.psB) d.psB[r] = v;
+    for (const auto& [r, v] : w.vsI) std::memcpy(d.vsI[r], v.data(), 16);
+    for (const auto& [r, v] : w.psI) std::memcpy(d.psI[r], v.data(), 16);
+    if (w.vsSet) d.vs = w.vs;
+    if (w.psSet) d.ps = w.ps;
+}
+
+void spriteTrios(const WriteSet& w, std::span<const SpriteBatch> batches, const std::array<std::uint32_t, 3>& entry, std::vector<std::array<std::uint32_t, 3>>& out) {
+    out.resize(batches.size());
+    std::array<std::uint32_t, 3> cur = entry;
+    for (std::size_t k = 0; k < batches.size(); ++k) {
+        const SpriteBatch& b = batches[k];
+        if (b.setBlend) {
+            std::uint32_t e = 0, s = 0, d = 0;
+            if (spriteBlend(b.blend, e, s, d)) cur = {e, s, d};
+        }
+        if (b.setImage) {
+            for (std::uint32_t c = 0; c < 3; ++c) {
+                if ((w.trioMask >> c & 1u) != 0) cur[c] = w.trio[c];
+            }
+        }
+        out[k] = cur;
+    }
+}
+
+std::vector<GuiRun> guiRuns(std::span<const SpriteBatch> batches, std::span<const std::array<std::uint32_t, 3>> trios) {
+    std::vector<GuiRun> runs;
+    for (std::size_t k = 0; k < batches.size() && k < trios.size(); ++k) {
+        const SpriteBatch& b = batches[k];
+        if (b.count == 0) continue;
+        if (!runs.empty() && runs.back().trio == trios[k] && runs.back().firstRecord + runs.back().count == b.firstRecord) {
+            runs.back().count += b.count;
+            continue;
+        }
+        runs.push_back({b.firstRecord, b.count, trios[k]});
+    }
+    return runs;
 }
 
 bool spriteBytesEqual(std::span<const std::uint8_t> a, std::span<const std::uint8_t> b, std::size_t& firstDiff, std::uint64_t& wLanesDiffer) {

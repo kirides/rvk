@@ -87,7 +87,7 @@ function Assert-WindowStages($Window, [string[]]$Settings, [string]$Arm = '', [s
         $stage = $script:StageOfSetting[$kv[0]]
         if ($Window.Stages.Count -eq 0) { $failures += "no 'native: stages' line inside window $($Window.Tag) (Full mode reports it)"; continue }
         $state = if ($Window.Stages.Contains($stage)) { $Window.Stages[$stage] } else { '(missing)' }
-        $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on', 'compare')
+        $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on', 'compare', 'owned')
         # (stricter than Assert-ArmStages: a window lies inside one arm after its settle frames, so an arm claimed on must have ACTED in it;
         # `inactive(armed, nothing owned in the window)` = the toggle armed the code but nothing ran through it, e.g. native.vertex_pull switched on
         # at run time: no record is rebuilt pulled; -AllowIdle accepts it for stages that legitimately have nothing in view)
@@ -131,7 +131,7 @@ function Assert-ArmStages([string]$Log, [string[]]$Settings, [string]$Arm = "", 
             $kv = $s -split '=', 2
             if ($kv.Count -ne 2 -or -not $script:StageOfSetting.Contains($kv[0])) { continue }
             $stage = $script:StageOfSetting[$kv[0]]
-            $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on', 'compare')
+            $want = $kv[1].ToLowerInvariant() -in @('true', '1', 'on', 'compare', 'owned')
             $anyActive = $false; $everActive = $false
             foreach ($w in $considered) { if ($w.Contains($stage) -and $w[$stage] -like 'active*') { $anyActive = $true } }
             $lastState = if ($last.Contains($stage)) { $last[$stage] } else { '(missing)' }

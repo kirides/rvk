@@ -1182,6 +1182,7 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[stage];
         s.texture = textureOfImageData(data, ok);
+        if (skyTexCapture_ != nullptr) (*skyTexCapture_)[stage] = {res, data, res != nullptr ? ptr(res, 0x70) : nullptr, true};  // (F12 owned record)
         if (vro_ && vro_->pend.rec) {
             auto& tm = vro_->pend.rec->texMap;
             const auto at = std::find_if(tm.begin(), tm.end(), [&](const tro::TexMap& x) { return x.res == res && x.stage == stage; });
@@ -1611,6 +1612,7 @@ StaticOps::Skip StaticOps::adminSamplers(sc::DrawDesc& d, const std::uint8_t* ow
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[a.stage];
         s.texture = adminStagesUnbound_ ? nullptr : textureOfImageData(data, ok);
+        if (skyTexCapture_ != nullptr) (*skyTexCapture_)[a.stage] = {nullptr, adminStagesUnbound_ ? nullptr : data, nullptr, false};  // (F12 owned record)
         if (!ok && !adminStagesUnbound_) d.inheritMask |= static_cast<std::uint16_t>(1u << a.stage);
         const std::uint32_t raw[6] = {sn.at<std::uint32_t>(a.slot), sn.at<std::uint32_t>(a.slot + 4), sn.at<std::uint32_t>(a.slot + 0xc),
                                       sn.at<std::uint32_t>(a.slot + 8), sn.at<std::uint32_t>(a.slot + 0x10), sn.at<std::uint32_t>(a.slot + 0x18)};
@@ -2951,6 +2953,7 @@ void StaticOps::issue() {
 void StaticOps::report() {
     stagesReport();  // (first: the windows it reads are reset by the reports below)
     decalsReport();  // (native.owned_decals)
+    skyOwnedReport();  // (native.own_sky = owned)
     if (f2c::on()) f2c::report(dev_.stats().frames);
     if (verified_ < 0 && active()) {
         spdlog::info("native: static ops: idle (the engine checks failed)");
