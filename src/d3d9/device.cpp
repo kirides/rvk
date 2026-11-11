@@ -8,8 +8,11 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <map>
+#include <thread>
 #include <chrono>
 #include <charconv>
 #include <cmath>
@@ -2096,16 +2099,35 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
         variantJobs_.push_back({std::move(owner), slot});
         if (variantThreads_.empty()) {
             variantStop_ = false;
-            for (int t = 0; t < 3; ++t) variantThreads_.emplace_back([this] { variantWorker(); });
+            const unsigned n = variantThreadCount();
+            for (unsigned t = 0; t < n; ++t) variantThreads_.emplace_back([this] { variantWorker(); });
+            spdlog::info("d3d9: shader variants: {} worker threads (below normal priority)", n);
         }
     }
     variantCv_.notify_one();
     return rhi::ShaderModule::None;
 }
 
+// the variant workers (frame-ownership.md 14.26): an ubershader variant compiles in ~0.8 s, and a cold cache (every build that changes an embedded header moves the
+// cache key) queues ~900 of them on Vulkan with FSR / frame generation (the bone-motion forms come on top): three workers took 3 - 4 minutes, during which the owned
+// shares stay low (forms pending). All hardware threads but four, below normal priority (the engine / render / record threads keep theirs); RVK_VARIANT_THREADS=n overrides
+unsigned Device::variantThreadCount() {
+    static const unsigned n = [] {
+        char v[16];
+        if (const DWORD len = GetEnvironmentVariableA("RVK_VARIANT_THREADS", v, sizeof v); len > 0 && len < sizeof v) {
+            const int k = std::atoi(v);
+            if (k > 0) return static_cast<unsigned>(std::min(k, 32));
+        }
+        const unsigned hw = std::thread::hardware_concurrency();
+        return std::clamp(hw > 4 ? hw - 4 : 3u, 3u, 12u);
+    }();
+    return n;
+}
+
 // translates + compiles the queued variants (SPIR-V disk cache as variantModule), in request order
 void Device::variantWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk shader variants");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     for (;;) {
         VariantJob job;
         VariantProvider provider;
@@ -2172,6 +2194,7 @@ void Device::variantWorker() {
             continue;
         }
         bool viaUber = false;
+        const auto t0 = std::chrono::steady_clock::now();
         rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion), &viaUber);
         // 14.22: the engine's request arrived while this variant was being built from the bytecode alone (a shader the engine created before it asked the pool for it):
         // the variant is built again with the request (the ubershader form when it covers it). Variants already built are reset by sourceAttached
@@ -2206,8 +2229,19 @@ void Device::variantWorker() {
         }
         job.shader->variants[i].store(m, std::memory_order_release);
         job.shader->variantState[i].store(2, std::memory_order_release);
+        const auto t1 = std::chrono::steady_clock::now();
         done();
         prewarmVariantKeys(job.shader->hash, job.slot);  // F15-1
+        const auto t2 = std::chrono::steady_clock::now();
+        // 14.26: where a variant worker's time goes (the module: translation + DXC or the disk cache; the known pipeline keys it unblocked)
+        const std::uint64_t built = variantTimes_.n.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto us = [](auto d) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(d).count()); };
+        const std::uint64_t mUs = variantTimes_.moduleUs.fetch_add(us(t1 - t0), std::memory_order_relaxed) + us(t1 - t0);
+        const std::uint64_t pUs = variantTimes_.prewarmUs.fetch_add(us(t2 - t1), std::memory_order_relaxed) + us(t2 - t1);
+        if (built % 100 == 0) {
+            spdlog::info("d3d9: shader variants: {} built by {} workers, per variant: module {:.0f} ms, pipeline keys {:.0f} ms (means)", built, variantThreadCount(),
+                         static_cast<double>(mUs) / 1000.0 / static_cast<double>(built), static_cast<double>(pUs) / 1000.0 / static_cast<double>(built));
+        }
     }
 }
 
