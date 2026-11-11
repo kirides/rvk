@@ -211,6 +211,7 @@ add_library(rvk_core STATIC
     src/native/effect_ops_lean.cpp
     src/native/own_post.cpp
     src/native/own_post_groups.cpp
+    src/native/own_post_units.cpp
     src/native/own_post.h
     src/native/effect_ops.h
     src/native/frame_desc.cpp
