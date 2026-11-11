@@ -259,6 +259,9 @@ struct TreeBatch {
 // tableMerge (table lighting with a complete table, gpu-scene.md 9.9): the light list and the static lights no longer cut a batch - only a different sun
 // flag (another pass structure) and static ambient (staticSh) do; the batch's ambient / sun values are its last instance's
 void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out, bool tableMerge = false);
+// TreeInstance::lightSig of an illumination with `ns` (1 .. 2) static light entries: a hash over each entry's first 48 bytes (position, colour, ...) at
+// illum +0x10 + 0x40 e; `illum` = the illumination's first 0x80 bytes
+std::uint64_t treeLightSig(const std::uint8_t* illum, std::uint32_t ns);
 // the draw description a batch writes into the visual's record (the rest stays as the record has it)
 struct TreeRange {
     std::uint32_t numVertices = 0, startIndex = 0, primCount = 0;

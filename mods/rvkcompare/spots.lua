@@ -311,4 +311,13 @@ return {
         time = { 13, 0 }, weather = "Sunny_Full", explicit = true,
         notes = "eye height inland from the beach, +0 m along the walk to the cliff",
     },
+    -- a night variant for native.picture_check (frame-ownership.md 14.36: torch-lit SpeedTrees; frozen, no thunder)
+    {
+        id = "harbour_night_north",
+        player = { x = -4361, y = 486, z = -19659, yaw = 0 },
+        camera = { target = { 0, 200, 0 }, yaw = 0, pitch = -8, distance = 800 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 23, 30 }, weather = "Sunny_Full", explicit = true,
+        notes = "harbour_night's place looking north",
+    },
 }
