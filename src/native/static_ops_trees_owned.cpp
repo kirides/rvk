@@ -94,7 +94,7 @@ void tro::Stats::add(const Stats& o) {
     lateNoRec += o.lateNoRec; lateStamp += o.lateStamp; lateView += o.lateView; lateMaterial += o.lateMaterial; latePlan += o.latePlan; lateSpecial += o.lateSpecial;
     lateNoTemplate += o.lateNoTemplate; lateTemplate += o.lateTemplate; lateFlush += o.lateFlush; lateRows += o.lateRows;
     for (int i = 0; i < 8; ++i) badBy[i] += o.badBy[i];
-    built += o.built; replaced += o.replaced; notRetained += o.notRetained; badOps += o.badOps;
+    built += o.built; replaced += o.replaced; matMoved += o.matMoved; notRetained += o.notRetained; badOps += o.badOps;
     derived += o.derived; reused += o.reused; refused += o.refused; tableFull += o.tableFull;
     checkOps += o.checkOps; checkInst += o.checkInst; checkRowDiff += o.checkRowDiff; checkKeyDiff += o.checkKeyDiff; checkCountDiff += o.checkCountDiff; checkDraws += o.checkDraws;
     checkTplDiff += o.checkTplDiff; checkMiss += o.checkMiss; checkMissCompared += o.checkMissCompared;
@@ -313,6 +313,18 @@ void StaticOps::treeCompEnd(const Op& op) {
                 texMoved = true;
                 break;
             }
+        }
+    }
+    // the material record the old templates were made with was released by the table's idle sweep (the op was not drawn for MaterialTable::kIdleFrames) and the
+    // shader got a fresh slot: the old templates are stale (their slot is free or another material's; the owned frames composed the op late meanwhile:
+    // rec.matHash no longer held), not a template error
+    if (sameStamp && !texMoved && old->matSlot != matSlot && mix(mix(0, old->matSlot), mt.structVersion(old->matSlot)) != old->matHash) {
+        texMoved = true;
+        ++W.matMoved;
+        if (T.matMovedLogged < 8) {
+            ++T.matMovedLogged;
+            spdlog::info("native: owned trees: {}: material record re-allocated (slot {} -> {}, the old slot {}): templates replaced", describe(op), old->matSlot, matSlot,
+                         mt.structVersion(old->matSlot) == 0 ? "free" : "another record");
         }
     }
     for (std::size_t k = 0; k < drawCount_; ++k) {
@@ -1360,12 +1372,12 @@ void StaticOps::treeReportOne(tro::Stats& q, tro::Stats& total, const char* what
     // (a template that differs from the next composition of its bucket is replaced and counted, not fatal: inputs outside the stamps move rarely, e.g. a texture streaming in)
     const std::uint64_t differing = q.checkRowDiff + q.checkCountDiff + q.checkMiss;
     spdlog::info("native: owned trees [{}] (5 s): {} views ({} owned), tree ops looked at {}, taken {}, drawn from templates {} (of them empty records {}), composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
-                 "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (not retained {}, bad ops {}: batch draws {} / draw level {} / depth bias {} / lean+retain {} / switch {} / material {} / none {}); persistent blocks derived {} reused {} refused {} (table full {}); "
+                 "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (material records re-allocated {}, not retained {}, bad ops {}: batch draws {} / draw level {} / depth bias {} / lean+retain {} / switch {} / material {} / none {}); persistent blocks derived {} reused {} refused {} (table full {}); "
                  "check frames: {} ops / {} instances compared, {} draws against templates: DIFFERING {} (rows {}, counts {}, templates {}; per-instance LOD start differs from the engine batch's first instance {}), MISS {} of {} compared; "
                  "observers shown {} instances; GPU commands: {} commands ({} records, {} indirect calls) per {} flushes = {:.1f} / flush, the engine's composed batches {:.1f} / composed view ({} views); "
                  "CPU per owned view: take {:.1f} us, side effects {:.1f} us, plan {:.1f} us, templates {:.1f} us, rows {:.1f} us, flush {:.1f} us",
                  what, q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.emptyOps, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
-                 q.instances, q.items, q.flushes, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff,
+                 q.instances, q.items, q.flushes, q.built, q.replaced, q.matMoved, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff,
                  q.checkCountDiff, q.checkTplDiff, q.checkKeyDiff, q.checkMiss, q.checkMissCompared, q.observed, q.items, q.records, q.packets, q.flushes,
                  static_cast<double>(q.items) / static_cast<double>(std::max<std::uint64_t>(1, q.flushes)), static_cast<double>(q.compBatches) / static_cast<double>(std::max<std::uint64_t>(1, q.compViews)), q.compViews, static_cast<double>(q.takeNs) / nv / 1000.0, static_cast<double>(q.sideNs) / nv / 1000.0, static_cast<double>(q.planNs) / nv / 1000.0,
                  static_cast<double>(q.tplNs) / nv / 1000.0, static_cast<double>(q.rowNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);
