@@ -28,7 +28,7 @@ class RtScene;
 struct RtShadowParams {
     std::uint32_t tex[4];   // depth map, raw visibility, history, accumulated (bindless t2D)
     std::uint32_t info[4];  // width, height, rays per pixel, RVK_RT_TRACE_* flags
-    std::uint32_t mode[4];  // frame index, history valid, debug, 0
+    std::uint32_t mode[4];  // frame index, history valid, debug, 1 = opaque-first visibility (A/B; 0 = one query)
     float sun[4];           // unit vector towards the sun, tan of the cone's half angle
     float range[4];         // range (view depth, world units), ray reach, origin bias, spatial filter strength
 };
@@ -54,6 +54,7 @@ public:
         float filter = 1.0f;       // spatial filter strength (0 = temporal only)
         float bias = 1.5f;         // origin offset along the surface normal (world units)
         int debug = 0;             // shadows.debug rt_term / rt_coverage are handled by the mask shader
+        bool opaqueFirst = false;  // rt.reflection_tweaks bit 128 (A/B): the opaque-first split per shadow ray instead of one query (measured: no gain, rt-shadows.md 14)
     };
     // what the shadow mask shader of this frame uses (slot 0 = none: the cascades alone)
     struct Frame {

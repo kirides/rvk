@@ -11,7 +11,7 @@
 struct RtShadowParams {
     uint4 tex;    // x depth map (t2D), y raw visibility (t2D), z history (t2D), w accumulated (t2D)
     uint4 info;   // x width, y height, z rays per pixel, w RVK_RT_TRACE_* flags
-    uint4 mode;   // x frame index, y history valid (0 / 1), z debug, w 0
+    uint4 mode;   // x frame index, y history valid (0 / 1), z debug, w 1 = opaque-first shadow rays (A/B), 0 = one query
     float4 sun;   // xyz unit vector towards the sun, w tan of the sun cone's half angle
     float4 range; // x range (view depth, world units), y ray reach, z origin bias (units), w spatial filter strength
 };

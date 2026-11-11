@@ -57,7 +57,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             // the ray cone is zero: the sun disc is sampled by the ray direction (the penumbra), so adding its angle (and the
             // pixel's) to the cone as well read a leaf's opacity 5-7 mips down, where the cut-out averages to a solid card and
             // every canopy cast a black blob; the cut-out is tested at its own resolution, the temporal pass averages the noise
-            sum += rvkRtVisibility(f, o, dir, 0.25, p.range.y, 0.0, 0.0, p.info.w);
+            // one query; mode.w = 1 the opaque-first split (rvkRtVisibilityOpaqueFirst: the same visibility, in-game picture identical; A/B,
+            // rt.reflection_tweaks 128: no gain measured, canopies pay a second traversal: rt-shadows.md 14)
+            sum += p.mode.w != 0u ? rvkRtVisibilityOpaqueFirst(f, o, dir, 0.25, p.range.y, 0.0, 0.0, p.info.w)
+                                  : rvkRtVisibility(f, o, dir, 0.25, p.range.y, 0.0, 0.0, p.info.w);
         }
         vis = sum / float(rays);
     }

@@ -208,6 +208,7 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     p.mode[0] = static_cast<std::uint32_t>(frame);
     p.mode[1] = historyValid_ ? 1u : 0u;
     p.mode[2] = static_cast<std::uint32_t>(settings_.debug);
+    p.mode[3] = settings_.opaqueFirst ? 1u : 0u;
     std::memcpy(p.sun, toSun, 12);
     p.sun[3] = std::tan(std::clamp(settings_.softness, 0.05f, 10.0f) * kPi / 180.0f);
     p.range[0] = rangeM * 100.0f;

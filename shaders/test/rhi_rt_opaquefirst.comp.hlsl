@@ -4,7 +4,9 @@
 // Per ray, 40 words: for the flags 0 and RVK_RT_TRACE_NO_DYNAMIC, the one-query closest hit (hit, t bits, record, primitive, bary) and the
 // opaque-first one (6 + 6 words), then the four visibilities (one-query / opaque-first per flags), then the ray-t semantics (28..31: forced opaque
 // t, forced non-opaque candidate / committed t through rvkRay, the committed t of a plain RayDesc), then the size checks of a lane-varying bindless
-// index (32..36: wrong inside the candidate loop, checked, wrong outside it, the width returned, the slot).
+// index (32..36: wrong inside the candidate loop, checked, wrong outside it, the width returned, the slot), the material-pack map's mip offset at
+// hits (37..39: rvkRtPackLodOffset wrong inside the candidate loop, the former size-query form wrong there, rvkRtPackLodOffset wrong outside it).
+// The records: record k's albedo is 8 << (k % 4) wide (its instanceId), its pack map (packWord slot) 8 << ((k + 1) % 4).
 #include "rvk_rt_trace.hlsli"
 
 struct RtRayIn {
@@ -37,6 +39,9 @@ void putHit(RvkRtHit h) {
     putU(h.hit ? asuint(h.bary.y) : 0u);
 }
 
+// the exact mip offset of record k's pack map (log2 of the albedo width over the map width)
+float packTruth(uint k) { return float(k % 4u) - float((k + 1u) % 4u); }
+
 [numthreads(64, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint i = id.x;
@@ -59,7 +64,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     // raw ray-t semantics (words 28..31): every instance forced opaque (closest t) and every instance forced non-opaque with every candidate
     // committed (the first candidate's CandidateTriangleRayT, the committed RayT): the three must agree, whatever tMin is
     float tOpaque = -1.0, tCandidate = -1.0, tCommitted = -1.0;
-    uint sizeBad = 0u, sizeChecked = 0u;  // texture sizes (GetDimensions of a non-uniform bindless index) inside the candidate loop: the record's
+    uint sizeBad = 0u, sizeChecked = 0u, packBad = 0u, packOldBad = 0u;  // texture sizes (GetDimensions of a non-uniform bindless index) inside the candidate loop: the record's
                                           // instanceId holds its texture's width
     {
         RayQuery<RAY_FLAG_NONE> q;
@@ -78,6 +83,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             RvkRtRecord rc = rvkRtRecord(f, q.CandidateInstanceID() + q.CandidateGeometryIndex());
             ++sizeChecked;
             if (uint(rvkSize2D(rc.albedoTex).x) != rc.instanceId) ++sizeBad;
+            const uint pslot = rc.packWord & 0x3FFFu;
+            if (abs(rvkRtPackLodOffset(rc, pslot) - packTruth(q.CandidateInstanceID())) > 1e-3) ++packBad;
+            if (abs(log2(float(max(rvkSize2D(rc.albedoTex).x, 1)) / float(max(rvkSize2D(pslot).x, 1))) - packTruth(q.CandidateInstanceID())) > 1e-3) ++packOldBad;
             q.CommitNonOpaqueTriangleHit();
         }
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) tCommitted = q.CommittedRayT() + rvkRayT0(tMin);
@@ -108,4 +116,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     putU(uint(rvkSize2D(rl.albedoTex).x) != rl.instanceId ? 1u : 0u);
     putU(uint(rvkSize2D(rl.albedoTex).x));
     putU(rl.albedoTex);
+    putU(packBad);
+    putU(packOldBad);
+    putU(abs(rvkRtPackLodOffset(rl, rl.packWord & 0x3FFFu) - packTruth(i % 9u)) > 1e-3 ? 1u : 0u);
 }
