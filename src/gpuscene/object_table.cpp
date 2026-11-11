@@ -66,6 +66,7 @@ ObjectWhy ObjectTable::serve(const void* entity, const float composed[kObjectReg
             const bool fadeOnly = std::memcmp(rec.regs[2], want.regs[2], 3 * 16) == 0;
             ++(fadeOnly ? stats_.fadeRewrites : stats_.matrixRewrites);
         }
+        if (history_ && regsDiffer) noteChanged(slot);
         rec = want;
         table_.mark(slot);
         used_ = std::max(used_, slot + 1);
@@ -141,12 +142,19 @@ void ObjectTable::flush(d3d9::Device& dev) {
     }
     if (!created_ && !gpuFailed_) {
         created_ = true;
-        if (!table_.create(dev, kCapacity, "object table", kTablePad)) {
+        if (!table_.create(dev, history_ ? 2 * kCapacity : kCapacity, "object table", kTablePad)) {
             gpuFailed_ = true;
             spdlog::warn("native: owned objects: the object table buffer could not be created (the object windows stay uploaded)");
         } else {
             servedFrame_.assign(kCapacity, 0);
             servedVersion_.assign(kCapacity, 0);
+            if (history_) {
+                table_.zero(dev);  // (the history half: info.w = 0 = invalid until a record changes)
+                lastRec_.assign(kCapacity, ObjectRecord{});
+                changedAt_.assign(kCapacity, 0);
+                settlingMark_.assign(kCapacity, 0);
+                spdlog::info("native: owned objects: the object table keeps the previous frame's records (rigid motion, {} MiB)", 2 * kCapacity * sizeof(ObjectRecord) >> 20);
+            }
         }
     }
     if (table_.ready()) {
@@ -169,16 +177,96 @@ void ObjectTable::flush(d3d9::Device& dev) {
                 if (rec.info[3] == 0) return;  // (never served: no record to keep fresh)
                 const ObjectRecord want = makeObjectRecord(s.world, rec.regs[1][3], s.generation, s.version, s.flags);
                 if (std::memcmp(&rec, &want, sizeof(rec)) != 0) {
+                    if (history_ && std::memcmp(rec.regs, want.regs, sizeof(rec.regs)) != 0) noteChanged(i);
                     rec = want;
                     table_.mark(i);
                 }
             });
         }
+        if (history_) rollHistory();
         table_.flush(dev, frame_ % kVerifyEvery == 0, used_);
         table_.collect(dev.game(), "object table");
     }
     report(dev);
     ++frame_;
+}
+
+rhi::GpuRef ObjectTable::prevOf(rhi::GpuRef base) const {
+    if (!history_ || !active_ || !table_.ready() || table_.ref().null() || base.null()) return {};
+    const std::int64_t delta = (static_cast<std::int64_t>(base.bits - table_.ref().bits) >> rhi::detail::g_refShift) + static_cast<std::int64_t>(kObjectFirstReg) * 16;
+    if (delta < 0 || delta % static_cast<std::int64_t>(sizeof(ObjectRecord)) != 0) return {};
+    const std::uint64_t slot = static_cast<std::uint64_t>(delta) / sizeof(ObjectRecord);
+    if (slot >= kCapacity) return {};
+    d3d9::OwnedWindows::Win w;
+    if (!windowFor(static_cast<std::uint32_t>(slot), w) || w.base.bits != base.bits) return {};
+    return base.plus(kHistoryDelta);
+}
+
+void ObjectTable::noteChanged(std::uint32_t slot) {
+    if (slot >= kCapacity || changedAt_.empty() || changedAt_[slot] == frame_ + 1) return;
+    changedAt_[slot] = frame_ + 1;
+    changed_.push_back(slot);
+}
+
+// The history records (14.15 b): the draws of frame F read the records uploaded at F's flush; the history record must hold what frame F - 1's draws read (lastRec_).
+// A slot changed this frame gets its last record (valid when it was live with the same generation and moved less than kJump units); a slot that changed in an earlier
+// frame and not in this one "settles": its history becomes the record itself (no motion), and it stays so until the next change.
+void ObjectTable::rollHistory() {
+    auto& shadow = table_.shadow();
+    const auto writeHist = [&](std::uint32_t slot, const ObjectRecord& h) {
+        ObjectRecord& dst = shadow[kCapacity + slot];
+        if (std::memcmp(&dst, &h, sizeof(h)) == 0) return;
+        dst = h;
+        table_.mark(kCapacity + slot);
+        used_ = std::max(used_, kCapacity + slot + 1);
+    };
+    for (const std::uint32_t slot : changed_) {
+        ++hist_.changed;
+        const ObjectRecord& last = lastRec_[slot];
+        const ObjectRecord& cur = shadow[slot];
+        ObjectRecord h = last;
+        bool valid = last.info[3] != 0;
+        if (!valid) {
+            ++hist_.invalidNew;
+        } else if (last.info[0] != cur.info[0]) {
+            valid = false;
+            ++hist_.invalidGeneration;
+        } else {
+            // the translation (the rows' .w of c33..c35)
+            const float dx = cur.regs[2][3] - last.regs[2][3], dy = cur.regs[3][3] - last.regs[3][3], dz = cur.regs[4][3] - last.regs[4][3];
+            if (dx * dx + dy * dy + dz * dz > kJump * kJump) {
+                valid = false;
+                ++hist_.invalidJump;
+            }
+        }
+        if (valid) ++hist_.valid;
+        h.info[3] = valid ? 1u : 0u;
+        writeHist(slot, h);
+        lastRec_[slot] = cur;
+        if (settlingMark_[slot] == 0) {
+            settlingMark_[slot] = 1;
+            settling_.push_back(slot);
+        }
+    }
+    // the slots that changed before and not now: history = the record (still: the second run gives this frame's position)
+    for (std::size_t i = 0; i < settling_.size();) {
+        const std::uint32_t slot = settling_[i];
+        if (changedAt_[slot] == frame_ + 1) {
+            ++i;
+            continue;
+        }
+        // (invalid: a still record's draws take the camera's motion from the pixel shader's reconstruction, as a record that never moved)
+        ObjectRecord h = shadow[slot];
+        h.info[3] = 0u;
+        writeHist(slot, h);
+        lastRec_[slot] = shadow[slot];
+        settlingMark_[slot] = 0;
+        settling_[i] = settling_.back();
+        settling_.pop_back();
+        ++hist_.settled;
+    }
+    // (a slot whose record was rewritten without a position change, e.g. a new record's first serve: its lastRec_ follows)
+    changed_.clear();
 }
 
 void ObjectTable::report(d3d9::Device& dev) {
@@ -202,6 +290,14 @@ void ObjectTable::report(d3d9::Device& dev) {
         d(s.newRecords, p.newRecords), d(s.fadeRewrites, p.fadeRewrites), d(s.matrixRewrites, p.matrixRewrites), d(s.matrixChecks, p.matrixChecks), s.matrixBad, s.changedAfterServe,
         d(s.drained, p.drained), static_cast<double>(ts.slotsUploaded - lastSlots_) / static_cast<double>(frames), static_cast<double>(ts.bytes - lastBytes_) / 1024.0 / static_cast<double>(frames),
         ts.verifyDone, ts.verifyBad);
+    if (history_) {
+        const HistoryStats& h = hist_;
+        const HistoryStats& q = histLast_;
+        spdlog::info("native: object history (5 s): records changed {} (history valid {}; invalid: new record {}, other generation {}, jump {}), settled {}",
+                     h.changed - q.changed, h.valid - q.valid, h.invalidNew - q.invalidNew, h.invalidGeneration - q.invalidGeneration, h.invalidJump - q.invalidJump,
+                     h.settled - q.settled);
+        histLast_ = h;
+    }
     last_ = s;
     lastDev_ = o;
     lastFrame_ = frame_;

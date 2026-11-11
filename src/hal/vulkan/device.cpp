@@ -276,6 +276,9 @@ void HalDevice::applyStaticOps() {
         const bool objects = on(rs.nativeOwnedObjects) && owned;
         if (objects != gpuscene::objecttable().active()) spdlog::info("native: owned objects {}", objects ? "on" : "off");
         gpuscene::objecttable().setActive(objects);
+        // frame-ownership.md 14.15 b: rigid-object history motion (restart: the history doubles the object table's buffer, made at its first flush)
+        gpuscene::objecttable().setHistory(objects && rs.nativeRigidMotion != nullptr && rs.nativeRigidMotion->startValue() != 0.0 && rs.nativeBoneMotion != nullptr &&
+                                           rs.nativeBoneMotion->startValue() != 0.0);
         staticOps_->setOwnedObjects(objects);
         // frame-ownership.md 7.14: F2c-2 op records (compare only; needs the object table + the lighting images)
         staticOps_->setOwnedRecords(on(rs.nativeOwnedRecords) && objects && gpuscene::lightingimages().active());
@@ -335,6 +338,7 @@ void HalDevice::applyStaticOps() {
             const int bone = actors && rs.nativeBoneMotion != nullptr ? static_cast<int>(rs.nativeBoneMotion->startValue()) : 0;
             gpuscene::bonetable().setHistory(bone != 0);
             dev_.setBoneMotion(gpuscene::bonetable().history() ? bone : 0);
+            dev_.setRigidMotion(bone != 0 && rs.nativeRigidMotion != nullptr && rs.nativeRigidMotion->startValue() != 0.0 && gpuscene::objecttable().active());  // 14.15 b
             staticOps_->setOwnedActors(actors);
         }
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
@@ -1773,6 +1777,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::objecttable().flush(dev_);
         gpuscene::bonetable().flush(dev_);  // F6-1: the owned actors' bone images (before the frame's draws, with the other tables)
         dev_.boneMotionFrame();         // 14.13: bone-history motion (compare readback, the 5 s line)
+        dev_.captureCensusFrame();      // 14.15: the vertex-capture census (`native: captures (5 s)`)
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
         gpuscene::bbtable().flush(dev_);
     }

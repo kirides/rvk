@@ -2110,7 +2110,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "        }}\n"
         "    }}",
         tc);
-    d3d9::Device::boneCompareText(o);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
+    d3d9::Device::boneCompareText(o, s);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
     return true;
 }
 
@@ -2238,7 +2238,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
             batch.base = a.addr();
             batch.baseRw = a.rw();
             batch.slots = slots;
-            dev.requestVertexCapture(a, q.instanced);
+            dev.requestVertexCapture(a, q.instanced, d3d9::Device::CaptureBy::RtTree, d3d9::Device::captureKindOf(q));
         }
         if (batch.slots != slots) return;
     }
@@ -2304,25 +2304,29 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
     if (capture) ++iv_.treeCaptured;
 }
 
-// the vertex layout the skinning pass reads (rt_skin.comp): stream 0 only, POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES0 UBYTE4,
-// TEXCOORD0 F2; morph targets (POSITION1..3 in streams 1..3, the heads') only while their weights (the vertex shader's c31.xyz) are
-// zero, then the vertex shader adds nothing of them; a draw with active morph targets keeps the vertex shader capture; `offsets`
-// packs the four byte offsets
-bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const {
+// the vertex layout the skinning pass reads (rt_skin.comp): stream 0: POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES0 UBYTE4, TEXCOORD0 F2; the morph targets
+// (POSITION1..3 F3 in streams 1..3, the heads') are added with the vertex shader's weights c31.xyz (14.15 c: before, a draw with active weights kept the vertex shader
+// capture, 27 - 72 solid draws per 5 s without a skinning job); `l.offsets` packs the four stream-0 byte offsets
+bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, SkinLayout& l) const {
+    l = SkinLayout{};
     if (q.decl == nullptr || q.vertexBuffer == nullptr || q.vertexStride == 0 || (q.vertexStride & 3u) != 0 || q.vertexStride > 255 ||
         q.vertexBuffer->ringCopied() || (q.vertexOffset & 3u) != 0) {
         return false;
     }
     int pos = -1, bw = -1, bi = -1, tc = -1;
-    bool morph = false;
+    int morph[3] = {-1, -1, -1};
     for (const d3d9::VertexElement& e : q.decl->elements()) {
         if (e.stream == d3d9::kDeclEndStream) break;
         if (e.stream != 0) {
-            morph = true;
+            // a morph target: POSITIONk F3 in stream k (the deltas of the normals are not needed: positions only)
+            if (e.stream >= 1 && e.stream <= 3 && e.usage == 0 && e.usageIndex == e.stream) {
+                if (e.type != 2) return false;
+                morph[e.stream - 1] = e.offset;
+            }
             continue;
         }
         if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = e.offset;
-        else if (e.usage == 0) morph = true;  // POSITION1..3
+        else if (e.usage == 0) return false;  // (a morph target in stream 0: not a layout the game uses)
         else if (e.usage == 1 && e.usageIndex == 0 && e.type == 3) bw = e.offset;
         else if (e.usage == 2 && e.usageIndex == 0 && e.type == 5) bi = e.offset;
         else if (e.usage == 5 && e.usageIndex == 0 && e.type == 1) tc = e.offset;
@@ -2330,9 +2334,29 @@ bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeight
     for (int o : {pos, bw, bi, tc}) {
         if (o < 0 || o > 252 || (o & 3) != 0) return false;
     }
-    if (morph && (std::fabs(morphWeights[0]) > 1e-6f || std::fabs(morphWeights[1]) > 1e-6f || std::fabs(morphWeights[2]) > 1e-6f)) return false;
-    offsets = static_cast<std::uint32_t>(pos) | (static_cast<std::uint32_t>(bw) << 8) | (static_cast<std::uint32_t>(bi) << 16) |
-              (static_cast<std::uint32_t>(tc) << 24);
+    // (c31 is the morph weights only for a layout with morph streams: other skinned shaders leave it to whatever the register file holds)
+    const bool morphLayout = morph[0] >= 0 || morph[1] >= 0 || morph[2] >= 0;
+    if (morphLayout && d3d9::Device::nocapOld() &&
+        (std::fabs(morphWeights[0]) > 1e-6f || std::fabs(morphWeights[1]) > 1e-6f || std::fabs(morphWeights[2]) > 1e-6f)) {
+        return false;  // (RVK_NOCAP_OLD: active morph targets kept the vertex shader capture)
+    }
+    for (std::uint32_t k = 0; k < 3 && morphLayout; ++k) {
+        const bool active = std::fabs(morphWeights[k]) > 1e-6f;
+        if (morph[k] < 0) {
+            if (active) return false;  // (weights for a target the layout does not have: the vertex shader reads something else)
+            continue;
+        }
+        const d3d9::Buffer* b = q.morphBuffer[k];
+        const std::uint32_t st = q.morphStride[k];
+        if (b == nullptr || b->ringCopied() || st == 0 || (st & 3u) != 0 || st > 255 || (q.morphOffset[k] & 3u) != 0 || morph[k] > 252 || (morph[k] & 3) != 0) {
+            if (active) return false;
+            continue;
+        }
+        l.morphOff[k] = static_cast<std::uint32_t>(morph[k]);
+        l.morphMask |= 1u << k;
+    }
+    l.offsets = static_cast<std::uint32_t>(pos) | (static_cast<std::uint32_t>(bw) << 8) | (static_cast<std::uint32_t>(bi) << 16) |
+                (static_cast<std::uint32_t>(tc) << 24);
     return true;
 }
 
@@ -2349,8 +2373,8 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const bool solid = mainView && q.phase.pass == Pass::Solid;
     // the skinning pass takes the draws of the z pre-pass and of the cascades (before the TLAS is built); the solid pass keeps
     // its vertex shader capture (the previous main-view positions: motion vectors, and the fallback for a character the others missed)
-    std::uint32_t skinOffsets = 0;
-    const bool skin = skinWanted_ && !solid && skinReady() && skinEligible(q, dev.vsConstant(31), skinOffsets);
+    SkinLayout skinLayout;
+    const bool skin = skinWanted_ && !solid && skinReady() && skinEligible(q, dev.vsConstant(31), skinLayout);
     if (skinWanted_ && !solid) ++(skin ? iv_.skinDraws : iv_.skinIneligible);
     if (skinWanted_ && !solid && !skin && skinReady_ && q.decl != nullptr && skinLogged_.insert(q.decl->id()).second && skinLogged_.size() <= 8) {
         std::string els;
@@ -2362,6 +2386,12 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                      q.vertexBuffer != nullptr && q.vertexBuffer->ringCopied(), els);
     }
     if (mainView && !solid && !skin) return;  // the pre-pass's draws only feed the skinning pass
+    // 14.15 (Full, native.bone_motion=on): a cascade's character draw while the skinning pipeline is still being built (the first second of a session) takes no
+    // capture either: the character enters the TLAS with the first skinning job (no capture-variant pipeline per skinned shader for a few frames)
+    if (!solid && !skin && skinWanted_ && !skinReady_ && !skinVerify_ && dev.boneMotion() == 1 && !d3d9::Device::nocapOld()) {
+        dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtCascade, d3d9::Device::captureKindOf(q));
+        return;
+    }
     // verify: only the cascades' draws (the vertex shader capture of the same draw is the reference)
     if (skin && skinVerify_ && mainView) return;
     // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
@@ -2383,22 +2413,31 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     for (const DynDraw& d : dyn_) {
         if (d.key == key && d.skin == skin && (skin || d.main == mainView)) return;
     }
+    bool solidHasJob = false;
     if (solid && skinWanted_ && skinReady_) {
         // diagnostics: a solid-pass character draw without a skinning job of this frame (the pose of the previous frame is used for it)
         bool has = false;
         for (const DynDraw& d : dyn_) has = has || (d.key == key && d.skin);
+        solidHasJob = has;
         ++(has ? iv_.solidWithSkin : iv_.solidNoSkin);
         // (F-VAR2: the skinning pass has this frame's pose of the character, nothing reads its capture: no request, so an owned solid draw stays owned)
         // (14.13: a bone-motion draw's motion needs no capture either: dev.boneMotionDraw)
-        if (has && (!characterMotion_ || dev.boneMotionDraw()) && !skinVerify_) {
+        if (has && (!characterMotion_ || dev.boneMotionCovered()) && !skinVerify_) {
             ++iv_.solidCaptureSkipped;
+            dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidMotion, d3d9::Device::captureKindOf(q));
+            return;
+        }
+        // 14.15: a solid-pass part without a job of this frame (its first frame: the pre-pass / cascades did not draw it yet) whose motion the bone forms give takes
+        // no capture: the TLAS takes it from the next frame's job (one frame without it), as the RT scene does for any part it first sees in a late pass
+        if (!has && dev.boneMotionCovered() && dev.boneMotion() == 1 && !skinVerify_ && !d3d9::Device::nocapOld()) {
+            dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidNoJob, d3d9::Device::captureKindOf(q));
             return;
         }
         if (!has && skinLogged_.size() < 12 && skinLogged_.insert(key).second) {
-            std::uint32_t o = 0;
+            SkinLayout lo;
             spdlog::info("rt: skin: a solid-pass draw without a skinning job: entity {}, primitives {}, morph weights {:.3f} {:.3f} {:.3f}, eligible {}, maxIndex {}, jobs {}",
                          reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->entity : nullptr), q.primitives, dev.vsConstant(31)[0], dev.vsConstant(31)[1],
-                         dev.vsConstant(31)[2], skinEligible(q, dev.vsConstant(31), o), dynBlas_[key].maxIndex, skinJobs_.size());
+                         dev.vsConstant(31)[2], skinEligible(q, dev.vsConstant(31), lo), dynBlas_[key].maxIndex, skinJobs_.size());
         }
     }
     DynBlas& b = dynBlas_[key];
@@ -2432,6 +2471,21 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         const rhi::GpuAddr vb = q.vertexBuffer->gpuAddress();
         const std::int64_t at = static_cast<std::int64_t>(q.vertexOffset) + static_cast<std::int64_t>(q.baseVertex) * q.vertexStride;
         if (!vb.null() && at >= 0) vertexAddress = vb.plus(at);
+        // 14.15 c: the morph targets' streams (the same base vertex); a target whose stream has no address is left out when its weight is 0, else no skinning job
+        for (std::uint32_t k = 0; k < 3 && !vertexAddress.null(); ++k) {
+            if ((skinLayout.morphMask >> k & 1u) == 0) continue;
+            d3d9::Buffer* mb = q.morphBuffer[k];
+            mb->gpu(q.morphStride[k]);
+            const rhi::GpuAddr ma = mb->gpuAddress();
+            const std::int64_t mat = static_cast<std::int64_t>(q.morphOffset[k]) + static_cast<std::int64_t>(q.baseVertex) * q.morphStride[k];
+            if (!ma.null() && mat >= 0) {
+                skinLayout.morph[k] = ma.plus(mat).ref;
+            } else if (std::fabs(dev.vsConstant(31)[k]) > 1e-6f) {
+                vertexAddress = {};
+            } else {
+                skinLayout.morphMask &= ~(1u << k);
+            }
+        }
     }
     const bool useSkin = skin && !vertexAddress.null();
     if (mainView && !solid && !useSkin) return;
@@ -2459,7 +2513,14 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         j.outKey = a.ref;
         j.slots = slots;
         j.stride = q.vertexStride;
-        j.offsets = skinOffsets;
+        j.offsets = skinLayout.offsets;
+        j.morphMask = skinLayout.morphMask;
+        for (std::uint32_t k = 0; k < 3; ++k) {
+            j.morph[k] = skinLayout.morph[k];
+            j.morphOff[k] = skinLayout.morphOff[k];
+            j.morphStride[k] = (skinLayout.morphMask >> k & 1u) != 0 ? q.morphStride[k] : 0u;
+            j.morphWeight[k] = dev.vsConstant(31)[k];
+        }
         // the bone matrices: c32 .. c231 of this draw's vertex shader constants
         const rhi::RingAlloc bones = dev.ring(200u * 16u, 16);
         if (bones.ptr == nullptr) return;
@@ -2472,13 +2533,15 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
                 std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
-                dev.requestVertexCapture(ref);
+                dev.requestVertexCapture(ref, false, d3d9::Device::CaptureBy::RtSkinVerify, d3d9::Device::captureKindOf(q));
                 j.ref = ref.rw();
             }
         }
         skinJobs_.push_back(j);
     } else {
-        dev.requestVertexCapture(a);
+        // (census: a solid-pass draw without a skinning job of this frame, one kept for its motion, or a cascade's draw the skinning pass cannot take)
+        const d3d9::Device::CaptureBy by = !solid ? d3d9::Device::CaptureBy::RtCascade : solidHasJob ? d3d9::Device::CaptureBy::RtSolidMotion : d3d9::Device::CaptureBy::RtSolidNoJob;
+        dev.requestVertexCapture(a, false, by, d3d9::Device::captureKindOf(q));
     }
     // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -2686,7 +2749,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(skinJobs_.size(), 512));
     std::uint32_t chunks = 0;
     for (std::uint32_t i = 0; i < n; ++i) chunks += (skinJobs_[i].slots + 63) / 64;
-    const rhi::RingAlloc t = dev_.ring(16 + 64ull * n, 16);
+    const rhi::RingAlloc t = dev_.ring(16 + 64ull * n + 48ull * n, 16);  // (4 uint4 per job, then a 3-uint4 morph block per job: rt_skin.comp.hlsl)
     if (t.ptr == nullptr) {
         skinJobs_.clear();
         return;
@@ -2752,8 +2815,28 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         w[11] = j.ref.high();
         w[12] = j.offsets;
         w[13] = w[14] = w[15] = 0;
+        // 14.15 c: the morph targets (rt_skin.comp.hlsl: the job's morph block after the job table)
+        w[9] = j.morphMask;
+        if (j.morphMask != 0) {
+            const std::uint64_t at = 16 + 64ull * n + 48ull * i;
+            std::uint32_t* m = static_cast<std::uint32_t*>(t.ptr) + at / 4;
+            m[0] = j.morph[0].low();
+            m[1] = j.morph[0].high();
+            m[2] = j.morph[1].low();
+            m[3] = j.morph[1].high();
+            m[4] = j.morph[2].low();
+            m[5] = j.morph[2].high();
+            m[6] = j.morphStride[0] | (j.morphStride[1] << 8) | (j.morphStride[2] << 16);
+            m[7] = j.morphOff[0] | (j.morphOff[1] << 8) | (j.morphOff[2] << 16);
+            std::memcpy(&m[8], j.morphWeight, 3 * sizeof(float));
+            m[11] = 0;
+            const rhi::GpuRef mr = t.ref.plus(static_cast<std::int64_t>(at));
+            w[13] = mr.low();
+            w[14] = mr.high();
+        }
         chunk += (j.slots + 63) / 64;
         skinVerticesTotal_ += j.slots;
+        if (j.morphMask != 0) ++skinMorphTotal_;
     }
     {
         d3d9::RegionScope r(dev_, "rt.skin");
@@ -2776,7 +2859,8 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const double now = dev_.secondsSinceCreate();
     if (now >= skinLogAt_ + 5.0) {
         skinLogAt_ = now;
-        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame)", skinJobsTotal_, skinVerticesTotal_, n);
+        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame; {} draws with morph targets so far)", skinJobsTotal_, skinVerticesTotal_, n,
+                     skinMorphTotal_);
     }
 }
 

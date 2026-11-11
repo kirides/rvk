@@ -489,6 +489,9 @@ struct ReplaceQuery {
     bool depthBias = false;                   // a depth bias (constant or slope-scaled) is set
     // F2c-2 (native.owned_records): the draw's world rows c33..c35 (3 float4) as the object table holds them; null = read the register file (c33..c35)
     const float* objectRows = nullptr;
+    // streams 1..3 (index k - 1): a skinned head's morph targets (POSITION1..3; enh/rt_scene's skinning pass reads them, 14.15 c); null buffer = not bound
+    Buffer* morphBuffer[3] = {nullptr, nullptr, nullptr};
+    std::uint32_t morphOffset[3] = {0, 0, 0}, morphStride[3] = {0, 0, 0};
 };
 
 // (defined with the observer loops' helper: the CoverQuery of a built query)
@@ -978,16 +981,26 @@ public:
     int boneMotion() const { return boneMode_; }
     // observers (enh/object_motion, enh/rt_scene): the draw being shown is a bone-motion draw (no capture needed for its motion)
     bool boneMotionDraw() const { return obsBone_; }
+    // ... or will be once its forms are built (14.15: while they compile the draw keeps the plain form, its motion that frame is the camera's: no capture as fallback)
+    bool boneMotionCovered() const { return obsBone_ || (obsBonePending_ && !nocapOld()); }
+    // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
+    // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
+    void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
+    void setRigidMotionWanted(bool on) { if (on != rigidWanted_) ++variantEpoch_; rigidWanted_ = on; }
+    bool rigidMotionOn() const { return rigidMode_ && rigidWanted_ && boneMode_ == 1; }
+    // the history window base of a VS window 2 base (the bone table's or the object table's; null = none)
+    rhi::GpuRef historyOf(rhi::GpuRef base) const;
     // compare mode: the bit the capture header carries for a main solid skinned draw whose window 2 is a bone image with history (0 = none / not compare mode)
     std::uint32_t boneCompareBit() const;
     struct BoneMotionStats {
         std::uint64_t predicted = 0, chosen = 0, chosen2 = 0, chosenPull = 0, pending = 0, noHistory = 0, records = 0, recordsNoPrev = 0, compareDraws = 0;
+        std::uint64_t rigidPredicted = 0, rigidNoWindow = 0, rigidNoHistory = 0, rigidPending = 0, pushPredicted = 0, pushDrawn = 0;  // 14.15 b
         std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
         float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
         float winPx = 0.0f, winWorld = 0.0f, winMotionBone = 0.0f, winMotionCapture = 0.0f, winRerun = 0.0f;
     } boneStats;
     static bool boneVsOptions(const Shader& s, shader::TranslateOptions& o);  // the BoneVs provider (vertex shaders)
-    static void boneCompareText(shader::TranslateOptions& o);  // compare mode: added to the capture variant's text (enh/rt_scene captureOptions)
+    static void boneCompareText(shader::TranslateOptions& o, const Shader& s);  // compare mode: added to the capture variant's text (enh/rt_scene captureOptions)
     static bool boneCompareOn();
     static void boneCompareForce(bool on);  // tools (rvk_shadertool --capture-bone): the compare text without a device
     static const char* captureTag() { return boneCompareOn() ? "cap6c8" : "cap6"; }  // the capture variant's cache tag (its text changes in compare mode)
@@ -1665,11 +1678,31 @@ public:
     // its pipeline are ready); vertexCaptured tells whether it ran this frame (render thread)
     // `instances`: an instanced draw may be captured too: instance k writes its vertices at `buffer` + 16 + 32 (k x slots + i),
     // slots = the header's first word (the buffer holds instances x slots x 32 bytes)
-    void requestVertexCapture(const rhi::RingAlloc& buffer, bool instances = false) {
+    // the capture census (frame-ownership.md 14.15; rvk.log `native: captures (5 s)`): who asks, for which draw kind, from which path
+    enum class CaptureBy : std::uint8_t { MotionSkinned, MotionRigid, RtSolidNoJob, RtSolidMotion, RtCascade, RtSkinVerify, RtTree, Other, Count };
+    enum class CaptureKind : std::uint8_t { Static, Instanced, Skinned, Morph, SpeedTree, Vegetation, Billboard, Other, Count };
+    enum class CaptureSite : std::uint8_t { Composed, Retained, Owned, Count };
+    static CaptureKind captureKindOf(const ReplaceQuery& q);
+    // `-Environment 'RVK_NOCAP_OLD=1'` (14.15 A/B): the capture requests as before 14.15 (object motion's rigid hash over c31..c37, no morph targets in the skinning pass,
+    // a capture while the bone forms build)
+    static bool nocapOld();
+    void requestVertexCapture(const rhi::RingAlloc& buffer, bool instances = false, CaptureBy by = CaptureBy::Other, CaptureKind kind = CaptureKind::Other) {
         captureRequest_ = buffer.ref;
         captureRequestRw_ = buffer.rw();
         captureInstances_ = instances;
+        const CaptureSite site = ownedReplay_ ? CaptureSite::Owned : obsSite_;
+        ++captureCensus_.n[static_cast<std::size_t>(by)][static_cast<std::size_t>(kind)][static_cast<std::size_t>(site)];
+        const OwnedWindows::Kind w2 = owned_ != nullptr ? owned_->w[0][2].kind : OwnedWindows::Kind::None;
+        ++captureCensus_.win2[static_cast<std::size_t>(by)][w2 == OwnedWindows::Kind::Object ? 1 : w2 == OwnedWindows::Kind::Bones ? 2 : 0];
     }
+    // a capture the requester left out because a capture-free source serves it now (counted per requester x kind: the census's "avoided" column)
+    void noteCaptureAvoided(CaptureBy by, CaptureKind kind) { ++captureCensus_.avoided[static_cast<std::size_t>(by)][static_cast<std::size_t>(kind)]; }
+    // the kind of the draw's VS window w (OwnedWindows::Kind::None: no owned windows / a per-draw upload)
+    OwnedWindows::Kind ownedVsWindowKind(std::uint32_t w) const { return owned_ != nullptr && w < 4 ? owned_->w[0][w].kind : OwnedWindows::Kind::None; }
+    // census diagnostics of the moving rigid draws' captures: VS window 2 = an object table record / a per-draw upload; entity has a scene-table slot
+    void noteRigidCapture(bool objectWindow, bool slot) { ++captureCensus_.rigid[objectWindow ? 0 : 1]; if (slot) ++captureCensus_.rigid[2]; }
+    // once per present: the 5 s census line
+    void captureCensusFrame();
     // a buffer written by a compute pass counts as captured this frame (enh/rt_scene's skinning pass)
     void markVertexCaptured(rhi::GpuRef buffer) { captured_.push_back(buffer); }
     bool vertexCaptured(rhi::GpuRef buffer) const {
@@ -2125,9 +2158,21 @@ private:
     GamePipeline scenePipe2_ = GamePipeline::None;  // ... its scene ABI v2 form (retained draws only)
     GamePipeline scenePipePull_ = GamePipeline::None;  // ... and its pulled form (S-4)
     // ---- bone-history motion (native.bone_motion, frame-ownership.md 14.13; d3d9/bone_motion.cpp)
+    bool rigidMode_ = false, rigidWanted_ = false;  // 14.15 b
     int boneMode_ = 0;              // 0 off, 1 on (the skinned solid draws' motion from the bone table's history), 2 compare (captures as before + a GPU compare)
     bool sceneBone_ = false;        // sceneDecide chose the bone-motion forms for the draw being prepared
     bool obsBone_ = false;          // the draw the observers are being shown is a bone-motion draw (boneMotionDraw)
+    bool obsBonePending_ = false;   // ... would be, its forms are still being built (boneMotionCovered)
+    rhi::GpuRef bonePushPrev_;      // 14.15 b: the draw being prepared takes the bone-motion PUSH form (an instanced-mesh op): its object record's history base
+    CaptureSite obsSite_ = CaptureSite::Composed;  // the path showing the observers the draw (capture census)
+    struct CaptureCensus {
+        std::uint64_t n[static_cast<std::size_t>(CaptureBy::Count)][static_cast<std::size_t>(CaptureKind::Count)][static_cast<std::size_t>(CaptureSite::Count)] = {};
+        std::uint64_t avoided[static_cast<std::size_t>(CaptureBy::Count)][static_cast<std::size_t>(CaptureKind::Count)] = {};
+        std::uint64_t win2[static_cast<std::size_t>(CaptureBy::Count)][3] = {};  // per requester: VS window 2 uploaded / an object record / a bone image
+        std::uint64_t rigid[3] = {};  // moving rigid captures: VS window 2 an object record, a per-draw upload; the entity has a scene-table slot
+    } captureCensus_, captureCensusLast_;
+    double captureCensusLog_ = -1e9;
+    std::uint64_t captureCensusFrames_ = 0, captureCensusFramesLast_ = 0;
     std::unordered_set<std::uint64_t> bonePipes_;  // the scene pipelines (v1, v2, pulled) of the bone-motion forms: toScenePacket gives their records the history base
     bool bonePipe(GamePipeline p) const { return boneMode_ == 1 && !bonePipes_.empty() && bonePipes_.contains(static_cast<std::uint64_t>(p)); }
     bool boneFormsReady();          // the current shaders' bone-motion forms (v1 + v2 VS, the motion PS's scene forms) exist (requested when not)

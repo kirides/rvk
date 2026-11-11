@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "engine/scene_table.h"
 #include "enh/rt_scene.h"
 
 namespace rvk::enh {
@@ -18,8 +19,10 @@ using d3d9::scene::View;
 constexpr std::uint32_t kMaxCapturesPerFrame = 256;
 constexpr std::uint32_t kMaxSlots = 1u << 20;
 constexpr std::uint32_t kRigidMaxSlots = 200000;
-// the vertex shader constants that hold a static mesh's placement (g_vInstanceMisc c31, g_vInstanceData c32..)
-constexpr std::uint32_t kRigidFirstReg = 31, kRigidRegs = 7;
+// the vertex shader constants that hold a static mesh's placement: the world rows c33..c35 (g_vInstanceData[1..3]; an instanced mesh op's single placement too).
+// (14.15: c31 / c32 / c36 / c37 were hashed as well: in Full the composed and owned draws' register file holds only the registers the draw's composition wrote (lean
+// mode), the others are another draw's, so a still object looked "moving" whenever its neighbours in the list changed: ~80 false captures per frame at jungle)
+constexpr std::uint32_t kRigidFirstReg = 33, kRigidRegs = 3;
 
 // rigid draws: static meshes, and the "instanced mesh" op kind (held weapons / shields, nets, barrels: one placement per draw
 // unless q.instanced, which is rejected)
@@ -43,6 +46,7 @@ void ObjectMotion::apply(bool skinned, bool rigid) {
     skinned_ = skinned;
     rigid_ = rigid;
     if (rt_ != nullptr) rt_->setCharacterMotion(skinned);  // (the RT scene's solid-pass capture of a character is the motion source: it is kept while this is on)
+    dev_.setRigidMotionWanted(rigid);  // (14.15 b: the static meshes' history forms only while moving rigid draws are asked for)
     const bool want = (skinned || rigid) && dev_.game().gameCaps().vertexStores;
     if (want == registered_) return;
     registered_ = want;
@@ -114,8 +118,10 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         }
     }
     // 14.13 (native.bone_motion): the draw takes the bone-motion forms: its previous positions come from the bone table's history, no capture
-    if (q.kind == Kind::Skinned && dev.boneMotionDraw()) {
+    // (14.15 b, native.rigid_motion: a static mesh's draw with the object table's history likewise)
+    if ((q.kind == Kind::Skinned || isRigid(q.kind)) && dev.boneMotionCovered()) {
         ++boneDraws_;
+        dev.noteCaptureAvoided(q.kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(q));
         return;
     }
     if (q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
@@ -175,8 +181,10 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (isRigid(q.kind)) {
         // a rigid draw is captured while its placement changes (and a few frames after)
         std::uint64_t h = 1469598103934665603ull;
-        for (std::uint32_t r = 0; r < kRigidRegs; ++r) {
-            const float* c = dev.vsConstant(kRigidFirstReg + r);
+        const bool old = d3d9::Device::nocapOld();  // (the hash before 14.15: c31..c37 of the register file)
+        for (std::uint32_t r = 0; r < (old ? 7u : kRigidRegs); ++r) {
+            // (an owned draw's rows as the object table holds them: its register file is not loaded for every register)
+            const float* c = old ? dev.vsConstant(31 + r) : q.objectRows != nullptr ? q.objectRows + 4 * r : dev.vsConstant(kRigidFirstReg + r);
             std::uint32_t bits[4];
             std::memcpy(bits, c, sizeof(bits));
             for (std::uint32_t b : bits) h = mix(h, b);
@@ -222,7 +230,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions)
     std::uint32_t header[4] = {slots, 0, 0, 0};
-    if (q.kind == Kind::Skinned) {
+    {  // (14.15 b: rigid draws too)
         // native.bone_motion=compare: the capture vertex shader also runs the bone path on this draw's bone image and compares (bit 30 of the slots)
         const std::uint32_t bit = dev.boneCompareBit();
         header[0] |= bit;
@@ -234,7 +242,8 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         header[3] = s.lastSlots;
     }
     std::memcpy(a.ptr, header, 16);
-    dev.requestVertexCapture(a);
+    if (isRigid(q.kind)) dev.noteRigidCapture(dev.ownedVsWindowKind(2) == d3d9::OwnedWindows::Kind::Object, engine::scenetable::find(q.tag->entity) != UINT32_MAX);
+    dev.requestVertexCapture(a, false, isRigid(q.kind) ? d3d9::Device::CaptureBy::MotionRigid : d3d9::Device::CaptureBy::MotionSkinned, d3d9::Device::captureKindOf(q));
     s.pending = a.ref;
     s.pendingSlots = slots;
     s.pendingFrame = frame;

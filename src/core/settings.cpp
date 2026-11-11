@@ -2902,6 +2902,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_actors", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeRigidMotion = &reg.add({
+        .key = "native.rigid_motion",
+        .label = "Native frame: rigid-object history motion",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Debug, Full (docs/research/frame-ownership.md 14.15 b; needs native.bone_motion = on, acts with upscale.object_motion = all): the object table keeps each "
+                       "record's previous-frame image, and the static meshes' main solid draws whose world rows come from the object table take the bone-motion vertex "
+                       "forms (the second run reads the previous record), so moving rigid objects get their per-object motion without a vertex capture and their owned "
+                       "draws stay owned. Restart. Off by default.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (the history doubles the object table's buffer, made once)
+        .needs = {{"native.bone_motion", "off", true, false}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnPost = &reg.add({
         .key = "native.own_post",
         .label = "Native frame: post chain on own shaders",

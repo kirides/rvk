@@ -507,6 +507,7 @@ struct RendererSettings {
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
+    Setting* nativeRigidMotion = nullptr;      // native.rigid_motion (frame-ownership.md 14.15 b: moving rigid draws' per-object motion from the object table's history, restart)
     Setting* nativeBoneMotion = nullptr;       // native.bone_motion: off | on | compare (frame-ownership.md 14.13: the skinned draws' per-object motion from the bone table's history, restart)
     Setting* nativeOwnFoliage = nullptr;       // native.own_foliage: S-5 grass distance thinning tied to lod.view (Full)
     Setting* nativeTreeWind = nullptr;         // native.tree_wind: off | on | compare (F4-5, frame-ownership.md 14.17: the RT scene's animated SpeedTrees by compute, no capture; Full)

@@ -544,8 +544,25 @@ int skinTest() {
         }
     }
     constexpr VkBufferUsageFlags kUse = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    vk::rt::AddressBuffer vb[2], bb[2], out[2], table;
-    bool ok = table.create(ctx, 16 + 64 * 2, kUse, true, 16, "test skin table");
+    // 14.15 c: job 1 also has morph targets 1 and 3 (streams of their own: stride 16 / position at 0, stride 20 / position at 4; target 2 not read)
+    const float morphW[3] = {0.75f, 0.0f, -0.4f};
+    const std::uint32_t morphStride[3] = {16, 0, 20}, morphOff[3] = {0, 0, 4};
+    std::vector<std::uint8_t> morphData[3];
+    for (int k = 0; k < 3; ++k) {
+        if (morphStride[k] == 0) continue;
+        morphData[k].assign(static_cast<std::size_t>(layouts[1].slots) * morphStride[k], 0);
+        for (std::uint32_t i = 0; i < layouts[1].slots; ++i) {
+            float d[3] = {rnd() * 10.0f - 5.0f, rnd() * 10.0f - 5.0f, rnd() * 10.0f - 5.0f};
+            std::memcpy(morphData[k].data() + static_cast<std::size_t>(i) * morphStride[k] + morphOff[k], d, 12);
+        }
+    }
+    vk::rt::AddressBuffer vb[2], bb[2], out[2], table, mb[3];
+    bool ok = table.create(ctx, 16 + 64 * 2 + 48, kUse, true, 16, "test skin table");
+    for (int k = 0; k < 3 && ok; ++k) {
+        if (morphStride[k] == 0) continue;
+        ok = mb[k].create(ctx, morphData[k].size(), kUse, true, 16, "test skin morph");
+        if (ok) std::memcpy(mb[k].mapped, morphData[k].data(), morphData[k].size());
+    }
     for (int j = 0; j < 2 && ok; ++j) {
         ok = vb[j].create(ctx, verts[j].size(), kUse, true, 16, "test skin vertices") &&
              bb[j].create(ctx, kBoneVec4 * 16, kUse, true, 16, "test skin bones") &&
@@ -563,6 +580,7 @@ int skinTest() {
     std::uint32_t chunk = 0;
     for (int j = 0; j < 2; ++j) {
         std::uint32_t* w = t + 4 + 16 * j;
+        std::memset(w, 0, 16 * sizeof(std::uint32_t));
         const Layout& l = layouts[j];
         w[0] = static_cast<std::uint32_t>(vb[j].address);
         w[1] = static_cast<std::uint32_t>(vb[j].address >> 32);
@@ -576,6 +594,22 @@ int skinTest() {
         w[9] = w[10] = w[11] = 0;
         w[12] = l.pos | (l.bw << 8) | (l.bi << 16) | (l.tc << 24);
         w[13] = w[14] = w[15] = 0;
+        if (j == 1) {
+            std::uint32_t* m = t + 4 + 16 * 2;  // (the morph block after the two jobs)
+            std::memset(m, 0, 48);
+            for (int k = 0; k < 3; ++k) {
+                if (morphStride[k] == 0) continue;
+                w[9] |= 1u << k;
+                m[2 * k] = static_cast<std::uint32_t>(mb[k].address);
+                m[2 * k + 1] = static_cast<std::uint32_t>(mb[k].address >> 32);
+            }
+            m[6] = morphStride[0] | (morphStride[1] << 8) | (morphStride[2] << 16);
+            m[7] = morphOff[0] | (morphOff[1] << 8) | (morphOff[2] << 16);
+            std::memcpy(&m[8], morphW, 12);
+            const VkDeviceAddress ma = table.address + 16 + 64 * 2;
+            w[13] = static_cast<std::uint32_t>(ma);
+            w[14] = static_cast<std::uint32_t>(ma >> 32);
+        }
         chunk += (l.slots + 63) / 64;
     }
     t[1] = chunk;
@@ -611,6 +645,14 @@ int skinTest() {
             std::memcpy(w, v + l.bw, 16);
             std::memcpy(idx, v + l.bi, 4);
             std::memcpy(tc, v + l.tc, 8);
+            if (j == 1) {
+                for (int k = 0; k < 3; ++k) {
+                    if (morphStride[k] == 0) continue;
+                    float d[3];
+                    std::memcpy(d, morphData[k].data() + static_cast<std::size_t>(i) * morphStride[k] + morphOff[k], 12);
+                    for (int c = 0; c < 3; ++c) p[c] += d[c] * morphW[k];
+                }
+            }
             float rows[3][4] = {};
             for (int k = 0; k < 4; ++k) {
                 if (idx[k] >= 66 || w[k] == 0.0f) continue;
@@ -639,6 +681,7 @@ int skinTest() {
         bb[j].destroy(ctx);
         out[j].destroy(ctx);
     }
+    for (auto& m : mb) m.destroy(ctx);
     table.destroy(ctx);
     vkDestroyPipeline(ctx.device(), pipe, nullptr);
     layout.destroy(ctx);

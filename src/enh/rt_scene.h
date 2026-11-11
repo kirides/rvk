@@ -398,6 +398,16 @@ private:
         rhi::GpuRef outKey;        // ... its read reference: the identity the consumers ask for (markVertexCaptured)
         rhi::GpuRef ref;           // verify: the vertex shader capture of the same draw
         std::uint32_t slots = 0, stride = 0, offsets = 0;
+        // 14.15 c: the morph targets POSITION1..3 (bit k of morphMask: stream k + 1 is read; its vertex 0, stride, byte offset of the position, the weight c31[k])
+        std::uint32_t morphMask = 0;
+        rhi::GpuRef morph[3];
+        std::uint32_t morphStride[3] = {0, 0, 0}, morphOff[3] = {0, 0, 0};
+        float morphWeight[3] = {0.0f, 0.0f, 0.0f};
+    };
+    struct SkinLayout {
+        std::uint32_t offsets = 0, morphMask = 0;
+        std::uint32_t morphOff[3] = {0, 0, 0};
+        rhi::GpuRef morph[3];
     };
     bool skinReady();
     void recordSkin(rhi::CommandList& cl);
@@ -437,7 +447,7 @@ private:
         float maxErr = 0.0f;
     } tw_;
     void destroyTreeWind();
-    bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const;
+    bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, SkinLayout& l) const;
     void destroySkin();
     std::vector<SkinJob> skinJobs_;
     std::unordered_set<std::uint64_t> skinLogged_;
@@ -449,7 +459,7 @@ private:
     double skinVerifyAt_ = 0.0, skinLogAt_ = 0.0;
     std::uint64_t skinVerifyCompared_ = 0, skinVerifyMissing_ = 0;
     float skinVerifyMax_ = 0.0f;
-    std::uint64_t skinJobsTotal_ = 0, skinVerticesTotal_ = 0;
+    std::uint64_t skinJobsTotal_ = 0, skinVerticesTotal_ = 0, skinMorphTotal_ = 0;
     struct DynBlas {
         std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t slots = 0, triangles = 0;

@@ -28,8 +28,12 @@ struct SkinErr {
 
 // job[4 j + 0] = (vertex 0's address lo, hi, bones lo, hi)
 // job[4 j + 1] = (output lo, hi, slots, vertex stride in bytes)
-// job[4 j + 2] = (first chunk, 0, reference capture lo, hi)   (the reference: a capture variant's output of the same draw)
-// job[4 j + 3] = (offsets: position | blend weight << 8 | blend indices << 16 | texcoord0 << 24, 0, 0, 0)
+// job[4 j + 2] = (first chunk, morph targets, reference capture lo, hi)   (the reference: a capture variant's output of the same draw)
+// job[4 j + 3] = (offsets: position | blend weight << 8 | blend indices << 16 | texcoord0 << 24, morph block lo, hi, 0)
+// 14.15 c, the morph targets (POSITION1..3 F3 in streams 1..3, the heads'): job[4 j + 2].y = the targets read (bit k = target k + 1), the morph block (3 uint4):
+//   m[0] = (target 1's vertex 0 lo, hi, target 2's lo, hi), m[1] = (target 3's lo, hi, strides s1 | s2 << 8 | s3 << 16, position offsets o1 | o2 << 8 | o3 << 16),
+//   m[2] = (weights c31.x, .y, .z as float bits, 0)
+//   position = v0 + d1 * w.x + d2 * w.y + d3 * w.z   (the VS: `mad r0.xyz, v8, c31.x, r0` in that order), then skinned
 static const uint BONE_COUNT = 66;  // c33 .. c230: 3 b + 3 <= 199 constants after c32
 
 uint4 jobWord(RvkAddr table, uint i) { return rvkRawLoad<uint4, 16>(rvkAddrAdd(table, 16u + i * 16u)); }
@@ -55,6 +59,21 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     RvkAddr v = rvkAddrAdd(rvkAddr(j0.xy), slot * j1.w);
     uint oPos = j3.x & 0xFFu, oBw = (j3.x >> 8) & 0xFFu, oBi = (j3.x >> 16) & 0xFFu, oTc = (j3.x >> 24) & 0xFFu;
     float4 p = float4(vfloat(v, oPos), vfloat(v, oPos + 4u), vfloat(v, oPos + 8u), 1.0);
+    if (j2.y != 0u && any(j3.yz != uint2(0u, 0u))) {
+        // the morph targets (14.15 c), in the vertex shader's order
+        RvkAddr mb = rvkAddr(j3.yz);
+        uint4 j4 = rvkRawLoad<uint4, 16>(mb), j5 = rvkRawLoad<uint4, 16>(rvkAddrAdd(mb, 16u)), j6 = rvkRawLoad<uint4, 16>(rvkAddrAdd(mb, 32u));
+        [unroll] for (uint k = 0u; k < 3u; ++k) {
+            if ((j2.y >> k & 1u) == 0u) continue;
+            uint2 base = k == 0u ? j4.xy : k == 1u ? j4.zw : j5.xy;
+            if (all(base == uint2(0u, 0u))) continue;
+            RvkAddr m = rvkAddrAdd(rvkAddr(base), slot * ((j5.z >> (8u * k)) & 0xFFu));
+            uint mo = (j5.w >> (8u * k)) & 0xFFu;
+            float wk = asfloat(j6[k]);
+            float3 d = float3(vfloat(m, mo), vfloat(m, mo + 4u), vfloat(m, mo + 8u));
+            p.xyz = mad(d, float3(wk, wk, wk), p.xyz);
+        }
+    }
     float4 bw = float4(vfloat(v, oBw), vfloat(v, oBw + 4u), vfloat(v, oBw + 8u), vfloat(v, oBw + 12u));
     uint bi = rvkRawLoad<uint, 4>(rvkAddrAdd(v, oBi));
     RvkAddr bones = rvkAddr(j0.zw);

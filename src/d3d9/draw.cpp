@@ -1004,7 +1004,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     scenePipe2_ = GamePipeline::None;
     scenePipePull_ = GamePipeline::None;
     sceneBone_ = false;
+    bonePushPrev_ = {};
     obsBone_ = false;
+    obsBonePending_ = false;
     packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
@@ -1086,6 +1088,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.engineVs = vs_.get();
         q.enginePs = ps_.get();
         q.decl = decl_;
+        for (std::uint32_t k = 0; k < 3; ++k) {
+            q.morphBuffer[k] = geom.userPointer ? nullptr : streams_[k + 1].buffer;
+            q.morphOffset[k] = streams_[k + 1].offset;
+            q.morphStride[k] = streams_[k + 1].stride;
+        }
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
         q.blending = rs_[RS_ALPHABLENDENABLE] != 0;
         q.srcBlend = static_cast<std::uint8_t>(rs_[RS_SRCBLEND]);
@@ -1106,6 +1113,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         captureInstances_ = false;
     }
     // 14.13 (native.bone_motion): the draw will take the bone-motion forms: its observers need no vertex capture for its motion (boneMotionDraw)
+    obsBonePending_ = false;
     obsBone_ = boneMode_ == 1 && bonePredict(kind, phase);
     if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         const bool f2cStatic = native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
@@ -1264,6 +1272,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (!replaced && !captureRequest_.null() && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
     }
+    // 14.15 b: an instanced-mesh op's single placement from an object record with a history (held equipment): the push form of the bone-motion vertex shader (no scene
+    // form exists for the kind), its prevVs = the history base; the motion pixel variant follows as for a capture
+    const bool bonePush = !replaced && vsVariant == rhi::ShaderModule::None && !bonePushPrev_.null() && geom.indexed && notInstanced && vsModule == vs_->module;
+    if (bonePush) vsVariant = variant(vs_, VariantSlot::BoneVs);
     cv.gbufGate = gbuf_.active;
     cv.gbufStatic = !replaced && tint == 0 && cv.gbufGate && gbufferStaticEligible(phase, kind);
     const bool gbufMaterial = cv.gbufStatic && gbufferLit();
@@ -1532,7 +1544,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             }
         }
     }
-    if (captureDraw) {
+    if (captureDraw && bonePush) {
+        ++boneStats.pushDrawn;  // (the bone-motion push form, not a capture)
+    } else if (captureDraw) {
         // the capture variant's slot = gl_VertexIndex - this draw's vertexOffset (= the index buffer value)
         block.pad[1] = static_cast<std::uint32_t>(geom.baseVertex + vertexShift_);
         captured_.push_back(captureRequest_);
@@ -1582,7 +1596,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         (tint != 0 ? shader::abi::kDrawFlagTinted : 0u) | (options_.backend == rhi::Backend::D3D12 ? ubyteInputs_ << 17 : 0u);
     const rhi::GpuRef drawBlock = !rep.block.null() && replaced ? rep.block : db.ref;
     packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, drawBlock.bits, frameBlockAddress().bits,
-                                              captureDraw ? captureRequestRw_.bits : 0, stats_.draws, flags};
+                                              captureDraw ? (bonePush ? bonePushPrev_.bits : captureRequestRw_.bits) : 0, stats_.draws, flags};
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
         packet_.push.vsWin[w] = drawWin_[0][w].bits;
         packet_.push.psWin[w] = drawWin_[1][w].bits;
@@ -1943,6 +1957,13 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
         ++replayStats.refused;
         return false;
     }
+    // 14.15 b (native.rigid_motion): a single-placement instanced-mesh op of the main solid pass is drawn by the normal path, which gives it the bone-motion push
+    // form when its object record has a history (no retained packet holds that form; before, a moving one asked for a capture and was refused here anyway)
+    if (rigidMotionOn() && c.kind == draws::Kind::InstancedMesh && !c.query.instanced && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
+        ++replayStats.why[8];
+        ++replayStats.refused;
+        return false;
+    }
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) {
@@ -1972,14 +1993,17 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             captureInstances_ = false;
             const bool f2cStatic = native::f2c::on() && c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main &&
                                    (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
+            obsBonePending_ = false;
             obsBone_ = boneOfCached(c) && c.scenePipeline != GamePipeline::None && sceneActive();  // (14.13: the replayed packet is the bone-motion scene form)
             const CoverQuery cq = coverOf(q);
+            obsSite_ = CaptureSite::Retained;  // (capture census)
             for (DrawObserver* o : observers_) {
                 if (!o->observes(c.kind, c.phase)) continue;
                 if (o->coversDraw(cq)) continue;  // F8-0
                 if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 1);
                 o->observe(*this, q);
             }
+            obsSite_ = CaptureSite::Composed;
             if (opaqueObserver) {
                 for (DrawReplacer* r : replacers_) {
                     if (!r->wantsOpaque()) continue;
