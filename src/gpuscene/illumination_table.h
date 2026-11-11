@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "engine/memread.h"
 #include "gpuscene/illum_compose.h"
 #include "rhi/game_device.h"
 
@@ -86,6 +87,9 @@ private:
 
 struct IllumStats {
     std::uint64_t uploadDirty = 0, uploadSet = 0, uploadF = 0, uploadPoll = 0, uploadNew = 0, uploadSetData = 0;  // records re-uploaded by cause
+    std::uint64_t uploadList = 0;     // the object's list pointer moved without SetLightSet (found by the poll)
+    std::uint64_t liveListMoved = 0;  // slotLive found it (the owned op is composed that frame)
+    std::uint64_t lightUpdates = 0, uploadLightData = 0;  // eCDynamicLight_PS::UpdateIllumination: set records re-read / changed
     std::uint64_t dirtyNoChange = 0, setNoChange = 0;                                              // hook fired, the bytes were the same
     std::uint64_t freed = 0, destroyed = 0, idleFreed = 0, setsFreed = 0;
     std::uint64_t checked = 0, differing = 0, unchecked = 0;
@@ -106,7 +110,8 @@ public:
     // ---- engine hooks (engine thread; engine/illum_census.cpp) ----
     void onPsUpdate(const void* ps, bool wasDirty);  // post eCIlluminated_PS::UpdateIllumination
     void onSetLightSet(const void* ps);              // post SetLightSet
-    void onSetUpdated(const void* set);              // post eCLightSet::UpdateIllumination
+    // post eCLightSet::UpdateIllumination; `fromLight`: from post eCDynamicLight_PS::UpdateIllumination (a moving light rebuilt the list with an inlined loop, 14.30)
+    void onSetUpdated(const void* set, bool fromLight = false);
     void onSetsUpdated();                            // post eCIlluminationAdmin::UpdateLightSets
     void onPsDestroy(const void* ps);                // pre eCIlluminated_PS::Destroy
 
@@ -124,9 +129,19 @@ public:
     bool pollDraw(const void* illum, std::uint32_t expectSlot);
     // frame-ownership.md 7.21 addendum: the owned static records' per-op check, no lock and no byte poll (engine thread only, where the slots are freed): true when `illum` still
     // has slot `expectSlot` (not freed by the idle sweep / Destroy, not reused); marks the slot drawn so that an op drawn without being composed is never idle-freed
+    // 14.30: also false when the object's list pointer (+0) no longer is its record's set (re-pointed without SetLightSet: the vegetation nodes' / instances'
+    // illumination copies the engine rewrites in place); the op is composed then, and the composition's poll re-reads the record
     bool slotLive(const void* illum, std::uint32_t expectSlot) {
         if (!active_ || illum == nullptr || expectSlot >= illumKey_.size() || illumKey_[expectSlot] != illum) return false;
         illumSeen_[expectSlot] = frame_;
+        const std::uint32_t set = illums_.shadow()[expectSlot].info[1];
+        if (set < setUsed_ && setKey_[set] != nullptr) {
+            std::uint64_t list = 0;
+            if (!engine::safeLoad8(illum, list) || reinterpret_cast<const void*>(list) != setKey_[set]) {
+                ++stats_.liveListMoved;
+                return false;
+            }
+        }
         return true;
     }
     // F4-3 (owned trees: an instance's own illumination, which the engine's batch never lit): the illumination's slot (created on first use), marked drawn and polled like
@@ -150,6 +165,8 @@ private:
     // reads the object into `slot`'s record; returns whether the content changed
     bool refresh(std::uint32_t slot, const void* illum);
     std::uint32_t lookupOrCreate(const void* illum);
+    // once per frame per drawn object: its bytes (and its list pointer) against the record, refreshed on a change
+    void poll(std::uint32_t slot, const void* illum);
     void report();
 
     bool active_ = false;

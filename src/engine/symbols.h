@@ -156,6 +156,10 @@
     X(illumPsDestroy, L"Engine.dll", "?Destroy@eCIlluminated_PS@@UEAAXXZ", false)                                                  \
     X(illumPsSetLightSet, L"Engine.dll", "?SetLightSet@eCIlluminated_PS@@QEAAXPEAVeCLightSet@@@Z", false)                        \
     X(illumAdminUpdateLightSets, L"Engine.dll", "?UpdateLightSets@eCIlluminationAdmin@@IEAAXXZ", false)                          \
+    /* virtual eCDynamicLight_PS::UpdateIllumination 0x593570 (vtable slot 0x2c0 of every dynamic light class; OnUpdatedWorldMatrix 0x593080 jumps to it): an   \
+       INLINED copy of eCLightSet::UpdateIllumination for each light set of the light (this +0x30 eCLightSet* array, count +0x38): clears the set's list and    \
+       re-adds every light (vt+0x2e8) without calling eCLightSet::UpdateIllumination (frame-ownership.md 14.30) */                                              \
+    X(dynLightUpdateIllumination, L"Engine.dll", "?UpdateIllumination@eCDynamicLight_PS@@MEAAXXZ", false)                        \
     /* ---- the world's lights (engine/lights.*, docs/research/rtgi.md 19): the illumination admin (found through the `this` of   \
        its calls), its dynamic light array (+0x38, data +0x40, count +0x48) and static light sphere tree (+0x68) ---- */         \
     X(illuminationFindWighted, L"Engine.dll", "?FindWightedStaticLights@eCIlluminationAdmin@@QEAAHPEAUeSWightedStaticLight@1@KAEBVbCBox@@PEAVeCPortalRoom_PS@@@Z", false) \
