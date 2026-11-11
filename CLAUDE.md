@@ -35,6 +35,7 @@ build\RelWithDebInfo\rvk_vktest.exe --rt                 # GPU: optional RT tier
 C++23, MSVC (VS 18 2026), CMake + vcpkg manifest (`vcpkg.json`, `builtin-baseline` = the user's vcpkg checkout; when they pull,
 take `git -C E:\git\github\vcpkg log -1 --format=%H`). Triplet `x64-windows-static-md`. New source files go into `CMakeLists.txt`.
 volk is compiled in `src/vk/volk_impl.c` (`VK_NO_PROTOTYPES`, `VK_USE_PLATFORM_WIN32_KHR`), not vcpkg's `volk.lib`.
+**Pedantic clang-cl build** (docs/research/clang-pedantic.md; run from time to time, from a VS x64 developer shell): `cmake --preset clang-pedantic; cmake --build build-clang-pedantic --config RelWithDebInfo` (`RVK_PEDANTIC=ON`: -Wall -Wextra -Wpedantic + UB-class warnings, optimised; must stay at 0 warnings, new code fixes its warnings or suppresses them narrowly); `--preset clang-ubsan` (`RVK_UBSAN=ON`, trap mode) builds `rvk_tests` / `rvk_d3d9test` / `rvk_d3d9` with -fsanitize=undefined (a failed check = ud2 crash). MSVC builds are unchanged.
 The editor's clang diagnostics ("file not found", "undeclared identifier std") are noise: only the MSBuild result counts.
 `rvk_core` has a private PCH (std + spdlog): files outside it (the DLL target, tests) must include what they use.
 The Vulkan SDK (`C:\VulkanSDK\1.4.363.0`, `VULKAN_SDK`) provides validation layers, `spirv-val`, `dxc`; the vcpkg `directx-dxc` port provides the `dxcompiler.dll` the renderer loads.
