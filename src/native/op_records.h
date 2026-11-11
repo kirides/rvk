@@ -228,6 +228,16 @@ struct OpRecord {
     bool actor = false;
     gpuscene::BoneKey actorKey;
     std::uint32_t actorBones = 0;
+    // F6-2 (frame-ownership.md 14.23): a morph actor's draws for the morph picks it was seen with before (the three strongest targets decide the stream offsets of streams 1..3;
+    // a blink alternates between a few picks): the stamp's `lightmaps` holds the pick's hash for an actor (no lightmaps there); a pick seen before swaps its draws in
+    // (StaticOps::actorPickSwap) instead of a composition. At most kPickSets kept, the least recently used goes
+    struct PickSet {
+        std::uint64_t pick = 0;
+        std::vector<DrawRec> draws;
+        std::uint64_t used = 0;
+    };
+    static constexpr std::size_t kPickSets = 4;
+    std::vector<PickSet> pickSets;
     bool ordered = false;    // F9 / F14 (native.owned_ordered): an order-dependent op (blended / no z write / alpha / refracted list): never compacted, drawn at its place
     bool dbvp = false;       // F14: its draws read the depth-bias view-projection in c0..c3 (a depth-bias material): the view's dbvp slot
     bool instances = false;  // F2f: a render-instance op (node 0xffffff): its draws' window 2 are instance row images, its stamp holds the instance list

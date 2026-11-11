@@ -43,6 +43,7 @@
 #include "native/tree_owned.h"
 #include "native/veg_owned.h"
 #include "native/op_records.h"
+#include "gpuscene/material_table.h"
 
 namespace rvk::hal::vulkan {
 class HalDevice;
@@ -159,6 +160,10 @@ public:
     // composed; the engine's own sort result is the order. Needs owned_persistent (+ owned_static, the scene ABI v2 view table)
     void setOwnedOrdered(bool on);
     bool ownedOrderedOn() const { return ownedOrdered_ && ownedPersistent_ && ownedStatic_; }
+    // F6-2 (frame-ownership.md 14.23): the actors' exclusions of F6-1 lifted while native.owned_actors is on (overlay flags, fade < 1, the alpha list's actor ops: their
+    // order-dependent draws through native.owned_ordered; switch materials through the material table's switch variants); `RVK_F62_OFF=1` = F6-1's exclusions (A/B)
+    static bool f62On();
+    bool actorOrderedNow(const Op* op) const;  // the op being composed is an actor op the ordered path records (Actors group, main view, solid / alpha)
     void orderedFlushRun();  // the pending run of ordered draws as one ordered flush (also the device's hook: Device::setOrderedHook)
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
     bool ownedListOk(void* db, List list);
@@ -387,7 +392,7 @@ private:
     // the lighting pool PS c14..c37); else eCShaderBase's (no global constants, no lighting: the shader's pools where they are)
     void constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader = nullptr, bool defaultClass = true);
     Skip materialSamplers(sc::DrawDesc& d, const std::uint8_t* shader, const void* psElement);
-    void applySwitch(const std::uint8_t* shader, std::int32_t switchValue, Skip& skip);
+    void applySwitch(const std::uint8_t* shader, std::int32_t switchValue, Skip& skip, bool variant = false);
     // frame-ownership.md F0 (native.material_table): the draw's material registers / texture bindings composed from the material's record and compared
     // with `d` (after constantsInto + materialSamplers); owner = the shader object whose pools / slots were used, psMask = the PS element's sampler mask
     void checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
@@ -401,7 +406,15 @@ private:
         std::uint64_t frame = ~0ull;
         std::uint32_t slot = 0xffffffffu;
         bool zPass = false;
+        std::uint64_t sw = 0;  // (F6-2: the switch variant's hash; 0 = the base record)
     };
+    // F6-2 (frame-ownership.md 14.23): switch materials. passDraw's SetSwitch writes (applySwitch with `variant`) give the pass's draws a switch variant record in the
+    // material table (exact registers / slot images for the draw's switch value; the base record's are history dependent): such a composition is recordable (no
+    // Excl::Switch) and its owned draws read the variant record's windows. On while native.owned_actors is on (F6-2), `RVK_F62_OFF=1` = off
+    std::vector<gpuscene::MaterialTable::SwitchWrite> passSw_;
+    const std::uint8_t* passSwShader_ = nullptr;  // (the shader the writes were applied to; null = no variant for the next checkMaterial)
+    std::uint64_t passSwHash_ = 0;
+    bool switchVariantsOn() const;
     std::array<MatMemo, 256> matMemo_{};
     // 7.27: off the check frames the illumination slot + lighting image entry of (illumination, pass parameters) is looked up once per frame
     struct LightMemo {
@@ -860,6 +873,8 @@ private:
         const void* wrapper = nullptr;
         std::uint32_t prim = 0, bones = 0;
         std::uint32_t draws = 0, offered = 0;  // the op's draws / those whose window 2 was served from the bone table
+        // (F6-2: per draw index, the last setOwnedFor call decides: a draw whose packet replay was refused is set up twice, the fresh path's call counts)
+        std::uint64_t drawMask = 0, offeredMask = 0;
         float weights[3] = {0.0f, 0.0f, 0.0f};  // c31.xyz as the composition wrote them
         float fade = 1.0f;                      // c32.w
         std::uint64_t histTag = 0;              // 14.13: the bone history's tag (actorHistTag)
@@ -958,8 +973,20 @@ private:
         std::uint64_t byView[3] = {};  // drawn ops: main z / main solid / cascades
         std::uint64_t seenByView[3] = {};
         std::uint64_t morphOps = 0, morphPickChanged = 0, imageNs = 0, stampNs = 0, drawsBuilt = 0, drawNoScene = 0, drawCdInvalid = 0, morphActive = 0, stampRebuilds = 0;
+        // F6-2 census (frame-ownership.md 14.23): every actor op per view class (main / cascade / other) x list (z / solid / alpha / refracted): owned, or composed with its reason
+        // (orec::Excl, then kActorCensusExtra)
+        std::uint64_t cenOwned[3][4] = {};
+        std::uint64_t ordSeen = 0, ordOwned = 0;  // actor ops with an ordered record looked at / drawn at their place (orderedPlace)
+        std::uint64_t pickSwaps = 0, pickMisses = 0, pickKept = 0;  // morph pick sets (actorPickSwap / actorPickKeep)
+        std::uint64_t cenWhy[3][4][orec::kExclCount + 6] = {};
         void add(const ActorOwnedStats& o);
     } actorW_, actorT_;
+    // the census's reasons after orec::Excl: why an actor op was composed
+    enum ActorCensusExtra : std::uint8_t { kCenCheck, kCenRecordRefused, kCenNoRecord, kCenAlphaList, kCenRefractedEmpty, kCenNotRecordedView, kCenExtraCount };
+    void actorCensus(const Op& op);           // opEnterImpl: an actor op that is composed (the owned ones never get there)
+    bool actorPickSwap(orec::OpRecord& rec, std::uint64_t pick);     // F6-2: the draws of an earlier morph pick swapped in (the stamp's lightmaps = the pick)
+    void actorPickKeep(orec::OpRecord& fresh, orec::OpRecord& old);  // F6-2: a record rebuilt for a new pick keeps the old pick's draws
+    void actorCensusOwned(const Op& op);      // an actor op drawn from its records
     ViewKind ownedCur_ = ViewKind::Main;
     // F3-1: the cascades' check / warm-up frames count the frames a cascade was rendered in (debug.shadow_stride renders them every 2nd frame while the camera stands still: the
     // frame number's check frames (multiples of native.owned_check) would never meet a cascade view); `ownedShadowCheck_` = the cascade view in progress is a check view

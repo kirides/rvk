@@ -88,7 +88,8 @@ int StaticOps::orderedValid(const Op& op, const orec::OpRecord& rec) {
     if (!tableLit_) return kOwNotTableLit;
     if (!rec.ownable) return kOwNotOwnable;
     // F2e-1: a record no engine event touched is valid on its polled inputs alone; a marked one (or 1 in 16 of the rolling scrub) runs the full stamp
-    const bool events = depEvents() && !rec.instances;  // (F2f: an instance list changes without an engine event: its full stamp every frame)
+    // (F2f: an instance list changes without an engine event: its full stamp every frame; F6-2: an actor record too, it has no event dependencies)
+    const bool events = depEvents() && !rec.instances && !rec.actor;
     int fast = -2;
     if (events) fast = depFast(op, rec);
     if (fast >= 0) return kOwStamp;
@@ -103,7 +104,13 @@ int StaticOps::orderedValid(const Op& op, const orec::OpRecord& rec) {
         if (!recStamp(op, st)) return kOwStamp;
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
-        if (const int d = orec::firstDifference(a, st); d >= 0) {
+        int d = orec::firstDifference(a, st);
+        if (d == 4 && rec.actor && actorPickSwap(const_cast<orec::OpRecord&>(rec), st.lightmaps)) {  // (F6-2: an actor's morph pick seen before)
+            a = rec.stamp;
+            a.view = a.materials = 0;
+            d = orec::firstDifference(a, st);
+        }
+        if (d >= 0) {
             if (scrub) depEventMiss(op, rec, d, "rolling scrub (ordered)");
             return kOwStamp;
         }
@@ -169,17 +176,21 @@ bool StaticOps::orderedPassBegin(const Op& op, const orec::OpRecord& rec) {
 }
 
 bool StaticOps::orderedPlace(const Op& op) {
-    if (viewKind_ != ViewKind::Main || op.kind != OpKind::Mesh || inNonOp_ || !recs_ || !ownedOrderedOn()) return false;
+    // (F6-2: the Actors group's solid / alpha ops with an ordered record: the fading actors, the focus NPC's highlight passes)
+    const bool actor = op.kind == OpKind::Animation;
+    if (viewKind_ != ViewKind::Main || (op.kind != OpKind::Mesh && !actor) || inNonOp_ || !recs_ || !ownedOrderedOn()) return false;
     const bool solid = op.list == List::Solid;
-    if (solid ? g_ != &groups_[static_cast<std::size_t>(Group::Static)]
-              : (g_ != &groups_[static_cast<std::size_t>(Group::Mesh)] || (op.list != List::Alpha && op.list != List::Refracted))) {
+    if (actor) {
+        if (!actorOrderedNow(&op)) return false;
+    } else if (solid ? g_ != &groups_[static_cast<std::size_t>(Group::Static)]
+                     : (g_ != &groups_[static_cast<std::size_t>(Group::Mesh)] || (op.list != List::Alpha && op.list != List::Refracted))) {
         return false;
     }
     if (!ownedView_.active) return false;  // (a check / warm-up frame, or the owned path is not ready: composed, and compared)
     const std::size_t li = solid ? 0 : op.list == List::Refracted ? 1 : 2;
     const auto it = recs_->map.find(orec::Key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0});
     if (it == recs_->map.end()) {
-        if (!solid) {
+        if (!solid && !actor) {
             ++ordW_.seen[li];
             ++ordW_.noRecord[li];
         }
@@ -188,9 +199,10 @@ bool StaticOps::orderedPlace(const Op& op) {
     const orec::OpRecord& rec = *it->second;
     if (!rec.ordered) {
         // (a solid list op with an opaque record that the compaction did not take: its stamp / view moved; composed as before)
-        if (!solid) ++ordW_.notOrdered[li];
+        if (!solid && !actor) ++ordW_.notOrdered[li];
         return false;
     }
+    if (actor) ++actorW_.ordSeen;
     ++ordW_.seen[li];
     const auto t0 = Clock::now();
     struct Timer {
@@ -242,7 +254,7 @@ bool StaticOps::orderedPlace(const Op& op) {
         ordItems_.clear();
         ++ordW_.runs;
     }
-    tag.source = d3d9::draws::Source::Mesh;
+    tag.source = actor ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
     tag.context = op.raw.context;
     tag.entity = op.entity != nullptr ? op.entity : ptr(op.raw.context, 0x10);
     tag.opDesc = op.raw.desc;
@@ -299,7 +311,8 @@ bool StaticOps::orderedPlace(const Op& op) {
     ++ordW_.owned[li];
     ++ordTotalOwned_;
     ordW_.draws[li] += drawn;
-    if (solid) {
+    if (actor) ++actorW_.ordOwned;
+    if (solid && !actor) {
         // (the owned share of the main view's static ops counts it: the op was looked at by the compaction and left there as ordered)
         OwnedStats& W = ownedStats();
         ++W.owned;

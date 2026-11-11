@@ -469,7 +469,7 @@ void Device::computePullFetch(const PipelineDesc& pd, const std::uint32_t* strea
         const rhi::GpuRef r = a.ref.plus(static_cast<std::int64_t>(ss.offset));
         f.ref[s][0] = r.low();
         f.ref[s][1] = r.high();
-        f.stride[s] = ss.stride;
+        f.stride[s] = (instConstStreams_ >> s & 1u) != 0 ? 0u : ss.stride;  // (F6-2: an instance-data stream of a draw that is not instanced: element 0 for every vertex)
     }
     for (std::uint32_t i = 0; i < pd.attributeCount; ++i) {
         const rhi::VertexAttribute& at = pd.attributes[i];
@@ -514,6 +514,14 @@ void Device::computePullFetch(const PipelineDesc& pd, const std::uint32_t* strea
     ++st.layoutOk;
 }
 
+bool Device::instRateAsVertex() const {
+    static const bool old = [] {
+        char b[8];
+        return GetEnvironmentVariableA("RVK_F62_INSTRATE_OLD", b, sizeof(b)) != 0;
+    }();
+    return sceneOrdered_ && !old;
+}
+
 bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t streamBinding[kStreams];
     std::fill(std::begin(streamBinding), std::end(streamBinding), UINT32_MAX);
@@ -521,7 +529,10 @@ bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     pd.bindingCount = 0;
     pd.attributeCount = 0;
     ubyteInputs_ = 0;
+    instConstStreams_ = 0;
     instanceCount_ = 1;
+    // (F6-2 / 14.23: no INDEXEDDATA on stream 0 = not instanced: an INSTANCEDATA stream's attributes read element 0 for every vertex)
+    const bool instConst = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0 && instRateAsVertex();
     if ((streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0) {
         instanceCount_ = std::max(1u, streams_[0].freq & 0x3FFFFFFFu);
     }
@@ -544,6 +555,10 @@ bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
                         return false;
                     }
                     pd.bindings[b] = {st.stride, (st.freq & STREAMSOURCE_INSTANCEDATA) != 0 ? 1u : 0u};
+                    if (instConst && in.stream != 0 && pd.bindings[b].perInstance != 0) {
+                        pd.bindings[b] = {0, 0};
+                        instConstStreams_ |= 1u << in.stream;
+                    }
                     out.buffers[b] = g.buffer;
                     out.offsets[b] = g.offset + st.offset;
                 }
@@ -569,6 +584,7 @@ bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
         }
     }
     out.bufferCount = pd.bindingCount;
+    if (instConstStreams_ != 0) ++instConstStats.draws;
     // one per-vertex stream whose offset is a multiple of its stride (static meshes in the mesh arena): bound at offset 0,
     // the offset goes into the draw's vertexOffset / firstVertex, so consecutive meshes of an arena block keep the binding
     // (not for procedural replacements: their vertices start at 0)
@@ -1030,6 +1046,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     bonePushPrev_ = {};
     obsBone_ = false;
     obsBonePending_ = false;
+    obsNoMotion_ = false;
     packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
@@ -1138,6 +1155,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // 14.13 (native.bone_motion): the draw will take the bone-motion forms: its observers need no vertex capture for its motion (boneMotionDraw)
     obsBonePending_ = false;
     obsBone_ = boneMode_ == 1 && bonePredict(kind, phase);
+    obsNoMotion_ = !obsBone_ && noMotionNow(kind, phase);  // (F6-2)
     if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         const bool f2cStatic = native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
                                (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::DepthPrepass);
@@ -1647,9 +1665,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const bool instList = sceneInstances_ && k == draws::Kind::InstancedMesh && (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0 && (streams_[0].freq & STREAMSOURCE_INSTANCEDATA) == 0;
         // (no stream at instance rate: an indirect scene draw's firstInstance is its record index, an instance-rate attribute would be read at that index (out of its buffer);
         // the alpha list's fading herbs bind stream 3 with 0x80000001)
+        // (F6-2 / 14.23: an instance-data stream of a draw that is not instanced is bound per vertex with stride 0 by computeVertexInput: the bindings decide)
         bool instRate = false;
-        for (std::uint32_t i = 0; i < 4; ++i) instRate = instRate || (streams_[i].buffer != nullptr && (streams_[i].freq & STREAMSOURCE_INSTANCEDATA) != 0);
-        orderedNow_ = sceneOrdered_ && !packet_.batchable && !instRate && (k == draws::Kind::StaticMesh || k == draws::Kind::Refracted || instList) && phase.view == scene::View::Main &&
+        {
+            const bool dyn = workVi_.dynamicLayout;
+            const std::uint32_t nb = dyn ? workVi_.bindingCount : pd.bindingCount;
+            for (std::uint32_t i = 0; i < nb && i < rhi::kMaxVertexBindings; ++i) instRate = instRate || (dyn ? workVi_.bindings[i].perInstance : pd.bindings[i].perInstance) != 0;
+        }
+        // (F6-2: the skinned actors' order-dependent draws too: the alpha list's fading actors, the highlighted focus NPC's overlay passes in the solid list)
+        orderedNow_ = sceneOrdered_ && !packet_.batchable && !instRate && (k == draws::Kind::StaticMesh || k == draws::Kind::Refracted || instList || (sceneActors_ && k == draws::Kind::Skinned)) &&
+                      phase.view == scene::View::Main &&
                       (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::Alpha || phase.pass == scene::Pass::Refracted) && !replaced && tint == 0 &&
                       customVertices_ == 0 && geom.indexed && !geom.userPointer;
     }
@@ -2030,6 +2055,7 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
                                    (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
             obsBonePending_ = false;
             obsBone_ = boneOfCached(c) && c.scenePipeline != GamePipeline::None && sceneActive();  // (14.13: the replayed packet is the bone-motion scene form)
+            obsNoMotion_ = !obsBone_ && noMotionOf(c);  // (F6-2)
             const CoverQuery cq = coverOf(q);
             obsSite_ = CaptureSite::Retained;  // (capture census)
             for (DrawObserver* o : observers_) {
@@ -2331,7 +2357,17 @@ void Device::flushBatch() {
     // the packets in recording order; runs of scene packets become one indirect call each (scene_draws.cpp)
     const auto recordOrdered = [&](auto&& index, std::uint32_t count) {
         if (sceneRecs_.empty()) {
-            for (std::uint32_t i = 0; i < count; ++i) record(batch_[index(i)]);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const DrawPacket& p = batch_[index(i)];
+                if (p.scene != 0) {
+                    // GPU safety (F6-2, frame-ownership.md 14.23; the device loss of 2026-11-11 08:41): a scene packet whose record list was emptied under it (a flush between
+                    // its toScenePacket and its batch entry) has no record and no ref stream: recorded as a plain packet its scene pipeline would read unbound addresses
+                    ++sceneStats_.fbNullAddress;
+                    spdlog::error("d3d9: scene packet dropped: its record list was emptied (index {}, list generation {} / {})", p.scene, p.sceneGen, sceneRecGen_);
+                    continue;
+                }
+                record(p);
+            }
             return;
         }
         sceneRun_.clear();
@@ -2384,6 +2420,7 @@ void Device::flushBatch() {
         recordOrdered([&](std::uint32_t i) { return static_cast<std::uint32_t>(batchKeys_[i]); }, n);
     }
     sceneRecs_.clear();
+    ++sceneRecGen_;
     if (threaded) closeChunk();  // a flush is one chunk: the backend's workers start on it now
     perf_.batchedDraws += n;
     ++perf_.batches;

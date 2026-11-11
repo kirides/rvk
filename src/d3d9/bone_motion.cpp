@@ -284,6 +284,25 @@ rhi::GpuRef Device::historyOf(rhi::GpuRef base) const {
     return gpuscene::objecttable().prevOf(base);
 }
 
+namespace {
+bool f62NoMotion() {
+    static const bool off = [] {
+        char v[8];
+        return GetEnvironmentVariableA("RVK_F62_OFF", v, sizeof(v)) != 0;
+    }();
+    return !off;
+}
+}  // namespace
+
+bool Device::noMotionOf(const CachedDraw& c) const {
+    return boneMode_ == 1 && f62NoMotion() && c.kind == draws::Kind::Skinned && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid && !c.v.gbufWanted;
+}
+
+bool Device::noMotionNow(draws::Kind kind, const scene::Phase& phase) const {
+    return boneMode_ == 1 && f62NoMotion() && kind == draws::Kind::Skinned && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
+           !(gbuf_.active && scopeGbuf_ && gbufferEligible(phase, kind));
+}
+
 bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase) {
     if (boneMode_ != 1 || phase.view != scene::View::Main || phase.pass != scene::Pass::Solid) return false;
     const bool skinned = kind == draws::Kind::Skinned;

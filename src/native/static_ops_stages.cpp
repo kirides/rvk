@@ -69,7 +69,7 @@ void StaticOps::stagesReport() {
     line += stage("owned_shadows", settingOn(rs.nativeOwnedShadows), ownedShadowsOn(), ownedShadowW_.owned, std::format("{} cascade ops owned", ownedShadowW_.owned),
                   ownedShadowsTripped_ ? std::string("a reset (tripped by a MISS / DIFFERING)") : needsOf(rs.nativeOwnedShadows, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}),
                   !gateCasc.empty() ? gateCasc : gateMain);
-    line += stage("owned_actors", settingOn(rs.nativeOwnedActors), ownedActorsOn(), actorW_.drawn, std::format("{} draws", actorW_.drawn),
+    line += stage("owned_actors", settingOn(rs.nativeOwnedActors), ownedActorsOn(), actorW_.drawn, std::format("{} draws; F6-2 {}: {} ordered ops, {} morph pick swaps", actorW_.drawn, f62On() ? "on" : "off (RVK_F62_OFF)", actorW_.ordOwned, actorW_.pickSwaps),
                   needsOf(rs.nativeOwnedActors, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedObjects}), gateAny);
     // F2f (native.owned_instances): acted = render-instance ops drawn from their records in the window
     line += stage("owned_instances", settingOn(rs.nativeOwnedInstances), ownedInstancesOn(), instW_.ownedOps, std::format("{} instance ops / {} draws owned", instW_.ownedOps, instW_.ownedDraws),

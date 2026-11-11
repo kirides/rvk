@@ -375,6 +375,7 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
     } scope(*this, &ow);
     obsBonePending_ = false;
     obsBone_ = boneOfCached(c);  // (14.13: the owned draw is the bone-motion form: its motion needs no capture)
+    obsNoMotion_ = !obsBone_ && noMotionOf(c);  // (F6-2)
     ReplaceQuery q = c.query;
     q.tag = &tag_;
     q.textures = c.tex;
@@ -485,6 +486,7 @@ Device::OwnedDrawScope::OwnedDrawScope(Device& d, const OwnedRecordView& r) : d_
     q_.objectRows = d.ownedObjectRows();
     d.obsBonePending_ = false;
     d.obsBone_ = d.boneOfCached(c);
+    d.obsNoMotion_ = !d.obsBone_ && d.noMotionOf(c);  // (F6-2)
     d.captureRequest_ = {};
     d.captureRequestRw_ = {};
     d.captureInstances_ = false;
