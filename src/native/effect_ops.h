@@ -289,6 +289,85 @@ private:
                   spriteNullTechnique_ = 0;
     std::uint32_t spriteLogged_ = 0;
     bool loggedOptimize_ = false;
+    // what a flush is made from (read once from the eCSprite / its effect: composeSprite and the owned records share it)
+    struct SpriteInputs {
+        std::int32_t n = 0;
+        std::vector<std::uint8_t> records;      // n x 0x48
+        std::vector<fxc::SpriteKey> keys;
+        fxc::SpritePlan plan;
+        const std::uint8_t* gfx = nullptr;       // the eCGfxEffect
+        const hal::vulkan::EffectInfo* info = nullptr;
+        int tech = -1, pass = -1;
+        std::uint32_t wvpParam = 0, texParam = 0;
+        const std::uint8_t* visual = nullptr;
+        const void* prim = nullptr;              // hal::vulkan::HalPrimitive
+        std::uint32_t visualStates[4]{};         // eCGfxVisual +0x18 .. +0x24
+        fxc::Masters masters;
+        std::vector<const void*> paramTextures;  // the effect's current textures (the texture parameter as the composition binds it, per batch)
+        std::vector<const void*> shaders;        // our device shaders of the effect's shaders
+        bool optimize = false, reset = false;
+        const void* active = nullptr;
+        std::uint8_t dirty = 0;
+    };
+    SpriteInputs spriteIn_;
+    // false: Skip `s` (the flush stays the engine's / is composed by the caller's fallback)
+    Skip spriteInputs(const std::uint8_t* sprite, SpriteInputs& in);
+
+    // ---- F13 owned records (effect_ops_gui_owned.cpp; docs/research/frame-ownership.md 14.34; native.own_gui = owned) ----
+    // A lean frame's taken-over flush is drawn from pulled records: its records (the engine's queue, in order) go into an instance stream, one instanced draw per
+    // run of batches with equal blend states (the batch's texture is the record's bindless slot), the clip rect is the device's scissor at Flush's entry (the
+    // composition never sets it); the device state the sprite effect's pass + the visual write is a template derived from the composition once per key (the
+    // effect, its technique / pass, every parameter value, the masters, the visual's states). The composition (batch states, quads) is skipped; the device and the
+    // effect are left as the engine's Flush leaves them (as O3's lean path). Check frames (native.lean_check) compose: every composed batch is compared with the
+    // template's model (DIFFERING), and the owned form is drawn into a scratch copy of the target and compared with the composed flush (image
+    // 'gui_main.frag (owned records)').
+    struct GuiOwned {
+        const fxc::WriteSet* w = nullptr;                   // the template (guiTemplates_)
+        const d3d9::Shader* vs = nullptr;                   // the pulled shaders
+        const d3d9::Shader* ps = nullptr;
+        std::vector<std::array<std::uint32_t, 3>> trios;   // per batch
+        std::vector<fxc::GuiRun> runs;
+        std::vector<std::uint8_t> records;                  // the pulled records (n x kGuiRecordStride)
+        const void* firstTexture = nullptr;                 // the stage texture while drawing (the first record's), the last batch's image after
+        const void* lastTexture = nullptr;
+        bool anyBlend = false;
+        std::int32_t scissor[4]{};                          // the clip rect (the flush's)
+    };
+    struct GuiTemplate {
+        fxc::WriteSet w;
+        std::uint64_t lastUse = 0;
+        bool checked = false;
+    };
+    std::uint64_t guiKey(const SpriteInputs& in, const fx::ParameterValues& values) const;
+    // the template for the inputs (derived from the composition's pass / visual on a miss); null + `why`: not representable
+    const fxc::WriteSet* guiTemplate(const SpriteInputs& in, const fx::ParameterValues& values, const char*& why, bool derive);
+    // the owned form of a flush from its inputs and template: records, runs, textures; false + `why`
+    bool guiOwnedPrepare(const SpriteInputs& in, const fxc::WriteSet& w, GuiOwned& f, const char*& why);
+    // draws the owned form (the device: entry + the template's writes + per run the blend states; `rtOverride`: into that target); leaves the device as drawn
+    void guiOwnedIssue(const GuiOwned& f, d3d9::Surface* rtOverride);
+    // a lean frame: the whole owned flush (true = done, the engine's Flush is skipped)
+    bool guiOwnedFlush(const std::uint8_t* sprite);
+    // a check frame (composed): the template's model against the composed batches; the owned form drawn into `scratch` (issueSprite)
+    void guiOwnedCheck();
+    bool guiOwnedCompareDraw(d3d9::Surface* scratch);
+    d3d9::VertexDecl* guiPullDecl();
+    std::unordered_map<std::uint64_t, GuiTemplate> guiTemplates_;
+    GuiOwned guiOwned_;
+    std::unique_ptr<fxc::EffectDraw> guiEntry_, guiSim_;  // check frames: the device at the flush's entry, the model's batch state
+    bool guiEntryValid_ = false;
+    std::unique_ptr<d3d9::VertexDecl> guiDecl_;
+    std::unique_ptr<d3d9::Buffer> guiRecVb_, guiIb_, guiDummy_;
+    std::uint32_t guiRecCursor_ = 0;
+    std::uint64_t guiRecFrame_ = ~0ull;
+    struct GuiOwnedStats {
+        std::uint64_t flushes = 0, records = 0, runs = 0, batches = 0, composed = 0, derived = 0, checked = 0, checkedBatches = 0, differing = 0, ns = 0, composeNs = 0,
+                      composedTimed = 0;
+        std::string why, firstDiff;
+    };
+    GuiOwnedStats guiOwnedW_;
+    std::uint64_t guiOwnedDifferingTotal_ = 0;
+    std::uint32_t guiOwnedLogged_ = 0;
+    void reportGuiOwned();
 
     // ---- the shadow views' setup (group 2048) ----
     enum class SetupField : std::uint8_t { Fit, Camera, TextureMatrix, Target, Viewport, Clear, Restore, Calls, Count };
@@ -450,6 +529,8 @@ private:
     void leanUpdateFrame();
     // the current unit may skip the engine's code (lean frame, taken over, no render-state block open)
     bool leanUnit();
+    // the engine's code of a unit may be skipped at all (eCGfxEffect's statics as expected, ms_bOptimize off, no execute callback, no state block open)
+    bool leanSkippable();
     // issues the unit's draws and leaves the device as the engine's code would (render states: those at the entry, the HAL's
     // technique block reverts every state the passes / visual set; the rest: the last draw's)
     void issueLean(bool draw = true);

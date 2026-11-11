@@ -54,6 +54,7 @@ void registerOwnPost(OwnPost* p, OwnPost* only) {
 }
 int ownSceneMode(OwnPost::Scene which) { return g_ownPost != nullptr ? static_cast<int>(g_ownPost->sceneMode(which)) : 0; }
 std::uint64_t ownSceneActs(OwnPost::Scene which) { return g_ownPost != nullptr ? g_ownPost->sceneActs(which) : 0; }
+std::uint64_t ownSceneOwnedActs(OwnPost::Scene which) { return g_ownPost != nullptr ? g_ownPost->ownedActs(which) : 0; }
 
 // ---- F12 / F13 (frame-ownership.md 14.24) ----
 
@@ -62,7 +63,8 @@ void OwnPost::setSceneMode(Scene which, Mode m) {
     if (cur == m) return;
     cur = m;
     if (m != Mode::Off) buildFxPorts();  // (14.29: the particles use the ge_particle ports)
-    spdlog::info("native: own {}: {}", which == Scene::Sky ? "sky" : which == Scene::Gui ? "gui" : "particles", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
+    if (which == Scene::Gui && m == Mode::Owned) buildGuiPulled();
+    spdlog::info("native: own {}: {}", which == Scene::Sky ? "sky" : which == Scene::Gui ? "gui" : "particles", modeName(m));
 }
 
 std::uint64_t OwnPost::drawSkips() { return dev_.stats().skippedCompiling + dev_.stats().skippedNoShader + dev_.game().pipelineSkips(); }
@@ -86,7 +88,7 @@ void OwnPost::reportScene() {
     for (std::size_t k = 0; k < 3; ++k) {
         SceneCounts& c = sceneW_[k];
         if (sceneMode_[k] != Mode::Off || c.draws != 0) {
-            spdlog::info("native: own {} (5 s): {}: {} {}: ours {} / engine's shaders {}{}{}", kNames[k], sceneMode_[k] == Mode::Off ? "off" : sceneMode_[k] == Mode::On ? "on" : "compare",
+            spdlog::info("native: own {} (5 s): {}: {} {}: ours {} / engine's shaders {}{}{}", kNames[k], modeName(sceneMode_[k]),
                          c.draws, kWhat[k], c.ours, c.left, c.why.empty() ? std::string() : std::format(" (first reason: {})", c.why),
                          k != 0 ? std::format("; compares dropped (a draw skipped while its shader / pipeline built, run) {}", droppedCompares_) : std::string());
         }
@@ -243,7 +245,75 @@ void OwnPost::reportFx() {
     spdlog::info("native: own fx shaders (5 s): {}; ports ready {} of {}", s.empty() ? std::string("no composed effect draw") : s, ready, kFxRows);
 }
 
+void OwnPost::buildGuiPulled() {
+    if (guiPullState_[0] != 0) return;
+    rhi::GameDevice* game = &dev_.game();
+    static constexpr const char* kNames[2] = {"post/fx/gui_main_pull.vert", "post/fx/gui_main_pull.frag"};
+    for (std::size_t i = 0; i < 2; ++i) {
+        guiPullState_[i] = 1;
+        guiPullBuilding_[i] = std::async(std::launch::async, [game, name = kNames[i]]() {
+            const rhi::ShaderModule m = game->createShaderModule({.spirv = shader::embedded::spirv(name), .dxil = shader::embedded::dxilOnDemand(name)}, name);
+            if (m == rhi::ShaderModule::None) spdlog::error("native: own gui: the pulled sprite shader {} failed: the flushes stay composed", name);
+            return m;
+        });
+    }
+}
+
+bool OwnPost::guiPulled(const void* engineVs, const void* enginePs, const d3d9::Shader*& vs, const d3d9::Shader*& ps, const char** why) {
+    vs = ps = nullptr;
+    const auto fail = [&](const char* w) {
+        if (why != nullptr) *why = w;
+        return false;
+    };
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (guiPullState_[i] == 1 && guiPullBuilding_[i].valid() && guiPullBuilding_[i].wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            guiPullModule_[i] = guiPullBuilding_[i].get();
+            guiPullState_[i] = guiPullModule_[i] != rhi::ShaderModule::None ? 2 : 3;
+        }
+        if (guiPullState_[i] != 2) return fail(guiPullState_[i] == 3 ? "the pulled sprite shaders failed to build" : "the pulled sprite shaders are not built yet");
+    }
+    // (only the sprite effect's pair: the record layout is its vertex's)
+    if (fxPort(engineVs) == nullptr || fxPort(enginePs) == nullptr) return fail("the sprite effect's ports are not built yet");
+    const char* nv = fxPortName(engineVs);
+    const char* np = fxPortName(enginePs);
+    if (nv == nullptr || np == nullptr || std::strcmp(nv, "gui_main.vert") != 0 || std::strcmp(np, "gui_main.frag") != 0) return fail("not the sprite effect's shaders");
+    if (!guiPullVs_ || guiPullFor_[0] != engineVs || guiPullFor_[1] != enginePs) {
+        const auto* ev = static_cast<const d3d9::Shader*>(engineVs);
+        const auto* ep = static_cast<const d3d9::Shader*>(enginePs);
+        const auto make = [&](const d3d9::Shader& e, rhi::ShaderModule m, std::uint64_t tag) {
+            auto s = std::make_shared<d3d9::Shader>();
+            s->stage = e.stage;
+            s->module.store(m, std::memory_order_release);
+            s->reflection = e.reflection;
+            s->semantics = e.semantics;
+            s->bytecode = e.bytecode;
+            s->samplerMask = e.samplerMask;
+            s->hash = e.hash ^ tag;
+            s->tintFailed = true;
+            s->lodFailed = true;
+            for (auto& v : s->variantState) v.store(3, std::memory_order_relaxed);
+            return s;
+        };
+        auto v = make(*ev, guiPullModule_[0], 0x6a11000000000000ull);
+        // the record's inputs (EffectOps::guiPullDecl: TEXCOORD8..12 of stream 1 at instance rate) in place of the vertex's
+        v->reflection.vertexInputs.clear();
+        for (std::uint8_t k = 8; k <= 12; ++k) v->reflection.vertexInputs.push_back({k, shader::Usage::TexCoord, k});
+        guiPullVs_ = std::move(v);
+        guiPullPs_ = make(*ep, guiPullModule_[1], 0x6a12000000000000ull);
+        guiPullFor_[0] = engineVs;
+        guiPullFor_[1] = enginePs;
+    }
+    vs = guiPullVs_.get();
+    ps = guiPullPs_.get();
+    return true;
+}
+
 void OwnPost::destroyFxPorts() {
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (guiPullBuilding_[i].valid()) guiPullModule_[i] = guiPullBuilding_[i].get();
+        if (guiPullModule_[i] != rhi::ShaderModule::None) dev_.game().destroyShaderModule(guiPullModule_[i], true);
+        guiPullModule_[i] = rhi::ShaderModule::None;
+    }
     for (auto& f : fxBuilding_) {
         if (f.valid()) f.wait();
     }

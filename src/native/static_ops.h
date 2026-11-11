@@ -527,6 +527,43 @@ private:
     d3d9::Surface* skyCmpScratch_ = nullptr;
     d3d9::Surface* skyCmpTarget_ = nullptr;
     std::uint64_t skyCmpSkips_ = 0;
+    // F12 owned record (frame-ownership.md 14.34, native.own_sky = owned): the dome's draw kept as a persistent record per (dome shader, cube face or main view).
+    // A lean frame takes the record when its stamp holds (every input the composition reads besides the registers: the shader object's bytes, the version's
+    // elements, the visual / primitive, the sampler snapshot, each material slot's image resource and data, the textures they resolve to) and refreshes only
+    // the parameter block (the live registers from the mirror = the composed state: camera, sun, weather, time; rewritten only when they changed); the slots'
+    // image touches and SetSwitch run as in the composition. Check frames compose and compare the record's form with the composed draw (DIFFERING).
+    struct SkyTex {
+        const void* res = nullptr;   // the material slot's image resource (null: an admin stage)
+        const void* data = nullptr;  // the image data the stage samples
+        const void* touched = nullptr;  // the resource's data as ExecuteShaderConstants touches it (before the placeholder / error image)
+        bool material = false;
+    };
+    struct SkyRecord {
+        std::uint64_t stamp = 0;
+        std::vector<std::uint8_t> stampBytes;
+        bool valid = false;
+        sc::DrawDesc desc;
+        std::array<SkyTex, sc::kStages> tex{};
+        std::uint16_t texMask = 0;
+        std::uint64_t paramHash = 0;
+        std::uint8_t alphaTest = 0;
+        std::uint32_t alphaRef = 0;
+    };
+    std::array<SkyRecord, 2> skyRecords_{};  // [0] the main view's dome, [1] the sky cube faces'
+    std::array<SkyTex, sc::kStages>* skyTexCapture_ = nullptr;  // (materialSamplers / adminSamplers record each stage's image data while composing the dome)
+    std::uint64_t skyStamp(const std::uint8_t* shader, const std::uint8_t* visual, const std::uint8_t* version, const std::uint8_t* vsElem, const std::uint8_t* psElem) const;
+    bool skyOwnedDraw(const std::uint8_t* shader, const std::uint8_t* visual, std::uint64_t stamp, SkyRecord& r);
+    static bool skyRecordEqual(const sc::DrawDesc& a, const sc::DrawDesc& b, std::string& why);
+    struct SkyOwnedStats {
+        std::uint64_t owned = 0, composed = 0, stampChanged = 0, paramChanges = 0, checked = 0, differing = 0, ownedNs = 0, composedNs = 0, composedTimed = 0;
+        std::uint64_t cubeFaces = 0, cubeFaceNs = 0, frame0 = 0;
+        std::string why, firstDiff;
+    };
+    SkyOwnedStats skyOwnedW_;
+    std::uint64_t skyOwnedDifferingTotal_ = 0;
+    std::uint32_t skyOwnedLogged_ = 0, skyStampLogged_ = 0;
+    mutable std::vector<std::uint8_t> skyStampBytes_;
+    void skyOwnedReport();
     int blendModeOf(const std::uint8_t* owner) const;
     // N5.6 (static_ops_fx.cpp): particles, strips, light streaks, precipitation
     bool verifyFx();

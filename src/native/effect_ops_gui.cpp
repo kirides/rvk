@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <format>
 
@@ -28,6 +29,7 @@ namespace rvk::native {
 namespace {
 
 using U8 = const std::uint8_t;
+using Clock = std::chrono::steady_clock;
 using engine::readAt;
 using engine::safeRead;
 
@@ -89,6 +91,19 @@ bool EffectOps::spriteFlushBegin(void* spritePtr) {
     stats_ = &window_[unitName_];
     ++stats_->counts.units;
     ++spriteFlushes_;
+    // F13 owned records (frame-ownership.md 14.34): a lean frame's taken-over flush from its pulled records (the composition skipped)
+    if (guiTake_ && own_->sceneMode(OwnPost::Scene::Gui) == OwnPost::Mode::Owned) {
+        leanStats_ = &leanWindow_[unitName_];
+        if (guiOwnedFlush(sprite)) {
+            ++stats_->counts.unitsComposed;
+            drawCount_ = 0;
+            engineDraws_ = 0;
+            taken_ = true;
+            leanSkipped_ = true;
+            return true;
+        }
+    }
+    const Clock::time_point composeT0 = Clock::now();
     const Skip s = composeSprite(sprite);
     if (s != Skip::None) {
         ++stats_->skips[static_cast<std::size_t>(s)];
@@ -101,6 +116,11 @@ bool EffectOps::spriteFlushBegin(void* spritePtr) {
     engineDraws_ = 0;
     taken_ = false;
     leanStats_ = &leanWindow_[unitName_];
+    if (guiEntryValid_) {
+        // F13 owned records, a check frame: the template's model against the composed batches
+        leanUpdateFrame();
+        if (checkFrame_) guiOwnedCheck();
+    }
     if (unitTake_) {
         predictAfter(true);
         if (leanUnit()) {
@@ -110,6 +130,9 @@ bool EffectOps::spriteFlushBegin(void* spritePtr) {
             adoptAfter();
             taken_ = true;
             leanSkipped_ = true;
+            // (the owned flush's counterpart: a lean frame's composed flush, composition + issue + the after state; reported by `native: own gui: owned records`)
+            guiOwnedW_.composeNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - composeT0).count());
+            ++guiOwnedW_.composedTimed;
             return true;
         }
         issueSprite(false);
@@ -127,17 +150,17 @@ void EffectOps::spriteFlushEnd(void* sprite) {
     if (sprite == leftUnit_) leftUnit_ = nullptr;
 }
 
-EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
-    drawCount_ = 0;
-    spriteGeom_.clear();
-    const std::int32_t n = get<std::int32_t>(sp, 0xb0);
+EffectOps::Skip EffectOps::spriteInputs(const std::uint8_t* sp, SpriteInputs& in) {
+    in.n = get<std::int32_t>(sp, 0xb0);
     U8* recs = ptr(sp, 0xa8);
-    if (n <= 0 || recs == nullptr) return Skip::Unreadable;
+    if (in.n <= 0 || recs == nullptr) return Skip::Unreadable;
     // Flush sorts with qsort_s by depth (flags & 0xc0) / texture (0x20) first: never with Begin(0) (GUI, videos); left to the engine
     if ((get<std::uint32_t>(sp, 0) & 0xe0u) != 0) return Skip::Sorted;
     U8* gfx = ptr(sp, 0xe8);
     const auto* info = hal::vulkan::EffectInfo::fromApi(ptr(gfx, 0x18));
     if (gfx == nullptr || info == nullptr) return Skip::NoEffect;
+    in.gfx = gfx;
+    in.info = info;
     const fx::Effect& e = info->fxEffect();
     // Flush's SetTechnique(+0x20): the sprite effect's handle is null (eCSpriteEffect::Create never sets it), which the HAL
     // rejects (as D3DX): the technique stays the effect's current one (the first)
@@ -150,59 +173,95 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
         if (spriteLogged_++ < 4) spdlog::info("native: gui: sprite effect technique handle {} (index {}), pass {}: left to the engine", techHandle, tech, pass);
         return Skip::Technique;
     }
-    const std::uint32_t wvpParam = info->parameterOf(ptr(sp, 0xf0));
-    const std::uint32_t texParam = info->parameterOf(ptr(sp, 0xf8));
-    if (wvpParam >= e.parameters.size() || texParam >= e.parameters.size()) return Skip::Unreadable;
+    in.tech = tech;
+    in.pass = pass;
+    in.wvpParam = info->parameterOf(ptr(sp, 0xf0));
+    in.texParam = info->parameterOf(ptr(sp, 0xf8));
+    if (in.wvpParam >= e.parameters.size() || in.texParam >= e.parameters.size()) return Skip::Unreadable;
     // the mesh (+0xb8): visual +0 (its record = our HalPrimitive), vertex data +0x10 (+0x20 the API buffer), count +0x20 (sprite
     // +0xd8), start +0x24 (+0xdc), capacity +0x28 (+0xe0)
     U8* visual = ptr(sp, 0xb8);
     const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
     if (visual == nullptr || prim == nullptr || ptr(visual, 0x60) != nullptr) return Skip::Visual;
+    in.visual = visual;
+    in.prim = prim;
     U8* vdata = ptr(sp, 0xc8);
     const std::uint32_t capacity = get<std::uint32_t>(sp, 0xe0);
     if (vdata == nullptr || ptr(vdata, 0x20) == nullptr || capacity == 0 || capacity > kMaxQuads) return Skip::Buffer;
     const auto sv = prim->streamView(0);
     if (sv.buffer == nullptr || sv.stride != fxc::kSpriteVertex) return Skip::Buffer;
-    spriteExecuted_ = spriteBlendSet_ = false;
-    std::vector<std::uint8_t> records(static_cast<std::size_t>(n) * fxc::kSpriteRecord);
-    if (!safeRead(recs, records.data(), records.size())) return Skip::Unreadable;
-    std::vector<fxc::SpriteKey> keys(static_cast<std::size_t>(n));
-    for (std::size_t i = 0; i < keys.size(); ++i) {
-        std::memcpy(&keys[i].image, records.data() + i * fxc::kSpriteRecord + 0x38, sizeof(void*));
-        std::memcpy(&keys[i].blend, records.data() + i * fxc::kSpriteRecord + 0x44, 4);
+    in.records.resize(static_cast<std::size_t>(in.n) * fxc::kSpriteRecord);
+    if (!safeRead(recs, in.records.data(), in.records.size())) return Skip::Unreadable;
+    in.keys.resize(static_cast<std::size_t>(in.n));
+    for (std::size_t i = 0; i < in.keys.size(); ++i) {
+        std::memcpy(&in.keys[i].image, in.records.data() + i * fxc::kSpriteRecord + 0x38, sizeof(void*));
+        std::memcpy(&in.keys[i].blend, in.records.data() + i * fxc::kSpriteRecord + 0x44, 4);
     }
-    const fxc::SpritePlan plan = fxc::planSprites(keys, capacity, get<std::uint32_t>(sp, 0xdc), get<std::uint32_t>(sp, 0xd8));
+    in.plan = fxc::planSprites(in.keys, capacity, get<std::uint32_t>(sp, 0xdc), get<std::uint32_t>(sp, 0xd8));
     // g_mWorldViewProj (Flush): the sprite's projection +0x48 x the device's view matrix (GetViewMatrix: the GUI's scale / offset)
     float proj[16], wvp[16];
     if (!readAt(sp, 0x48, proj)) return Skip::Unreadable;
     const auto view = hal_.viewMatrix();
     matMul_(proj, wvp, &view);
-    fx::ParameterValues& values = valuesScratch_;  // (V4: see EffectOps::composeEffect)
+    fx::ParameterValues& values = valuesScratch_;  // (V4: see EffectOps::composeEffect; the flush's values = valuesScratch_)
     values = info->currentValues();
-    std::memcpy(values.data[wvpParam].data(), wvp, std::min<std::size_t>(64, values.data[wvpParam].size()));
-    std::vector<const void*> paramTextures(e.parameters.size(), nullptr);
-    for (std::uint32_t i = 0; i < e.parameters.size(); ++i) paramTextures[i] = info->currentTexture(i);
-    std::vector<const void*> shaders(e.shaders.size(), nullptr);
-    for (std::uint32_t k = 0; k < e.shaders.size(); ++k) shaders[k] = info->fxShader(k);
-    const fx::Pass& fxPass = e.techniques[static_cast<std::size_t>(tech)].passes[static_cast<std::size_t>(pass)];
+    std::memcpy(values.data[in.wvpParam].data(), wvp, std::min<std::size_t>(64, values.data[in.wvpParam].size()));
+    in.paramTextures.assign(e.parameters.size(), nullptr);
+    for (std::uint32_t i = 0; i < e.parameters.size(); ++i) in.paramTextures[i] = info->currentTexture(i);
+    in.shaders.assign(e.shaders.size(), nullptr);
+    for (std::uint32_t k = 0; k < e.shaders.size(); ++k) in.shaders[k] = info->fxShader(k);
     // eCGfxEffect::Execute's skip state, followed through the flush
     const auto& sy = engine::sym();
-    const bool optimize = get<bool>(sy.gfxEffectOptimize, 0);
-    const void* active = ptr(sy.gfxEffectActive, 0);
-    std::uint8_t dirty = get<std::uint8_t>(gfx, 0x2c);
-    bool reset = get<bool>(sy.gfxEffectReset, 0);
+    in.optimize = get<bool>(sy.gfxEffectOptimize, 0);
+    in.active = ptr(sy.gfxEffectActive, 0);
+    in.dirty = get<std::uint8_t>(gfx, 0x2c);
+    in.reset = get<bool>(sy.gfxEffectReset, 0);
+    for (std::uint32_t i = 0; i < 4; ++i) in.visualStates[i] = get<std::uint32_t>(visual, 0x18 + 4 * i);
+    in.masters = hal_.visualMasters();
+    return Skip::None;
+}
+
+EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
+    drawCount_ = 0;
+    spriteGeom_.clear();
+    SpriteInputs& in = spriteIn_;
+    if (const Skip s = spriteInputs(sp, in); s != Skip::None) return s;
+    const auto* info = in.info;
+    const fx::Effect& e = info->fxEffect();
+    const auto* prim = static_cast<const hal::vulkan::HalPrimitive*>(in.prim);
+    U8* visual = in.visual;
+    U8* gfx = in.gfx;
+    const auto sv = prim->streamView(0);
+    spriteExecuted_ = spriteBlendSet_ = false;
+    const std::vector<std::uint8_t>& records = in.records;
+    const std::vector<fxc::SpriteKey>& keys = in.keys;
+    const fxc::SpritePlan& plan = in.plan;
+    const std::uint32_t texParam = in.texParam;
+    fx::ParameterValues& values = valuesScratch_;
+    std::vector<const void*>& paramTextures = in.paramTextures;
+    const std::vector<const void*>& shaders = in.shaders;
+    const fx::Pass& fxPass = e.techniques[static_cast<std::size_t>(in.tech)].passes[static_cast<std::size_t>(in.pass)];
+    const bool optimize = in.optimize;
+    const void* active = in.active;
+    std::uint8_t dirty = in.dirty;
+    bool reset = in.reset;
     if (!loggedOptimize_) {
         loggedOptimize_ = true;
         spdlog::info("native: gui: eCGfxEffect::ms_bOptimize {}, the sprite effect active {}, dirty {}, reset {}", optimize, active == gfx, dirty, reset);
     }
-    const fxc::Masters masters = hal_.visualMasters();
+    const fxc::Masters masters = in.masters;
     fxc::EffectDraw& state = *scratch_;
     captureDevice(state);
+    // F13 owned records (check frames): the device at the entry, the model's start
+    guiEntryValid_ = false;
+    if (own_->sceneMode(OwnPost::Scene::Gui) == OwnPost::Mode::Owned) {
+        if (!guiEntry_) guiEntry_ = std::make_unique<fxc::EffectDraw>();
+        *guiEntry_ = state;
+        guiEntryValid_ = true;
+    }
     entryRs_ = state.rs;
     spriteEndStart_ = plan.endStart;
     spriteEndCount_ = plan.endCount;
-    const auto& dc = prim->drawDesc();
-    (void)dc;
     for (const fxc::SpriteBatch& b : plan.batches) {
         if (b.why == fxc::SpriteBatch::Why::Blend) ++spriteBreaksBlend_;
         else if (b.why == fxc::SpriteBatch::Why::Texture) ++spriteBreaksTexture_;
@@ -272,13 +331,13 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
         spriteGeom_.push_back(std::move(g));
         ++drawCount_;
     }
-    spriteRecords_ += static_cast<std::uint64_t>(n);
-    spriteQuads_ += static_cast<std::uint64_t>(n);
+    spriteRecords_ += static_cast<std::uint64_t>(in.n);
+    spriteQuads_ += static_cast<std::uint64_t>(in.n);
     // O3: what Flush leaves in the sprite effect (predictAfter): g_mWorldViewProj, the last attached image's texture, the technique
     // (SetTechnique(null) is rejected: unchanged)
     unitInfo_ = hal::vulkan::EffectInfo::fromApiMutable(ptr(gfx, 0x18));
     unitValues_ = values;
-    unitTextures_ = std::move(paramTextures);
+    unitTextures_ = paramTextures;
     unitTech_ = info->currentTechnique();
     unitPasses_ = 0;
     return Skip::None;
@@ -380,7 +439,7 @@ void EffectOps::issueSprite(bool lean) {
                     portActive_ = true;
                 }
             }
-            if (gm != OwnPost::Mode::Off && (rtOverride != nullptr || gm == OwnPost::Mode::On)) own_->countScene(OwnPost::Scene::Gui, port, why);
+            if (gm != OwnPost::Mode::Off && (rtOverride != nullptr || OwnPost::portsOn(gm))) own_->countScene(OwnPost::Scene::Gui, port, why);
             issueIndex_ = rtOverride != nullptr ? ~std::size_t{0} : k;  // (a compare draw has no composition of its own)
             dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
             portActive_ = false;
@@ -413,10 +472,23 @@ void EffectOps::issueSprite(bool lean) {
         }
         if (cmpScratch != nullptr) drawAll(true, cmpScratch);
     }
-    drawAll(gm == OwnPost::Mode::On, nullptr);
+    // F13 owned records, a check frame: the owned form (pulled records, the template's state) into a scratch copy of the target first, then the composed flush
+    const char* cmpName = "gui_main.frag";
+    if (gm == OwnPost::Mode::Owned && !lean && checkFrame_ && guiEntryValid_ && cmpTarget != nullptr) {
+        bool same = true;
+        for (std::size_t k = 0; k < drawCount_; ++k) same &= draws_[k]->rt0 == cmpTarget;
+        if (same) {
+            dev_.orderedFlushPending();
+            cmpSkips = own_->drawSkips();
+            cmpScratch = own_->scratchOf(cmpTarget, 1, true);
+            if (cmpScratch != nullptr && !guiOwnedCompareDraw(cmpScratch)) cmpScratch = nullptr;
+            cmpName = "gui_main.frag (owned records)";
+        }
+    }
+    drawAll(OwnPost::portsOn(gm), nullptr);
     if (cmpScratch != nullptr) {
         if (own_->drawSkips() != cmpSkips) own_->countDroppedCompare();  // (a draw of the two passes was skipped while its shader / pipeline built)
-        else own_->compareUnit("gui_main.frag", cmpScratch, cmpTarget);
+        else own_->compareUnit(cmpName, cmpScratch, cmpTarget);
     }
     issuing_ = false;
     tag = savedTag;
@@ -434,6 +506,7 @@ void EffectOps::issueSprite(bool lean) {
 
 void EffectOps::reportGui() {
     if (!guiOn() || guiVerified_ <= 0) return;
+    reportGuiOwned();
     spdlog::info("native: gui (5 s): {} flushes, {} records / quads, batch breaks: blend {} texture {} buffer full {}; executes skipped {}; "
                  "w lanes differing (not compared) {}; Gui-view engine draws outside the flushes {}; flushes with a null technique handle {}",
                  spriteFlushes_, spriteRecords_, spriteBreaksBlend_, spriteBreaksTexture_, spriteBreaksFull_, spriteSkippedExecute_, spriteWLaneDiffers_,

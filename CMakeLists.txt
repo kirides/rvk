@@ -212,6 +212,7 @@ add_library(rvk_core STATIC
     src/native/effect_ops_setup.cpp
     src/native/effect_ops_post.cpp
     src/native/effect_ops_gui.cpp
+    src/native/effect_ops_gui_owned.cpp
     src/native/effect_ops_pssm.cpp
     src/native/effect_ops_lean.cpp
     src/native/own_post.cpp

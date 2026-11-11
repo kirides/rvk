@@ -258,6 +258,23 @@ void Device::ownedPrepTexture(Texture* t) {
     ++ownedTexturePreps_;
 }
 
+std::uint32_t Device::sampleSlot2D(Texture* t) {
+    // (prepareTextures + the block's tex[] rule of prepareDraw for a 2D sampler: a feedback loop / unbound / unusable texture = the default texture)
+    if (t != nullptr && !t->isNull()) {
+        if (ownedTextureNeedsPrep(t)) {
+            ownedPrepTexture(t);
+        } else {
+            bool target = ds_ != nullptr && ds_->texture() == t;
+            for (Surface* s : rt_) target |= s != nullptr && s->texture() == t;
+            if (!target) t->lastUseFrame_ = frameValue();
+        }
+    }
+    const bool usable = t != nullptr && !t->isNull() && t->desc().type != TextureType::Cube && t->desc().type != TextureType::Volume &&
+                        t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!usable) return game_->defaultTextureSlot(static_cast<std::uint32_t>(shader::TextureType::Tex2D));
+    return (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
+}
+
 // The shader's inputs against the declaration, computed once per pair (the declaration and the shader never change)
 const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs) {
     const std::uint64_t declId = decl != nullptr ? decl->id() : 0;

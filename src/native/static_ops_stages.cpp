@@ -188,6 +188,16 @@ void StaticOps::stagesReport() {
         settings::Setting* st = which == OwnPost::Scene::Sky ? rs.nativeOwnSky : which == OwnPost::Scene::Gui ? rs.nativeOwnGui : rs.nativeOwnParticles;
         const int want = st != nullptr ? static_cast<int>(st->asInt()) : 0;
         const int have = ownSceneMode(which);
+        // (14.34, owned: acted = units drawn from their records in the window: the sky dome's persistent record, sprite flushes from pulled records)
+        static std::uint64_t lastOwned[3] = {};
+        const std::uint64_t owned = ownSceneOwnedActs(which);
+        const std::uint64_t o = owned >= lastOwned[i] ? owned - lastOwned[i] : owned;
+        lastOwned[i] = owned;
+        if (have == 3) {
+            static constexpr const char* kOwned[3] = {"sky dome draws from the persistent record", "sprite flushes from pulled records", ""};
+            line += stage(kStage[i], want != 0, have == want, o, std::format("owned: {} {}, {} {} on our shaders", o, kOwned[i], a, kWhat[i]));
+            continue;
+        }
         line += stage(kStage[i], want != 0, have != 0 && have == want, a, std::format("{}: {} {} on our shaders", have == 2 ? "compare" : "on", a, kWhat[i]));
     }
     // row 13 (frame-ownership.md 14.26): native.owned_decals (acted = decal records drawn from their persistent buffers / content-checked in the window)
