@@ -33,6 +33,7 @@
 #include "d3d9/fvf.h"
 #include "enh/rt_scene.h"
 #include "gpuscene/bone_table.h"
+#include "gpuscene/row_table.h"
 #include "engine/scene_table.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/object_table.h"
@@ -4140,6 +4141,129 @@ mov o2, v2
 // junk, the windows are persistent images of the caller's (a view-block-like c0 image, a billboard-constants-like c31.. image). The pictures must be identical, the four
 // draws must leave as one indirect run; refusals (a window image shorter than the shader reads, a null base, a dry run) must draw nothing, a changed image must change
 // the picture (the draw really reads it)
+// F2f (frame-ownership.md 14.19): the instance row table's images as VS window 2 of a static draw (c32.w, c33..c35): drawn through the device's window override with junk in the
+// register file, equal to the register-file reference; a released slot is refused (GPU safety: no window into a freed image) and handed out again only after the deferral
+void testInstanceRows(Fixture& f) {
+    Device& dev = f.dev;
+    static const char* kVs = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_position o0
+dcl_color o1
+dcl_texcoord o2
+dp4 o0.x, v0, c33
+dp4 o0.y, v0, c34
+dp4 o0.z, v0, c35
+mov o0.w, v0.w
+mul o1, v1, c32.w
+mov o2, v2
+)";
+    const auto vs = shaderFrom(dev, kVs);
+    if (!vs) {
+        std::printf("  FAIL instance rows: shader\n");
+        ++g_failures;
+        return;
+    }
+    gpuscene::RowTable& rt = gpuscene::rowtable();
+    rt.releaseGpu();
+    rt.setActive(true);
+    for (int i = 0; i < 3 && !rt.ready(); ++i) rt.flush(dev);
+    if (!rt.ready()) {
+        std::printf("  FAIL instance rows: the buffer was not created\n");
+        ++g_failures;
+        rt.setActive(false);
+        return;
+    }
+    float regsA[gpuscene::kObjectRegs][4] = {{9, 9, 9, 9}, {7, 7, 7, 0.5f}, {0.5f, 0, 0, 0.25f}, {0, 0.5f, 0, 0}, {0, 0, 1, 0}};
+    float regsB[gpuscene::kObjectRegs][4] = {{9, 9, 9, 9}, {7, 7, 7, 1.0f}, {0.25f, 0, 0, -0.5f}, {0, 0.25f, 0, 0.25f}, {0, 0, 1, 0}};
+    const std::uint32_t bits = 0x1eu;  // c32 .. c35 composed
+    const auto setRegisters = [&](const float (*r)[4], bool junk) {
+        const float j4[4] = {0.9f, 0.9f, 0.9f, 0.9f};
+        for (std::uint32_t i = 1; i < gpuscene::kObjectRegs; ++i) dev.setVertexShaderConstantF(31 + i, junk ? j4 : r[i], 1);
+    };
+    const auto render = [&](const float (*r)[4], const d3d9::OwnedWindows::Win* win, const char* name) {
+        f.reset();
+        dev.setVertexShader(vs);
+        setRegisters(r, win != nullptr);
+        OwnedWindows ow;
+        if (win != nullptr) {
+            ow.w[0][2] = *win;
+            dev.setOwnedWindows(&ow);
+        }
+        f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+        dev.setOwnedWindows(nullptr);
+        rt.flush(dev);
+        return capture(dev, name);
+    };
+    const auto differ = [](const Pixels& a, const Pixels& b) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < a.bgra.size() && i < b.bgra.size(); ++i) n += a.bgra[i] != b.bgra[i];
+        return a.bgra.size() != b.bgra.size() ? 0xffffffffu : n;
+    };
+    const Pixels refA = render(regsA, nullptr, "rows_ref_a");
+    const Pixels refB = render(regsB, nullptr, "rows_ref_b");
+    if (differ(refA, refB) == 0) {
+        std::printf("  FAIL instance rows: the two images draw the same picture (the shader does not read them)\n");
+        ++g_failures;
+    }
+    const std::uint32_t a = rt.alloc(regsA, bits), b = rt.alloc(regsB, bits);
+    d3d9::OwnedWindows::Win wa, wb;
+    if (a == gpuscene::kNoSlot || b == gpuscene::kNoSlot || a == b || !rt.windowFor(a, bits, wa) || !rt.windowFor(b, bits, wb) || wa.kind != OwnedWindows::Kind::Object || wa.covered != 5 ||
+        wa.base.null() || wa.image == nullptr || !rt.same(a, regsA, bits) || rt.same(a, regsB, bits)) {
+        std::printf("  FAIL instance rows: alloc / window\n");
+        ++g_failures;
+        rt.setActive(false);
+        return;
+    }
+    rt.flush(dev);  // (the images' upload)
+    const OwnedStats s0 = dev.ownedStats();
+    const Pixels pa = render(regsA, &wa, "rows_served_a");
+    const Pixels pb = render(regsB, &wb, "rows_served_b");
+    const OwnedStats s1 = dev.ownedStats();
+    if (const std::uint32_t n = differ(refA, pa); n != 0) {
+        std::printf("  FAIL instance rows: image A: %u bytes differ from the register-file reference\n", n);
+        ++g_failures;
+    }
+    if (const std::uint32_t n = differ(refB, pb); n != 0) {
+        std::printf("  FAIL instance rows: image B: %u bytes differ from the register-file reference\n", n);
+        ++g_failures;
+    }
+    if (s1.object - s0.object != 2) {
+        std::printf("  FAIL instance rows: the device served %llu object windows (expected 2)\n", static_cast<unsigned long long>(s1.object - s0.object));
+        ++g_failures;
+    }
+    // a c31-reading draw gets no image
+    if (rt.alloc(regsA, bits | 1u) != gpuscene::kNoSlot) {
+        std::printf("  FAIL instance rows: an image with c31 composed was handed out\n");
+        ++g_failures;
+    }
+    // released: no window any more; the slot comes back only after kFramesInFlight + 1 presents
+    rt.release(a);
+    d3d9::OwnedWindows::Win dead;
+    if (rt.windowFor(a, bits, dead)) {
+        std::printf("  FAIL instance rows: a released slot still has a window\n");
+        ++g_failures;
+    }
+    bool early = false;
+    for (std::uint32_t i = 0; i < rhi::kFramesInFlight; ++i) {
+        const std::uint32_t c = rt.alloc(regsB, bits);
+        if (c == a) early = true;
+        if (c != gpuscene::kNoSlot) rt.release(c);
+        rt.flush(dev);
+    }
+    if (early) {
+        std::printf("  FAIL instance rows: a released slot was handed out before the deferral\n");
+        ++g_failures;
+    }
+    rt.release(b);
+    for (std::uint32_t i = 0; i < rhi::kFramesInFlight + 2; ++i) rt.flush(dev);
+    rt.setActive(false);
+    rt.releaseGpu();
+    std::printf("  instance rows (F2f): served draws equal the register file, release deferred\n");
+}
+
 void testOwnedSubmit(Fixture& f) {
     Device& dev = f.dev;
     dev.setSceneDraws(true, 0);
@@ -4846,7 +4970,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)
     };
     for (const auto& [name, fn] : cases) {

@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <optional>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -530,6 +531,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.matSlot = gpuscene::MaterialTable::kNoSlot;
     d.lightEntry = gpuscene::kNoEntry;
     d.illumSlot = gpuscene::kNoSlot;
+    d.illumPtr = nullptr;
     d.lightN = d.lightFirst = 0;
     d.lightTableLit = d.lightHoldsAll = false;
     d.alphaFunc = 8;
@@ -1322,7 +1324,9 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
             vs1Composed = static_cast<std::uint32_t>((d.vsSet[0] >> 12) & ((1u << 19) - 1u));
             // VS window 2: the object table (7.27: off the check frames the record current by the scene table's signals is served without the matrix check)
             d3d9::OwnedWindows::Win ow;
-            if (!verifyDraw && objects.serveFast(op_->entity, gpuscene::objectComposedBits(d.vsSet.data()), d.vsF[32][3], ow)) {
+            if (ownedInstancesOn() && (op_->raw.desc >> 8) == 0xffffffu && op_->list == List::Solid) {
+                instanceServeComposed(d);  // F2f: an instance draw's window 2 is its record's row image (or uploaded while the record is built)
+            } else if (!verifyDraw && objects.serveFast(op_->entity, gpuscene::objectComposedBits(d.vsSet.data()), d.vsF[32][3], ow)) {
                 ownedWin_.w[0][2] = ow;
             } else {
                 const float composed[gpuscene::kObjectRegs][4] = {
@@ -1498,6 +1502,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     sc::DrawDesc& d = drawFrom(geometry);
     d.lightEntry = lightEntry;
     d.illumSlot = lightKey_.slot;
+    d.illumPtr = pass.illum;
     d.lightTableLit = lightKey_.tableLit;
     d.lightHoldsAll = lightKey_.holdsAll;
     d.lightN = lightKey_.n;
@@ -1824,24 +1829,36 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
     const std::int32_t count = get<std::int32_t>(res, 0x60);
     if (node == 0xffffffu) {
         // eCMeshResource2::ExecuteRenderInstances 0x7607b0 (instances sorted once per frame by Render)
+        // (F2f: the instance list is the stamp's (instanceStamp: the list as sorted); its header / bytes are left out of the read log: they are rewritten every frame)
+        std::optional<RecNoLog> listNoLog;
+        if (ownedInstancesOn()) listNoLog.emplace(recs_ ? &recs_->readLog : nullptr);
         leanSortInstances(res);  // O2a: Render's in-place sort + res +0xa4 = 0 (then the composition reads the sorted list)
         const std::int32_t n = get<std::int32_t>(res, 0xb8);
         if (n <= 0) return Skip::None;
         if (static_cast<std::int32_t>(sub) >= count) return Skip::Unreadable;
+        std::vector<std::uint8_t>& inst = scr_.inst;
+        inst.resize(static_cast<std::size_t>(n) * 0x58);
+        if (!rd(ptr(res, 0xb0), 0, inst.data(), inst.size())) return Skip::Unreadable;
+        if (get<std::int32_t>(res, 0xa4) != 0 && n > 1) qsort_(inst.data(), static_cast<std::size_t>(n), 0x58, instanceCmp_);
+        listNoLog.reset();
         const std::uint32_t combi = bindLightmaps(res);
         U8* s = subs + 0x48 * static_cast<std::size_t>(sub);
         U8* material = ptr(s, 0x38);
         U8* shader = ptr(material, 0x70);
         if (material == nullptr || shader == nullptr) return Skip::None;
         if (!shaderClassOk(shader)) return Skip::ShaderClass;
-        std::vector<std::uint8_t>& inst = scr_.inst;
-        inst.resize(static_cast<std::size_t>(n) * 0x58);
-        if (!rd(ptr(res, 0xb0), 0, inst.data(), inst.size())) return Skip::Unreadable;
-        if (get<std::int32_t>(res, 0xa4) != 0 && n > 1) qsort_(inst.data(), static_cast<std::size_t>(n), 0x58, instanceCmp_);
         const auto at = [&](std::int32_t i) { return inst.data() + 0x58 * static_cast<std::size_t>(i); };
         const auto illumOf = [&](std::int32_t i) { U8* p = nullptr; std::memcpy(&p, at(i) + 0x48, 8); return p; };
         const auto switchOf = [&](std::int32_t i) { std::int32_t v = 0; std::memcpy(&v, at(i) + 0x40, 4); return v; };
-        if (get<std::uint8_t>(res, 0xa0) == 0 || n < 2 || combi == 1) {
+        // F2f (native.owned_instances): the main view's hardware batches are drawn one draw per instance (the engine's own fallback path for this resource: the
+        // non-instanced shader version, each instance with its own illumination), so that every render-instance op has one ownable draw per instance
+        const bool batch = get<std::uint8_t>(res, 0xa0) != 0 && n >= 2 && combi != 1;
+        const bool unbatch = batch && instanceUnbatch();
+        if (unbatch) {
+            ++instW_.unbatchedOps;
+            instW_.unbatchedInstances += static_cast<std::uint64_t>(n);
+        }
+        if (!batch || unbatch) {
             for (std::int32_t i = 0; i < n; ++i) {
                 const float* m = reinterpret_cast<const float*>(at(i));
                 if (const Skip k = subMeshDraws(res, s, 0, switchOf(i), combi, illumOf(i), 1.0f, m, false, at(i)[0x50], 0); k != Skip::None) return k;
@@ -2674,6 +2691,7 @@ void StaticOps::issue() {
         }
         if (pe != nullptr && !verifyFrame) {
             setRegs(d);
+            ownedDrawIndex_ = static_cast<std::uint32_t>(k);
             if (owned) setOwnedFor(d);
             setTag(d);  // (the observers and replacers look at it)
             if (dev_.replayDraw(pe->cd, rin)) {
@@ -2755,6 +2773,7 @@ void StaticOps::issue() {
         }
         // the composed registers as ranges (one copy per run of consecutive registers)
         setRegs(d);
+        ownedDrawIndex_ = static_cast<std::uint32_t>(k);
         if (owned) setOwnedFor(d);
         setTag(d);
         issueIndex_ = k;

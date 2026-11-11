@@ -407,6 +407,7 @@ struct DrawDesc {
     // F2c-2 (op records): the key the lighting entry was made from (illumination slot + the pass's compose parameters), the alpha test of the pass as the engine's states
     // give it (the device's ALPHAFUNC / ALPHAREF are never composed) and the mask reference the pass writes into PS c5.w
     std::uint32_t illumSlot = 0xffffffffu, lightN = 0, lightFirst = 0;
+    const void* illumPtr = nullptr;  // F2f: the illumination the slot belongs to (an instance-list draw's is its render instance's)
     bool lightTableLit = false, lightHoldsAll = false;
     std::uint32_t alphaFunc = 8, alphaRef = 0;
     bool maskSet = false;

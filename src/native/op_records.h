@@ -24,6 +24,7 @@
 #include "d3d9/owned_windows.h"
 #include "gpuscene/bone_table.h"
 #include "gpuscene/draw_record_table.h"
+#include "gpuscene/row_table.h"
 #include "native/static_ops_retained.h"
 
 namespace rvk::native::orec {
@@ -189,6 +190,10 @@ struct DrawRec {
     bool zPass = false;
     std::uint32_t passFlags = 0;
     bool scene = false;  // composed as a scene draw when the record was made
+    // F2f (native.owned_instances, frame-ownership.md 14.19): an instance-list draw's VS window 2 image (the instance row table; immutable: the stamp holds the instance's matrix)
+    // and the illumination its lighting slot belongs to (the render instance's, not the entity's)
+    gpuscene::RowHandle row;
+    const void* illumPtr = nullptr;
 };
 
 struct OpRecord {
@@ -221,6 +226,7 @@ struct OpRecord {
     bool actor = false;
     gpuscene::BoneKey actorKey;
     std::uint32_t actorBones = 0;
+    bool instances = false;  // F2f: a render-instance op (node 0xffffff): its draws' window 2 are instance row images, its stamp holds the instance list
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;

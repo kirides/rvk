@@ -247,6 +247,7 @@ add_library(rvk_core STATIC
     src/native/static_ops_sky.cpp
     src/native/static_ops_actors.cpp
     src/native/static_ops_actors_owned.cpp
+    src/native/static_ops_inst_owned.cpp
     src/native/static_ops_trees.cpp
     src/native/static_compose.h
     src/native/static_ops.cpp
@@ -323,6 +324,8 @@ add_library(rvk_core STATIC
     src/gpuscene/window_tables.h
     src/gpuscene/object_table.cpp
     src/gpuscene/object_table.h
+    src/gpuscene/row_table.cpp
+    src/gpuscene/row_table.h
     src/gpuscene/object_compose.h
     src/gpuscene/illum_compose.h
     src/gpuscene/lighting_images.cpp

@@ -2732,6 +2732,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}, {"native.owned_objects", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedInstances = &reg.add({
+        .key = "native.owned_instances",
+        .label = "Native frame: owned instance lists",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs persistent owned draws (frame-ownership.md 14.19, F2f): the main view's instanced mesh ops (render-op node 0xffffff: one draw per render "
+                       "instance, the engine's hardware batches are composed per instance too while this is on) get op records whose stamp holds every instance's record (matrix, "
+                       "switch, illumination, flags) and are drawn from persistent DrawRecords like the other static meshes; each draw's VS window 2 (c32.w, c33..c35) is an immutable "
+                       "image in the instance row table. The blended terrain layers of the solid list are owned too, drawn from their records at the engine's place in the list "
+                       "(order kept). native.owned_check frames compare with the composition (DIFFERING / MISS must stay 0). Off = nothing changes. rvk.log `native: owned instances (5 s)`, "
+                       "`native: instance rows (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedBillboards = &reg.add({
         .key = "native.owned_billboards",
         .label = "Native frame: owned tree billboards",

@@ -39,6 +39,7 @@
 #include "gpuscene/view_table.h"
 #include "gpuscene/billboard_table.h"
 #include "gpuscene/object_table.h"
+#include "gpuscene/row_table.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/shutdown.h"
 #include "gpuscene/verify.h"
@@ -340,6 +341,13 @@ void HalDevice::applyStaticOps() {
             dev_.setBoneMotion(gpuscene::bonetable().history() ? bone : 0);
             dev_.setRigidMotion(bone != 0 && rs.nativeRigidMotion != nullptr && rs.nativeRigidMotion->startValue() != 0.0 && gpuscene::objecttable().active());  // 14.15 b
             staticOps_->setOwnedActors(actors);
+        }
+        {
+            // frame-ownership.md 14.19: F2f owned instance lists (+ the hardware batches composed per instance) and F9 the blended terrain layers at their place
+            const bool inst = on(rs.nativeOwnedInstances) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
+            dev_.setSceneInstances(inst);
+            gpuscene::rowtable().setActive(inst);
+            staticOps_->setOwnedInstances(inst);
         }
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
@@ -735,7 +743,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1775,6 +1783,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::drawrecords().flush(dev_);
         gpuscene::clusterstore().flush(dev_);  // F5-1 (before the compaction: F5-2's cull reads the cluster table and the object table's rows)
         gpuscene::objecttable().flush(dev_);
+        gpuscene::rowtable().flush(dev_);  // F2f (frame-ownership.md 14.19): the owned instance-list draws' window 2 images
         gpuscene::bonetable().flush(dev_);  // F6-1: the owned actors' bone images (before the frame's draws, with the other tables)
         dev_.boneMotionFrame();         // 14.13: bone-history motion (compare readback, the 5 s line)
         dev_.captureCensusFrame();      // 14.15: the vertex-capture census (`native: captures (5 s)`)

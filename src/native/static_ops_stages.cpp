@@ -46,6 +46,9 @@ void StaticOps::stagesReport() {
     line += stage("owned_trees", settingOn(rs.nativeOwnedTrees), ownedTrees_, treeMain + treeCasc, std::format("main {} owned views, cascades {}", treeMain, treeCasc));
     line += stage("owned_shadows", settingOn(rs.nativeOwnedShadows), ownedShadowsOn(), ownedShadowW_.owned, std::format("{} cascade ops owned", ownedShadowW_.owned));
     line += stage("owned_actors", settingOn(rs.nativeOwnedActors), ownedActorsOn(), actorW_.drawn, std::format("{} draws", actorW_.drawn));
+    // F2f (native.owned_instances): acted = render-instance ops drawn from their records in the window
+    line += stage("owned_instances", settingOn(rs.nativeOwnedInstances), ownedInstancesOn(), instW_.ownedOps, std::format("{} instance ops / {} draws owned", instW_.ownedOps, instW_.ownedDraws));
+    instReport();
     line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained));
     const std::uint64_t vegViews = vro_ ? vro_->window.ownedViews : 0;
     line += stage("owned_vegetation_ops", settingOn(rs.nativeOwnedVegetationOps), ownedVegOps_, vegViews, std::format("{} owned views", vegViews));

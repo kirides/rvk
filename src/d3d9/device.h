@@ -973,6 +973,10 @@ public:
     void setSceneShadows(bool on) { if (on != sceneShadows_) ++variantEpoch_; sceneShadows_ = on; }
     // F6-1 (frame-ownership.md 7.40, native.owned_actors): the skinned actors' z / solid draws of the main view and z draws of the cascades get their scene forms too
     void setSceneActors(bool on) { if (on != sceneActors_) ++variantEpoch_; sceneActors_ = on; }
+    // F2f (frame-ownership.md 14.19, native.owned_instances): the main view's instance-list draws (draws::Kind::InstancedMesh, not hardware-instanced) get their scene forms like the
+    // static meshes' (their VS window 2 is an instance row image or an object record), and a rigid one with an object history takes the scene bone forms instead of the push form
+    void setSceneInstances(bool on) { if (on != sceneInstances_) ++variantEpoch_; sceneInstances_ = on; }
+    bool sceneInstances() const { return sceneInstances_; }
     // ---- bone-history motion (native.bone_motion = off | on | compare, frame-ownership.md 14.13; d3d9/bone_motion.cpp). On: a skinned main-view solid draw whose VS window 2 is
     // a bone table image with history is drawn with the bone-motion forms (its vertex shader runs the translated program a second time on the previous frame's image: the previous
     // world position for the G-buffer's motion), so object motion / the RT scene need no vertex capture of it and its owned form stays owned. Compare: the captures as before and
@@ -2135,6 +2139,7 @@ private:
     bool sceneActive() const { return sceneIssue_ && sceneDrawsOn_ && sceneAvail_; }
     bool sceneShadows_ = false;
     bool sceneActors_ = false;
+    bool sceneInstances_ = false;
     void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk,
                      rhi::ShaderModule fsBeforeDrop);
     // false: an address the scene shader reads is null, the packet stays a normal one. `viewSlot` >= 0: a scene ABI v2 packet (the record carries no view windows, c5w =
