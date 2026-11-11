@@ -36,6 +36,7 @@
 #include <pix3.h>
 
 #include "core/crash_dump.h"
+#include "core/gpu_events.h"
 #include "core/caps.h"
 #include "rhi/d3d12/d3d12_ffx.h"
 #include "rhi/game_device.h"
@@ -626,6 +627,7 @@ public:
         vramShared_ = ad.SharedSystemMemory;
         bool viaFactory = false;
         RVK_HR(makeDevice(adapter.Get(), IID_PPV_ARGS(&device_), &viaFactory), "D3D12CreateDevice");
+        gpuevents::record(gpuevents::Kind::DeviceCreated, "d3d12");
         caps_.agilitySdkVersion = viaFactory ? sdk.version : 0;
         spdlog::info("d3d12: device from {}", viaFactory ? std::format("the Agility SDK {} factory", sdk.version) : std::string("the system runtime"));
         if (layer) {
@@ -1135,6 +1137,14 @@ public:
             spdlog::error("d3d12: {}", text.substr(from, end == std::string::npos ? std::string::npos : end - from));
             if (end == std::string::npos) break;
             from = end + 2;
+        }
+        // the other renderer processes on this GPU (core/gpu_events.h, rt-shadows.md 11.2): a removal without a page fault of its own shortly after another
+        // process's page fault / hang is that process's GPU reset
+        const bool faulted = text.find("DRED: page fault at") != std::string::npos;
+        gpuevents::record(faulted ? gpuevents::Kind::LostWithFault : gpuevents::Kind::Lost, std::format("d3d12, at {}", where));
+        for (const std::string& o : gpuevents::reportOthers()) {
+            spdlog::error("d3d12: {}", o);
+            text += o + "\r\n";
         }
         if (const auto dump = crashdump::write("d3d12_device_removed", text); !dump.empty()) spdlog::error("d3d12: minidump written to {}", dump.string());
     }

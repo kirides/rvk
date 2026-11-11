@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/crash_dump.h"
+#include "core/gpu_events.h"
 #include "core/paths.h"
 #include "core/profile.h"
 #include "vk/debug_names.h"
@@ -605,6 +606,7 @@ bool Context::createDevice(bool withRayTracing) {
         return false;
     }
     volkLoadDevice(device_);
+    gpuevents::record(gpuevents::Kind::DeviceCreated, "vulkan");
     vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
     if (wantFrameGenQueues_ && queueFamilyCount_ >= 3) {
         fgQueues_.presentFamily = fgQueues_.acquireFamily = queueFamily_;
@@ -698,48 +700,64 @@ VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
 // vendor binary for Radeon GPU Detective). Logged once, at the first DEVICE_LOST any queue operation returns.
 void Context::reportDeviceLost(const char* where) {
     if (lostReported_.exchange(true)) return;
-    spdlog::error("vulkan: DEVICE LOST at {} (validation errors so far: {})", where, validationErrors_.load());
-    std::string report = std::format("Vulkan device lost at {} (validation errors so far: {})\r\n", where, validationErrors_.load());
+    // every line goes to rvk.log AND into the dump's text report (before, the report held only the first line: the fault data and the
+    // unfinished crash-marker regions were logged after the dump was written)
+    std::string report;
+    auto line = [&report](const std::string& text) {
+        spdlog::error("vulkan: {}", text);
+        report += text + "\r\n";
+    };
+    line(std::format("DEVICE LOST at {} (validation errors so far: {})", where, validationErrors_.load()));
     if (lostReporter_) {
         const std::string text = lostReporter_();
-        if (!text.empty()) {
-            spdlog::error("vulkan: {}", text);
-            report += text + "\r\n";
+        if (!text.empty()) line(text);
+    }
+    bool faultReported = false;
+    std::vector<std::uint8_t> binary;
+    if (!features_.deviceFault || vkGetDeviceFaultInfoEXT == nullptr) {
+        line("device fault: the driver offers no VK_EXT_device_fault");
+    } else {
+        VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+        VkResult r = vkGetDeviceFaultInfoEXT(device_, &counts, nullptr);
+        if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+            line(std::format("device fault: vkGetDeviceFaultInfoEXT counts: {}", resultString(r)));
+        } else {
+            std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+            std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+            binary.resize(static_cast<std::size_t>(counts.vendorBinarySize));
+            VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+            info.pAddressInfos = addrs.empty() ? nullptr : addrs.data();
+            info.pVendorInfos = vendors.empty() ? nullptr : vendors.data();
+            info.pVendorBinaryData = binary.empty() ? nullptr : binary.data();
+            r = vkGetDeviceFaultInfoEXT(device_, &counts, &info);
+            faultReported = counts.addressInfoCount > 0 || counts.vendorInfoCount > 0;
+            line(std::format("device fault: {} (result {}), {} address info(s), {} vendor info(s), vendor binary {} bytes{}", info.description,
+                             resultString(r), counts.addressInfoCount, counts.vendorInfoCount, counts.vendorBinarySize,
+                             faultReported ? "" : " (nothing of this device faulted: a hang, a TDR or another process's GPU reset)"));
+            static constexpr const char* kAddrType[] = {"none", "read invalid", "write invalid", "execute invalid", "instruction pointer unknown",
+                                                        "instruction pointer invalid", "instruction pointer (fault)"};
+            for (std::uint32_t i = 0; i < counts.addressInfoCount && i < addrs.size(); ++i) {
+                const auto t = static_cast<std::uint32_t>(addrs[i].addressType);
+                line(std::format("device fault: address {} 0x{:x} (precision {} bytes): {}", i, static_cast<std::uint64_t>(addrs[i].reportedAddress),
+                                 static_cast<std::uint64_t>(addrs[i].addressPrecision), t < std::size(kAddrType) ? kAddrType[t] : "?"));
+            }
+            for (std::uint32_t i = 0; i < counts.vendorInfoCount && i < vendors.size(); ++i) {
+                line(std::format("device fault: vendor {}: {} (code 0x{:x}, data 0x{:x})", i, vendors[i].description,
+                                 static_cast<std::uint64_t>(vendors[i].vendorFaultCode), static_cast<std::uint64_t>(vendors[i].vendorFaultData)));
+            }
         }
+    }
+    // the other renderer processes on this GPU (core/gpu_events.h): a loss without a fault of its own shortly after another process's page fault
+    // is that process's GPU reset (rt-shadows.md 11.2)
+    gpuevents::record(faultReported ? gpuevents::Kind::LostWithFault : gpuevents::Kind::Lost, std::format("vulkan, at {}", where));
+    const std::vector<std::string> others = gpuevents::reportOthers();
+    for (const std::string& o : others) line(o);
+    if (!faultReported && !others.empty()) {
+        line("device lost without a fault of this device while other renderer processes share the GPU: check their logs first (a page fault or "
+             "hang in one process resets the GPU for all of them)");
     }
     // a minidump of the process at the moment of the loss (threads, modules) + the report, next to rvk.log (core/crash_dump.h)
     if (const auto dump = crashdump::write("vulkan_device_lost", report); !dump.empty()) spdlog::error("vulkan: minidump written to {}", dump.string());
-    if (!features_.deviceFault || vkGetDeviceFaultInfoEXT == nullptr) {
-        spdlog::error("vulkan: device fault: the driver offers no VK_EXT_device_fault");
-        return;
-    }
-    VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
-    VkResult r = vkGetDeviceFaultInfoEXT(device_, &counts, nullptr);
-    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
-        spdlog::error("vulkan: device fault: vkGetDeviceFaultInfoEXT counts: {}", resultString(r));
-        return;
-    }
-    std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
-    std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
-    std::vector<std::uint8_t> binary(static_cast<std::size_t>(counts.vendorBinarySize));
-    VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
-    info.pAddressInfos = addrs.empty() ? nullptr : addrs.data();
-    info.pVendorInfos = vendors.empty() ? nullptr : vendors.data();
-    info.pVendorBinaryData = binary.empty() ? nullptr : binary.data();
-    r = vkGetDeviceFaultInfoEXT(device_, &counts, &info);
-    spdlog::error("vulkan: device fault: {} (result {}), {} address info(s), {} vendor info(s), vendor binary {} bytes", info.description,
-                  resultString(r), counts.addressInfoCount, counts.vendorInfoCount, counts.vendorBinarySize);
-    static constexpr const char* kAddrType[] = {"none", "read invalid", "write invalid", "execute invalid", "instruction pointer unknown",
-                                                "instruction pointer invalid", "instruction pointer (fault)"};
-    for (std::uint32_t i = 0; i < counts.addressInfoCount && i < addrs.size(); ++i) {
-        const auto t = static_cast<std::uint32_t>(addrs[i].addressType);
-        spdlog::error("vulkan: device fault: address {} 0x{:x} (precision {} bytes): {}", i, static_cast<std::uint64_t>(addrs[i].reportedAddress),
-                      static_cast<std::uint64_t>(addrs[i].addressPrecision), t < std::size(kAddrType) ? kAddrType[t] : "?");
-    }
-    for (std::uint32_t i = 0; i < counts.vendorInfoCount && i < vendors.size(); ++i) {
-        spdlog::error("vulkan: device fault: vendor {}: {} (code 0x{:x}, data 0x{:x})", i, vendors[i].description,
-                      static_cast<std::uint64_t>(vendors[i].vendorFaultCode), static_cast<std::uint64_t>(vendors[i].vendorFaultData));
-    }
     if (!binary.empty()) {
         try {
             const auto file = paths::dataDir() / "devicefault.bin";
@@ -769,6 +787,7 @@ void Context::destroy() {
     if (device_ != VK_NULL_HANDLE) {
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
+        gpuevents::record(gpuevents::Kind::DeviceDestroyed, "vulkan");
     }
     if (messenger_ != VK_NULL_HANDLE) {
         vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);

@@ -6,6 +6,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/gpu_events.h"
 #include "vk/context.h"
 
 namespace rvk::vk {
@@ -99,6 +100,12 @@ void Frames::waitFor(std::uint64_t value) const {
         }
         spdlog::warn("vulkan: the GPU has not finished frame value {} after {} s (completed {})", value, slice * 4,
                      completedValue());
+        if (slice == 1) {
+            // a stall: written to the cross-process board, and what the other renderer processes on this GPU did just before (a page fault in
+            // one of them stalls every process until the driver resets the GPU; core/gpu_events.h, rt-shadows.md 11.2)
+            gpuevents::record(gpuevents::Kind::Stall, std::format("vulkan, frame value {}", value));
+            for (const std::string& o : gpuevents::reportOthers()) spdlog::warn("vulkan: {}", o);
+        }
     }
 }
 

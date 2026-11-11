@@ -344,6 +344,39 @@ per run; see the commit message for the validation runs.
 **Diagnostics kept**: `Context::reportDeviceLost` (device fault report + vendor binary `bin/rvk/devicefault.bin` when the driver gives
 one, and the crash markers' report), `debug.crash_markers`, the `rt.*` sub-regions (also useful in captures).
 
+### 11.2 The lake_jungle "hang" of 2026-11-11: another process's page fault (cross-process GPU reset)
+
+**Symptom** (wrt agent's water-compare, Full, F2f settings `scratch\f2f\all_settings.txt`, arm `native.owned_instances=false`, main's
+shaders): when the camera arrived at the rvkcompare spot `lake_jungle`, rvk.log `vulkan: the GPU has not finished frame value 4593
+after 12 s`, then `VK_ERROR_DEVICE_LOST` at `vkQueueSubmit2` (dump `copies\risen-test-vk-wrt\bin\rvk\dumps\rvk_20261111-030115_*`,
+03:01:15); no device fault data of its own, no TDR event in the System log.
+
+**Cause** [C]: not this process. A second test game on the same GPU, the F9 agent's GPU-assisted-validation run
+(`scratch\f9\av1.log`, copy `risen-test-vk-f9`, instance 2; its run.txt: "instance id 1 is taken by pid 45396
+...risen-test-vk-wrt\bin\Risen.exe"), lost its device 13 s earlier, at 03:01:01.99, with `device fault: GPU page fault detected ...
+address 0 0x0 (precision 4096 bytes): read invalid` (a read through a null GPU address; settings incl. `native.owned_ordered = true`,
+the F9 / F14 work in progress, not on main). The wrt process's frame submitted ~1 s after that fault never finished: the AMD driver
+stalls the GPU while it handles the faulting context and then resets it, which ends the device of every process on it (the victim's
+`VK_EXT_device_fault` has nothing: none of its own work faulted). The F9 branch faulted the same way again at 07:17:50
+(`scratch\f9\p1.log`, address 0x0 read, 29 s after start). Timeline: f9 fault 03:01:01.99 -> wrt waits from ~03:01:03 (4 / 8 / 12 s
+warnings) -> wrt loss 03:01:15.
+
+**Not reproducible alone** [C]: 5 runs of the incident's settings to `lake_jungle` and 5 with everything on (`scratch\soak\allon.txt`
++ `native.owned_instances=true`), each with `debug.regions` + `debug.crash_markers`, in a private copy (`risen-test-vk-dl`): no stall,
+no loss (`scratch\dl\gate_*.txt`). The traversal / candidate loops (`rvk_rt_trace.hlsli`, incl. the new opaque-first two-query traces)
+are bounded by the hardware traversal; nothing in this process needed a fix.
+
+**Guard** (`core/gpu_events.*`, tests `gpu_events_*`): every renderer process (any copy / build, also the test tools) writes its device
+creation / destruction, stalls (Vulkan: the first 4 s slice of a frame wait) and losses / removals (with / without a fault report)
+into one session-local shared memory board (`Local\rvk_gpu_events_v1`, 32 slots, diagnostics only). A stall or loss logs the other
+processes' losses / stalls of the last 30 s and the other renderer processes still alive (pid checked against its exe path):
+`vulkan: another renderer process on this GPU: pid 26296 (...\risen-test-vk-f9\bin\Risen.exe): DEVICE LOST with a page fault / fault
+report 13.0 s before: vulkan, at vkQueueSubmit2`, and a loss without an own fault while others share the GPU adds `device lost without a
+fault of this device while other renderer processes share the GPU: check their logs first`. `reportDeviceLost` now also writes the
+fault lines and these lines into the dump's `.txt` (before, the report held only its first line), and `debug.crash_markers` no longer
+warns "debug.regions is off" when both are on (the settings were applied in the wrong order). **Triage rule**: a loss / stall without an
+own fault report while another test game ran is that game's until its log says otherwise; concurrent test runs share one GPU.
+
 ## 12. SpeedTree cut-outs traced as solid cards (2026-10-29)
 
 Reported: with `shadows.rt` the palms' and bushes' shadows were one solid blob, the cascades' (enhanced shadows) fine fronds. Not the
