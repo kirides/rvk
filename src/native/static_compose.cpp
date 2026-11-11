@@ -811,6 +811,22 @@ std::uint64_t treeLightSig(const std::uint8_t* illum, std::uint32_t ns) {
     return sig;
 }
 
+float treeLampContribution(const std::uint8_t* illum, std::uint32_t ns, const float pos[3]) {
+    float best = 0.0f;
+    for (std::uint32_t e = 0; e < ns && e < 2; ++e) {
+        const std::uint8_t* en = illum + 0x10 + 0x40 * static_cast<std::size_t>(e);
+        float p[3], c[3], rcp;
+        std::memcpy(p, en, sizeof(p));
+        std::memcpy(&rcp, en + 0x0c, sizeof(rcp));  // 1 / R^2
+        std::memcpy(c, en + 0x10, sizeof(c));
+        const float dx = pos[0] - p[0], dy = pos[1] - p[1], dz = pos[2] - p[2];
+        const float fall = 1.0f - (dx * dx + dy * dy + dz * dz) * rcp;
+        if (fall <= 0.0f) continue;
+        best = std::max(best, std::max(c[0], std::max(c[1], c[2])) * fall);
+    }
+    return best;
+}
+
 TreeRange treeRange(TreeGeometry g, bool hardware, std::uint32_t count, std::uint16_t strip, std::uint16_t start, std::uint16_t vertsPerInstance,
                     std::uint16_t leafIndices) {
     TreeRange r;

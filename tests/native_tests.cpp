@@ -788,6 +788,20 @@ TEST(tree_batches_table_merge_cuts_by_sun_and_static_sh_only) {
     CHECK(b[3].first == 4 && b[3].count == 1);
 }
 
+TEST(tree_lamp_contribution_by_distance) {
+    // one static light entry at illum +0x10: position (0, 0, 0), 1 / R^2 (R = 1000), colour (2, 1, 0.5) at +0x20
+    std::uint8_t illum[0x80]{};
+    const float pos[3] = {0, 0, 0}, rcp = 1.0f / (1000.0f * 1000.0f), col[3] = {2.0f, 1.0f, 0.5f};
+    std::memcpy(illum + 0x10, pos, 12);
+    std::memcpy(illum + 0x1c, &rcp, 4);
+    std::memcpy(illum + 0x20, col, 12);
+    const float atLamp[3] = {0, 0, 0}, mid[3] = {707.1f, 0, 0}, outside[3] = {1500, 0, 0};
+    CHECK(std::abs(sc::treeLampContribution(illum, 1, atLamp) - 2.0f) < 1e-4f);
+    CHECK(std::abs(sc::treeLampContribution(illum, 1, mid) - 1.0f) < 1e-2f);  // falloff 0.5
+    CHECK(sc::treeLampContribution(illum, 1, outside) == 0.0f);                   // outside the range
+    CHECK(sc::treeLampContribution(illum, 0, atLamp) == 0.0f);                  // no entries
+}
+
 TEST(tree_batches_follow_render_branches) {
     int l1 = 0, l2 = 0;
     // solid branches: breaks on the strip length, the light list, the light flags (the instance's or the batch's last) and the limit

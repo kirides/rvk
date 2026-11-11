@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 
@@ -29,12 +30,28 @@
 
 namespace rvk::native {
 
-bool tro::lightCuts() {
-    static const bool on = [] {
+int tro::lightCutMode() {
+    static const int mode = [] {
         char b[8] = {};
-        return GetEnvironmentVariableA("RVK_TREE_LIGHT_CUTS", b, sizeof(b)) != 0 && b[0] == '1';
+        if (GetEnvironmentVariableA("RVK_TREE_LIGHT_CUTS", b, sizeof(b)) == 0) return 2;
+        return b[0] == '1' ? 1 : b[0] == '0' ? 0 : 2;
     }();
-    return on;
+    return mode;
+}
+bool tro::lightCuts() { return lightCutMode() == 1; }
+float tro::lampMin() {
+    static const float v = [] {
+        char b[32] = {};
+        if (GetEnvironmentVariableA("RVK_TREE_LAMP_MIN", b, sizeof(b)) != 0) return static_cast<float>(std::atof(b));
+        return 0.1f;
+    }();
+    return v;
+}
+std::uint64_t tro::knownLightSig(const std::uint8_t* illum, std::uint32_t ns, const float pos[3], bool* lit) {
+    const int mode = lightCutMode();
+    const bool on = mode == 1 || (mode == 2 && sc::treeLampContribution(illum, ns, pos) >= lampMin());
+    if (lit != nullptr) *lit = on;
+    return on ? sc::treeLightSig(illum, ns) : 0;
 }
 
 namespace {
@@ -355,7 +372,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (trOn) treeCompBegin(op, zpass, type, rb, material, shader, hardware, tableMerge, queue.data(), n, wrapper);
     const U8* sunList = nullptr;
     bool sunListValue = false, dynListValue = false;
-    const auto readLight = [&](sc::TreeInstance& x, U8* il) {
+    const auto readLight = [&](sc::TreeInstance& x, U8* il, U8* treeObj) {
         const f4m::PhaseScope f4l(f4m::kLight);
         bool noSun = false, statLights = false;
         std::uint64_t buf[16]{};  // the illumination's first 0x80 bytes (static light entries 0 and 1 start at +0x10 / +0x50)
@@ -400,8 +417,12 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 allKnown = enh::LightTable::lightKnown(p);
             }
             if (allKnown) ++st.knownLights;
-            if (allKnown && !tro::lightCuts()) {
-                x.lightSig = 0;
+            if (allKnown) {
+                bool lit = false;
+                float wm[16]{};
+                if (tro::lightCutMode() == 2 && !entityWorld(treeObj, wm)) wm[12] = wm[13] = wm[14] = 0.0f;
+                x.lightSig = tro::knownLightSig(reinterpret_cast<const std::uint8_t*>(buf), ns, wm + 12, &lit);
+                if (lit) ++st.litLights;
             } else if (ns > 2) {
                 x.ownLights = true;
             } else {
@@ -455,7 +476,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             x.strip = get<std::uint16_t>(rb, stripAt + 2 * static_cast<std::size_t>(lod));
             x.start = get<std::uint16_t>(rb, startAt + 2 * static_cast<std::size_t>(lod));
             if (!zpass) {
-                readLight(x, illumOf(i));
+                readLight(x, illumOf(i), tree);
             }
             inst.push_back(x);
         }
@@ -542,7 +563,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 sc::TreeInstance x;
                 x.queueIndex = i;
                 if (!zpass) {
-                    readLight(x, illumOf(i));
+                    readLight(x, illumOf(i), tree);
                 }
                 inst.push_back(x);
                 alpha.push_back(a);
