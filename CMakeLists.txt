@@ -154,6 +154,7 @@ add_library(rvk_core STATIC
     src/d3d9/cluster_draw.cpp
     src/d3d9/scene_draws.cpp
     src/d3d9/bone_motion.cpp
+    src/d3d9/particle_gpu.cpp
     src/d3d9/owned_submit.cpp
     src/gpuscene/billboard_table.cpp
     src/gpuscene/bone_table.cpp

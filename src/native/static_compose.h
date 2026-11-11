@@ -417,6 +417,9 @@ struct DrawDesc {
     std::uint64_t treeKey = 0;
     // F12 (frame-ownership.md 14.24, native.own_sky): the sky dome's draw (eCShaderSkyDome: main view and cube faces): drawn with the sky dome port
     bool skyDome = false;
+    // F11 (frame-ownership.md 14.26, native.own_particles): 1 = this particle draw IS its GPU form (records, the expansion vertex shader); 2 = compare: the
+    // composed draw, whose GPU form StaticOps::ptCmp_ holds
+    std::uint8_t particleGpu = 0;
 };
 
 // the lowest set bit of a non-zero word (bsf: an intrinsic, inlined in every build configuration)

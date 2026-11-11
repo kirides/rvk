@@ -519,6 +519,8 @@ struct RendererSettings {
     Setting* nativeDepthZ = nullptr;          // native.depth_z: depth-only z passes (S-6: no pixel shader / colour attachment where nothing reads them; the R32F depth map derived from the hardware depth)
     Setting* nativeOwnPost = nullptr;         // native.own_post: the post chain on our own shaders (S-7: the luminance chain in one dispatch)
     Setting* nativeOwnSky = nullptr;          // native.own_sky: the sky dome (main view + sky cube faces) on our own shaders (frame-ownership.md 14.24, F12)
+    Setting* nativeOwnedDecals = nullptr;     // native.owned_decals: decal records in persistent buffers (frame-ownership.md 14.26, row 13)
+    Setting* nativeOwnParticles = nullptr;    // native.own_particles: the particle quads expanded on the GPU (frame-ownership.md 14.26, F11)
     Setting* nativeOwnGui = nullptr;          // native.own_gui: the GUI sprite batches on our own shaders (frame-ownership.md 14.24, F13)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)

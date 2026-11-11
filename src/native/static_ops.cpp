@@ -542,6 +542,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.maskSet = false;
     d.maskValue = 0.0f;
     d.skyDome = false;
+    d.particleGpu = 0;
     return d;
 }
 
@@ -2843,6 +2844,8 @@ void StaticOps::issue() {
         setTag(d);
         // F12 (native.own_sky): the sky dome on its ports (On), or its compare draw into a scratch image first (Compare)
         const bool skyPorted = d.skyDome && skyOwnBefore(d);
+        // F11 (native.own_particles = compare): the GPU form of the op's particle draw into a scratch copy of the target first
+        if (d.particleGpu == 2) particleCompareBefore(d);
         issueIndex_ = k;
         const bool capturing = cacheable && (pe == nullptr || verifyFrame || stale);
         if (capturing) {
@@ -2856,6 +2859,7 @@ void StaticOps::issue() {
             dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
         }
         if (d.skyDome) skyOwnAfter(d, skyPorted);
+        if (d.particleGpu == 2) particleCompareAfter();
         if (capturing) {
             if (!dev_.endCapture()) {
                 ++pktWindow_.notBuilt;
@@ -2946,6 +2950,7 @@ void StaticOps::issue() {
 
 void StaticOps::report() {
     stagesReport();  // (first: the windows it reads are reset by the reports below)
+    decalsReport();  // (native.owned_decals)
     if (f2c::on()) f2c::report(dev_.stats().frames);
     if (verified_ < 0 && active()) {
         spdlog::info("native: static ops: idle (the engine checks failed)");
@@ -3180,6 +3185,7 @@ void StaticOps::report() {
         spdlog::info("native: effects (5 s): {}", line(w));
         spdlog::info("native: effects (total): {}", line(t));
         fxWindow_ = {};
+        particleGpuReport();  // F11
     }
 }
 

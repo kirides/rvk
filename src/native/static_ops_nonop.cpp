@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -188,12 +189,23 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
     const auto decalAt = [&](std::size_t q) { U8* p = nullptr; std::memcpy(&p, queue.data() + 16 * q, 8); return p; };
     const auto illumAt = [&](std::size_t q) { U8* p = nullptr; std::memcpy(&p, queue.data() + 16 * q + 8, 8); return p; };
 
+    // F11 / row 13 (frame-ownership.md 14.26, native.owned_decals): On = a record's vertices / indices live in persistent buffers of their own, keyed by what
+    // the record's bytes are made from (each decal's pointers, counts, alpha and, for a dynamic decal, its entity's matrix): an unchanged record is drawn from
+    // them without reading or transforming a vertex; Compare = the bytes are built every frame and checked against the persistent copy of a hit (MISS)
+    const int ownMode = g_ != nullptr && !g_->compare ? ownedDecals_ : 0;
+    const std::uint64_t frame = dev_.stats().frames;
+    const auto t0 = std::chrono::steady_clock::now();
+
     struct Record {
         U8* material = nullptr;
         U8* image = nullptr;
         U8* lightmapMesh = nullptr;
         U8* illum = nullptr;
         std::int32_t firstVertex = 0, vertexCount = 0, startIndex = 0, indexCount = 0;
+        std::size_t q0 = 0, q1 = 0;  // its decals in the queue
+        std::uint64_t key = 0xcbf29ce484222325ull;
+        DecalEntry* entry = nullptr;  // owned: the persistent buffers drawn
+        bool built = false;           // its bytes were made this frame (vb / ib)
     };
     std::vector<Record> records;
     std::vector<std::uint8_t> vb(static_cast<std::size_t>(kMaxVertices) * kDecalStride);
@@ -208,94 +220,20 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
     float prevF = one_;
     bool alone = false;
     std::vector<std::uint8_t> src;
-    const auto flush = [&]() -> Skip {
-        for (const Record& r : records) {
-            U8* shader = nullptr;
-            if (r.material == nullptr) {
-                if (r.image == nullptr) continue;
-                shader = defaultShader;
-                // eCColorSrcSampler::SetImageResource(admin +0x50, image): the sampler's only image, UpdateSampler writes it into
-                // the pool slot (+0x90 pool, +0x98 slot)
-                if (ptr(sampler, 0x90) != defaultShader + 0xf8) return Skip::Unreadable;
-                const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
-                if (slot < 0 || slot >= 16) return Skip::Unreadable;
-                poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = r.image;
-                gpuscene::materialtable().noteSwitchWrite(defaultShader, 2, static_cast<std::uint32_t>(slot));
-            } else {
-                leanTouch(r.material);  // O2a: every record's material is touched, also without a shader
-                shader = ptr(r.material, 0x70);
-                if (shader == nullptr) continue;
-            }
-            writeAlpha(0, one_);
-            writeWorld(0, kIdentity);
-            const std::uint32_t combi = r.lightmapMesh != nullptr ? bindLightmaps(r.lightmapMesh) : 0;
-            Geom g = base;
-            g.minIndex = static_cast<std::uint32_t>(r.firstVertex);
-            g.numVertices = static_cast<std::uint32_t>(r.vertexCount);
-            g.startIndex = static_cast<std::uint32_t>(r.startIndex);
-            g.primCount = static_cast<std::uint32_t>(r.indexCount / 3);
-            const std::size_t before = drawCount_;
-            if (const Skip k = nonOpPasses(shader, r.illum, combi, g); k != Skip::None) return k;
-            for (std::size_t d = before; d < drawCount_; ++d) {
-                sc::DrawDesc& dd = *draws_[d];
-                dd.vertexStride = kDecalStride;
-                const auto* v0 = vb.data() + static_cast<std::size_t>(r.firstVertex) * kDecalStride;
-                dd.vertexBytes.assign(v0, v0 + static_cast<std::size_t>(r.vertexCount) * kDecalStride);
-                const auto* i0 = reinterpret_cast<const std::uint8_t*>(ib.data() + r.startIndex);
-                dd.indexBytes.assign(i0, i0 + static_cast<std::size_t>(g.primCount) * 6);
-            }
-        }
-        records.clear();
-        locked = false;
-        return Skip::None;
-    };
-    for (std::size_t q = 0; q < n; ++q) {
+    // one decal's indices (rebased to `base`) and vertices into ib / vb at idx / vtx
+    const auto build = [&](std::size_t q, std::int32_t at, std::int32_t iat, std::int32_t base) -> Skip {
         U8* decal = decalAt(q);
         const std::int32_t vc = get<std::int32_t>(decal, 0x30);
         const std::int32_t ic = get<std::int32_t>(decal, 0x48);
-        if (vc > kMaxVertices || ic > kMaxIndices) continue;  // too large: never drawn
-        if (kMaxVertices < vc + vtx || kMaxIndices < ic + idx) {
-            if (!records.empty()) {
-                if (const Skip k = flush(); k != Skip::None) return k;
-            }
-        }
-        if (!locked) {
-            // VB / IB locked DISCARD at offset 0: a new cycle
-            vtx = 0;
-            idx = 0;
-            locked = true;
-        }
-        U8* il = illumAt(q);
-        U8* list = ptr(il, 0);
-        const float f = get<float>(il, 8);
-        if (records.empty() || ptr(decal, 0) != prevMat || ptr(decal, 8) != prevImg || ptr(decal, 0x58) != prevLm || list != prevList ||
-            f != prevF || alone) {
-            Record r;
-            r.material = ptr(decal, 0);
-            r.image = ptr(decal, 8);
-            r.lightmapMesh = ptr(decal, 0x58);
-            r.illum = il;
-            r.firstVertex = vtx;
-            r.startIndex = idx;
-            records.push_back(r);
-            prevMat = r.material;
-            prevImg = r.image;
-            prevLm = r.lightmapMesh;
-            prevList = list;
-            alone = get<std::uint8_t>(il, 0xd) != 0 || get<std::uint8_t>(il, 0x90) != 0 || r.lightmapMesh != nullptr;
-            prevF = f;
-        }
-        // indices first (rebased to this decal's first vertex), then the vertices
         U8* srcIdx = ptr(decal, 0x40);
         std::vector<std::uint16_t> ind(static_cast<std::size_t>(ic));
         if (!safeRead(srcIdx, ind.data(), ind.size() * 2)) return Skip::Unreadable;
-        for (std::int32_t k = 0; k < ic; ++k) ib[static_cast<std::size_t>(idx + k)] = static_cast<std::uint16_t>(ind[static_cast<std::size_t>(k)] + static_cast<std::uint16_t>(vtx));
-        idx += ic;
+        for (std::int32_t k = 0; k < ic; ++k) ib[static_cast<std::size_t>(iat + k)] = static_cast<std::uint16_t>(ind[static_cast<std::size_t>(k)] + static_cast<std::uint16_t>(base));
         src.resize(static_cast<std::size_t>(vc) * kDecalStride);
         if (!safeRead(ptr(decal, 0x28), src.data(), src.size())) return Skip::Unreadable;
         const float alpha = get<float>(decal, 0x50);
         const std::uint32_t colour = static_cast<std::uint32_t>(static_cast<std::int32_t>(alpha * decalAlphaScale_)) << 24 | 0xffffffu;
-        std::uint8_t* dst = vb.data() + static_cast<std::size_t>(vtx) * kDecalStride;
+        std::uint8_t* dst = vb.data() + static_cast<std::size_t>(at) * kDecalStride;
         if (get<std::uint8_t>(decal, 0x54) == 1) {
             bool ok = false;
             U8* entity = decalEntity(decal, ok);
@@ -320,12 +258,285 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
         } else {
             std::memcpy(dst, src.data(), src.size());
         }
+        return Skip::None;
+    };
+    // what a decal's bytes are made from (owned decals' record key)
+    const auto decalKey = [&](std::size_t q, std::uint64_t& h) {
+        U8* decal = decalAt(q);
+        const auto mix = [&](const void* p, std::size_t len) {
+            const auto* b = static_cast<const std::uint8_t*>(p);
+            for (std::size_t i = 0; i < len; ++i) {
+                h ^= b[i];
+                h *= 0x100000001b3ull;
+            }
+        };
+        struct {
+            const void* decal;
+            const void* verts;
+            const void* inds;
+            std::int32_t vc, ic;
+            float alpha;
+            std::uint32_t dyn;
+        } k{decal, ptr(decal, 0x28), ptr(decal, 0x40), get<std::int32_t>(decal, 0x30), get<std::int32_t>(decal, 0x48), get<float>(decal, 0x50),
+            get<std::uint8_t>(decal, 0x54)};
+        mix(&k, sizeof(k));
+        if (k.dyn == 1) {
+            bool ok = false;
+            float m[16]{};
+            if (U8* entity = decalEntity(decal, ok); entity != nullptr) safeRead(entity + 0x60, m, sizeof(m));
+            mix(m, sizeof(m));
+        }
+    };
+    const auto flush = [&]() -> Skip {
+        for (Record& r : records) {
+            U8* shader = nullptr;
+            if (r.material == nullptr) {
+                if (r.image == nullptr) continue;
+                shader = defaultShader;
+                // eCColorSrcSampler::SetImageResource(admin +0x50, image): the sampler's only image, UpdateSampler writes it into
+                // the pool slot (+0x90 pool, +0x98 slot)
+                if (ptr(sampler, 0x90) != defaultShader + 0xf8) return Skip::Unreadable;
+                const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
+                if (slot < 0 || slot >= 16) return Skip::Unreadable;
+                poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = r.image;
+                gpuscene::materialtable().noteSwitchWrite(defaultShader, 2, static_cast<std::uint32_t>(slot));
+            } else {
+                leanTouch(r.material);  // O2a: every record's material is touched, also without a shader
+                shader = ptr(r.material, 0x70);
+                if (shader == nullptr) continue;
+            }
+            writeAlpha(0, one_);
+            writeWorld(0, kIdentity);
+            const std::uint32_t combi = r.lightmapMesh != nullptr ? bindLightmaps(r.lightmapMesh) : 0;
+            Geom g = base;
+            g.minIndex = static_cast<std::uint32_t>(r.firstVertex);
+            g.numVertices = static_cast<std::uint32_t>(r.vertexCount);
+            g.startIndex = static_cast<std::uint32_t>(r.startIndex);
+            g.primCount = static_cast<std::uint32_t>(r.indexCount / 3);
+            if (r.entry != nullptr) {
+                // owned: the record's persistent buffers, from vertex 0 / index 0
+                g.streams[0] = {r.entry->vb.get(), 0, kDecalStride, 1};
+                g.indices = r.entry->ib.get();
+                g.minIndex = 0;
+                g.startIndex = 0;
+            }
+            const std::size_t before = drawCount_;
+            if (const Skip k = nonOpPasses(shader, r.illum, combi, g); k != Skip::None) return k;
+            if (r.entry != nullptr) continue;
+            for (std::size_t d = before; d < drawCount_; ++d) {
+                sc::DrawDesc& dd = *draws_[d];
+                dd.vertexStride = kDecalStride;
+                const auto* v0 = vb.data() + static_cast<std::size_t>(r.firstVertex) * kDecalStride;
+                dd.vertexBytes.assign(v0, v0 + static_cast<std::size_t>(r.vertexCount) * kDecalStride);
+                const auto* i0 = reinterpret_cast<const std::uint8_t*>(ib.data() + r.startIndex);
+                dd.indexBytes.assign(i0, i0 + static_cast<std::size_t>(g.primCount) * 6);
+            }
+        }
+        records.clear();
+        locked = false;
+        return Skip::None;
+    };
+    // owned: a record's decals are complete -> its persistent entry (hit / new / rebuilt), or its bytes built as before
+    const auto closeRecord = [&](Record& r) -> Skip {
+        if (ownMode == 0) return Skip::None;
+        ++decalW_.records;
+        auto it = decalCache_.find(r.key);
+        DecalEntry* e = it != decalCache_.end() ? &it->second : nullptr;
+        const bool scrub = e != nullptr && (frame + r.key) % 30 == 0;  // (On: a rolling content check, every 30th frame per record)
+        const bool hit = e != nullptr && e->vertices == r.vertexCount && e->indices == r.indexCount;
+        if (hit && ownMode == 1 && !scrub) {
+            e->lastFrame = frame;
+            r.entry = e;
+            ++decalW_.hits;
+            ++decalHitsTotal_;
+            return Skip::None;
+        }
+        // the bytes, record-relative (vertex 0, index 0), into the scratch past this cycle's data
+        std::vector<std::uint8_t> rv(static_cast<std::size_t>(r.vertexCount) * kDecalStride);
+        std::vector<std::uint16_t> ri(static_cast<std::size_t>(r.indexCount));
+        {
+            std::int32_t at = 0, iat = 0;
+            for (std::size_t q = r.q0; q < r.q1; ++q) {
+                U8* decal = decalAt(q);
+                const std::int32_t vc = get<std::int32_t>(decal, 0x30), ic = get<std::int32_t>(decal, 0x48);
+                if (const Skip k = build(q, r.firstVertex + at, r.startIndex + iat, at); k != Skip::None) return k;
+                at += vc;
+                iat += ic;
+            }
+            std::memcpy(rv.data(), vb.data() + static_cast<std::size_t>(r.firstVertex) * kDecalStride, rv.size());
+            std::memcpy(ri.data(), ib.data() + r.startIndex, ri.size() * 2);
+            // (the cycle-relative copy the CPU path draws: re-based to the cycle's first vertex)
+            for (std::int32_t k = 0; k < r.indexCount; ++k) ib[static_cast<std::size_t>(r.startIndex + k)] = static_cast<std::uint16_t>(ri[static_cast<std::size_t>(k)] + r.firstVertex);
+            r.built = true;
+        }
+        if (hit) {
+            ++decalW_.checked;
+            if (e->vbBytes != rv || e->ibBytes != ri) {
+                ++decalW_.miss;
+                if (decalMissLogged_ < 8) {
+                    ++decalMissLogged_;
+                    spdlog::info("native: owned decals: MISS: record of {} decals ({} vertices) changed with an unchanged key (frame {})", r.q1 - r.q0, r.vertexCount, frame);
+                }
+                // (rewritten below)
+            } else if (ownMode == 2) {
+                e->lastFrame = frame;
+                return Skip::None;  // (compare: the composed bytes are drawn)
+            } else {
+                e->lastFrame = frame;
+                r.entry = e;
+                ++decalW_.hits;
+                ++decalHitsTotal_;
+                return Skip::None;
+            }
+        }
+        if (ownMode == 2 && e == nullptr && decalCache_.size() >= kDecalEntries) return Skip::None;
+        if (e == nullptr) {
+            if (decalCache_.size() >= kDecalEntries) {
+                ++decalW_.full;
+                return Skip::None;  // (the CPU bytes this frame)
+            }
+            e = &decalCache_[r.key];
+            ++decalW_.created;
+        } else {
+            ++decalW_.rebuilt;
+        }
+        // a fresh pair of static buffers (the old ones are released at the frame boundary: a draw of this frame may still read them)
+        if (e->vb) dev_.release(std::move(e->vb));
+        if (e->ib) dev_.release(std::move(e->ib));
+        e->vb = dev_.createBuffer(static_cast<std::uint32_t>(rv.size()), d3d9::USAGE_WRITEONLY, d3d9::POOL_MANAGED, false, false);
+        e->ib = dev_.createBuffer(static_cast<std::uint32_t>(ri.size() * 2), d3d9::USAGE_WRITEONLY, d3d9::POOL_MANAGED, true, false);
+        bool ok = e->vb && e->ib;
+        if (ok) {
+            if (void* p = e->vb->lock(0, 0, 0)) {
+                std::memcpy(p, rv.data(), rv.size());
+                e->vb->unlock();
+            } else {
+                ok = false;
+            }
+            if (void* p = e->ib->lock(0, 0, 0)) {
+                std::memcpy(p, ri.data(), ri.size() * 2);
+                e->ib->unlock();
+            } else {
+                ok = false;
+            }
+        }
+        if (!ok) {
+            if (e->vb) dev_.release(std::move(e->vb));
+            if (e->ib) dev_.release(std::move(e->ib));
+            decalCache_.erase(r.key);
+            return Skip::None;
+        }
+        decalW_.uploadBytes += rv.size() + ri.size() * 2;
+        e->vertices = r.vertexCount;
+        e->indices = r.indexCount;
+        e->vbBytes = std::move(rv);
+        e->ibBytes = std::move(ri);
+        e->lastFrame = frame;
+        if (ownMode == 1) r.entry = e;
+        return Skip::None;
+    };
+    for (std::size_t q = 0; q < n; ++q) {
+        U8* decal = decalAt(q);
+        const std::int32_t vc = get<std::int32_t>(decal, 0x30);
+        const std::int32_t ic = get<std::int32_t>(decal, 0x48);
+        if (vc > kMaxVertices || ic > kMaxIndices) continue;  // too large: never drawn
+        if (kMaxVertices < vc + vtx || kMaxIndices < ic + idx) {
+            if (!records.empty()) {
+                if (const Skip k = closeRecord(records.back()); k != Skip::None) return k;
+                if (const Skip k = flush(); k != Skip::None) return k;
+            }
+        }
+        if (!locked) {
+            // VB / IB locked DISCARD at offset 0: a new cycle
+            vtx = 0;
+            idx = 0;
+            locked = true;
+        }
+        U8* il = illumAt(q);
+        U8* list = ptr(il, 0);
+        const float f = get<float>(il, 8);
+        if (records.empty() || ptr(decal, 0) != prevMat || ptr(decal, 8) != prevImg || ptr(decal, 0x58) != prevLm || list != prevList ||
+            f != prevF || alone) {
+            if (!records.empty()) {
+                if (const Skip k = closeRecord(records.back()); k != Skip::None) return k;
+            }
+            Record r;
+            r.material = ptr(decal, 0);
+            r.image = ptr(decal, 8);
+            r.lightmapMesh = ptr(decal, 0x58);
+            r.illum = il;
+            r.firstVertex = vtx;
+            r.startIndex = idx;
+            r.q0 = q;
+            records.push_back(r);
+            prevMat = r.material;
+            prevImg = r.image;
+            prevLm = r.lightmapMesh;
+            prevList = list;
+            alone = get<std::uint8_t>(il, 0xd) != 0 || get<std::uint8_t>(il, 0x90) != 0 || r.lightmapMesh != nullptr;
+            prevF = f;
+        }
+        Record& r = records.back();
+        if (ownMode == 0) {
+            // indices first (rebased to this decal's first vertex), then the vertices
+            if (const Skip k = build(q, vtx, idx, vtx); k != Skip::None) return k;
+        } else {
+            decalKey(q, r.key);
+            ++decalW_.decals;
+        }
+        r.q1 = q + 1;
         vtx += vc;
-        records.back().vertexCount += vc;
-        records.back().indexCount += ic;
+        idx += ic;
+        r.vertexCount += vc;
+        r.indexCount += ic;
     }
-    if (!records.empty()) return flush();
+    if (!records.empty()) {
+        if (const Skip k = closeRecord(records.back()); k != Skip::None) return k;
+        if (const Skip k = flush(); k != Skip::None) return k;
+    }
+    if (ownMode != 0) {
+        decalW_.cpuUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+        ++decalW_.passes;
+        // entries no record used for 300 frames: their buffers go
+        if (frame % 64 == 0) {
+            for (auto it = decalCache_.begin(); it != decalCache_.end();) {
+                if (frame - it->second.lastFrame > 300) {
+                    if (it->second.vb) dev_.release(std::move(it->second.vb));
+                    if (it->second.ib) dev_.release(std::move(it->second.ib));
+                    it = decalCache_.erase(it);
+                    ++decalW_.evicted;
+                } else {
+                    ++it;
+                }
+            }
+        }
+    } else {
+        decalW_.cpuUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+        ++decalW_.passes;
+    }
     return Skip::None;
+}
+
+void StaticOps::decalsReport() {
+    DecalStats& w = decalW_;
+    if (ownedDecals_ != 0 || w.records != 0) {
+        spdlog::info("native: owned decals (5 s): {}: {} decal passes ({} us CPU), {} records of {} decals: {} drawn from persistent buffers, {} new, {} rebuilt (key changed), "
+                     "{} content checks, MISS {}, {} not kept (table full); {} entries, {} evicted, {} bytes uploaded",
+                     ownedDecals_ == 0 ? "off" : ownedDecals_ == 1 ? "on" : "compare", w.passes, w.cpuUs, w.records, w.decals, w.hits, w.created, w.rebuilt, w.checked,
+                     w.miss, w.full, decalCache_.size(), w.evicted, w.uploadBytes);
+    } else if (w.passes != 0) {
+        spdlog::info("native: owned decals (5 s): off: {} decal passes ({} us CPU)", w.passes, w.cpuUs);
+    }
+    decalTotalMiss_ += w.miss;
+    w = {};
+}
+
+void StaticOps::releaseDecalCache() {
+    for (auto& [key, e] : decalCache_) {
+        if (e.vb) dev_.release(std::move(e.vb));
+        if (e.ib) dev_.release(std::move(e.ib));
+    }
+    decalCache_.clear();
 }
 
 bool StaticOps::nonOpGroupBegin(Group group, void* admin) {

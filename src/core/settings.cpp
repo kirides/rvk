@@ -3017,6 +3017,42 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnParticles = &reg.add({
+        .key = "native.own_particles",
+        .label = "Native frame: particles expanded on the GPU",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F11 (docs/research/frame-ownership.md 14.26; Full, needs native.scene_ops with the particle group 4096): a particle op is drawn as one "
+                       "instanced draw of per-particle records (position, size, rotation, colour, sprite frame; the engine's depth order) whose quads the "
+                       "vertex shader builds (shaders/include/rvk_particle.hlsli: the orientation modes, rotations, pivots, pinned corners, facing, normal modes) "
+                       "instead of CPU-built vertices; the engine's particle shaders run unchanged on the expanded corners. Compare = the GPU form is drawn into "
+                       "a scratch copy of the target before the composed draw (image 'particles') and the C++ twin of the expansion is checked against the "
+                       "engine-rule vertices byte for byte (rvk.log `native: own particles (5 s)`). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the CPU quads"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeOwnedDecals = &reg.add({
+        .key = "native.owned_decals",
+        .label = "Native frame: decals from persistent buffers",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Roadmap row 13 (docs/research/frame-ownership.md 14.26; Full, needs native.scene_ops with the decal group 4): each decal record (the "
+                       "decals RenderDecals batches by material / image / lightmap / lights) keeps its vertices and indices in persistent static buffers, "
+                       "rewritten only when what they are made from changed (the decals' vertex / index pointers, counts, alpha, a dynamic decal's entity "
+                       "matrix); an unchanged record is drawn from them without reading or transforming a vertex, a rolling content check every 30th frame. "
+                       "Compare = the bytes are built every frame and checked against the persistent copy (MISS must stay 0; rvk.log `native: owned "
+                       "decals (5 s)`). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the per-frame bytes"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeCoverage = &reg.add({
         .key = "native.coverage",
         .label = "Native frame: coverage counter",

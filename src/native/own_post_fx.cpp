@@ -61,8 +61,8 @@ void OwnPost::setSceneMode(Scene which, Mode m) {
     Mode& cur = sceneMode_[static_cast<std::size_t>(which)];
     if (cur == m) return;
     cur = m;
-    if (m != Mode::Off) buildFxPorts();
-    spdlog::info("native: own {}: {}", which == Scene::Sky ? "sky" : "gui", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
+    if (m != Mode::Off && which != Scene::Particles) buildFxPorts();  // (F11 uses no port)
+    spdlog::info("native: own {}: {}", which == Scene::Sky ? "sky" : which == Scene::Gui ? "gui" : "particles", m == Mode::Off ? "off" : m == Mode::On ? "on" : "compare");
 }
 
 std::uint64_t OwnPost::drawSkips() { return dev_.stats().skippedCompiling + dev_.stats().skippedNoShader + dev_.game().pipelineSkips(); }
@@ -80,14 +80,15 @@ void OwnPost::countScene(Scene which, bool ours, const char* why) {
 }
 
 void OwnPost::reportScene() {
-    static constexpr const char* kNames[2] = {"sky", "gui"};
-    static constexpr const char* kWhat[2] = {"sky dome draws (main view + sky cube faces)", "sprite batch draws (GUI, text, cursor, loading screens)"};
-    for (std::size_t k = 0; k < 2; ++k) {
+    static constexpr const char* kNames[3] = {"sky", "gui", "particles"};
+    static constexpr const char* kWhat[3] = {"sky dome draws (main view + sky cube faces)", "sprite batch draws (GUI, text, cursor, loading screens)",
+                                             "particle draws (quads expanded on the GPU)"};
+    for (std::size_t k = 0; k < 3; ++k) {
         SceneCounts& c = sceneW_[k];
         if (sceneMode_[k] != Mode::Off || c.draws != 0) {
             spdlog::info("native: own {} (5 s): {}: {} {}: ours {} / engine's shaders {}{}{}", kNames[k], sceneMode_[k] == Mode::Off ? "off" : sceneMode_[k] == Mode::On ? "on" : "compare",
                          c.draws, kWhat[k], c.ours, c.left, c.why.empty() ? std::string() : std::format(" (first reason: {})", c.why),
-                         k == 1 ? std::format("; compares dropped (a draw skipped while its shader / pipeline built, run) {}", droppedCompares_) : std::string());
+                         k != 0 ? std::format("; compares dropped (a draw skipped while its shader / pipeline built, run) {}", droppedCompares_) : std::string());
         }
         c = {};
     }

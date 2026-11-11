@@ -171,7 +171,8 @@ public:
     // `native.own_sky` / `native.own_gui` (Full, Debug): On = the composed draws are drawn with the ports (shaders/post/fx/sky_dome.*, gui_main.*); Compare = they
     // are drawn a second time with the ports into a scratch copy of their target before the composed draw, and the two images are compared (`image 'sky_dome.frag'`,
     // `image 'gui_main.frag'`). The ports are built whenever one of own_post / own_sky / own_gui is not off.
-    enum class Scene : int { Sky = 0, Gui = 1, Count = 2 };
+    // F11 (14.26): Particles = `native.own_particles` (the particle ops' quads expanded on the GPU, static_ops_fx.cpp; compare image `particles`)
+    enum class Scene : int { Sky = 0, Gui = 1, Particles = 2, Count = 3 };
     void setSceneMode(Scene which, Mode m);
     Mode sceneMode(Scene which) const { return sceneMode_[static_cast<std::size_t>(which)]; }
     // a composed draw of the class: drawn with our shaders (`ours`) or kept on the engine's (`why`)
@@ -207,13 +208,13 @@ private:
         int comps = 4;
     };
     // ---- F12 / F13 ----
-    std::array<Mode, 2> sceneMode_{};
-    std::array<std::uint64_t, 2> sceneActs_{};
+    std::array<Mode, 3> sceneMode_{};
+    std::array<std::uint64_t, 3> sceneActs_{};
     struct SceneCounts {
         std::uint64_t draws = 0, ours = 0, left = 0;
         std::string why;
     };
-    std::array<SceneCounts, 2> sceneW_{};
+    std::array<SceneCounts, 3> sceneW_{};
     std::unique_ptr<d3d9::Texture> sceneScratch_[8];
     int sceneScratchTag_[8]{};
     std::uint32_t sceneScratchNext_ = 0;

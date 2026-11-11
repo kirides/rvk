@@ -15,6 +15,7 @@
 #pragma warning(disable : 4723)
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -27,6 +28,7 @@
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/static_ops.h"
 #include "gpuscene/material_table.h"
+#include "native/own_post.h"
 
 namespace rvk::native {
 
@@ -162,13 +164,28 @@ StaticOps::Skip StaticOps::composeStrip(const Op& op) {
     zeroColor(c1);
     g_color.alphaCtor(a.b, ps + 0x20, get<float>(ps, 0x38));
     g_color.alphaCtor(b.b, ps + 0x40, get<float>(ps, 0x58));
-    std::vector<std::uint8_t> vb(static_cast<std::size_t>(segments) * 2 * kStripStride);
+    // F11 (native.own_particles): the strip's vertex records (position, u / v, the segment's alpha factor, the side) for the GPU form; the CPU vertices stay the fallback
+    const int ownMode = g_ != nullptr && !g_->compare ? ownParticlesMode() : 0;
+    std::vector<std::uint8_t> recs(ownMode != 0 ? static_cast<std::size_t>(segments) * 2 * d3d9::particle::kStripRecordStride : 0);
+    std::vector<std::uint8_t> vb(static_cast<std::size_t>(segments) * 2 * kStripStride);  // (also On: the fallback of a strip without a GPU form; strips are rare)
     float u = 0.0f, v = 0.0f;
     for (std::int32_t i = 0; i < segments; ++i) {
         const std::uint8_t* s = seg.data() + static_cast<std::size_t>(i) * kSegmentStride;
         float f[9];
         std::memcpy(f, s, sizeof(f));
         const float du = f[6] / lenU, dv = f[7] / lenV;
+        if (ownMode != 0) {
+            d3d9::particle::StripRecord r[2];
+            std::memcpy(r[0].pos, &f[0], 12);
+            r[0].t = u;
+            r[0].alpha = f[8];
+            r[0].side = 0.0f;
+            std::memcpy(r[1].pos, &f[3], 12);
+            r[1].t = v;
+            r[1].alpha = f[8];
+            r[1].side = 1.0f;
+            std::memcpy(recs.data() + static_cast<std::size_t>(i) * 2 * d3d9::particle::kStripRecordStride, r, sizeof(r));
+        }
         g_color.alphaCopy(t.b, b.b);
         g_color.sub(t.b, a.b);
         g_color.multiply(t.b, u);
@@ -216,13 +233,87 @@ StaticOps::Skip StaticOps::composeStrip(const Op& op) {
     g.primType = static_cast<std::uint32_t>(dd.type);
     const std::size_t before = drawCount_;
     if (const Skip k = nonOpPasses(shader, nullptr, 0, g, get<std::int32_t>(ps, 0xa4)); k != Skip::None) return k;
-    if (vb.size() > kOwnVbBytes) return Skip::Unreadable;
+    if (vb.size() > kOwnVbBytes || recs.size() > kOwnVbBytes) return Skip::Unreadable;
     for (std::size_t i = before; i < drawCount_; ++i) {
         sc::DrawDesc& x = *draws_[i];
         x.indexed = false;
         x.indices = nullptr;
         x.vertexStride = kStripStride;
         x.vertexBytes = vb;
+    }
+    if (ownMode != 0 && drawCount_ > before) {
+        // the colours A / B (c232 / c233) as bCFloatAlphaColor holds them (r +8, g +0xc, b +0x10, a +0x18)
+        float ca[4], cb[4];
+        std::memcpy(ca, a.b + 8, 12);
+        ca[3] = a.alpha();
+        std::memcpy(cb, b.b + 8, 12);
+        cb[3] = b.alpha();
+        if (ownMode == 2) {
+            // the C++ twin of rvkStripExpand against the engine-rule vertices
+            for (std::int32_t k = 0; k < 2 * segments; ++k) {
+                d3d9::particle::StripRecord r;
+                std::memcpy(&r, recs.data() + static_cast<std::size_t>(k) * d3d9::particle::kStripRecordStride, sizeof(r));
+                std::uint8_t mine[kStripStride];
+                d3d9::particle::expandStrip(ca, cb, r, mine);
+                ++ptWindow_.twinVertices;
+                if (std::memcmp(mine, vb.data() + static_cast<std::size_t>(k) * kStripStride, kStripStride) == 0) {
+                    ++ptWindow_.twinExact;
+                } else {
+                    ++ptWindow_.twinDiffer;
+                    if (ptTwinLogged_ < 8) {
+                        ++ptTwinLogged_;
+                        std::uint32_t x0, x1;
+                        std::memcpy(&x0, mine + 0xc, 4);
+                        std::memcpy(&x1, vb.data() + static_cast<std::size_t>(k) * kStripStride + 0xc, 4);
+                        spdlog::info("native: own particles: strip twin check: vertex {} differs (colour {:#010x} vs the engine rule's {:#010x})", k, x0, x1);
+                    }
+                }
+            }
+        }
+        const char* why = nullptr;
+        bool gpu = true;
+        std::vector<sc::DrawDesc> trials;
+        for (std::size_t i = before; i < drawCount_ && gpu; ++i) {
+            trials.push_back(*draws_[i]);
+            sc::DrawDesc& x = trials.back();
+            auto* engineVs = const_cast<d3d9::Shader*>(static_cast<const d3d9::Shader*>(x.vs));
+            d3d9::Shader* vs = engineVs != nullptr ? dev_.particleVs(*engineVs, d3d9::particle::kKindStrip, static_cast<const d3d9::VertexDecl*>(x.decl), &why) : nullptr;
+            if (vs == nullptr || x.primType != 5 || x.primCount + 2 != static_cast<std::uint32_t>(2 * segments)) {
+                if (why == nullptr) why = "not a strip of the segments' vertices";
+                gpu = false;
+                break;
+            }
+            x.vs = vs;
+            x.decl = dev_.particleDecl(d3d9::particle::kKindStrip);
+            x.streams[0].stride = d3d9::particle::kStripRecordStride;
+            x.vertexStride = d3d9::particle::kStripRecordStride;
+            x.vertexBytes = recs;
+            for (std::uint32_t r = 0; r < 2; ++r) {
+                const std::uint32_t reg = d3d9::particle::kConstFirst + r;
+                std::memcpy(x.vsF[reg], r == 0 ? ca : cb, 16);
+                x.vsSet[reg / 64] |= 1ull << (reg % 64);
+                x.vsLive.set(reg);
+            }
+            x.particleGpu = 1;
+        }
+        if (gpu && ownMode == 2) {
+            ptCmp_.gpu = std::move(trials.front());
+            ptCmp_.armed = true;
+            ptCmp_.name = "strips";
+            draws_[before]->particleGpu = 2;
+        } else if (gpu) {
+            for (std::size_t i = before; i < drawCount_; ++i) *draws_[i] = std::move(trials[i - before]);
+        }
+        if (OwnPost* own = ownPost()) {
+            for (std::size_t i = before; i < drawCount_; ++i) own->countScene(OwnPost::Scene::Particles, draws_[i]->particleGpu != 0, why);
+        }
+        if (gpu && ownMode == 1) {
+            ++ptWindow_.stripOps;
+            ptWindow_.stripVertices += static_cast<std::uint64_t>(2 * segments);
+        } else {
+            ++ptWindow_.stripCpuOps;
+            if (why != nullptr && ptWindow_.stripWhy.empty()) ptWindow_.stripWhy = why;
+        }
     }
     return Skip::None;
 }
@@ -712,6 +803,302 @@ bool StaticOps::particleVertices(const std::uint8_t* ps, const std::uint8_t* ent
     return true;
 }
 
+// ---- F11 (frame-ownership.md 14.26, native.own_particles): the particle quads expanded on the GPU ----
+
+// what particleVertices builds per particle, without the per-corner work: the scalars the engine computes before the basis (half sizes, sprite frames, the clamped
+// COLOR1, the age ratio) and the sin / cos of each non-zero angle from SharedBase's own bCMatrix3::SetToRotation (axis z: m0 = cos, m1 = -sin exactly), so the
+// GPU's corners follow the engine's rule with the engine's trigonometry; the op's constants (camera basis, entity matrices, mode, pivots) once per op
+bool StaticOps::particleRecords(const std::uint8_t* ps, const std::uint8_t* entity, std::vector<std::uint8_t>& out, std::uint32_t& quads, d3d9::particle::OpConsts& k) {
+    namespace pt = d3d9::particle;
+    quads = 0;
+    const std::int32_t count = get<std::int32_t>(ps, 0x390);
+    const std::int32_t coords = get<std::int32_t>(ps, 0xb0);
+    alignas(16) float E[16];
+    if (!rd(entity, 0x60, E, 64)) return false;
+    U8* app = ptr(engine::sym().appInstancePtr, 0);
+    U8* appCam = ptr(app, 0x38);
+    if (appCam == nullptr) appCam = ptr(app, 0xc8);
+    if (appCam == nullptr) return false;
+    alignas(16) float cm[16];
+    if (!rd(appCam, 0x10, cm, 64)) return false;
+    if (coords == 1) g_vec.matMulAssign(cm, E);
+    t_axis[0] = cm[2];
+    t_axis[1] = cm[6];
+    t_axis[2] = cm[10];
+    t_axis[3] = cm[14];
+    std::vector<std::uint8_t> parts(static_cast<std::size_t>(count) * kParticleStride);
+    if (!rd(ptr(ps, 0x388), 0, parts.data(), parts.size())) return false;
+    if (count > 1) qsort_(parts.data(), static_cast<std::size_t>(count), kParticleStride, particleDepthCmp);
+    ++fxWindow_.particleSorted;
+    U8* cam = ptr(engine::sym().gfxActiveCamera, 0);
+    alignas(16) float C[16], Ci[16];
+    if (cam == nullptr || !rd(cam, 0x20, C, 64)) return false;
+    g_vec.matInvertedRef(C, Ci);
+    k = {};
+    for (int r = 0; r < 4; ++r) std::memcpy(k.c[r], Ci + 4 * r, 12);
+    k.c[3][3] = static_cast<float>(get<std::int32_t>(ps, 0x170));
+    std::memcpy(k.c[4], E, 64);
+    if (coords == 1) {
+        alignas(16) float Mi[16]{};
+        g_vec.matInverted(E, Mi);
+        Mi[12] = Mi[13] = Mi[14] = 0.0f;
+        std::memcpy(k.c[8], Mi, 64);
+    }
+    const bool axisInEntity = get<std::int32_t>(ps, 0x198) == 1;
+    const bool pin = get<std::uint8_t>(ps, 0x200) != 0, rowMajor = get<std::uint8_t>(ps, 0x23b) != 0, blendFrames = get<std::uint8_t>(ps, 0x239) != 0;
+    const std::int32_t normalMode = get<std::int32_t>(ps, 0x2b0);
+    std::memcpy(k.c[12], ps + 0x178, 12);
+    k.c[12][3] = static_cast<float>((coords == 1 ? pt::kFlagEntityCoords : 0u) | (axisInEntity ? pt::kFlagAxisInEntity : 0u) | (pin ? pt::kFlagPinned : 0u) |
+                                    static_cast<std::uint32_t>(std::clamp(normalMode, 0, 15)) << 4);
+    if (coords == 0) std::memcpy(k.c[13], entity + 0x90, 12);  // the pinned corners' point (GetGeometryEntity(PS) +0x90)
+    k.c[13][3] = get<float>(ps, 0x184);
+    if (coords == 0) {
+        // Eo = GetZero + the entity's position (as particleVertices' addAssign)
+        V Eo;
+        std::memcpy(Eo.v, g_vec.zero(), 12);
+        V entityPos;
+        std::memcpy(entityPos.v, E + 12, 12);
+        g_vec.addAssign(Eo.p(), entityPos.p());
+        std::memcpy(k.c[14], Eo.v, 12);
+    } else {
+        std::memcpy(k.c[14], g_vec.zero(), 12);
+    }
+    k.c[14][3] = get<float>(ps, 0x188);
+    std::memcpy(k.c[15], g_vec.up(), 12);
+    const std::int32_t tx = get<std::int32_t>(ps, 0x228) + 1, ty = get<std::int32_t>(ps, 0x22c) + 1;
+    const float invTx = one_ / static_cast<float>(tx), invTy = one_ / static_cast<float>(ty);
+    float texX = 0.0f, texY = 0.0f;
+    if (U8* img = ptr(ps, 0x440); img != nullptr) {
+        const float w = static_cast<float>(get<std::int32_t>(img, 0x58)), h = static_cast<float>(get<std::int32_t>(img, 0x5c));
+        if (w != 0.0f) texX = one_ / w;
+        if (h != 0.0f) texY = one_ / h;
+    }
+    const float sizeScale = get<float>(ps, 0x418);
+    out.resize(static_cast<std::size_t>(count) * pt::kRecordStride);
+    for (std::int32_t i = 0; i < count; ++i) {
+        const std::uint8_t* p = parts.data() + static_cast<std::size_t>(i) * kParticleStride;
+        const auto f = [&](std::size_t off) {
+            float x;
+            std::memcpy(&x, p + off, 4);
+            return x;
+        };
+        if (f(0xb8) > f(0xbc)) continue;
+        std::uint32_t flags = 0;
+        std::memcpy(&flags, p + 0xc8, 4);
+        if ((flags & 1) != 0) continue;
+        if (0.0f >= f(0x90) || 0.0f >= f(0xb0)) continue;
+        if ((f(0x60) * f(0x60) + f(0x64) * f(0x64)) + f(0x68) * f(0x68) == 0.0f) continue;
+        if ((f(0x6c) * f(0x6c) + f(0x70) * f(0x70)) + f(0x74) * f(0x74) == 0.0f) continue;
+        pt::Record rec{};
+        std::memcpy(rec.r[0], p + 0xc, 12);
+        // d = GetScaled(+0x18, +0x24): per component
+        rec.r[1][0] = f(0x18) * f(0x24);
+        rec.r[1][1] = f(0x1c) * f(0x28);
+        rec.r[1][2] = f(0x20) * f(0x2c);
+        // the half sizes: GetScaled(size, 0.5) x the tint scale x the size scale
+        const float sx = f(0x60) * 0.5f, sy = f(0x64) * 0.5f;
+        rec.r[1][3] = (sy * f(0x70)) * sizeScale;
+        rec.r[0][3] = (sx * f(0x6c)) * sizeScale;
+        std::uint32_t mask = 0;
+        const float angles[3] = {f(0x48), f(0x4c), f(0x50)};
+        float* sc[3] = {&rec.r[2][0], &rec.r[2][2], &rec.r[3][0]};
+        for (int a = 0; a < 3; ++a) {
+            if (!(angles[a] != 0.0f)) continue;
+            mask |= 1u << a;
+            alignas(16) float aa[4] = {0.0f, 0.0f, 1.0f, angles[a]};
+            alignas(16) float m3[16]{};
+            g_vec.rotation(m3, aa);
+            sc[a][0] = -m3[1];  // m1 = (x y) k - z s = -s
+            sc[a][1] = m3[0];   // m0 = (x x) k + c = c
+        }
+        rec.mask = static_cast<float>(mask);
+        float u0 = 0, v0 = 0, u1 = 1, v1 = 1, u0b = 0, v0b = 0, u1b = 1, v1b = 1, frac = 0;
+        if (tx > 1 || ty > 1) {
+            const float fr = f(0xc0);
+            const float fl = std::floor(fr);
+            frac = fr - fl;
+            const auto i0 = static_cast<std::int32_t>(fl);
+            const auto i1 = static_cast<std::int32_t>(std::ceil(fr));
+            const sc::ParticleTile t0 = sc::particleTile(i0, tx, ty, rowMajor, invTx, invTy);
+            u0 = t0.u0;
+            u1 = t0.u1;
+            v0 = t0.v0;
+            v1 = t0.v1;
+            if (blendFrames) {
+                const sc::ParticleTile t1 = sc::particleTile(i1, tx, ty, rowMajor, invTx, invTy);
+                u0b = t1.u0;
+                u1b = t1.u1;
+                v0b = t1.v0;
+                v1b = t1.v1;
+            }
+        }
+        rec.r[4][0] = u0 + texX;
+        rec.r[4][1] = v0 + texY;
+        rec.r[4][2] = u1;
+        rec.r[4][3] = v1;
+        rec.r[5][0] = u0b + texX;
+        rec.r[5][1] = v0b + texY;
+        rec.r[5][2] = u1b;
+        rec.r[5][3] = v1b;
+        rec.r[3][2] = f(0xbc) != 0.0f ? f(0xb8) / f(0xbc) : 0.0f;
+        rec.r[3][3] = one_ - frac;
+        // COLOR1 = the colour x its tint, bCFloatAlphaColor::Clamp, bCByteAlphaColor (d3d9/particle_gpu.h: SharedBase's rules)
+        rec.colour1 = pt::argbOf(pt::clampOf(f(0xa0) * f(0x80)), pt::clampOf(f(0xa4) * f(0x84)), pt::clampOf(f(0xa8) * f(0x88)), pt::clampOf(f(0xb0) * f(0x90)));
+        std::memcpy(out.data() + static_cast<std::size_t>(quads) * pt::kRecordStride, &rec, sizeof(rec));
+        ++quads;
+    }
+    out.resize(static_cast<std::size_t>(quads) * pt::kRecordStride);
+    return true;
+}
+
+void StaticOps::particleTwinCheck(const std::vector<std::uint8_t>& recs, const d3d9::particle::OpConsts& k, const std::vector<std::uint8_t>& vb, std::uint32_t quads) {
+    namespace pt = d3d9::particle;
+    if (recs.size() != static_cast<std::size_t>(quads) * pt::kRecordStride || vb.size() != static_cast<std::size_t>(quads) * 4 * pt::kVertexStride) {
+        ++ptWindow_.twinDiffer;
+        if (ptTwinLogged_ < 8) {
+            ++ptTwinLogged_;
+            spdlog::info("native: own particles: twin check: {} records vs {} CPU vertex bytes for {} quads", recs.size() / pt::kRecordStride, vb.size(), quads);
+        }
+        return;
+    }
+    for (std::uint32_t q = 0; q < quads; ++q) {
+        pt::Record r;
+        std::memcpy(&r, recs.data() + static_cast<std::size_t>(q) * pt::kRecordStride, sizeof(r));
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            std::uint8_t mine[pt::kVertexStride];
+            pt::expand(k, r, c, mine);
+            const std::uint8_t* theirs = vb.data() + (static_cast<std::size_t>(q) * 4 + c) * pt::kVertexStride;
+            ++ptWindow_.twinVertices;
+            if (std::memcmp(mine, theirs, pt::kVertexStride) == 0) {
+                ++ptWindow_.twinExact;
+                continue;
+            }
+            ++ptWindow_.twinDiffer;
+            float worst = 0.0f;
+            std::size_t at = 0;
+            for (std::size_t o = 0; o < pt::kVertexStride; o += 4) {
+                if (std::memcmp(mine + o, theirs + o, 4) == 0) continue;
+                float a, b;
+                std::memcpy(&a, mine + o, 4);
+                std::memcpy(&b, theirs + o, 4);
+                const float dlt = (o == 0x18 || o == 0x1c) ? 1.0f : std::fabs(a - b);
+                if (!(dlt <= worst)) {
+                    worst = dlt;
+                    at = o;
+                }
+            }
+            if (worst == worst) ptWindow_.twinMaxAbs = std::max(ptWindow_.twinMaxAbs, worst);
+            if (ptTwinLogged_ < 8) {
+                ++ptTwinLogged_;
+                float a, b;
+                std::memcpy(&a, mine + at, 4);
+                std::memcpy(&b, theirs + at, 4);
+                std::uint32_t ua, ub;
+                std::memcpy(&ua, mine + at, 4);
+                std::memcpy(&ub, theirs + at, 4);
+                spdlog::info("native: own particles: twin check: quad {} corner {} differs at byte {:#x}: {} ({:#010x}) vs the engine rule's {} ({:#010x}); mode {}, flags {}, "
+                             "angle mask {} (frame {})", q, c, at, a, ua, b, ub, k.c[3][3], k.c[12][3], r.mask, dev_.stats().frames);
+            }
+        }
+    }
+}
+
+int StaticOps::ownParticlesMode() const {
+    OwnPost* own = ownPost();
+    return own != nullptr ? static_cast<int>(own->sceneMode(OwnPost::Scene::Particles)) : 0;
+}
+
+bool StaticOps::particleToGpu(sc::DrawDesc& x, const std::vector<std::uint8_t>& recs, std::uint32_t quads, const d3d9::particle::OpConsts* k, int kind, const char*& why) {
+    namespace pt = d3d9::particle;
+    using namespace d3d9;
+    why = nullptr;
+    const std::uint32_t stride = kind == pt::kKindSkyBillboard ? pt::kSkyRecordStride : pt::kRecordStride;
+    if (quads == 0 || recs.size() != static_cast<std::size_t>(quads) * stride || recs.size() > kOwnInstBytes || (kind == pt::kKindParticle && k == nullptr)) {
+        why = "record bytes";
+        return false;
+    }
+    if (!x.indexed || x.primType != 4 || x.baseVertex != 0) {
+        why = "not an indexed triangle list from vertex 0";
+        return false;
+    }
+    auto* engineVs = const_cast<Shader*>(static_cast<const Shader*>(x.vs));
+    if (engineVs == nullptr) {
+        why = "no vertex shader";
+        return false;
+    }
+    // the engine's quad index order (quad 0's six indices: the particles' static IB, the sky objects' composed index bytes), read once; every IB must agree
+    auto* ib = const_cast<Buffer*>(static_cast<const Buffer*>(x.indices));
+    std::array<std::uint16_t, 6> idx{};
+    if (x.indexBytes.size() >= 12) {
+        std::memcpy(idx.data(), x.indexBytes.data(), 12);
+    } else if (ib == nullptr || !ib->readCpu(x.startIndex * 2, 12, idx.data())) {
+        why = "the engine's index buffer is not readable";
+        return false;
+    }
+    const std::uint16_t lo = *std::min_element(idx.begin(), idx.end());
+    for (auto& v : idx) v = static_cast<std::uint16_t>(v - lo);
+    if (*std::max_element(idx.begin(), idx.end()) > 3 || lo != x.minIndex) {
+        why = "the engine's first quad does not use vertices 0..3";
+        return false;
+    }
+    if (!ptIndicesKnown_) {
+        ptIndices_ = idx;
+        ptIndicesKnown_ = true;
+        ptIb_ = dev_.createBuffer(64, USAGE_WRITEONLY, POOL_MANAGED, true, false);
+        ptDummy_ = dev_.createBuffer(64, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+        if (ptIb_) {
+            if (void* p = ptIb_->lock(0, 12, 0)) {
+                std::memcpy(p, idx.data(), 12);
+                ptIb_->unlock();
+            }
+        }
+        if (ptDummy_) {
+            if (void* p = ptDummy_->lock(0, 64, 0)) {
+                std::memset(p, 0, 64);
+                ptDummy_->unlock();
+            }
+        }
+        spdlog::info("native: own particles: the engine's quad index order {} {} {} {} {} {}", idx[0], idx[1], idx[2], idx[3], idx[4], idx[5]);
+    }
+    if (idx != ptIndices_) {
+        why = "another quad index order";
+        return false;
+    }
+    if (!ptIb_ || !ptDummy_) {
+        why = "own buffers";
+        return false;
+    }
+    Shader* vs = dev_.particleVs(*engineVs, kind, static_cast<const VertexDecl*>(x.decl), &why);
+    if (vs == nullptr) return false;
+    VertexDecl* decl = dev_.particleDecl(kind);
+    if (decl == nullptr) {
+        why = "declaration";
+        return false;
+    }
+    x.vs = vs;
+    x.decl = decl;
+    x.streams = {};
+    x.streams[0] = {ptDummy_.get(), 0, 16, STREAMSOURCE_INDEXEDDATA | quads};
+    x.streams[1] = {ptDummy_.get(), 0, stride, STREAMSOURCE_INSTANCEDATA | 1u};
+    x.indices = ptIb_.get();
+    x.minIndex = 0;
+    x.numVertices = 4;
+    x.startIndex = 0;
+    x.primCount = 2;
+    x.cpuStream = 1;
+    x.vertexStride = stride;
+    x.vertexBytes = recs;
+    x.indexBytes.clear();
+    for (std::uint32_t r = 0; k != nullptr && r < pt::kConstCount; ++r) {
+        const std::uint32_t reg = pt::kConstFirst + r;
+        std::memcpy(x.vsF[reg], k->c[r], 16);
+        x.vsSet[reg / 64] |= 1ull << (reg % 64);
+        x.vsLive.set(reg);
+    }
+    x.particleGpu = 1;
+    return true;
+}
+
 // eCShaderParticle's version (0x9d99f0) Execute 0x6d6c30 for the pass key: VS element version +0x1b0 + 16 ((dir + 2 ambient) 5 +
 // lights), PS element +0x2f0 + 16 fog; the light constants (0x6d7020: nothing without an illumination), the states 0x6d9740
 // (FillBlendingRenderStates with GetGlobalAlpha, the master depth write), ExecuteShaderConstants (eCShaderBase's map + the particle
@@ -830,6 +1217,13 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     std::vector<std::uint8_t> vb;
     std::uint32_t quads = 0;
     const auto& dd = prim->drawDesc();
+    // F11 (native.own_particles): the records of the GPU expansion (On: instead of the CPU vertices; Compare: next to them). Not on the scene ops' compare frames
+    // (they compare the CPU vertex bytes with the engine's) nor with the engine's own bytes of this frame
+    const int ownMode = g_ != nullptr && !g_->compare ? ownParticlesMode() : 0;
+    std::vector<std::uint8_t> recs;
+    d3d9::particle::OpConsts recK;
+    std::uint32_t recQuads = 0;
+    bool haveRecs = false;
     if (source == sc::ParticleSource::Engine) {
         quads = dd.primitiveCount / 2;
         const auto sv = prim->streamView(0);
@@ -838,16 +1232,45 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
         if (buf == nullptr || (!vb.empty() && !buf->readCpu(sv.offset, static_cast<std::uint32_t>(vb.size()), vb.data()))) return Skip::Unreadable;
         ++fxWindow_.particleEngineBytes;
     } else if (source == sc::ParticleSource::Cache) {
-        vb = cache->vb;
-        quads = cache->quads;
+        if (cache->gpu) {
+            // (an earlier instance of this target this frame was drawn from records: the same records)
+            recs = cache->vb;
+            recK = cache->k;
+            recQuads = quads = cache->quads;
+            haveRecs = true;
+            ++ptWindow_.cached;
+            if (ownMode != 1) {
+                // (the GPU form was turned off since: the vertices by the engine rule now)
+                if (!particleVertices(ps, entity, vb, quads)) return Skip::Unreadable;
+            }
+        } else {
+            vb = cache->vb;
+            quads = cache->quads;
+        }
         ++leanWindow_.particleCached;
     } else {
         if (live > get<std::int32_t>(ps, 0x394)) return Skip::Unreadable;  // more than the buffer holds (UpdateVertices has no check)
-        if (live > 0 && !particleVertices(ps, entity, vb, quads)) return Skip::Unreadable;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (live > 0 && ownMode != 0) haveRecs = particleRecords(ps, entity, recs, recQuads, recK);
+        if (ownMode == 1 && haveRecs) {
+            quads = recQuads;
+        } else if (live > 0 && !particleVertices(ps, entity, vb, quads)) {
+            return Skip::Unreadable;
+        }
+        {  // (also with the stage off: the A/B of the CPU cost)
+            ptWindow_.cpuUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            ++ptWindow_.cpuTimed;
+        }
+        if (ownMode == 2 && haveRecs) {
+            if (recQuads == quads) particleTwinCheck(recs, recK, vb, quads);
+            else ++ptWindow_.twinDiffer;
+        }
         if (lean) {
             // the commit sorts the live array in place (DepthSortParticles: the qsort particleVertices ran on its copy) and keeps these
             leanParticleTarget_ = ps;
-            leanParticleVb_ = vb;
+            leanParticleGpu_ = ownMode == 1 && haveRecs;
+            leanParticleVb_ = leanParticleGpu_ ? recs : vb;
+            leanParticleConsts_ = recK;
             leanParticleQuads_ = quads;
         }
     }
@@ -1000,8 +1423,52 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
             g.baseVertex = dd.baseVertexIndex;
             const std::size_t before = drawCount_;
             result = particlePassDraw(shader, version, key, g, fade);
+            // F11: On = every draw of the op as its GPU form (a refusal: the CPU vertices for all of them); Compare = the composed draws, the first one's GPU form
+            // kept for its scratch draw
+            bool gpu = ownMode != 0 && haveRecs && result == Skip::None && drawCount_ > before;
+            const char* why = haveRecs || ownMode == 0 ? nullptr : "no records";
+            if (gpu && ownMode == 2) {
+                ptCmp_.gpu = *draws_[before];
+                gpu = particleToGpu(ptCmp_.gpu, recs, recQuads, &recK, d3d9::particle::kKindParticle, why);
+                ptCmp_.armed = gpu;
+                ptCmp_.name = "particles";
+                if (gpu) draws_[before]->particleGpu = 2;
+                gpu = false;
+            } else if (gpu) {
+                std::vector<sc::DrawDesc> trials;
+                trials.reserve(drawCount_ - before);
+                for (std::size_t i = before; i < drawCount_ && gpu; ++i) {
+                    trials.push_back(*draws_[i]);
+                    gpu = particleToGpu(trials.back(), recs, recQuads, &recK, d3d9::particle::kKindParticle, why);
+                }
+                if (gpu) {
+                    for (std::size_t i = before; i < drawCount_; ++i) *draws_[i] = std::move(trials[i - before]);
+                } else {
+                    // (back to the CPU quads for the whole op; the commit keeps the vertices)
+                    if (vb.empty() && !particleVertices(ps, entity, vb, quads)) result = Skip::Unreadable;
+                    if (lean && leanParticleTarget_ == ps) {
+                        leanParticleGpu_ = false;
+                        leanParticleVb_ = vb;
+                    }
+                }
+            }
+            if (OwnPost* own = ownPost(); own != nullptr && ownMode != 0 && result == Skip::None) {
+                for (std::size_t i = before; i < drawCount_; ++i) own->countScene(OwnPost::Scene::Particles, draws_[i]->particleGpu != 0, why);
+            }
+            {
+                if (gpu) {
+                    ++ptWindow_.ops;
+                    ptWindow_.quads += quads;
+                    ptWindow_.recordBytes += recs.size();
+                } else {
+                    ++ptWindow_.cpuOps;
+                    ptWindow_.cpuQuads += quads;
+                    if (why != nullptr && ptWindow_.why.empty()) ptWindow_.why = why;
+                }
+            }
             for (std::size_t i = before; i < drawCount_ && result == Skip::None; ++i) {
                 sc::DrawDesc& x = *draws_[i];
+                if (x.particleGpu == 1) continue;
                 x.vertexStride = kParticleVertex;
                 x.vertexBytes = vb;
             }
@@ -1153,7 +1620,172 @@ StaticOps::Skip StaticOps::composePrecipitation(const Op& op) {
         draws_[i]->drawClass = sc::DrawClass::NonOp;
         fxWindow_.precipDrops += draws_[i]->primCount / 2;
     }
+    // F11 (native.own_particles): the drops' billboard records expanded on the GPU (one instance per drop; rvkSkyBillboardExpand) instead of 4 CPU vertices each
+    const int ownMode = g_ != nullptr && !g_->compare ? ownParticlesMode() : 0;
+    if (ownMode != 0 && drawCount_ > before) {
+        const char* why = native ? nullptr : "no native records";
+        bool gpu = native;
+        for (std::size_t i = before; i < drawCount_ && gpu; ++i) {
+            if (draws_[i]->primCount / 2 * sc::kSkyBillboardSize != mine.size()) {
+                gpu = false;
+                why = "records vs primitives";
+            }
+        }
+        if (gpu && ownMode == 2) {
+            ptCmp_.gpu = *draws_[before];
+            if (particleToGpu(ptCmp_.gpu, mine, static_cast<std::uint32_t>(mine.size() / sc::kSkyBillboardSize), nullptr, d3d9::particle::kKindSkyBillboard, why)) {
+                ptCmp_.armed = true;
+                ptCmp_.name = "precipitation";
+                draws_[before]->particleGpu = 2;
+            }
+            gpu = false;
+        } else if (gpu) {
+            std::vector<sc::DrawDesc> trials;
+            for (std::size_t i = before; i < drawCount_ && gpu; ++i) {
+                trials.push_back(*draws_[i]);
+                gpu = particleToGpu(trials.back(), mine, static_cast<std::uint32_t>(mine.size() / sc::kSkyBillboardSize), nullptr, d3d9::particle::kKindSkyBillboard, why);
+            }
+            if (gpu) {
+                for (std::size_t i = before; i < drawCount_; ++i) *draws_[i] = std::move(trials[i - before]);
+            }
+        }
+        if (OwnPost* own = ownPost()) {
+            for (std::size_t i = before; i < drawCount_; ++i) own->countScene(OwnPost::Scene::Particles, draws_[i]->particleGpu != 0, why);
+        }
+        if (gpu) {
+            ++ptWindow_.rainOps;
+            ptWindow_.rainDrops += mine.size() / sc::kSkyBillboardSize;
+        } else {
+            ++ptWindow_.rainCpuOps;
+            if (why != nullptr && ptWindow_.rainWhy.empty()) ptWindow_.rainWhy = why;
+        }
+    }
     return Skip::None;
+}
+
+// F11 compare: the composed particle draw's state is set (shaders, declaration, streams, registers): its GPU form is drawn into a scratch copy of the target with
+// the same render states, samplers and pixel shader (render targets 1..3 unbound: the particles blend; depth writes off), then the device's state is put back
+void StaticOps::particleCompareBefore(const sc::DrawDesc& d) {
+    using namespace d3d9;
+    namespace pt = d3d9::particle;
+    ptCmp_.scratch = ptCmp_.target = nullptr;
+    if (!ptCmp_.armed) return;
+    ptCmp_.armed = false;
+    OwnPost* own = ownPost();
+    const sc::DrawDesc& g = ptCmp_.gpu;
+    if (own == nullptr || g.vs == nullptr || g.vertexBytes.empty()) return;
+    Surface* target = dev_.renderTarget(0);
+    if (target == nullptr) return;
+    dev_.orderedFlushPending();
+    ptCmp_.skips = own->drawSkips();
+    Surface* scratch = own->scratchOf(target, 4, true);
+    if (scratch == nullptr) return;
+    // the records into our instance buffer (as issue() appends a CPU stream)
+    if (!ownInstVb_) ownInstVb_ = dev_.createBuffer(kOwnInstBytes, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    const auto size = static_cast<std::uint32_t>(g.vertexBytes.size());
+    if (!ownInstVb_ || size > ownInstVb_->size()) return;
+    const std::uint64_t frame = dev_.stats().frames;
+    std::uint32_t flags = LOCK_NOOVERWRITE;
+    if (frame != ownInstFrame_ || ownInstCursor_ + size > ownInstVb_->size()) {
+        flags = LOCK_DISCARD;
+        ownInstCursor_ = 0;
+        ownInstFrame_ = frame;
+    }
+    void* p = ownInstVb_->lock(ownInstCursor_, size, flags);
+    if (p == nullptr) return;
+    std::memcpy(p, g.vertexBytes.data(), size);
+    ownInstVb_->unlock();
+    const std::uint32_t recOffset = ownInstCursor_;
+    ownInstCursor_ += (size + 15u) & ~15u;
+    const Viewport vp = dev_.viewport();
+    std::int32_t sc[4];
+    std::memcpy(sc, dev_.scissorRect(), sizeof(sc));
+    Surface* more[3] = {dev_.renderTarget(1), dev_.renderTarget(2), dev_.renderTarget(3)};
+    const std::uint32_t zwrite = dev_.renderState(RS_ZWRITEENABLE), stencilMask = dev_.renderState(RS_STENCILWRITEMASK);
+    const ShaderRef vsSaved = dev_.vertexShaderRef();
+    VertexDecl* declSaved = dev_.vertexDecl();
+    Buffer* ibSaved = dev_.indexBuffer();
+    const Device::StreamSource s0 = dev_.streamSource(0), s1 = dev_.streamSource(1);
+    float regs[pt::kConstCount][4];
+    std::memcpy(regs, dev_.vsConstants()[pt::kConstFirst], sizeof(regs));
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        if (more[i] != nullptr) dev_.setRenderTarget(i + 1, nullptr);
+    }
+    dev_.setRenderTarget(0, scratch);
+    dev_.setViewport(vp);
+    dev_.setScissorRect(sc[0], sc[1], sc[2], sc[3]);
+    if (zwrite != 0) dev_.setRenderState(RS_ZWRITEENABLE, 0);
+    if (stencilMask != 0) dev_.setRenderState(RS_STENCILWRITEMASK, 0);
+    dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(g.vs))));
+    dev_.setVertexDecl(const_cast<VertexDecl*>(static_cast<const VertexDecl*>(g.decl)));
+    const bool instanced = g.cpuStream == 1;  // (particles / precipitation: instances of a quad; strips: per-vertex records on stream 0, drawn from vertex 0)
+    if (instanced) {
+        dev_.setStreamSource(0, const_cast<Buffer*>(static_cast<const Buffer*>(g.streams[0].buffer)), 0, g.streams[0].stride);
+        dev_.setStreamSourceFreq(0, g.streams[0].freq);
+        dev_.setStreamSource(1, ownInstVb_.get(), recOffset, g.streams[1].stride);
+        dev_.setStreamSourceFreq(1, g.streams[1].freq);
+        dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(g.indices)));
+    } else {
+        dev_.setStreamSource(0, ownInstVb_.get(), recOffset, g.streams[0].stride);
+        dev_.setStreamSourceFreq(0, 1);
+        dev_.setStreamSource(1, nullptr, 0, 0);
+        dev_.setStreamSourceFreq(1, 1);
+    }
+    dev_.setVertexShaderConstantF(pt::kConstFirst, g.vsF[pt::kConstFirst], pt::kConstCount);
+    const bool savedIssuing = issuing_;
+    const std::size_t savedIndex = issueIndex_;
+    issuing_ = true;
+    issueIndex_ = ~std::size_t{0};  // (the compare draw has no composition of its own: the own-draw check skips it)
+    if (instanced) dev_.drawIndexedPrimitive(g.primType, 0, 0, 4, 0, 2);
+    else if (static_cast<std::uint64_t>(g.primCount + 2) * g.streams[0].stride <= size) dev_.drawPrimitive(g.primType, 0, g.primCount);
+    issuing_ = savedIssuing;
+    issueIndex_ = savedIndex;
+    dev_.setVertexShaderConstantF(pt::kConstFirst, regs[0], pt::kConstCount);
+    dev_.setIndices(ibSaved);
+    dev_.setStreamSource(0, s0.buffer, s0.offset, s0.stride);
+    dev_.setStreamSourceFreq(0, s0.freq);
+    dev_.setStreamSource(1, s1.buffer, s1.offset, s1.stride);
+    dev_.setStreamSourceFreq(1, s1.freq);
+    dev_.setVertexDecl(declSaved);
+    dev_.setVertexShaderRef(vsSaved);
+    if (zwrite != 0) dev_.setRenderState(RS_ZWRITEENABLE, zwrite);
+    if (stencilMask != 0) dev_.setRenderState(RS_STENCILWRITEMASK, stencilMask);
+    dev_.setRenderTarget(0, target);
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        if (more[i] != nullptr) dev_.setRenderTarget(i + 1, more[i]);
+    }
+    dev_.setViewport(vp);
+    dev_.setScissorRect(sc[0], sc[1], sc[2], sc[3]);
+    ptCmp_.scratch = scratch;
+    ptCmp_.target = target;
+}
+
+void StaticOps::particleCompareAfter() {
+    d3d9::Surface* target = ptCmp_.target;
+    d3d9::Surface* ours = ptCmp_.scratch;
+    ptCmp_.scratch = ptCmp_.target = nullptr;
+    OwnPost* own = ownPost();
+    if (own == nullptr || ours == nullptr || target == nullptr) return;
+    if (own->drawSkips() != ptCmp_.skips) {
+        own->countDroppedCompare();
+        return;
+    }
+    ++ptWindow_.compares;
+    own->compareUnit(ptCmp_.name, ours, target);
+}
+
+void StaticOps::particleGpuReport() {
+    const int mode = ownParticlesMode();
+    ParticleGpuStats& w = ptWindow_;
+    if (mode != 0 || w.ops != 0 || w.cpuOps != 0) {
+        spdlog::info("native: own particles (5 s): {}: {} ops ({} quads, {} record bytes) drawn from GPU-expanded records, {} cached instances; {} ops ({} quads) on CPU quads{}; "
+                     "records + sort CPU {} us in {} ops; twin check (C++ twin vs the engine rule): {} vertices, {} byte-exact, {} differ (max |d| {:.3g}); {} image compares; precipitation: {} ops ({} drops) from GPU-expanded records, {} on CPU vertices{}; strips: {} ops ({} vertices) from GPU-expanded records, {} on CPU vertices{}",
+                     mode == 0 ? "off" : mode == 1 ? "on" : "compare", w.ops, w.quads, w.recordBytes, w.cached, w.cpuOps, w.cpuQuads,
+                     w.why.empty() ? std::string() : std::format(" (first reason: {})", w.why), w.cpuUs, w.cpuTimed, w.twinVertices, w.twinExact, w.twinDiffer, w.twinMaxAbs,
+                     w.compares, w.rainOps, w.rainDrops, w.rainCpuOps, w.rainWhy.empty() ? std::string() : std::format(" (first reason: {})", w.rainWhy), w.stripOps,
+                     w.stripVertices, w.stripCpuOps, w.stripWhy.empty() ? std::string() : std::format(" (first reason: {})", w.stripWhy));
+    }
+    w = {};
 }
 
 bool StaticOps::verifyFx() {

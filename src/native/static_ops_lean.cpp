@@ -309,6 +309,7 @@ void StaticOps::leanBegin(Group g) {
     leanStream3_.clear();
     leanVeg_ = {};
     leanParticleTarget_ = nullptr;
+    leanParticleGpu_ = false;
     leanPool_.count = 0;
     if (!lean_ || g_ == nullptr || !g_->takeOver) return;
     if (leanAnimVerified_ == 0 && engine_ != nullptr) leanAnimVerified_ = verifyLeanAnim() ? 1 : -1;
@@ -351,6 +352,8 @@ bool StaticOps::leanCommit() {
         c.frame = dev_.stats().frames;
         c.quads = leanParticleQuads_;
         c.vb.swap(leanParticleVb_);
+        c.gpu = leanParticleGpu_;  // (F11: the records of the GPU expansion)
+        c.k = leanParticleConsts_;
         ++leanWindow_.particleSorts;
     }
     if (leanPool_.count != 0) {
