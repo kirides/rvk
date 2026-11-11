@@ -115,6 +115,9 @@ void testOpaqueFirst(Harness& h) {
         r.albedoTex = texs[k % 4];
         r.albedoSampler = sampler;
         r.alpha = 5u | (128u << 8);                  // GREATER 128
+        // a material-pack map of another size (the next texture: 8 << ((k + 1) % 4) wide) and its mip offset as the RT scene writes it
+        r.packWord = texs[(k + 1) % 4] | (1u << 14);
+        r.alpha |= static_cast<std::uint32_t>(128 + 8 * (static_cast<int>(k % 4) - static_cast<int>((k + 1) % 4))) << abi::kRtAlphaPackLodShift;
         // the diffuse alpha; the texture's log2(area) x 8 as the RT scene writes it (rvkRtTexArea: the cone LOD's texel count)
         const std::uint32_t area8 = 8u * (2u * (3u + k % 4));
         r.uvSet = (3u << abi::kRtUvOpacityShift) | (area8 << abi::kRtUvAlbedoAreaShift) | (area8 << abi::kRtUvOpacityAreaShift);
@@ -299,17 +302,26 @@ void testOpaqueFirst(Harness& h) {
                 plainBad != 0 ? " (rvkRay starts such rays at tMin on this backend)" : "");
     check(rawBad[0] == 0 && rawBad[1] == 0, std::format("{}: the ray query's t of non-opaque hits ({} / {} rays): {}", name, rawBad[0], rawBad[1], rawFirst));
     // the size of a non-uniform bindless texture (rvkSize2D = GetDimensions) inside the candidate loop and outside it
-    std::uint64_t sizeBadIn = 0, sizeChecked = 0, sizeBadOut = 0;
+    std::uint64_t sizeBadIn = 0, sizeChecked = 0, sizeBadOut = 0, packBadIn = 0, packOldBadIn = 0, packBadOut = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
         const std::uint32_t* r = w + static_cast<std::size_t>(i) * kWords;
         sizeBadIn += r[32];
         sizeChecked += r[33];
         sizeBadOut += r[34];
+        packBadIn += r[37];
+        packOldBadIn += r[38];
+        packBadOut += r[39];
     }
     // a NOTE, not a failure: the platform's behaviour (rvkSize2D is for wave-uniform indices; the RT records carry their sizes, rvkRtTexArea)
     std::printf("  %s: NOTE texture sizes of a lane-varying bindless index (GetDimensions): inside the candidate loop %llu of %llu wrong, outside it %llu of %u wrong%s\n",
                 name, static_cast<unsigned long long>(sizeBadIn), static_cast<unsigned long long>(sizeChecked), static_cast<unsigned long long>(sizeBadOut), count,
                 sizeBadIn + sizeBadOut != 0 ? " (the first lane's size: rvkRtTexArea reads the records' sizes instead)" : "");
+    // the material-pack map's mip offset at hits (rvkRtPackLodOffset: from the record) must be exact everywhere; the former form (two size queries) as a note
+    std::printf("  %s: pack map mip offset at hits: rvkRtPackLodOffset %llu of %llu wrong in the candidate loop, %llu of %u outside it; NOTE the size-query form: %llu of %llu wrong%s\n", name,
+                static_cast<unsigned long long>(packBadIn), static_cast<unsigned long long>(sizeChecked), static_cast<unsigned long long>(packBadOut), count,
+                static_cast<unsigned long long>(packOldBadIn), static_cast<unsigned long long>(sizeChecked),
+                *std::max_element(std::begin(texs), std::end(texs)) > 0x3FFFu ? " (n/a: the test's slots exceed the pack word's 14 bits)" : "");
+    check(packBadIn == 0 && packBadOut == 0, std::format("{}: pack map mip offset wrong at {} / {} hits", name, packBadIn, packBadOut));
     std::string byRecord, tieList;
     for (std::uint32_t k = 0; k < kInstances; ++k) byRecord += std::format("{}{} {}", k == 0 ? "" : ", ", k, hitsByRecord[k]);
     for (const auto& [p, n] : tiePairs) tieList += std::format("{}records {} / {}: {}", tieList.empty() ? "" : ", ", p.first, p.second, n);

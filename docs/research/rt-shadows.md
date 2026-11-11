@@ -420,3 +420,26 @@ noise ("watery, broken up, no stochastic noise", rt-reflections.md 3.3); the hal
 for the denoiser to remove, and its reprojection would only add history and ghosting risk on waves. **Verdict: not useful.**
 
 GI is probe-based (rtgi.md 20) and not a denoiser case. Revisit if the RT shadows ever trace below one ray per pixel (then a purpose-built or SVGF-style filter, not FFX's).
+
+## 14. Opaque-first shadow rays measured: not adopted (2026-11-11)
+
+`rvkRtVisibilityOpaqueFirst` (rt-reflections.md 3.3.1: the opaque instances first, any hit ends the ray; then the cut-outs only) instead of the one query
+in `rt_shadow_trace.comp`. Switch: `rt.reflection_tweaks` bit 128 (run time; `RtShadows::Settings::opaqueFirst` -> `RtShadowParams.mode.w`), default
+one query.
+
+* **Same visibility** (Full, swamp_pond frozen, `shadows.rt=near`, `rt_quality=high`, `shadows.debug=rt_term`, one session): opaque-first vs one query
+  0.001 % of the pixels > 8/255 (0.09 - 0.11 % > 2/255), the same arm 80 frames apart 0.000 %, the same arm 600 frames apart (of1 vs of3) 0.001 % /
+  0.111 %: the arm difference is the temporal drift of the accumulation; final picture one query vs opaque first 0.000 % > 8/255.
+* **Cost** (`perf-ab.ps1 -Key rt.reflection_tweaks -A 128 -B 0 -Mode full -PlayerDefaults -Setting 'shadows.rt=near','rt.reflections=medium'`, shared
+  copy, another game on the GPU; built while bit 128 meant one query and 0 opaque first, so A = one query, B = opaque first; `shadows.rt trace` ms, delta = B - A):
+
+| scene | run 1 (3 pairs) | run 2 (4 pairs) |
+|---|---|---|
+| hold | 1.17 vs 1.54: opaque first +0.37 (z 1.9) | 1.36 vs 1.20: opaque first -0.15 (z -0.5) |
+| jungle | 1.40 vs 1.54: +0.14 (z 0.3) | 1.31 vs 1.64: +0.33 (z 1.9) |
+| swamp_pond | 0.83 vs 0.60: -0.23 (z -2.1) | 0.65 vs 0.57: -0.09 (z -1.0) |
+
+  Opaque first is cheaper at swamp_pond in both runs but dearer at the jungle (canopy) in both, and hold is not resolved. Why: a shadow ray that no opaque surface blocks
+  (lit ground, rays through leaves) pays two traversals, and the leaves are the cut-outs; a ray that opaque geometry blocks saves the leaves' alpha tests.
+  The water's reflection rays are different (water.rt kept it: mostly blocked by opaque shore geometry). **Not adopted**: the one query stays the default,
+  bit 128 stays as the A/B for later scenes. A per-pixel choice (opaque first only where the history says "blocked") is untested.

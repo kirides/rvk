@@ -275,6 +275,15 @@ float rvkRtTexArea(uint uvSet, uint shift, uint tex) {
     return float(s.x) * float(s.y);
 }
 
+// The material-pack map's mip offset against the albedo's (log2 of the width ratio): from the record's alpha word (bits 16-23: 128 + 8 x the offset,
+// written by the RT scene), else the size queries (wrong on Vulkan for a lane-varying index: rvkSize2D, rt-reflections.md 3.3.1)
+static const uint RVK_RT_ALPHA_PACK_LOD_SHIFT = 16u;  // abi.h kRtAlphaPackLodShift
+float rvkRtPackLodOffset(RvkRtRecord r, uint slot) {
+    uint q = (r.alpha >> RVK_RT_ALPHA_PACK_LOD_SHIFT) & 0xFFu;
+    if (q != 0u) return (float(q) - 128.0) * 0.125;
+    return log2(float(max(rvkSize2D(r.albedoTex).x, 1)) / float(max(rvkSize2D(slot).x, 1)));
+}
+
 float2 rvkRtMaterialTriUv(RvkRtMaterialTri t, float2 bary) { return t.uv0 + bary.x * (t.uv1 - t.uv0) + bary.y * (t.uv2 - t.uv0); }
 
 // Ray-cone mip level (Akenine-Moeller et al., "Improved shader and texture level of detail using ray cones"; as in GD3D11's

@@ -444,7 +444,17 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 if (b != nullptr && b->state != BlasState::Failed && q.phase.pass == Pass::Solid) {
                     std::uint8_t rank = 0;
                     bool overlay = false;
-                    const std::uint32_t id = materialOf(dev, q, *b, rank, overlay);
+                    // a hardware batch fading in (blended, ExecuteRenderInstances: no material in the tag) takes its sub-mesh's material as the
+                    // opaque batches do (learnEngineMaterials), not the bytecode heuristic (rt-reflections.md 3.3.2)
+                    d3d9::draws::Tag batchTag;
+                    d3d9::ReplaceQuery qb = q;
+                    if (const void* batch = batchHeuristic_ ? nullptr : batchMaterial(q); batch != nullptr) {
+                        batchTag = *q.tag;
+                        batchTag.material = batch;
+                        qb.tag = &batchTag;
+                        ++iv_.batchMaterials;
+                    }
+                    const std::uint32_t id = materialOf(dev, qb, *b, rank, overlay);
                     // an untextured blended layer (a wet-sand specular layer with a cube as the diffuse, seen unblended in the
                     // cascades / z pre-pass): the range's untextured materials are overlays on another surface (a textured
                     // object fading in is drawn blended too: not this)
@@ -1365,7 +1375,14 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     if (pack_ != nullptr && !m->name.empty()) {
         // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
         const auto hit = pack_->lookup(m->name);
-        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
+        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
+            f.packWord = hit.word;
+            // the map's mip offset against the albedo (the hit shading's lod: log2 of the width ratio, as the raster's derivatives give it)
+            if (hit.texture != nullptr && !hit.texture->isNull() && f.albedoTex != 0 && m->albedo != nullptr && !m->albedo->isNull()) {
+                const double d = std::log2(static_cast<double>(std::max(m->albedo->desc().width, 1u)) / static_cast<double>(std::max(hit.texture->desc().width, 1u)));
+                f.packLod = static_cast<std::uint32_t>(std::clamp(128l + std::lround(d * 8.0), 1l, 255l));
+            }
+        }
         else if (hit.word == 0) f.packWord = pack_->deriveWord(m->spec);  // no entry: the roughness the engine's specular data implies (materials.derive_from_specular)
     }
     return f;
@@ -3352,7 +3369,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         r.texcoord6 = b.layout.texcoord6;
         r.color0 = b.layout.color0;
         r.instanceId = in.id;
-        r.alpha = recordAlpha(in.flags, in.data, m);
+        r.alpha = recordAlpha(in.flags, in.data, m) | (mf.packLod << abi::kRtAlphaPackLodShift);
         r.albedoTex = mf.albedoTex;
         r.albedoSampler = mf.albedoSampler;
         r.packWord = mf.packWord;
@@ -3377,7 +3394,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                     e.primitiveCount = seg.primitiveCount;
                     e.albedoTex = sf.albedoTex;
                     e.albedoSampler = sf.albedoSampler;
-                    e.alpha = r.alpha;
+                    e.alpha = (r.alpha & 0xFFFFu) | (sf.packLod << abi::kRtAlphaPackLodShift);
                     e.uvSet = sf.uvSet;
                     e.packWord = sf.packWord;
                     std::memcpy(e.uvMap, sf.uvMap, sizeof(e.uvMap));

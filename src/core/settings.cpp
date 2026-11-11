@@ -1248,11 +1248,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "screen-space fallback, 8 hits unshaded, 16 one-query traces (no opaque-first split), "
                        "32 compare one-query vs opaque-first on the same ray (differing reflection = magenta, exact tie = yellow, shadow = cyan; "
                        "rvk.log `enh: water.rt: compare` on Vulkan; 16 + 32 = the one query against itself), 64 the RT scene's "
-                       "hardware batches take the bytecode fallback material (the pre-fix behaviour, A/B).",
+                       "hardware batches take the bytecode fallback material (the pre-fix behaviour, A/B), 128 the RT sun shadows trace opaque first (rvkRtVisibilityOpaqueFirst; default one query: no gain measured, A/B).",
         .type = Type::Int,
         .defaultValue = 0,
         .min = 0,
-        .max = 127,
+        .max = 255,
         .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
         .page = "Debug", .section = "Debug views",
     });

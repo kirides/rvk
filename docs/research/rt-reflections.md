@@ -396,7 +396,7 @@ itself 0), and every RT alpha test / hit LOD on Vulkan used a wrong size. Isolat
 object matrix -> still differing, constant size -> 0. **Fix:** the RT records carry their textures' sizes: `uvSet` bits 16-23 = log2(albedo
 width x height) x 8, bits 24-31 = the same of the alpha test's texture (`RtScene::materialFields`, also in the segments; 0 = unknown);
 `rvkRtTexArea` reads them (fallback: the size query), used by `rvkRtCandidatePasses` and the hit surface's LOD. `rvkSize2D` is documented
-for wave-uniform indices only. Open: the material pack map's LOD offset at hits (`rvk_rt_trace.hlsli`, `rvkSize2D(slot)`) still queries.
+for wave-uniform indices only. The material pack map's LOD offset at hits: fixed in 3.3.2.
 
 **Defect 2 (D3D12, same GPU): the committed t of a cut-out with TMin > 0.** When the candidate loop reads `CandidateTriangleRayT` (the ray
 cone does) before `CommitNonOpaqueTriangleHit`, the committed t is wrong (826 of 826 rays with tMin > 0, 198 of them exactly t + TMin; the
@@ -412,6 +412,42 @@ active shader stale) its RT material fell back to the bytecode heuristic and mas
 `Nat_Veg_Ferns_01`, `Nat_Vegetation_Ivy_01`) entered the TLAS opaque (dark quads in reflections and RT shadows). `RtScene::batchMaterial`
 takes the op's sub-mesh material. Wrapper was not affected (the engine's `ExecuteShaderConstants` set the active shader). A/B:
 `rt.reflection_tweaks` bit 64. Cost and pictures: frame-ownership.md 14.19.1.
+
+#### 3.3.2 Size-query audit, the fading batch, opaque-first RT shadows (2026-11-11) [C]
+
+**Audit of every texture-size query** (Defect 1 above: on the AMD Vulkan driver `GetDimensions` of a lane-varying bindless index answers the
+first lane's size). Searched: every embedded HLSL file (`shaders/**`), the ubershader (`shaders/material/ge_default.*`), the material variants
+(`rvk_material_variant.hlsli`), the translator's output (`src/shader/hlsl.cpp`: emits no size / LOD query), GI, material RT, water, glass,
+lamp shadows, G-buffer, post ports; `GetDimensions` only occurs in `rvkSize2D` (`rvk_common.hlsli`), `CalculateLevelOfDetail` once.
+
+| site | index | verdict |
+|---|---|---|
+| `rvk_rt_trace.hlsli` `rvkRtHitSurface`: the pack map's mip offset (`rvkSize2D(albedoTex)` / `rvkSize2D(slot)`) | per hit (record) | **wrong on Vulkan; fixed**: the record's `alpha` bits 16-23 = 128 + 8 x log2(albedo width / map width) (`abi::kRtAlphaPackLodShift`, `RtScene::materialFields` -> `MaterialFields::packLod`, records and segments), read by `rvkRtPackLodOffset` (`rvk_rt.hlsli`; 0 = unknown -> the old size queries) |
+| `rvk_rt.hlsli` `rvkRtTexArea` fallback | per hit | safe in practice: only for an area code 0, which the RT scene never writes for a textured record (every `materialFields` path sets bits 16-31); kept as a fallback |
+| `rvk_material_variant.hlsli` `rvkMvGather` / `rvkMvSgiTaps` (`f.ao.x`, `f.sgi.x`) | frame block | uniform: OK |
+| `material_rt.frag`, `rt_debug.comp`, `inject_view.comp` (`pc.*`) | push constants | uniform: OK |
+| `post_bright.comp`, `post_lum_tile.comp` (`p.tex.*` of the pass's params block) | pass params | uniform: OK |
+| `ocean_surface.hlsli` `CalculateLevelOfDetailUnclamped` (`fftDeriv[c]`, c = cascade loop) | water block, loop counter | uniform: OK |
+| `shaders/test/rhi_rt_opaquefirst.comp` | test | measures the defect on purpose |
+
+NonUniformResourceIndex is already on every `RVK_TEX2D` (no help for the size query, Defect 1). Sampling a lane-varying index is right (the
+opaque-first parity shows it). **Proof** (rhitest `opaque-first traces`, `--validation`): the nine records' pack maps are another of the four
+texture sizes; `rvkRtPackLodOffset` 0 of 8,136 wrong inside the candidate loop / 0 of 14,336 outside it (Vulkan), 0 / 0 (D3D12); the former
+size-query form: 614 of 8,136 wrong on Vulkan, and **4,004 of 8,152 on D3D12** although the plain albedo size query is right there (0 wrong; the
+test's slots fit the 14 slot bits): the two-query expression is wrong on D3D12 as well, cause not isolated [open]; the record form is exact on both.
+Side note [I, not measured]: `MaterialPack::finish` masks the map's bindless slot to 14 bits (`kWordSlotMask`): a pack map in a slot >= 16,384
+would sample another texture (raster and RT).
+
+**The fading hardware batch** (task: "the one instanced material at swamp_pond in Full still resolved by the bytecode heuristic, DXT1
+diffuse"): rvk.log `rt: material '?' (InstancedMesh Main, vs 650e8571636e529f ps d283177759c7638f): no material graph (bytecode fallback s9);
+bound s9=1024x1024 DXT1 ...` right after `rt: scene: main-view blended draw of BLAS #68 (Solid instanced): material '?', blend 5/6 (alpha-over:
+a layer)`: a hardware batch of `Nat_Stone_Rock_01` (same pixel shader, its opaque batches resolve `Nat_Stone_Rock_01_Diffuse_07`) drawn
+alpha-blended while it fades in. That branch of `RtScene::observe` (main-view blended draws on an existing BLAS) called `materialOf`
+without `batchMaterial`; it now takes the sub-mesh's material as `learnEngineMaterials` does (bit 64 restores the heuristic there too).
+(BLAS #68 / ps d283... in the session of 14.19.1; BLAS #14 in this one.) In game (Full, swamp_pond): no `InstancedMesh` heuristic line left (only SpeedTree's, which has no material graph); the blended batch logs
+`rt: material 'Nat_Stone_Rock_01_Diffuse_07' (InstancedMesh Main ...)` at the same timestamp as its blended-draw line.
+
+**RT sun shadows opaque first** (rt-shadows.md 14): measured, no gain; the default stays one query, `rt.reflection_tweaks` 128 = opaque first.
 
 ## 4. GD3D11's D3D12 RT path (survey 2026-10-22; root `E:\git\github\GD3D11\D3D11Engine\`)
 
