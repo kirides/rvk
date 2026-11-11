@@ -8,7 +8,8 @@
 -- (Default_CrystalLight_Blue: an eCStaticPointLight_PS with CastDynamicShadows), fog (VFX_EMT_Fog_Ground_01 / VFX_EMT_Fog_Pollon:
 -- LightingStyle Particle = lit emitters), fire (VFX_EMT_Magic_FireInferno_Burn_02 / _03 / VFX_EMT_Magic_Inferno_PerSmoke: Instanced emitters), billboards
 -- (Obj_LS_Crystal_AntiMagic, Decal_Glow, VFX_BB_Ice_01: blended billboard sets), strip (VFX_EMT_Titan_Strip_01 moved on a
--- circle every tick: strip segments), hit (DoDamage on the hero above a quarter of its hit points: the OverlayHit image effect).
+-- circle every tick: strip segments), hit (DoDamage on the hero above a quarter of its hit points: the OverlayHit image effect),
+-- imagefx (not in the default list: the game time frozen `fxhold` s for the renderer's `post ...` debug commands, see the step).
 -- rvk.log `rvk_rare: step <name> ...` at each step's start (frame numbers for -LogFrame). Parameters: steps (all, comma list),
 -- hold (12), time (22: night, for the lights), dist (450), spacing (600: the steps' distance along x), shots (a screenshot name prefix).
 local T = risen.test
@@ -112,6 +113,19 @@ T.run(function()
                 risen.log.info(("rvk_rare: DoDamage %d on the hero (%d): %s %s"):format(dmg, k, tostring(ok), tostring(r)))
                 wait_s(2)
             end
+        elseif s == "imagefx" then
+            -- S-7d (docs/research/frame-ownership.md 14.18): the rare image effects. The game starts RadialBlur / Wobble / EdgeSmooth only from effect data
+            -- and OverlayBlackScreen / WhiteScreen from camera types; the renderer's debug commands switch them (engine/image_effects.h). The step freezes the
+            -- game time for `fxhold` seconds so the commands can be anchored to it ("freeze+<presents>: ..."):
+            --   -Param 'steps=imagefx' -Commands 'freeze+200: post effect RadialBlur','freeze+600: post effect Wobble','freeze+1000: post effect EdgeSmooth',
+            --     'freeze+1400: post default','freeze+1500: post overlay OverlayBlackScreen 0 0.5 0','freeze+1900: post overlay stop',
+            --     'freeze+2000: post overlay OverlayWhiteScreen 0 0.5 0','freeze+2400: post overlay stop','freeze+2500: post overlay OverlayHit 3 0.2 0.5'
+            look(tx, ty, tz)
+            local fxhold = tonumber(T.param("fxhold", "60")) or 60
+            pcall(risen.debug.time_freeze, true)
+            risen.log.info(("rvk_rare: imagefx: time frozen for %d s at frame %d"):format(fxhold, risen.debug.frame and risen.debug.frame() or -1))
+            wait_s(fxhold)
+            pcall(risen.debug.time_freeze, false)
         end
         look(tx, ty, tz)
         if shots ~= "" then

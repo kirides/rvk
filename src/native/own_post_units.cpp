@@ -258,8 +258,17 @@ void OwnPost::compareUnit(const char* name, d3d9::Surface* ours, d3d9::Surface* 
     if (ours == nullptr || engine == nullptr || ours->texture() == nullptr || engine->texture() == nullptr) return;
     d3d9::Texture* a = ours->texture();
     d3d9::Texture* b = engine->texture();
-    // (full-resolution images every 4th frame: two 1600 x 900 compares per frame cost the CPU ~10 ms)
-    if (static_cast<std::uint64_t>(b->desc().width) * b->desc().height > (1u << 20) && dev_.frameValue() % 4 != 0) return;
+    // (full-resolution images: one of the frame's big compares per frame, in rotation: two 1600 x 900 compares per frame cost the CPU ~10 ms, and the
+    // read-back slot holds 48 MiB; S-7d: the mask chain adds 3 - 5 of them per frame)
+    if (static_cast<std::uint64_t>(b->desc().width) * b->desc().height > (1u << 20)) {
+        const std::uint64_t f = dev_.frameValue();
+        if (f != bigFrame_) {
+            bigFrame_ = f;
+            bigInFrame_ = 0;
+        }
+        const std::uint32_t k = bigInFrame_++;
+        if ((f + k) % 8 != 0) return;
+    }
     // X8R8G8B8 (the back buffer): the alpha byte is not part of the picture
     const int channels = b->desc().format == rhi::d3dfmt::X8R8G8B8 ? 3 : 4;
     dev_.runPassNow("post.unit (compare)", [&](d3d9::PassContext& ctx) { recordCompare(ctx.cmd, name, a->rhi(), b->rhi(), static_cast<int>(OwnGroup::Units), channels); });

@@ -220,11 +220,13 @@ private:
     std::array<std::vector<PortShader>, kPortCount> portShaders_;  // per engine pixel shader (a handful)
     bool portReady(int port);
     d3d9::Shader* portShader(int port, const d3d9::Shader* engine, bool fused);
-    std::unique_ptr<d3d9::Texture> scratch_[8];  // compare scratch targets (by size + format: ToneMap, DoFDown, the back buffer, an overlay copy; S-7d: the mask chain's images)
+    std::unique_ptr<d3d9::Texture> scratch_[24];  // compare scratch targets (by size + format: ToneMap, DoFDown, the back buffer, an overlay copy; S-7d: the mask chain's images)
     std::array<std::uint64_t, kPostUnitCount> unitOwn_{}, unitEngine_{};
     std::array<std::uint64_t, 4> tmCounts_{};
     std::array<std::string, kPostUnitCount> unitWhy_;
     std::uint64_t bigCompareFrame_ = 0;
+    std::uint64_t bigFrame_ = ~0ull;  // (compareUnit: the frame of the full-resolution compares counted in bigInFrame_)
+    std::uint32_t bigInFrame_ = 0;
     bool noFuse_ = false;
     bool noUnits_ = false;  // RVK_OWNPOST_UNITS=0: every single unit stays the engine's
     std::array<std::vector<Pending>, rhi::kFramesInFlight> cmpPending_;

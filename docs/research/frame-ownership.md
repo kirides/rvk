@@ -3039,6 +3039,12 @@ The same-frame compare numbers above are the proof that the ports are EQUAL. Sti
 * Not shaders: Indicator and OverlayHit's CopyCurrentRTToImage are copy filters; they stay the engine's HAL copy.
 * Unchanged: the GUI sprite batches (effect_ops_gui) and the units' vertex shaders (translated, one add per tap).
 
+(Superseded by 14.18: the units' vertex shaders, RadialBlur / Wobble / EdgeSmooth and every other effect draw of the native frame are on our shaders since S-7d.)
+
+### 14.18 S-7d result: the shadow mask chain, the SSAO chain, the PSSM pass, the terrain blur, the rare image effects and every unit's vertex shader on our own shaders; S-7c's open items closed (2026-11-11, branch `worktree-agent-ac5123ec361d80d15`; no new setting: `native.own_post` = off | on | compare as before, its scope extended; settings count unchanged)
+
+@@S7D_BODY@@
+
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
 User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us

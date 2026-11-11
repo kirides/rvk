@@ -21,6 +21,7 @@
 
 #include "core/perf_window.h"
 #include "core/settings.h"
+#include "api/capture.h"
 #include "engine/image_effects.h"
 #include "engine/menu_state.h"
 #include "overlay/keys.h"
@@ -447,6 +448,17 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         // "display fake <W>x<H>" | "display fake off": the display resolver sees another monitor (docs/research/window-mode.md 10)
         const auto rest = command.substr(static_cast<std::size_t>(w[1].data() - command.data()));
         return engine::window::runCommand(rest, out);
+    }
+    if (w[0] == "shot" && w.size() == 2) {
+        // "shot <name>": the back buffer of this present -> bin\rvk\screenshots\<name>.png (rvk_screenshot's queue; anchored A/B pictures inside one run:
+        // "freeze+N: shot a1", "freeze+M: set native.own_post on", "freeze+K: shot b1", S-7d)
+        const std::filesystem::path file = api::gameDir() / "bin" / "rvk" / "screenshots" / (std::string(w[1]) + ".png");
+        if (auto refused = api::refuseOutputPath(file, api::gameDir())) return fail(*refused);
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        std::string reason;
+        const std::uint32_t ticket = api::captures().request(file, api::ImageFormat::Png, 0, &reason);
+        return ticket != 0 ? ok(std::format("screenshot #{} -> {}", ticket, file.string())) : fail(reason);
     }
     if (w[0] == "post" && w.size() >= 2) {
         // "post effect <name>" / "post default" / "post overlay <name> [dur [in [out]]]" / "post overlay stop [fade]": the engine's image effects

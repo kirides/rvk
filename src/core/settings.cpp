@@ -2896,7 +2896,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "the two 1x1 adapted-luminance images. On = the units are not drawn; compare = they are drawn and the kernel's result is checked "
                        "against the engine's (rvk.log `native: own post`, `luminance differs` lines must stay 0). S-7b (14.8b): the bloom chain (BrightPass, GlowH, "
                        "Streak, GlowVAddBloom2: three dispatches) and the DoF middle (BlurH, BlurV, NearCoc, SmallBlur: one dispatch) likewise; the small "
-                       "A8R8G8B8 images they write are RGBA8 storage images while On. Off by default.",
+                       "A8R8G8B8 images they write are RGBA8 storage images while On. S-7c (14.16): ToneMap, HDRI, DoFDown, DoF and the overlay effects on our "
+                       "pixel shaders. S-7d (14.18): every other composed effect draw (the shadow mask chain, the SSAO chain, the PSSM pass, the terrain map's "
+                       "blur, the rare image effects, every unit's vertex shader) on the ports in shaders/post/fx (rvk.log `native: own fx shaders`; compare = "
+                       "each unit drawn a second time with them into a scratch copy and compared, `image '<port>'` lines). Off by default.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"off", "on", "compare"},
