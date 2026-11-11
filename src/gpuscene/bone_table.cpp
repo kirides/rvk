@@ -215,9 +215,12 @@ void BoneTable::flush(d3d9::Device& dev) {
             histTag_.assign(kCapacity, 0);
             prevValid_.assign(kCapacity, 0);
             prevSame_.assign(kCapacity, 0);
+            // the buffer starts as zeros in both modes: a new device buffer holds whatever its memory held before (the d3d9test case failed 1 in 2 runs after other
+            // cases had freed buffers), and slots the CPU never wrote are still GPU-visible: the zero tail pad (record kCapacity - 1) a window read past its slot
+            // lands in, the read-back of this very flush (frame 0: used_ = 0 -> slot 0) and, with history, the current images 0 .. kCapacity - 1 it covers
+            table_.zero(dev);
             if (history_) {
-                // (the read-back covers the current images 0 .. kCapacity - 1 too, most of them never written: the buffer starts as zeros, the uploads go out next flush)
-                table_.zero(dev);
+                // (the uploads go out next flush)
                 report(dev);
                 ++frame_;
                 return;
