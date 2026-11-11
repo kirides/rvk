@@ -21,6 +21,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/crash_dump.h"
+#include "d3d9/device.h"
 #include "core/perf_window.h"
 #include "core/settings.h"
 #include "api/capture.h"
@@ -440,6 +441,13 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         if (w[2] != "cpu" && w[2] != "gpu") return fail("debug compact cpu|gpu");
         gpuscene::ownedcompact().setForceCpu(w[2] == "cpu");
         return ok(std::format("owned draws: arguments by the {}", w[2]));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "pull") {
+        // frame-ownership.md 14.30: bit 0 = the cascades, bit 1 = the terrain map + atlas cells draw vertex-pulled (A/B inside one run)
+        std::uint32_t m = 3;
+        std::from_chars(w[2].data(), w[2].data() + w[2].size(), m);
+        d3d9::pullViewMask().store(m);
+        return ok(std::format("owned shadow views pulled mask {}", m));
     }
     if (w[0] == "quit" && w.size() == 1) {
         // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs
