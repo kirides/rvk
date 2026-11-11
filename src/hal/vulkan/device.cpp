@@ -245,6 +245,20 @@ void HalDevice::applyStaticOps() {
     effectOps_->setGuiMode(sceneTake && (groups & 65536) != 0, sceneCompare && (groups & 65536) != 0);
     // S-7: the post chain's own shaders (Full only; On needs the take-over, Compare the composition)
     effectOps_->setOwnPost(rs.nativeOwnPost != nullptr && renderMode() == RenderMode::Full ? static_cast<native::OwnPost::Mode>(rs.nativeOwnPost->asInt()) : native::OwnPost::Mode::Off);
+    // F12 / F13 (frame-ownership.md 14.24): the sky dome / the GUI sprite batches on our own shaders (Full; their groups taken over: 8 / 32 the sky op and cube faces,
+    // 65536 the sprite batcher)
+    {
+        const auto sceneMode = [&](settings::Setting* st, bool groupsTaken, const char* what) {
+            const auto m = st != nullptr && renderMode() == RenderMode::Full ? static_cast<native::OwnPost::Mode>(st->asInt()) : native::OwnPost::Mode::Off;
+            if (m != native::OwnPost::Mode::Off && !groupsTaken) {
+                spdlog::warn("native: own {}: needs native.scene_ops with its groups taken over: staying off", what);
+                return native::OwnPost::Mode::Off;
+            }
+            return m;
+        };
+        effectOps_->setOwnScene(native::OwnPost::Scene::Sky, sceneMode(rs.nativeOwnSky, sceneTake && (groups & (8 | 32)) == (8 | 32), "sky"));
+        effectOps_->setOwnScene(native::OwnPost::Scene::Gui, sceneMode(rs.nativeOwnGui, sceneTake && (groups & 65536) != 0, "gui"));
+    }
     frameTap_->setStaticOpsActive(staticOps_->active());
     frameTap_->setEffectOpsActive(effectOps_->active());
     // O1: the register file's source; the coverage counter only where it is read (a compare, the tap's own report, or asked for)
@@ -750,7 +764,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

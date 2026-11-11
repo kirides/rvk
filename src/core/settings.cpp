@@ -2980,6 +2980,40 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnSky = &reg.add({
+        .key = "native.own_sky",
+        .label = "Native frame: sky dome on own shaders",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F12 (docs/research/frame-ownership.md 14.24; Full, needs native.scene_ops with the sky groups 8 / 32): the sky dome's composed draw (the "
+                       "main view's sky op and every face of the sky environment cube) is drawn with our own vertex / pixel shader (shaders/post/fx/sky_dome.*, "
+                       "the port of ge_skydome_2_0.fx) instead of the translated engine shader; the stars / sun / moon billboards and the decals are "
+                       "material shaders (the HLSL ubershader with debug.ubershader). Compare = the dome is drawn a second time with the port into a scratch "
+                       "copy of its target and the two images are compared (rvk.log `native: own sky`, `image 'sky_dome.frag'`: max 0 steps). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the engine's shader"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeOwnGui = &reg.add({
+        .key = "native.own_gui",
+        .label = "Native frame: GUI sprites on own shaders",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F13 (docs/research/frame-ownership.md 14.24; Full, needs native.scene_ops with the sprite group 65536): the sprite batches of "
+                       "eCSprite::Flush (HUD, menus, inventory, text, cursor, loading screens) are drawn with our own vertex / pixel shader "
+                       "(shaders/post/fx/gui_main.*, the port of the sprite effect) over the natively generated quads. Compare = each flush is drawn a second "
+                       "time with the port into a scratch copy of its target and the two images are compared (rvk.log `native: own gui`, `image "
+                       "'gui_main.frag'`: bit-identical, max 0 steps). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the engine's shader"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeCoverage = &reg.add({
         .key = "native.coverage",
         .label = "Native frame: coverage counter",

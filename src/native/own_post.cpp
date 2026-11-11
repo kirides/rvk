@@ -82,7 +82,7 @@ bool OwnPost::quadUv(const fxc::EffectDraw& d, std::uint32_t w, std::uint32_t h,
     return true;
 }
 
-OwnPost::OwnPost(d3d9::Device& dev) : dev_(dev) {}
+OwnPost::OwnPost(d3d9::Device& dev) : dev_(dev) { registerOwnPost(this); }
 
 OwnPost::~OwnPost() {
     if (building_.valid()) building_.wait();
@@ -97,8 +97,12 @@ OwnPost::~OwnPost() {
     for (auto& t : scratch_) {
         if (t) dev_.release(std::move(t));
     }
+    for (auto& t : sceneScratch_) {
+        if (t) dev_.release(std::move(t));
+    }
     readback_.reset();
     destroyFxPorts();
+    registerOwnPost(nullptr, this);
 }
 
 void OwnPost::setMode(Mode m) {
@@ -366,8 +370,18 @@ void OwnPost::report() {
         const int have = static_cast<int>(mode_);
         spdlog::info("native: own post state (5 s): {} (setting {}, code {}){}", mode_ == Mode::Off ? "inactive" : "active", want, have, want != have ? " INCONSISTENT" : "");
     }
-    if (mode_ == Mode::Off) return;
+    reportScene();
+    if (mode_ == Mode::Off && sceneMode_[0] == Mode::Off && sceneMode_[1] == Mode::Off) return;
     reportFx();
+    if (mode_ == Mode::Off) {
+        // (own_sky / own_gui alone: their compared images)
+        for (const auto& [name, n] : named_) {
+            spdlog::info("native: own post (5 s):   image '{}': {} compared, max {} steps, max rel {:.3g}, mean rel {:.3g}, {:.4f} % of the pixels more than 1 step off", name, n.compared,
+                         n.maxStep, n.maxRel, n.sumRel / static_cast<double>(std::max<std::uint64_t>(n.compared, 1)),
+                         100.0 * static_cast<double>(n.offPixels) / static_cast<double>(std::max<std::uint64_t>(n.pixels, 1)));
+        }
+        return;
+    }
     spdlog::info("native: own post (5 s): luminance kernel runs {}, refused {}; compare {} frames, differing {} (rel > 1e-5), max rel {:.3g}, mean rel {:.3g}", stats_.runs,
                  stats_.refused, stats_.compared, stats_.differing, stats_.maxRel, stats_.compared != 0 ? stats_.sumRel / static_cast<double>(stats_.compared) : 0.0);
     static constexpr const char* kNames[kGroupCount] = {"luminance", "bloom chain", "DoF middle", "single units (S-7c)"};

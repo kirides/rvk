@@ -142,6 +142,7 @@ public:
     // S-7 (native/own_post): small R32F render targets (<= 64 x 64: the post chain's luminance levels) are created with storage usage too, so a compute
     // pass can write the engine's persistent 1x1 images; textures made before the switch keep their usage (the pass checks `storageCapable`)
     static void setSmallStorage(bool on);
+    static bool smallStorage();
     bool storageCapable() const { return (tex_ != nullptr) && (tex_->desc().usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0; }
 
 private:
@@ -844,6 +845,7 @@ public:
     void setViewport(const Viewport& vp);
     const Viewport& viewport() const { return viewport_; }
     void setScissorRect(std::int32_t left, std::int32_t top, std::int32_t right, std::int32_t bottom);
+    const std::int32_t* scissorRect() const { return scissor_; }  // left, top, right, bottom
 
     // commands (render thread)
     void clear(std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil);

@@ -144,6 +144,20 @@ void StaticOps::stagesReport() {
         line += stage("own_post", want != 0, have != 0 && have == want, a,
                       std::format("{}: {} effect draws / kernel runs on our shaders", have == 2 ? "compare" : "on", a));
     }
+    // F12 / F13 (frame-ownership.md 14.24): the sky dome / the GUI sprite batches on our own shaders (native.own_sky / native.own_gui; acted = composed draws drawn with
+    // the ports in the window; compare counts as armed)
+    for (const OwnPost::Scene which : {OwnPost::Scene::Sky, OwnPost::Scene::Gui}) {
+        static std::uint64_t last[2] = {};
+        const auto i = static_cast<std::size_t>(which);
+        const std::uint64_t acts = ownSceneActs(which);
+        const std::uint64_t a = acts >= last[i] ? acts - last[i] : acts;
+        last[i] = acts;
+        settings::Setting* st = which == OwnPost::Scene::Sky ? rs.nativeOwnSky : rs.nativeOwnGui;
+        const int want = st != nullptr ? static_cast<int>(st->asInt()) : 0;
+        const int have = ownSceneMode(which);
+        line += stage(which == OwnPost::Scene::Sky ? "own_sky" : "own_gui", want != 0, have != 0 && have == want, a,
+                      std::format("{}: {} {} on our shaders", have == 2 ? "compare" : "on", a, which == OwnPost::Scene::Sky ? "sky dome draws" : "sprite batch draws"));
+    }
     // S-1a: the HLSL ubershader (debug.ubershader; the owned-shader line holds the per-kind counts)
     const bool uberSetting = settingOn(rs.ubershader), uberCode = dev_.ubershader();
     line += std::format(" ubershader={}", uberCode == uberSetting ? (uberCode ? "active(HLSL material shaders)" : "inactive(setting off)") : "INCONSISTENT(setting vs code)");

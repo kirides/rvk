@@ -75,6 +75,7 @@ public:
     bool psoQuit_ = false;
     std::atomic<std::uint32_t> psoPending_{0};
     std::atomic<std::uint64_t> psoSkipped_{0};
+    std::uint64_t pipelineSkips() const override { return psoSkipped_.load(std::memory_order_relaxed); }
     void startPsoThreads();
     void stopPsoThreads();
 

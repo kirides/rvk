@@ -67,3 +67,7 @@
     {0x94f835486b8cc4c8ull, shader::Stage::Vertex, "post/fx/edge_edgesmooth.vert", "edge EdgeSmooth, edge EdgeSmoothDebug"},
     {0x788e4eaafe729e75ull, shader::Stage::Pixel, "post/fx/edge_edgesmooth.frag", "edge EdgeSmooth"},
     {0x1300b2b62c6f9984ull, shader::Stage::Pixel, "post/fx/edge_edgesmoothdebug.frag", "edge EdgeSmoothDebug"},
+    {0xdbba1531486b1df5ull, shader::Stage::Vertex, "post/fx/gui_main.vert", "gui Main"},
+    {0x1e0e4e74ea3477cfull, shader::Stage::Pixel, "post/fx/gui_main.frag", "gui Main"},
+    {0x98629e7bbba95f12ull, shader::Stage::Vertex, "post/fx/sky_dome.vert", "ge_skydome_2_0.fx VS (eCShaderVersionSkyDome_2_0 +0x1b0)"},
+    {0x38851f343d71da1eull, shader::Stage::Pixel, "post/fx/sky_dome.frag", "ge_skydome_2_0.fx PS (eCShaderVersionSkyDome_2_0 +0x1d0)"},

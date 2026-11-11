@@ -19,6 +19,7 @@ namespace {
 std::atomic<bool> smallStorageFlag{false};
 }
 void Texture::setSmallStorage(bool on) { smallStorageFlag.store(on, std::memory_order_relaxed); }
+bool Texture::smallStorage() { return smallStorageFlag.load(std::memory_order_relaxed); }
 
 Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(desc) {
     dev_.trackLive(this);
