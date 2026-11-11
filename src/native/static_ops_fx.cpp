@@ -1068,8 +1068,28 @@ bool StaticOps::particleToGpu(sc::DrawDesc& x, const std::vector<std::uint8_t>& 
         why = "own buffers";
         return false;
     }
-    Shader* vs = dev_.particleVs(*engineVs, kind, static_cast<const VertexDecl*>(x.decl), &why);
+    // 14.28 addendum: the ports of the engine's particle vertex + pixel shader (shaders/post/fx/particle_*): both or neither (the stage interfaces of a ported pair are
+    // dense, D3D12 links them by register); a port that is not built yet = the translated pair this time
+    const Shader* vsPort = nullptr;
+    const Shader* psPort = nullptr;
+    static const bool noPorts = [] {  // A/B: `-Environment 'RVK_PARTICLE_PORT=0'` = the translated engine shaders (the Win32 environment: the proxy sets it)
+        char v[8] = {};
+        return GetEnvironmentVariableA("RVK_PARTICLE_PORT", v, sizeof(v)) != 0 && v[0] == '0';
+    }();
+    if (kind == pt::kKindParticle && !noPorts) {
+        if (OwnPost* own = ownPost(); own != nullptr) {
+            vsPort = own->fxPort(engineVs);
+            psPort = own->fxPort(x.ps);
+            if (vsPort == nullptr || psPort == nullptr) vsPort = psPort = nullptr;
+        }
+    }
+    bool portUsed = false;
+    Shader* vs = dev_.particleVs(*engineVs, kind, static_cast<const VertexDecl*>(x.decl), &why, vsPort, &portUsed);
     if (vs == nullptr) return false;
+    if (kind == pt::kKindParticle) {
+        ++(portUsed ? ptWindow_.portDraws : ptWindow_.translatedDraws);
+        if (portUsed) x.ps = psPort;
+    }
     VertexDecl* decl = dev_.particleDecl(kind);
     if (decl == nullptr) {
         why = "declaration";
@@ -1779,11 +1799,11 @@ void StaticOps::particleGpuReport() {
     ParticleGpuStats& w = ptWindow_;
     if (mode != 0 || w.ops != 0 || w.cpuOps != 0) {
         spdlog::info("native: own particles (5 s): {}: {} ops ({} quads, {} record bytes) drawn from GPU-expanded records, {} cached instances; {} ops ({} quads) on CPU quads{}; "
-                     "records + sort CPU {} us in {} ops; twin check (C++ twin vs the engine rule): {} vertices, {} byte-exact, {} differ (max |d| {:.3g}); {} image compares; precipitation: {} ops ({} drops) from GPU-expanded records, {} on CPU vertices{}; strips: {} ops ({} vertices) from GPU-expanded records, {} on CPU vertices{}",
+                     "records + sort CPU {} us in {} ops; twin check (C++ twin vs the engine rule): {} vertices, {} byte-exact, {} differ (max |d| {:.3g}); {} image compares; precipitation: {} ops ({} drops) from GPU-expanded records, {} on CPU vertices{}; strips: {} ops ({} vertices) from GPU-expanded records, {} on CPU vertices{}; particle forms on our ge_particle ports {} / on the translated shaders {}",
                      mode == 0 ? "off" : mode == 1 ? "on" : "compare", w.ops, w.quads, w.recordBytes, w.cached, w.cpuOps, w.cpuQuads,
                      w.why.empty() ? std::string() : std::format(" (first reason: {})", w.why), w.cpuUs, w.cpuTimed, w.twinVertices, w.twinExact, w.twinDiffer, w.twinMaxAbs,
                      w.compares, w.rainOps, w.rainDrops, w.rainCpuOps, w.rainWhy.empty() ? std::string() : std::format(" (first reason: {})", w.rainWhy), w.stripOps,
-                     w.stripVertices, w.stripCpuOps, w.stripWhy.empty() ? std::string() : std::format(" (first reason: {})", w.stripWhy));
+                     w.stripVertices, w.stripCpuOps, w.stripWhy.empty() ? std::string() : std::format(" (first reason: {})", w.stripWhy), w.portDraws, w.translatedDraws);
     }
     w = {};
 }

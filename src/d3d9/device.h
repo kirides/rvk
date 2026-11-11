@@ -777,7 +777,10 @@ public:
     // Null (`why`) when the shader reads another input or the variant does not build. particleDecl = the record stream's declaration (stream 1, instance rate).
     // kind (d3d9/particle_gpu.h): kKindParticle = the particle vertex (rvkParticleExpand), kKindSkyBillboard = an eCSkyObject billboard (rvkSkyBillboardExpand: the
     // precipitation); engineDecl = the composed draw's declaration: each input is the expansion's field at that element's offset (refused when one is not)
-    Shader* particleVs(Shader& engineVs, int kind, const VertexDecl* engineDecl, const char** why = nullptr);
+    // `port` (14.28 addendum, native.own_particles): the engine vertex shader's own port (shaders/post/fx/particle_vs_*, OwnPost::fxPort) = the expansion's text written
+    // down with the shader's program; used for kKindParticle when the shader's inputs are the canonical ones (usage -> field: the port's fixed prologue), else
+    // the translated form is built as before. `portUsed` = which one this is.
+    Shader* particleVs(Shader& engineVs, int kind, const VertexDecl* engineDecl, const char** why = nullptr, const Shader* port = nullptr, bool* portUsed = nullptr);
     VertexDecl* particleDecl(int kind = 0);
     void release(std::unique_ptr<Texture> texture);
     void release(std::unique_ptr<Buffer> buffer);
@@ -1988,6 +1991,7 @@ private:
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
     std::unordered_map<std::uint64_t, std::shared_ptr<Shader>> particleVs_;  // F11: (engine vertex shader, kind, declaration) -> its expansion form (null: refused)
     std::unordered_map<std::uint64_t, const char*> particleVsWhy_;
+    std::unordered_set<const Shader*> particlePorted_;  // 14.28 addendum: the expansion forms that are a port
     std::unique_ptr<VertexDecl> particleDecl_[3];
     rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash, bool half16 = false);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
