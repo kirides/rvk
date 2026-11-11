@@ -120,7 +120,10 @@ void GpuTable<T>::startVerify(d3d9::Device& dev, std::uint32_t used) {
         dev.uploadList().bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
         return;
     }
-    used = std::max(used, 1u);
+    if (used == 0) {  // nothing served yet: a read-back would compare never-written GPU memory (the bone table flake)
+        dev.uploadList().bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+        return;
+    }
     const std::uint64_t bytes = static_cast<std::uint64_t>(used) * sizeof(T);
     if (!p.buffer || p.buffer->desc().size < bytes) {
         p.buffer = dev.rhi()->createBuffer({static_cast<std::uint64_t>(capacity_) * sizeof(T), VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "gpu table verify"});

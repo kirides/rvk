@@ -175,7 +175,10 @@ void InstanceBuffer::verify(d3d9::Device& dev) {
     for (std::uint32_t i = 0; i < kCapacity; ++i) {
         if (shadow_[i].live != 0) used = i + 1;
     }
-    used = std::max(used, 1u);
+    if (used == 0) {  // nothing served yet: a read-back would compare never-written GPU memory (the bone table flake)
+        if (buffer_) dev.uploadList().bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+        return;
+    }
     const std::uint64_t bytes = static_cast<std::uint64_t>(used) * sizeof(InstanceRecord);
     if (!p.buffer || p.buffer->desc().size < bytes) {
         p.buffer = dev.rhi()->createBuffer({static_cast<std::uint64_t>(kCapacity) * sizeof(InstanceRecord), VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback,
