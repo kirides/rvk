@@ -24,6 +24,7 @@
 // native.frame_tap is on). Render thread only.
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -929,11 +930,20 @@ private:
         std::uint64_t leftStamp[orec::kStampFields] = {};         // the record's stamp differs, by first field
         std::uint64_t leftNoRecord = 0, leftView = 0, leftAudit = 0, leftNotOwnable = 0, leftScene = 0;
         std::uint64_t fallback[kFallback] = {};                   // owned ops composed late: materials, view, object window, refused draw, ...
+        static constexpr std::size_t kLate = 20;
+        std::uint64_t late[kLate] = {};                           // F15-1: the same ops by root reason (static_ops_owned.cpp kLateNames)
         std::uint64_t touches = 0, lightmaps = 0, stream3 = 0;
         std::uint64_t compactNs = 0, selectNs = 0, buildNs = 0, submitNs = 0, sideNs = 0, matNs = 0, prepNs = 0;
         void add(const OwnedStats& o);
     } ownedW_, ownedT_, ownedShadowW_, ownedShadowT_;
     OwnedStats& ownedStats() { return ownedCur_ == ViewKind::Main ? ownedW_ : ownedShadowW_; }
+    // F15-1 (frame-ownership.md 14.20): the root reason of the refusal being made (set where an owned op is refused, read by composeLate) and the 1 s census
+    int lateDetail_ = 0;
+    struct LateSecond {
+        std::uint64_t ops[2] = {}, views[2] = {}, why[OwnedStats::kLate] = {};
+    } late1s_;
+    std::chrono::steady_clock::time_point late1sAt_{}, lateStart_{};
+    void lateSecondReport();
     d3d9::Device::OwnedReplayStats ownedDevLast_{};
     std::unordered_map<std::uint64_t, bool> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
     std::vector<std::uint64_t> ownedPolled_;                  // material slot -> frame + 1 of the last poll made for an owned op

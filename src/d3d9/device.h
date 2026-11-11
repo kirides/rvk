@@ -952,10 +952,11 @@ public:
         std::uint64_t candidates = 0, sceneDraws = 0, replayedSceneDraws = 0, indirectCalls = 0, records = 0, maxRun = 0, groups = 0;
         std::uint64_t breaks[5] = {};     // runs cut inside one pipeline: vertex input, dynamic state, index binding, frame block, run size
         std::uint64_t fbNotBatchable = 0, fbVariantKind = 0, fbVariantFailed = 0, fbVariantPending = 0, fbPipelinePending = 0, fbNoRoom = 0, fbRingFull = 0, fbNullAddress = 0;
+        std::uint64_t earlyPipelines = 0;  // F15-1: v2 / pulled pipelines requested while the draw's v1 pipeline was still being built
         std::uint64_t checks = 0, checkedRecords = 0, checkedBytes = 0, checkDiffering = 0, checkSkipped = 0;
         // S-1a: pixel shader form per draw kind x UberWhy: counted per scene draw decision (decided) and per owned item per flush (owned)
-        std::uint64_t uberDecided[static_cast<std::size_t>(draws::Kind::Count)][6] = {};
-        std::uint64_t uberOwned[static_cast<std::size_t>(draws::Kind::Count)][6] = {};
+        std::uint64_t uberDecided[static_cast<std::size_t>(draws::Kind::Count)][7] = {};  // [kind][UberWhy]
+        std::uint64_t uberOwned[static_cast<std::size_t>(draws::Kind::Count)][7] = {};
         // S-1b: vertex shader form per draw kind: 0 translated (not covered) / 1 ubershader / 2 failed (translated)
         std::uint64_t uberVsDecided[static_cast<std::size_t>(draws::Kind::Count)][3] = {};
         std::uint64_t uberVsOwned[static_cast<std::size_t>(draws::Kind::Count)][3] = {};
@@ -1360,6 +1361,20 @@ public:
     std::uint64_t f2c4BucketKey(const CachedDraw& c) const;
     // every registered observer reads no more than an owned draw provides (DrawObserver::Registers)
     int variantRefusal(int site, const CachedDraw& c);  // (deriveScene's code 4, logged)
+    // F15-1 (frame-ownership.md 14.20): the last code-4 refusal's site and whether the record's scene forms were still being built when it was composed (the composed-late census)
+    // F15-1: a texture an owned draw samples that is not ready for sampling (a render target still in its attachment layout, a pending upload): ownedTextureNeedsPrep
+    // asks (no side effects), ownedPrepTexture makes it ready exactly as prepareTextures does for a composed draw at the same place (the caller flushed its queued items first)
+    bool ownedTextureNeedsPrep(const Texture* t) const;
+    void ownedPrepTexture(Texture* t);
+    // F15-1: the variant build queue now: jobs waiting + building, and the run's built / failed totals (the composed-late census)
+    void variantQueue(std::size_t& waiting, std::uint64_t& built, std::uint64_t& failed);
+    int lastVariantSite() const { return lastVariantSite_; }
+    bool lastVariantPending() const { return lastVariantPending_; }
+    int lastVariantSite_ = 0;
+    bool lastVariantPending_ = false;
+    // F15-1: request every scene form + pipeline of a draw at its first sight (default; RVK_F15_BASELINE=1 = the old one-after-the-other chain, A/B)
+    std::uint64_t ownedTexturePreps_ = 0;  // F15-1: textures an owned draw made ready (instead of composing its op late)
+    bool earlyForms_ = GetEnvironmentVariableA("RVK_F15_BASELINE", nullptr, 0) == 0;
     bool ownedObserversOk() const;
     bool observersWantLighting() const;  // F-VAR: an observer reads the lighting registers (Registers::MaterialLighting)
     bool ownedReplayActive() const { return ownedReplay_; }
@@ -1663,6 +1678,7 @@ public:
         Skipped = 3,     // class kept translated by debug.ubershader_skip
         NoRequest = 4,   // the engine's request of this shader is unknown (no Shader::source)
         Failed = 5,      // the ubershader did not build (or the translated scene form was taken first): translated
+        NoPixel = 6,     // F15-1: no pixel shader at all (S-6 native.depth_z: a depth-only z / cascade draw without texkill has no fragment stage); not a fallback
         Count
     };
     std::uint8_t uberVsFormOf(const Shader& vs, VariantSlot slot) const;
@@ -1969,15 +1985,33 @@ private:
     // Pipelines of earlier runs (<cacheDir>/pipelines.keys): the shader hashes + the rest of the description. When both
     // shaders of a known pipeline exist (they are created while the game loads), it is built in the background, so its
     // first draw does not stall. New pipelines are appended and the file is rewritten every 10 s.
+    // F15-1 (frame-ownership.md 14.20): a key also names the VARIANT a stage's module is (vsSlot / psSlot = VariantSlot, kBaseModule = the shader's own module):
+    // the scene forms of the owned path are variants, and their pipelines are built in the background (prewarmOncePipeline), so before F15-1 they were never
+    // remembered. At a shader's creation the variants of its known keys are requested and the pipeline is built once both modules exist (prewarmVariantKeys).
+    static constexpr std::uint8_t kBaseModule = 0xff;
+    static constexpr std::uint8_t kNoModule = 0xfe;  // (psSlot: no fragment stage, S-6's depth-only forms; ps = the vertex shader's hash)
     struct PipelineKey {
         std::uint64_t vs = 0;
         std::uint64_t ps = 0;
+        std::uint8_t vsSlot = kBaseModule, psSlot = kBaseModule;
+        std::uint8_t pad[6] = {};
         PipelineDesc desc{};  // vs / fs = VK_NULL_HANDLE
     };
     void loadPipelineKeys();
     void savePipelineKeys();
     void recordPipelineKey(const PipelineDesc& pd);
+    void recordBackgroundKey(const PipelineDesc& pd);  // F15-1: a pipeline requested in the background (scene forms), deduplicated by a hash of the description
     void prewarmPipelines(std::uint64_t shaderHash);
+    void prewarmVariantKeys(std::uint64_t shaderHash, VariantSlot slot);  // F15-1: a variant module was built: the known keys waiting for it
+    bool prewarmKey(std::size_t index);                                    // F15-1: false = a variant module is missing (requested; the key waits for it)
+    std::unordered_map<rhi::ShaderModule, std::pair<std::uint64_t, std::uint8_t>> variantHashes_;  // variant module -> (shader hash, slot) (under shaderMutex_)
+    std::unordered_multimap<std::uint64_t, std::size_t> variantWaitKeys_;  // mix(shader hash, slot) -> keys_ index waiting for that variant (under keysMutex_)
+    std::unordered_set<std::uint64_t> backgroundKeys_;
+    std::unordered_set<std::size_t> keysPrewarmed_;
+    std::atomic<bool> destroying_{false};  // F15-1: destroy() began: no variant request / key prewarm from a worker thread (they would restart the stopped variant workers)                        // keys_ indices prewarmKey built (under keysMutex_)                     // description hashes recordBackgroundKey saw (under keysMutex_)
+    struct KeyStats {
+        std::atomic<std::uint64_t> variantKeysLoaded{0}, variantRequests{0}, variantPrewarmed{0}, basePrewarmed{0}, recorded{0}, waits{0};
+    } keyStats_;
     std::mutex keysMutex_;
     std::vector<PipelineKey> keys_;
     std::unordered_multimap<std::uint64_t, std::size_t> pendingKeys_;  // shader hash -> index into keys_, not yet built
