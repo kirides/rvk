@@ -481,7 +481,8 @@ void MeshPartTable::collectFetch(d3d9::Device& dev) {
         f.readback->invalidate();
         const auto* got = static_cast<const std::uint32_t*>(f.readback->map());
         std::uint64_t bad = 0;
-        const auto close = [](float a, float b) { return std::fabs(a - b) <= 1e-5f * std::max(1.0f, std::fabs(b)); };
+        // (a NaN the engine's vertex data holds is fetched as that NaN: equal; found by the F8-1 soak, frame-ownership.md 14.30)
+        const auto close = [](float a, float b) { return (std::isnan(a) && std::isnan(b)) || std::fabs(a - b) <= 1e-5f * std::max(1.0f, std::fabs(b)); };
         for (std::size_t i = 0; i < f.expect.size(); ++i) {
             const Fetch::Expect& e = f.expect[i];
             const std::uint32_t* w = got + i * 20;

@@ -1445,6 +1445,19 @@ public:
     bool ownedObserversOk(std::string* why = nullptr) const;  // (`why`: the first observer that gates, named)
     bool observersWantLighting() const;  // F-VAR: an observer reads the lighting registers (Registers::MaterialLighting)
     bool ownedReplayActive() const { return ownedReplay_; }
+    // F8-1 (frame-ownership.md 14.30): while ownedObserve shows an owned persistent draw to the per-draw observers, its record (persistent slot id, derivation
+    // signature, env epoch, rewritten this frame) and the retained draw; null otherwise (composed draws, the bulk path: RtScene::observeOwned has the record view)
+    const OwnedObsInfo* ownedObsInfo() const { return obsInfo_; }
+    const CachedDraw* ownedObsDraw() const { return obsDraw_; }
+    // ... and a composed draw issued now (drawIndexedPrimitive's observer loop): its query, built once on first ask (null outside that loop)
+    const ReplaceQuery* immediateQuery() {
+        if (!immArmed_) return nullptr;
+        if (!immBuilt_) {
+            immFn_(immCtx_, immQuery_);
+            immBuilt_ = true;
+        }
+        return &immQuery_;
+    }
     // F4-3 (owned_trees.cpp, docs/research/frame-ownership.md 7.25): the SpeedTree draws of the main view as scene draws. `setSceneTrees`: a SpeedTree draw issued while a scene issue is
     // on gets its scene ABI v2 form (pipeline only; the composed draw itself is NOT turned into a scene packet: its instance count would be lost).
     // ownedTreeObserversOk: no observer wants the main view's tree draws. allocOwnedRing: a ring block of this frame (the caller's rows). ownedTreeFlush: the frame's per-instance
@@ -1998,6 +2011,12 @@ private:
     const OwnedWindows* owned_ = nullptr;      // setOwnedWindows
     std::uint32_t ownedServed_[2] = {};        // per stage: the windows of the draw being prepared that came from owned_ (verifySplit skips them)
     OwnedStats ownedStats_;
+    const OwnedObsInfo* obsInfo_ = nullptr;    // F8-1: ownedObsInfo()
+    bool immArmed_ = false, immBuilt_ = false; // F8-1: immediateQuery()
+    void (*immFn_)(const void*, ReplaceQuery&) = nullptr;  // (drawIndexedPrimitive's query builder)
+    const void* immCtx_ = nullptr;
+    ReplaceQuery immQuery_;
+    const CachedDraw* obsDraw_ = nullptr;
     bool ownedReplay_ = false;                 // F2c-3: replayOwned is preparing the draw (the register file is not the draw's: no verification against it)
     bool ownedWindowsServed(std::uint32_t* stageOut = nullptr, std::uint32_t* windowOut = nullptr, std::uint32_t* needOut = nullptr) const;
     void loadOwnedRegisters(const OwnedWindows& ow);

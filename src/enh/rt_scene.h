@@ -55,6 +55,12 @@ struct TreeWindState {
     std::uint64_t jobs = 0, owned = 0;
 };
 TreeWindState treeWindState();
+// F8-1 (native.rt_records): for the stages line: armed (setting on, scene active) and the owned draws whose sightings were replayed from their record script
+struct RtRecordsState {
+    bool armed = false;
+    std::uint64_t replayed = 0;
+};
+RtRecordsState rtRecordsState();
 
 class RtScene final : public d3d9::DrawObserver {
 public:
@@ -137,6 +143,16 @@ public:
     // kTableCompare frames with the pre-filter off and diffs each observed draw against its entry.
     void setTableEntries(bool on, bool compare);
     bool tableEntries() const { return tableOn_; }
+    // F8-1 (docs/research/frame-ownership.md 14.30; native.rt_records, Full, Debug): the RT scene from the owned record set. An owned persistent draw (static / instanced
+    // mesh, any view; Device::ownedObsInfo or the bulk record view) is observed in full once; what that observation did to the scene (its sightings: instance key, rows,
+    // owner, flags, data word, view; the BLAS, the material slot) is kept as the record's script, keyed by the persistent slot id. While the record is unchanged (retained draw,
+    // derivation signature, env epoch, not rewritten), the rows its windows hold are byte-equal to the script's, the BLAS, its material slot (not due for a refresh) and the
+    // engine material of a depth-only draw are what the script saw, the draw is not observed: the script's sightings are replayed (Registry::see with the same arguments, the
+    // material applied as materialOf would), i.e. the registry and so the TLAS end in the same state. Every kRecordRelearn-th frame per record and on check frames
+    // (every kRecordCheck-th) the draw is observed in full again; a check frame compares the fresh script with the stored one (DIFFERING must stay 0) and the TLAS's
+    // world instances with the previous frame's when the camera did not move (rvk.log `rt: scene records (5 s)`).
+    void setRecordReplay(bool on);
+    bool recordReplay() const { return f81On_; }
 
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
@@ -286,6 +302,11 @@ private:
     bool ensureResources();
     void destroyResources();
     Blas* findBlas(std::uint64_t id);
+    // the instance's BLAS without a lookup (Registry::Instance::user, set when it was added)
+    Blas* blasOf(const rt::Registry::Instance& in) {
+        if (in.user == nullptr) in.user = findBlas(in.blas);
+        return static_cast<Blas*>(in.user);
+    }
     void dropBlas(std::uint64_t id, bool countEvicted);
     void learnExcluded(const d3d9::ReplaceQuery& q, bool water);  // water / alpha-blended meshes of the main view
     // the material of the draw `q` for the BLAS (0 = none / not eligible) and the draw's rank: 4 the main view's opaque
@@ -304,6 +325,14 @@ private:
         float uvMap[2][4]{};
     };
     MaterialFields materialFields(const RtMaterial* m) const;
+    // record(): the frame's materialFields per material (a pure function of the material and its textures' state at that moment: one evaluation per material and
+    // frame instead of one per instance; frame-ownership.md 14.30)
+    std::unordered_map<const RtMaterial*, MaterialFields> fieldsMemo_;
+    const MaterialFields& fieldsOf(const RtMaterial* m) {
+        auto [it, fresh] = fieldsMemo_.try_emplace(m);
+        if (fresh) it->second = materialFields(m);
+        return it->second;
+    }
     matpack::MaterialPack* pack_ = nullptr;
     // glass panes (materials.glass, docs/research/material-rt.md 8): the main view's blended draws of pack entries with transmission > 0 enter the scene
     // under their own mask (they are in no other ray's way)
@@ -326,6 +355,7 @@ private:
     void processCompactions(rhi::CommandList& cl, std::uint32_t slot);
     void buildPending(rhi::CommandList& cl, std::uint32_t slot);
     void evictOverBudget();
+    std::vector<std::uint64_t> staleScratch_;
     // level of detail: proxies (queued from record() for instances beyond the range, built when their job is done)
     void queueProxy(Blas& b);
     void buildProxies(rhi::CommandList& cl);
@@ -511,6 +541,119 @@ private:
     std::uint32_t nextDynId_ = 1u << 30;
     std::uint64_t dynBuilt_ = 0, dynRefit_ = 0;  // interval counters
 
+    // ---- F8-1 record scripts (setRecordReplay) ----
+    struct F81Sight {
+        std::uint64_t key = 0, owner = 0;
+        rt::Rows rows{};
+        std::uint32_t reg = 0;  // the VS register of the first row (c33 plain, c[32 + 4 v + 1] of a batch)
+        std::uint32_t flags = 0, data = 0;
+        std::uint8_t view = 0;
+    };
+    struct F81Script {
+        const void* cd = nullptr;
+        std::uint64_t sig = 0, epoch = 0, matSig = 0, learned = 0, state = 0;
+        const void* entity = nullptr;
+        const void* tagMaterial = nullptr;
+        const void* engineMaterial = nullptr;  // a depth-only / batch draw's material from the engine's sub-mesh (learnEngineMaterials)
+        std::uint32_t opDesc = 0;
+        std::uint64_t blas = 0;
+        std::uint32_t material = 0, exclEpoch = 0;
+        std::uint8_t rank = 0, salt = 0, cls = 0;
+        bool mainOpaque = false, engineDepth = false, engineBatch = false, valid = false, reached = false, bad = false;
+        std::vector<F81Sight> sights;
+        // an instanced draw: the instance stream observe() read (TEXCOORD4 of the device's stream binding at the observation): replayed only while it reads the same
+        bool instanced = false, fromStream = false;
+        int stream = -1;
+        std::uint32_t streamOffset = 0, n = 0;
+        std::vector<float> index;
+    };
+    // observe()'s read of an instanced draw's TEXCOORD4 instance indices (false: not readable)
+    bool readInstanceIndex(d3d9::Device& dev, int stream, std::uint32_t offset, std::uint32_t n, float* index) const;
+    struct F81Key {
+        bool valid = false;
+        std::uint32_t id = 0;
+        const void* cd = nullptr;
+        std::uint64_t sig = 0, epoch = 0;
+        bool changed = false;
+        const d3d9::OwnedWindows* ow = nullptr;
+        bool composed = false;  // a composed draw's packet replay (Device::replayDraw): keyed by its retained draw, rows from the register file
+        const d3d9::ReplaceQuery* imm = nullptr;  // a composed draw issued now (no retained draw): keyed by its identity hash (cd = that hash)
+    };
+    F81Script& f81Script(const F81Key& k);
+    const float* f81Rows(const F81Key& k, std::uint32_t reg) const;
+    static std::uint64_t f81State(const d3d9::ReplaceQuery& q);
+    std::unordered_map<const void*, F81Script> f81c_;  // composed packet replays' scripts, by retained draw
+    F81Key f81Key(const d3d9::CoverQuery& d) const;
+    bool f81Cover(const d3d9::CoverQuery& d);
+    bool f81Replay(F81Script& s, const d3d9::CoverQuery& d, const F81Key& k, bool apply);
+    void f81Finish(d3d9::Device& dev);
+    bool f81Same(const F81Script& a, const F81Script& b, const char*& what) const;
+    static const float* windowRows(const d3d9::OwnedWindows& ow, std::uint32_t reg);
+    static const void* batchMaterialOf(const d3d9::draws::Tag* tag, bool instanced, std::uint32_t primitiveType, std::uint32_t first, std::uint32_t primitives);
+    struct F81Digest {
+        std::uint32_t id = 0;
+        std::uint64_t hash = 0;
+        std::uint64_t as = 0;
+        std::uint32_t mask = 0, flags = 0, albedo = 0, alpha = 0;
+        float t[3]{};
+        bool operator<(const F81Digest& o) const { return id < o.id; }
+    };
+    void f81TlasDigest(std::vector<F81Digest>& digest, const float camera[3]);
+    static constexpr std::uint64_t kRecordRelearn = 32;  // frames: a replayed record is observed again (<= half the materials' refresh period)
+    static constexpr std::uint64_t kRecordCheck = 10;    // frames between check frames (every record observed in full, scripts compared)
+    bool f81On_ = false;
+    std::vector<F81Script> f81_;   // by persistent record id
+    F81Script f81Scratch_;         // the script of the observation in progress
+    F81Script* f81Rec_ = nullptr;  // observe(): recording into f81Scratch_
+    F81Key f81Arm_;                // coversDraw armed the next observe() to record (the draw's record)
+    bool f81ArmCompare_ = false;
+    F81Key f81Cur_;                // observeOwned: the record view in hand (the bulk path has no Device::ownedObsInfo)
+    std::uint32_t exclEpoch_ = 1;  // water materials / keys learned, views changed: every script is stale
+    struct DigestSrc {
+        VkAccelerationStructureInstanceKHR vi;
+        shader::abi::RtGeometryRecord r;
+        std::uint64_t blas = 0;
+        std::uint8_t lod = 0;
+    };
+    std::vector<DigestSrc> digestSrc_;  // the digest frame's world instances as written
+    std::vector<F81Digest> f81PrevDigest_;  // the previous frame's TLAS world instances (id, content hash), sorted
+    bool f81TlasAlways_ = false;           // RVK_F81_TLAS=1: the TLAS compare also with the records off (the observe path's own frame-to-frame noise)
+    float f81PrevCamera_[3]{};
+    // scene events (registry instances added / removed, BLASes built / dropped, proxies built): a TLAS pair across one changed legitimately (either path)
+    std::uint64_t sceneEvents_ = 0, f81PrevEvents_ = 0;
+    std::uint64_t f81PrevFrame_ = 0;
+    struct F81Stats {
+        std::uint64_t asked[3]{}, replayed[3]{}, sights = 0;  // by class: main solid, main z, cascades
+        std::uint64_t composedAsked = 0, composedReplayed = 0;  // of them: composed packet replays
+        std::uint64_t fallNew = 0, fallChanged = 0, fallRelearn = 0, fallCheck = 0, fallInvalid = 0, fallRows = 0, fallBlas = 0, fallMaterial = 0, fallEngine = 0, fallBlended = 0;
+        std::uint64_t learned = 0, unreplayable = 0, noMaterial = 0, noWindow = 0, glass = 0;
+        std::uint64_t compared = 0, matched = 0, differing = 0;
+        std::uint64_t tlasPairs = 0, tlasSkipped = 0, tlasEvents = 0, tlasInstances = 0, tlasDiffering = 0, tlasLogged = 0;
+        double ms = 0.0;
+    } f8s_;
+    const char* f81FirstDiff_ = nullptr;
+    void logRecords(double frames);
+    // F8-1 for the owned SpeedTree runs (Device::ownedTreeObserve: one template draw shown with up to 50 instances' rows at a time): the batch-invariant part of
+    // observe() (shader verdict, declaration, BLAS key + lookup, engine material, material slot, flags) is kept per template draw; a run whose template is unchanged
+    // goes straight to the per-instance sightings (the same loop as observe's). Check frames / relearn frames take the full observe() and compare.
+    struct TreeTpl {
+        bool valid = false, leaf = false, animated = false;
+        rt::BlasKey key;
+        std::uint64_t blas = 0, matSig = 0;
+        std::uint32_t material = 0, flags = 0, alphaWord = 0, exclEpoch = 0;
+        std::uint8_t rank = 0, view = 0, salt = 0;
+        const void* tagMaterial = nullptr;
+    };
+    std::unordered_map<const void*, TreeTpl> treeTpl_;
+    TreeTpl treeTplScratch_;
+    const void* treeTplArm_ = nullptr;  // observe(): learn the template of this draw
+    bool treeTplCompare_ = false;
+    bool treeRunFast(d3d9::Device& dev, const d3d9::ReplaceQuery& q);
+    bool treeTplGuards(const TreeTpl& t, const d3d9::ReplaceQuery& q, const rt::BlasKey& key, Blas*& b, Blas::MaterialSlot*& slot);
+    struct TreeTplStats {
+        std::uint64_t runs = 0, fast = 0, learned = 0, refused = 0, compared = 0, matched = 0, differing = 0, sightings = 0;
+    } tts_;
+
     // ---- F8-0 persistent entries ----
     struct TableEntry {
         const void* entity = nullptr;
@@ -542,6 +685,7 @@ private:
     std::vector<std::uint32_t> entryGen_, entryFree_;
     const TableEntry* coveredEntry_ = nullptr;  // coversDraw's answer: the entry that covered the draw
     void tableDropInstance(std::uint64_t instKey);
+    bool tableCover(const d3d9::CoverQuery& d, bool& entryDecides);  // F8-0's part of coversDraw
     struct BulkStats {
         std::uint64_t calls = 0, records = 0, entered = 0, left = 0, skipped = 0, slow = 0, covered = 0, observed = 0;
     } bs_;
@@ -631,6 +775,14 @@ private:
         std::uint64_t gpuSamples = 0;
     } iv_;
     std::deque<std::pair<std::uint64_t, std::vector<Entry>>> contents_;  // frame value -> the TLAS's instances (last 4)
+    // F8-1 census (frame-ownership.md 14.30; -Perf): observe() by kind x view / pass x source (composed / owned), observeOwned, the pass's parts
+    struct ObsCensus {
+        std::uint64_t calls = 0, sightings = 0;
+        double ms = 0.0;
+    };
+    ObsCensus census_[5][4][2]{};
+    double bulkMs_ = 0.0;
+    double recMs_[6]{};
     std::uint32_t lastInstances_ = 0;
     std::uint64_t lastTriangles_ = 0;
     std::uint64_t lastCharTriangles_ = 0, lastAnimTreeTriangles_ = 0;

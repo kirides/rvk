@@ -1165,14 +1165,17 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const CoverQuery cq{kind, phase, &tag_, geom.userPointer ? nullptr : streams_[0].buffer, geom.indexed && !geom.userPointer ? indices_ : nullptr,
                             streams_[0].offset, streams_[0].stride, primitiveType, geom.first, geom.primitives, geom.baseVertex,
                             (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0, rs_[RS_ALPHABLENDENABLE] != 0, vs_.get(), ps_.get(), tex_.data()};
+        immArmed_ = true;  // (F8-1: immediateQuery for the observers' pre-filter; the query is built once)
+        immBuilt_ = false;
+        immCtx_ = &query;
+        immFn_ = [](const void* ctx, ReplaceQuery& q) { (*static_cast<const decltype(query)*>(ctx))(q); };
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
             if (o->coversDraw(cq)) continue;  // F8-0: a persistent RT table entry holds what this draw would teach
             if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 0);
-            ReplaceQuery q;
-            query(q);
-            o->observe(*this, q);
+            o->observe(*this, *immediateQuery());
         }
+        immArmed_ = false;
     }
     if (!skipObs && !replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
         geom.indexed && !geom.userPointer) {
@@ -2095,6 +2098,11 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             obsNoMotion_ = !obsBone_ && noMotionOf(c);  // (F6-2)
             const CoverQuery cq = coverOf(q);
             obsSite_ = CaptureSite::Retained;  // (capture census)
+            struct RetainedScope {  // F8-1: the retained draw of the replay for the observers (ownedObsDraw; ownedObsInfo stays null: a composed draw)
+                Device& d;
+                RetainedScope(Device& dev, const CachedDraw* cd) : d(dev) { d.obsDraw_ = cd; }
+                ~RetainedScope() { d.obsDraw_ = nullptr; }
+            } retainedScope(*this, &c);
             for (DrawObserver* o : observers_) {
                 if (!o->observes(c.kind, c.phase)) continue;
                 if (o->coversDraw(cq)) continue;  // F8-0

@@ -387,6 +387,17 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
     captureInstances_ = false;
     bool loaded = false;
     const CoverQuery cq = coverOf(q);
+    struct ObsScope {  // F8-1: the record of the draw the per-draw observers are shown (ownedObsInfo)
+        Device& d;
+        ObsScope(Device& dev, const OwnedObsInfo* i, const CachedDraw* c) : d(dev) {
+            d.obsInfo_ = i;
+            d.obsDraw_ = c;
+        }
+        ~ObsScope() {
+            d.obsInfo_ = nullptr;
+            d.obsDraw_ = nullptr;
+        }
+    } obsScope(*this, &info, &c);
     for (std::size_t i = 0; i < observers_.size(); ++i) {
         DrawObserver* o = observers_[i];
         if (!o->observes(c.kind, c.phase)) continue;
