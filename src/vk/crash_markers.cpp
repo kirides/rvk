@@ -29,7 +29,8 @@ bool CrashMarkers::create(Context& ctx) {
     }
     ctx_ = &ctx;
     mapped_ = static_cast<volatile std::uint32_t*>(info.pMappedData);
-    mapped_[0] = mapped_[1] = 0;
+    mapped_[1] = 0;
+    mapped_[0] = 0;
     next_ = 0;
     spdlog::info("vulkan: crash markers on ({}): the unfinished regions are logged after a device loss",
                  amd_ ? "VK_AMD_buffer_marker" : "fill buffer + barriers: the GPU runs the regions one after another");

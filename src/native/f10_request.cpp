@@ -138,6 +138,8 @@ using CtxRequestFn = void (*)(void* ctx, void* db, float fade, std::uint16_t mas
 using BoolGetter = bool (*)(const void* shader);
 using ByteGetter = std::uint8_t (*)(const void* shader);
 using SphereFn = const float* (*)(const void* entity);
+// a vtable slot (a `const void*` element) as a function pointer: clang rejects reinterpret_cast from const void* (casts away qualifiers)
+template <class Fn> Fn slotFn(const void* slot) { return reinterpret_cast<Fn>(const_cast<void*>(slot)); }
 
 Hook<RequestFn> g_request;
 CacheResFn g_cacheResource = nullptr;
@@ -251,15 +253,15 @@ Why prepare(const void* ctx, const void* db, Prepared& p) {
         const void* sh = rdp(mat, 0x70);
         const void* const* vt = sh != nullptr ? static_cast<const void* const*>(rdp(sh, 0)) : nullptr;
         if (sh != nullptr) {
-            s.refracted = reinterpret_cast<BoolGetter>(vt[0x1a8 / 8])(sh);
-            s.blended = reinterpret_cast<BoolGetter>(vt[0x198 / 8])(sh);
+            s.refracted = slotFn<BoolGetter>(vt[0x1a8 / 8])(sh);
+            s.blended = slotFn<BoolGetter>(vt[0x198 / 8])(sh);
         }
-        const std::uint8_t add = sh != nullptr ? reinterpret_cast<ByteGetter>(vt[0x1b0 / 8])(sh) : 0;
+        const std::uint8_t add = sh != nullptr ? slotFn<ByteGetter>(vt[0x1b0 / 8])(sh) : 0;
         s.sortId = sortIdOf(rd<std::uint32_t>(mat, 0x78), sh != nullptr, add, sh != nullptr ? rd<std::int32_t>(sh, 0x7c) : 0);
     }
     // the view depth key from the entity's sphere (vtable +0x268: {r, cx, cy, cz})
     const void* entity = rdp(ctx, 0x10);
-    const auto sphereFn = reinterpret_cast<SphereFn>(static_cast<const void* const*>(rdp(entity, 0))[0x268 / 8]);
+    const auto sphereFn = slotFn<SphereFn>(static_cast<const void* const*>(rdp(entity, 0))[0x268 / 8]);
     const float* sph = sphereFn(entity);
     float plane[4];
     std::memcpy(plane, static_cast<const U8*>(db) + 0x94, sizeof(plane));
@@ -482,11 +484,11 @@ bool requestBody(void* item, void* db, std::uint16_t mask, float fade) {
         const std::uint16_t f = rd<std::uint16_t>(ctx, 0x20);
         if ((f & mask & 1u) != 0) {
             const std::uint64_t tl = timed ? nowNs() : 0;
-            reinterpret_cast<LodFn>(vt[0x30 / 8])(ctx, db);
+            slotFn<LodFn>(vt[0x30 / 8])(ctx, db);
             if (timed) g_classCost[vt].lodNs += nowNs() - tl;
         }
         const auto m = static_cast<std::uint16_t>(f & mask);
-        const auto engineSlot = reinterpret_cast<CtxRequestFn>(vt[0x40 / 8]);
+        const auto engineSlot = slotFn<CtxRequestFn>(vt[0x40 / 8]);
         ++g_w.contexts;
         if (g_pass.mode == 2) {
             compareCtx(ctx, db, fade, m, engineSlot);

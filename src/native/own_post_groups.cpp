@@ -2,8 +2,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 #include <cstring>
 #include <format>

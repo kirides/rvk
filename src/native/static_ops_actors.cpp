@@ -92,7 +92,7 @@ struct Cls {
 };
 enum { kMainZ, kMainSolid, kCascade, kOther, kN };
 const char* const kNames[kN] = {"main z", "main solid", "cascade z", "other"};
-Cls g_win[kN], g_tot[kN];
+Cls g_win[kN];
 std::unordered_set<std::uint64_t> g_parts[kN], g_actors[kN];
 std::uint64_t g_lastFrame = 0, g_report = 0;
 struct Cur {
