@@ -35,7 +35,43 @@ void MaterialTable::releaseGpu() {
 std::uint32_t MaterialTable::lookupOrCreate(const void* key, const void* material) {
     const auto it = slotOf_.find(key);
     if (it != slotOf_.end()) return it->second;
+    const std::uint32_t slot = allocSlot(key, material);
+    if (slot == kNone) return kNone;
+    slotOf_[key] = slot;
+    if (const auto pend = pendingSw_.find(key); pend != pendingSw_.end()) {
+        MaterialRecord& r = table_.shadow()[slot];
+        r.sw[0] = pend->second[0];
+        r.sw[1] = pend->second[1];
+        pendingSw_.erase(pend);
+    }
+    return slot;
+}
+
+std::uint32_t MaterialTable::lookupOrCreateVariant(const Draw& d) {
+    const std::uint64_t vk = (reinterpret_cast<std::uintptr_t>(d.owner) * 0x9E3779B97F4A7C15ull) ^ (d.swHash | 1u);
+    if (const auto it = variantOf_.find(vk); it != variantOf_.end()) {
+        // (the same key with other writes: a hash collision or element data that moved: the overlay follows the composition, the structure version moves)
+        std::vector<SwitchWrite>& o = overlay_[it->second];
+        if (o.size() != d.swCount || std::memcmp(o.data(), d.sw, d.swCount * sizeof(SwitchWrite)) != 0) {
+            o.assign(d.sw, d.sw + d.swCount);
+            polled_[it->second] = 0;
+            structVer_[it->second] = ++structSerial_;
+        }
+        return it->second;
+    }
+    const std::uint32_t slot = allocSlot(d.owner, d.material);
+    if (slot == kNone) return kNone;
+    variantOf_[vk] = slot;
+    varKey_[slot] = vk;
+    overlay_[slot].assign(d.sw, d.sw + d.swCount);
+    ++stats_.variantSlots;
+    return slot;
+}
+
+std::uint32_t MaterialTable::allocSlot(const void* key, const void* material) {
     if (key_.empty()) {
+        varKey_.assign(kCapacity, 0);
+        overlay_.assign(kCapacity, {});
         key_.assign(kCapacity, nullptr);
         seen_.assign(kCapacity, 0);
         polled_.assign(kCapacity, 0);
@@ -61,8 +97,9 @@ std::uint32_t MaterialTable::lookupOrCreate(const void* key, const void* materia
         return kNone;
     }
     std::memset(&table_.shadow()[slot], 0, sizeof(MaterialRecord));
-    slotOf_[key] = slot;
     key_[slot] = key;
+    varKey_[slot] = 0;
+    overlay_[slot].clear();
     seen_[slot] = frame_;
     polled_[slot] = 0;
     lastPs_[0][slot] = lastPs_[1][slot] = nullptr;
@@ -71,21 +108,15 @@ std::uint32_t MaterialTable::lookupOrCreate(const void* key, const void* materia
     structVer_[slot] = ++structSerial_;
     changeWhat_[slot].clear();
     name_[slot] = material != nullptr ? engine::readCString(static_cast<const std::uint8_t*>(material) + 0x40) : std::string();
-    if (const auto pend = pendingSw_.find(key); pend != pendingSw_.end()) {
-        MaterialRecord& r = table_.shadow()[slot];
-        r.sw[0] = pend->second[0];
-        r.sw[1] = pend->second[1];
-        pendingSw_.erase(pend);
-    }
     ++live_;
     peak_ = std::max(peak_, live_);
     return slot;
 }
 
-void MaterialTable::noteSwitchWrite(const void* shader, int kind, std::uint32_t idx) {
+void MaterialTable::noteSwitchWrite(const void* shader, int kind, std::uint32_t idx, bool variant) {
     if (!active_ || shader == nullptr) return;
     std::lock_guard lock(mutex_);
-    ++stats_.switchNotes;
+    ++(variant ? stats_.switchVariantNotes : stats_.switchNotes);
     std::uint32_t m0 = 0, m1 = 0;
     if (kind == 0 && idx < 32) m0 = 1u << idx;
     else if (kind == 1 && idx < 16) m1 = 1u << idx;
@@ -127,6 +158,16 @@ bool MaterialTable::refresh(std::uint32_t slot, const void* key, const Draw& d) 
     MaterialRecord& cur = table_.shadow()[slot];
     MaterialRecord n = cur;
     fillMaterialRecord(n, img, vs, ps, [&](std::uint32_t stage, const void* res) { return d.tex != nullptr ? d.tex(d.texCtx, stage, res) : kMatNoTex; });
+    // F6-2: a switch variant: its value's SetSwitch writes on top of the polled pools (the registers / slot images the switch elements own)
+    for (const SwitchWrite& w : overlay_[slot]) {
+        if (w.kind == 0 && w.idx < n.counts[1]) {
+            std::memcpy(n.vs[w.idx], w.v, 16);
+        } else if (w.kind == 1 && w.idx < n.counts[3]) {
+            std::memcpy(n.ps[w.idx], w.v, 16);
+        } else if (w.kind == 2 && w.idx < kMatSlots && w.idx < ((n.state[2] >> 8) & 0xffu)) {
+            n.slots[w.idx].tex = d.tex != nullptr ? d.tex(d.texCtx, (n.state[2] & 0xffu) + w.idx, w.image) : kMatNoTex;
+        }
+    }
     const bool isNew = cur.info[0] == 0;
     const bool slotsChanged = std::memcmp(n.slots, cur.slots, sizeof(n.slots)) != 0;
     const bool restChanged = std::memcmp(n.counts, cur.counts, sizeof(n.counts)) != 0 || std::memcmp(n.state, cur.state, sizeof(n.state)) != 0 || n.info[3] != cur.info[3] ||
@@ -236,7 +277,8 @@ std::uint32_t MaterialTable::checkDraw(const Draw& d, bool verify) {
     const std::uint64_t t0 = verify ? nowNs() : 0;
     std::lock_guard lock(mutex_);
     ++stats_.draws;
-    const std::uint32_t slot = lookupOrCreate(d.owner, d.material);
+    const std::uint32_t slot = d.swCount != 0 && d.sw != nullptr ? lookupOrCreateVariant(d) : lookupOrCreate(d.owner, d.material);
+    if (d.swCount != 0 && slot != kNone) ++stats_.variantDraws;
     if (slot == kNone) {
         ++stats_.unchecked;
         return kNoSlot;
@@ -372,7 +414,13 @@ void MaterialTable::flush(d3d9::Device& dev, bool verify) {
     if (frame_ % 300 == 0) {
         for (std::uint32_t s = 0; s < used_; ++s) {
             if (key_[s] == nullptr || frame_ - seen_[s] < kIdleFrames) continue;
-            slotOf_.erase(key_[s]);
+            if (varKey_[s] != 0) {
+                variantOf_.erase(varKey_[s]);
+                varKey_[s] = 0;
+                overlay_[s].clear();
+            } else if (const auto it = slotOf_.find(key_[s]); it != slotOf_.end() && it->second == s) {
+                slotOf_.erase(it);
+            }
             key_[s] = nullptr;
             std::memset(&table_.shadow()[s], 0, sizeof(MaterialRecord));
             table_.mark(s);
@@ -399,11 +447,11 @@ void MaterialTable::report() {
     const MaterialStats& p = lastStats_;
     spdlog::info(
         "native: material table (5 s): {} records (peak {}, slots {}); uploads: new {}, poll {}, texture {}, graph {} (other graph variants seen {}) ({:.2f} records / {:.2f} KiB per frame, {} flushed); polls {} ({} unchanged), switch "
-        "notes {}; freed {}; draws {} checked {} (unchecked {}, with switch registers {}): registers {} compared, {} switch-skipped, DIFFERING {}; textures {} compared ({} unresolved), "
+        "notes {} (switch variants: {} slots made, {} draws, {} writes held); freed {}; draws {} checked {} (unchecked {}, with switch registers {}): registers {} compared, {} switch-skipped, DIFFERING {}; textures {} compared ({} unresolved), "
         "sampler states {}, DIFFERING {} + {}; blend / mask {} compared, DIFFERING {}; verify: {} read-backs ({} slots) DIFFERING {}; graphs: {} ids, {} pipelines (run), {:.1f} per frame (max {}); "
         "overflow {} gpu {}, read failures {}; check {:.3f} ms per frame",
         live_, peak_, used_, s.uploadNew, s.uploadPoll, s.uploadTexture, s.uploadGraph, s.graphVariants, static_cast<double>(ts.slotsUploaded - lastSlots_) / static_cast<double>(frames),
-        static_cast<double>(ts.bytes - lastBytes_) / 1024.0 / static_cast<double>(frames), ts.slotsUploaded, s.polls, s.pollsUnchanged, s.switchNotes, s.freed, s.draws, s.checked, s.unchecked,
+        static_cast<double>(ts.bytes - lastBytes_) / 1024.0 / static_cast<double>(frames), ts.slotsUploaded, s.polls, s.pollsUnchanged, s.switchNotes, s.variantSlots, s.variantDraws, s.switchVariantNotes, s.freed, s.draws, s.checked, s.unchecked,
         s.switchDraws, s.regsCompared, s.regsSwitch, s.regsDiffering, s.texCompared, s.texUnresolved, s.stateCompared, s.texDiffering, s.stateDiffering, s.blendCompared, s.blendDiffering,
         ts.verifyDone, ts.verifySlots, ts.verifyBad, graphsRun_.size(), pipelinesRun_.size(), frames_ != 0 ? static_cast<double>(frameGraphSum_) / static_cast<double>(frames_) : 0.0, frameGraphMax_,
         s.overflow, table_.stats().overflow, s.readFailed, static_cast<double>(s.checkNs - p.checkNs) / 1e6 / static_cast<double>(frames));

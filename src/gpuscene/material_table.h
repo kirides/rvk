@@ -40,6 +40,7 @@ namespace rvk::gpuscene {
 struct MaterialStats {
     std::uint64_t uploadNew = 0, uploadPoll = 0, uploadTexture = 0, uploadGraph = 0, graphVariants = 0;  // records (re-)uploaded by cause
     std::uint64_t polls = 0, pollsUnchanged = 0, switchNotes = 0;
+    std::uint64_t switchVariantNotes = 0, variantDraws = 0, variantSlots = 0;  // F6-2: switch writes a variant slot holds (not counted in switchNotes), draws given one, slots made
     std::uint64_t freed = 0;
     std::uint64_t draws = 0, checked = 0, unchecked = 0, switchDraws = 0;
     std::uint64_t regsCompared = 0, regsSwitch = 0, texCompared = 0, texUnresolved = 0, stateCompared = 0, blendCompared = 0;
@@ -61,7 +62,18 @@ public:
     using TexFn = std::uint32_t (*)(void* ctx, std::uint32_t stage, const void* imageRes);
 
     // StaticOps::applySwitch: a SetSwitch element writes `kind` (0 VS pool register, 1 PS pool register, 2 sampler slot) `idx` of `shader`'s pools
-    void noteSwitchWrite(const void* shader, int kind, std::uint32_t idx);
+    // (`variant`: the draw gets a switch variant slot (F6-2): the base record still learns that the register is history dependent, switchNotes does not count it)
+    void noteSwitchWrite(const void* shader, int kind, std::uint32_t idx, bool variant = false);
+
+    // F6-2 (frame-ownership.md 14.23): a switch material's draws get a record of their own per (shader, switch writes): the engine's pools as polled + the SetSwitch writes
+    // of the draw's switch value on top (exact for that value; the base record's switch-written registers hold whichever value was written last, history dependent)
+    struct SwitchWrite {
+        std::uint8_t kind = 0;  // 0 VS pool register, 1 PS pool register, 2 sampler slot image
+        std::uint8_t pad[3] = {};
+        std::uint32_t idx = 0;
+        float v[4]{};
+        const void* image = nullptr;
+    };
 
     struct Draw {
         const void* owner = nullptr;     // the shader object whose pools / slots the composition used (constantsInto / materialSamplers)
@@ -71,6 +83,10 @@ public:
         MaterialDraw draw;
         TexFn tex = nullptr;
         void* texCtx = nullptr;
+        // F6-2: the pass's switch writes (owner == the shader they were applied to): the draw's record is the variant slot of (owner, swHash)
+        const SwitchWrite* sw = nullptr;
+        std::uint32_t swCount = 0;
+        std::uint64_t swHash = 0;
     };
     // after the draw's constants and samplers are composed (engine thread)
     // returns the record's slot (kNoSlot: none: not active / overflow / unreadable)
@@ -107,6 +123,8 @@ private:
     };
     // all under mutex_
     std::uint32_t lookupOrCreate(const void* key, const void* material);
+    std::uint32_t allocSlot(const void* key, const void* material);  // (a fresh slot for `key`, not yet in a map)
+    std::uint32_t lookupOrCreateVariant(const Draw& d);              // F6-2
     // re-reads the record from the engine object; returns false when it could not be read
     bool refresh(std::uint32_t slot, const void* key, const Draw& d);
     const GraphInfo& graphOf(const d3d9::Shader* ps);
@@ -119,6 +137,9 @@ private:
     std::mutex mutex_;
     GpuTable<MaterialRecord> table_;
     std::unordered_map<const void*, std::uint32_t> slotOf_;
+    std::unordered_map<std::uint64_t, std::uint32_t> variantOf_;  // F6-2: (owner, switch writes) -> slot
+    std::vector<std::uint64_t> varKey_;                            // slot -> its variantOf_ key (0 = a base record)
+    std::vector<std::vector<SwitchWrite>> overlay_;                // slot -> the switch writes refresh puts on top of the polled pools
     std::vector<const void*> key_;                 // slot -> key (nullptr = free)
     std::vector<std::uint64_t> seen_;              // slot -> frame last drawn
     std::vector<std::uint64_t> polled_;            // slot -> frame + 1 of the last poll

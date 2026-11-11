@@ -368,7 +368,13 @@ bool StaticOps::ownedSelect(const Op& op) {
         }
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
-        if (const int d = orec::firstDifference(a, st); d >= 0) {
+        int d = orec::firstDifference(a, st);
+        if (d == 4 && rec.actor && actorPickSwap(*it->second, st.lightmaps)) {  // (F6-2: an actor's morph pick seen before: its draws swapped in)
+            a = rec.stamp;
+            a.view = a.materials = 0;
+            d = orec::firstDifference(a, st);
+        }
+        if (d >= 0) {
             // (a scrub finding with no mark = nothing announced it: an EVENT MISS; the polled-class fields never get here from the fast path)
             if (scrub) depEventMiss(op, rec, d, "rolling scrub");
             ++W.leftStamp[static_cast<std::size_t>(d)];
@@ -394,7 +400,10 @@ bool StaticOps::ownedSelect(const Op& op) {
             return false;
         }
     }
-    if (rec.actor) ++actorW_.byView[ownedCur_ != ViewKind::Main ? 2 : op.list == List::Solid ? 1 : 0];
+    if (rec.actor) {
+        ++actorW_.byView[ownedCur_ != ViewKind::Main ? 2 : op.list == List::Solid ? 1 : 0];
+        ++actorW_.cenOwned[ownedCur_ == ViewKind::Main ? 0 : ownedCur_ == ViewKind::Cascade ? 1 : 2][op.list == List::Solid ? 1 : 0];
+    }
     return true;
 }
 
