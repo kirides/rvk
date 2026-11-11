@@ -9,6 +9,7 @@
 #include <string>
 
 #include <spdlog/spdlog.h>
+#include <windows.h>
 
 #include "shader/embedded.h"
 
@@ -175,6 +176,14 @@ void MeshPartTable::dropPart(std::uint32_t slot, bool byBuffer) {
     --liveParts_;
     if (byBuffer) ++stats_.droppedByBuffer;
     else ++stats_.idleFreed;
+}
+
+d3d9::DrawObserver::Registers MeshPartTable::registersRead() const {
+    static const bool oldGate = [] {
+        char v[8] = {};
+        return GetEnvironmentVariableA("RVK_MESHPARTS_GATE", v, sizeof(v)) != 0 && v[0] == '1';
+    }();
+    return oldGate ? Registers::All : Registers::None;
 }
 
 void MeshPartTable::bufferChanged(std::uint64_t bufferId) {

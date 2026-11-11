@@ -581,6 +581,8 @@ public:
     // CPU from the illumination table's records for the owned draw (LightingImages::cpuImage)
     enum class Registers : std::uint8_t { None, Material, MaterialLighting, All };
     virtual Registers registersRead() const { return Registers::All; }
+    // the observer's name for the owned path's gate reasons (rvk.log `native: owned static: gated: ...`, the stage line)
+    virtual const char* observerName() const { return "an unnamed observer"; }
     // the buffer `id` got a new static GPU copy (a new generation: the old VkBuffer and its address are retired) or is
     // released (its GPU copy dies after the frame): anything built from it must be forgotten
     virtual void bufferChanged(std::uint64_t /*bufferId*/) {}
@@ -1356,7 +1358,7 @@ public:
     std::uint64_t f2c4BucketKey(const CachedDraw& c) const;
     // every registered observer reads no more than an owned draw provides (DrawObserver::Registers)
     int variantRefusal(int site, const CachedDraw& c);  // (deriveScene's code 4, logged)
-    bool ownedObserversOk() const;
+    bool ownedObserversOk(std::string* why = nullptr) const;  // (`why`: the first observer that gates, named)
     bool observersWantLighting() const;  // F-VAR: an observer reads the lighting registers (Registers::MaterialLighting)
     bool ownedReplayActive() const { return ownedReplay_; }
     // F4-3 (owned_trees.cpp, docs/research/frame-ownership.md 7.25): the SpeedTree draws of the main view as scene draws. `setSceneTrees`: a SpeedTree draw issued while a scene issue is
@@ -1368,7 +1370,7 @@ public:
         if (on != sceneTrees_) ++variantEpoch_;
         sceneTrees_ = on;
     }
-    bool ownedTreeObserversOk() const;
+    bool ownedTreeObserversOk(std::string* why = nullptr) const;  // (`why`: the first observer that gates, named)
     // at least one observer wants this template's draws (kind / phase), so ownedTreeObserve is to be called for its runs
     bool ownedTreeObserved(const CachedDraw& c) const;
     // F-VAR2: show the observers one owned vegetation batch (`ow` = the template's windows with the batch's lighting entry); returns the batches shown (0 or 1)
@@ -1395,7 +1397,7 @@ public:
     bool ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions,
                         const VegInstances* inst = nullptr);
     // no observer wants the main view's vegetation draws (the owned vegetation pass shows them nothing)
-    bool ownedVegObserversOk() const;
+    bool ownedVegObserversOk(std::string* why = nullptr) const;  // (`why`: the first observer that gates, named)
     std::uint64_t treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok);
     bool treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;
     struct TreeFlushStats {

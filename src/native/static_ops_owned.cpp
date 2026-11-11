@@ -68,6 +68,7 @@ static_assert(std::size(kFallbackNames) == kFbCount);
 void StaticOps::OwnedStats::add(const OwnedStats& o) {
     views += o.views; owned += o.owned; drawnOps += o.drawnOps; draws += o.draws; lateOps += o.lateOps; lateDraws += o.lateDraws; undrawn += o.undrawn;
     checkViews += o.checkViews; warmupViews += o.warmupViews; gatedViews += o.gatedViews; leanFrames += o.leanFrames; seen += o.seen;
+    for (std::size_t i = 0; i < kGateCount; ++i) gated[i] += o.gated[i];
     for (std::size_t i = 0; i < orec::kExclCount; ++i) leftExcl[i] += o.leftExcl[i];
     for (std::size_t i = 0; i < orec::kStampFields; ++i) leftStamp[i] += o.leftStamp[i];
     leftNoRecord += o.leftNoRecord; leftView += o.leftView; leftAudit += o.leftAudit; leftNotOwnable += o.leftNotOwnable; leftScene += o.leftScene;
@@ -167,11 +168,48 @@ bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade) {
         ++f2c4::counters().views;
         ++f2c4::counters().curViews;
     }
-    const bool ready = ownedRecords_ && recs_ && sceneDraws_ && dev_.sceneDrawsActive() && ownedWindows_ && gpuscene::windowtables().active() && ownedObjects_ &&
-                       gpuscene::objecttable().ready() && gpuscene::lightingimages().active() && gpuscene::lightingimages().ready() && gpuscene::materialtable().active() &&
-                       tableLit_ && dev_.ownedObserversOk() && verified_ > 0;
+    std::string obsWhy;
+    int gate = -1;
+    {
+        using G = OwnedGate;
+        G g = G::Count;
+        if (!(ownedRecords_ && recs_)) g = G::Records;
+        else if (!(sceneDraws_ && dev_.sceneDrawsActive())) g = G::SceneDraws;
+        else if (!(ownedWindows_ && gpuscene::windowtables().active())) g = G::Windows;
+        else if (!ownedObjects_) g = G::ObjectsOff;
+        else if (!gpuscene::objecttable().ready()) g = G::ObjectsPending;
+        else if (!gpuscene::lightingimages().active()) g = G::LightingOff;
+        else if (!gpuscene::lightingimages().ready()) g = G::LightingPending;
+        else if (!gpuscene::materialtable().active()) g = G::MaterialTable;
+        else if (!tableLit_) g = G::TableLighting;
+        else if (!dev_.ownedObserversOk(&obsWhy)) g = G::Observer;
+        else if (verified_ <= 0) g = G::NotVerified;
+        if (g != G::Count) gate = static_cast<int>(g);
+    }
+    const bool ready = gate < 0;
+    {
+        // the gate's state per view kind, logged once per change (with how many views the previous state lasted)
+        const std::size_t k = vkind == ViewKind::Main ? 0 : 1;
+        if (gate == static_cast<int>(OwnedGate::Observer) && obsWhy != ownedGateObs_) {
+            ownedGateObs_ = obsWhy;
+            ownedGateCur_[k] = -3;  // (another observer: a change)
+        }
+        if (gate != ownedGateCur_[k]) {
+            const char* kindName = k == 0 ? "main views" : "cascade views";
+            if (gate >= 0) {
+                spdlog::info("native: owned static: {} gated: {} (after {} views in the previous state)", kindName, gate == static_cast<int>(OwnedGate::Observer) ? obsWhy : std::string(kGateNames[gate]),
+                             ownedGateSince_[k]);
+            } else if (ownedGateCur_[k] != -2) {
+                spdlog::info("native: owned static: {} gate open (after {} gated views)", kindName, ownedGateSince_[k]);
+            }
+            ownedGateCur_[k] = gate;
+            ownedGateSince_[k] = 0;
+        }
+        ++ownedGateSince_[k];
+    }
     if (!ready) {
         ++W.gatedViews;
+        ++W.gated[static_cast<std::size_t>(gate)];
         if (ownedLogged_ < 4) {
             ++ownedLogged_;
             spdlog::info("native: owned static: not this view (records {}, scene draws {} / {}, windows {}, objects {} / {}, lighting images {} / {}, material table {}, table lighting {}, observers ok {}, static ops verified {})",
@@ -205,6 +243,16 @@ bool StaticOps::ownedBegin(void* desc, ViewKind vkind, std::int32_t cascade) {
     U8* depthImage = ptr(desc, 8);
     V.zColor = depthImage != nullptr && ptr(depthImage, 0x60) != nullptr;
     return true;
+}
+
+std::string StaticOps::ownedGateText(const OwnedStats& w) const {
+    std::string out;
+    for (std::size_t i = 0; i < kGateCount; ++i) {
+        if (w.gated[i] == 0) continue;
+        const std::string name = i == static_cast<std::size_t>(OwnedGate::Observer) && !ownedGateObs_.empty() ? ownedGateObs_ : std::string(kGateNames[i]);
+        out += std::format("{}{} {}", out.empty() ? "" : ", ", name, w.gated[i]);
+    }
+    return out;
 }
 
 bool StaticOps::ownedListOk(void* db, List list) {
@@ -1241,12 +1289,13 @@ void StaticOps::ownedReport() {
         if (w.leftScene != 0) left += std::format("; not a scene draw {}", w.leftScene);
         if (w.leftAudit != 0) left += std::format("; read log {}", w.leftAudit);
     }
+    const auto gateList = [this](const OwnedStats& s) { const std::string g = ownedGateText(s); return g.empty() ? g : std::format(": {}", g); };
     const double nv = static_cast<double>(frames);
     spdlog::info(
-        "native: owned static (5 s): {} main views ({} compacted, {} check frames, {} warm-up, {} gated off), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
+        "native: owned static (5 s): {} main views ({} compacted, {} check frames, {} warm-up, {} gated off{}), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
         "(fallbacks: {}), undrawn {}; left to the engine path: {}; replay refusals: {}; scene indirect calls {}; check frames DIFFERING {} draws; side effects: {} touches, {} lightmap binds, {} stream 3; "
         "CPU per main view: compaction {:.1f} us (of it the stamp / record checks {:.1f}), view + windows setup {:.1f} us, material polls + stamps {:.1f} us, build {:.1f} us (the rest: derivation inputs, windows, object records), side effects {:.1f} us, submit {:.1f} us (replayOwned incl. observers)",
-        w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
+        w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, gateList(w), w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
         w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), w.undrawn, left, refused.empty() ? "none" : refused, dev_.sceneStats().indirectCalls - ownedIndirectLast_,
         recs_ ? recs_->total.differing : 0, w.touches, w.lightmaps, w.stream3, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.selectNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
         static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0);
@@ -1289,13 +1338,14 @@ void StaticOps::ownedShadowReport() {
             shadowDraws += kv.second->draws.size();
         }
     }
+    const auto gateList = [this](const OwnedStats& s) { const std::string g = ownedGateText(s); return g.empty() ? g : std::format(": {}", g); };
     const double nv = static_cast<double>(std::max<std::uint64_t>(1, w.views));
     const std::uint64_t miss = q.scrubMiss + q.checkMiss;
-    spdlog::info("native: owned shadows (5 s): {} cascade views ({} compacted, {} check frames, {} warm-up, {} gated off), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
+    spdlog::info("native: owned shadows (5 s): {} cascade views ({} compacted, {} check frames, {} warm-up, {} gated off{}), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
                  "(fallbacks: {}), undrawn {}; left to the engine path: {}; persistent: {} passes ({} env epoch changes, {} flush failures, {} reserve failures), {} draws: reused {} ({:.1f} %), derived {} ({} rewrote the slot), refused {} "
                  "(table full {}, observer {}), rolling scrub {} draws MISS {}; check frames: {} compared, {} skipped, MISS {}; {} cascade records / {} draws; CPU per cascade view: compaction {:.1f} us, view + windows {:.1f} us, "
                  "material polls {:.1f} us, build {:.1f} us, side effects {:.1f} us, submit {:.1f} us, flush {:.1f} us",
-                 w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
+                 w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, gateList(w), w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
                  w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), w.undrawn, left, q.passes, q.envChanges, q.flushFailed, q.arenaFailed, q.draws, q.reused,
                  q.draws != 0 ? 100.0 * static_cast<double>(q.reused) / static_cast<double>(q.draws) : 0.0, q.derived + q.scrubbed, q.derivedChanged, q.refused, q.tableFull, q.observerRefused, q.scrubbed, q.scrubMiss,
                  q.checkCompared, q.checkSkipped, q.checkMiss, shadowRecs, shadowDraws, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,

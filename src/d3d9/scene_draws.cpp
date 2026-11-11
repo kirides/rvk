@@ -555,11 +555,17 @@ bool Device::ownedWindowsServed(std::uint32_t* stageOut, std::uint32_t* windowOu
     return true;
 }
 
-bool Device::ownedObserversOk() const {
+bool Device::ownedObserversOk(std::string* why) const {
     for (const DrawObserver* o : observers_) {
         const DrawObserver::Registers r = o->registersRead();
-        if (r == DrawObserver::Registers::All) return false;
-        if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) return false;  // (no lighting entries: the registers would be stale)
+        if (r == DrawObserver::Registers::All) {
+            if (why != nullptr) *why = std::format("observer '{}' declares no register reads (Registers::All)", o->observerName());
+            return false;
+        }
+        if (r == DrawObserver::Registers::MaterialLighting && !gpuscene::lightingimages().active()) {  // (no lighting entries: the registers would be stale)
+            if (why != nullptr) *why = std::format("observer '{}' reads the lighting registers and native.lighting_images is off", o->observerName());
+            return false;
+        }
     }
     return true;
 }

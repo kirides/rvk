@@ -644,6 +644,13 @@ void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t casca
     const bool ready = ownedPersistent_ && !ownedTripped_ && ownedStatic_ && tableLit_ && T.ramp != nullptr && tab.ready() && gpuscene::viewtable().ready() && dev_.sceneViewsReady() &&
                        dev_.ownedTreeObserversOk() && treesVerified_ > 0 && lean_ && leanAnimVerified_ > 0 && qsort_ != nullptr;
     if (!ready) {
+        std::string obs;
+        std::string why = !ownedPersistent_ ? "native.owned_persistent off" : ownedTripped_ ? "owned path tripped" : !ownedStatic_ ? "owned static off" : !tableLit_ ? "table lighting off"
+                        : T.ramp == nullptr ? "no identity ramp" : !tab.ready() ? "draw record table not ready" : !(gpuscene::viewtable().ready() && dev_.sceneViewsReady()) ? "view table not ready"
+                        : !dev_.ownedTreeObserversOk(&obs) ? obs : treesVerified_ <= 0 ? "trees not verified" : !lean_ ? "native.lean off" : leanAnimVerified_ <= 0 ? "lean animation not verified"
+                        : "no qsort";
+        if (why != T.gate) spdlog::info("native: owned trees: gated: {}", why);
+        T.gate = std::move(why);
         if (T.logged < 6) {
             ++T.logged;
             spdlog::info("native: owned trees: not this view (persistent {}, tripped {}, owned static {}, table lighting {}, ramp {}, record table {}, view table {} / {}, observers ok {}, trees verified {}, lean {} / {}, qsort {})", ownedPersistent_,
@@ -652,6 +659,8 @@ void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t casca
         }
         return;
     }
+    if (!T.gate.empty()) spdlog::info("native: owned trees: gate open (was: {})", T.gate);
+    T.gate.clear();
     T.active = true;
     ++T.win().ownedViews;
 }

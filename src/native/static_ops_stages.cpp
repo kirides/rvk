@@ -21,14 +21,27 @@ bool settingOn(const settings::Setting* s) { return s != nullptr && s->asBool();
 // (restart settings: what the session started with is what runs)
 bool startOn(const settings::Setting* s) { return s != nullptr && s->startValue() != 0.0; }
 
-std::string stage(const char* name, bool setting, bool armed, std::uint64_t acted, const std::string& detail) {
+// `needs` = the unmet prerequisites (setting keys) that keep the code off; `gate` = why an armed stage owned nothing (the owned path's gate of the window)
+std::string stage(const char* name, bool setting, bool armed, std::uint64_t acted, const std::string& detail, const std::string& needs = {}, const std::string& gate = {}) {
     std::string state;
     if (!setting && !armed) state = "inactive(setting off)";
     else if (!setting && armed) state = std::format("INCONSISTENT(setting off, code on, acted {})", acted);
-    else if (!armed) state = "inactive(setting on, code off)";
-    else if (acted == 0) state = "inactive(armed, nothing owned in the window)";
+    else if (!armed) state = needs.empty() ? "inactive(setting on, code off)" : std::format("inactive(setting on, code off: needs {})", needs);
+    else if (acted == 0) state = gate.empty() ? "inactive(armed, nothing owned in the window)" : std::format("inactive(armed, gated: {})", gate);
     else state = std::format("active({})", detail);
     return std::format(" {}={}", name, state);
+}
+
+// the unmet prerequisites of a stage: the setting's declared needs (Spec::needs) + the settings the code arms it with (hal/vulkan/device.cpp applyStaticOps), off ones by key
+std::string needsOf(const settings::Setting* s, std::initializer_list<const settings::Setting*> code) {
+    std::string out = s != nullptr ? settings::registry().unmetNeedKeys(*s) : std::string{};
+    for (const settings::Setting* c : code) {
+        if (c == nullptr || c->asBool()) continue;
+        const std::string k = c->spec().key;
+        if (out.find(k) != std::string::npos) continue;
+        out += std::format("{}{}", out.empty() ? "" : ", ", k);
+    }
+    return out;
 }
 
 }  // namespace
@@ -40,17 +53,30 @@ void StaticOps::stagesReport() {
     const std::uint64_t cullJobs = cs.cullJobs - lastCullJobs;
     lastCullJobs = cs.cullJobs;
     std::string line;
-    line += stage("owned_static", settingOn(rs.nativeOwnedStatic), ownedStatic_, ownedW_.owned, std::format("{} ops owned in {} views", ownedW_.owned, ownedW_.views));
-    line += stage("owned_persistent", settingOn(rs.nativeOwnedPersistent), ownedPersistent_, persistW_.passes, std::format("{} passes", persistW_.passes));
+    // the owned path's gate of the window (main views; the cascades' own for owned_shadows): the stages behind it name it while they own nothing
+    const std::string gateMain = ownedGateText(ownedW_), gateCasc = ownedGateText(ownedShadowW_);
+    const std::string gateAny = !gateMain.empty() ? gateMain : gateCasc;
+    const auto own = [&](const std::string& own) { return !own.empty() ? own : gateMain; };
+    // (the code prerequisites of applyStaticOps, by setting)
+    const std::initializer_list<const settings::Setting*> base = {rs.nativeSceneDraws, rs.nativeOwnedStatic};
+    line += stage("owned_static", settingOn(rs.nativeOwnedStatic), ownedStatic_, ownedW_.owned, std::format("{} ops owned in {} views", ownedW_.owned, ownedW_.views),
+                  needsOf(rs.nativeOwnedStatic, {rs.nativeSceneDraws}), gateMain);
+    line += stage("owned_persistent", settingOn(rs.nativeOwnedPersistent), ownedPersistent_, persistW_.passes, std::format("{} passes", persistW_.passes), needsOf(rs.nativeOwnedPersistent, base), gateMain);
     const std::uint64_t treeMain = tro_ ? tro_->window.ownedViews : 0, treeCasc = tro_ ? tro_->shadowWindow.ownedViews : 0;
-    line += stage("owned_trees", settingOn(rs.nativeOwnedTrees), ownedTrees_, treeMain + treeCasc, std::format("main {} owned views, cascades {}", treeMain, treeCasc));
-    line += stage("owned_shadows", settingOn(rs.nativeOwnedShadows), ownedShadowsOn(), ownedShadowW_.owned, std::format("{} cascade ops owned", ownedShadowW_.owned));
-    line += stage("owned_actors", settingOn(rs.nativeOwnedActors), ownedActorsOn(), actorW_.drawn, std::format("{} draws", actorW_.drawn));
-    line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained));
+    line += stage("owned_trees", settingOn(rs.nativeOwnedTrees), ownedTrees_, treeMain + treeCasc, std::format("main {} owned views, cascades {}", treeMain, treeCasc),
+                  needsOf(rs.nativeOwnedTrees, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), own(tro_ ? tro_->gate : std::string{}));
+    line += stage("owned_shadows", settingOn(rs.nativeOwnedShadows), ownedShadowsOn(), ownedShadowW_.owned, std::format("{} cascade ops owned", ownedShadowW_.owned),
+                  ownedShadowsTripped_ ? std::string("a reset (tripped by a MISS / DIFFERING)") : needsOf(rs.nativeOwnedShadows, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}),
+                  !gateCasc.empty() ? gateCasc : gateMain);
+    line += stage("owned_actors", settingOn(rs.nativeOwnedActors), ownedActorsOn(), actorW_.drawn, std::format("{} draws", actorW_.drawn),
+                  needsOf(rs.nativeOwnedActors, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedObjects}), gateAny);
+    line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained), needsOf(rs.nativeOwnedVegetation, {}));
     const std::uint64_t vegViews = vro_ ? vro_->window.ownedViews : 0;
-    line += stage("owned_vegetation_ops", settingOn(rs.nativeOwnedVegetationOps), ownedVegOps_, vegViews, std::format("{} owned views", vegViews));
-    line += stage("clusters", startOn(rs.nativeClusters), gpuscene::clusterstore().active(), gpuscene::clusterstore().active() ? 1 : 0, "store active");
-    line += stage("cluster_cull", startOn(rs.nativeClusterCull), dev_.clusterCullOn(), cullJobs, std::format("{} jobs with the cull", cullJobs));
+    line += stage("owned_vegetation_ops", settingOn(rs.nativeOwnedVegetationOps), ownedVegOps_, vegViews, std::format("{} owned views", vegViews),
+                  needsOf(rs.nativeOwnedVegetationOps, {rs.nativeOwnedVegetation, rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), own(vro_ ? vro_->gate : std::string{}));
+    line += stage("clusters", startOn(rs.nativeClusters), gpuscene::clusterstore().active(), gpuscene::clusterstore().active() ? 1 : 0, "store active", needsOf(rs.nativeClusters, {}));
+    line += stage("cluster_cull", startOn(rs.nativeClusterCull), dev_.clusterCullOn(), cullJobs, std::format("{} jobs with the cull", cullJobs), needsOf(rs.nativeClusterCull, {rs.nativeClusters}),
+                  gateAny);
     // S-6: depth-only z passes (native.depth_z; acted = main z scopes without the depth map attachment + pixel shaders left out in the window)
     static std::uint64_t lastDepthZ = 0;
     const std::uint64_t dz = dev_.depthZActs() - lastDepthZ;
@@ -61,7 +87,8 @@ void StaticOps::stagesReport() {
     static std::uint64_t lastPull = 0;
     const std::uint64_t vp = dev_.vertexPullActs() - lastPull;
     lastPull = dev_.vertexPullActs();
-    line += stage("vertex_pull", settingOn(rs.nativeVertexPull), dev_.vertexPull(), vp, std::format("{} items pulled", vp));
+    line += stage("vertex_pull", settingOn(rs.nativeVertexPull), dev_.vertexPull(), vp, std::format("{} items pulled", vp),
+                  needsOf(rs.nativeVertexPull, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), gateAny);
     vertexPullReport();
     // S-5: own foliage (native.own_foliage; acted = grass instances shrunk or removed by the distance thinning in the window)
     {

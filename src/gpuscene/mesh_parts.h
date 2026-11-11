@@ -79,6 +79,11 @@ public:
     bool observes(d3d9::draws::Kind, d3d9::scene::Phase) const override { return false; }
     void observe(d3d9::Device&, const d3d9::ReplaceQuery&) override {}
     void bufferChanged(std::uint64_t bufferId) override;
+    // it reads no draw state (the table is fed by the static composition's checkDraw; the observer slot only carries the buffer notifications), so it must not
+    // gate the owned path: the default Registers::All did from its first composed draw on, and nothing was owned while native.mesh_parts was on
+    // (frame-ownership.md 14.18). `RVK_MESHPARTS_GATE=1` = the old declaration (A/B of the gate)
+    Registers registersRead() const override;
+    const char* observerName() const override { return "mesh part table"; }
 
 private:
     struct Key {

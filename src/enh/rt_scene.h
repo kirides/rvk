@@ -139,6 +139,7 @@ public:
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
     bool coversDraw(const d3d9::CoverQuery& draw) override;
+    const char* observerName() const override { return "rt scene"; }
     Registers registersRead() const override { return Registers::Material; }  // (world rows: ReplaceQuery::objectRows; the uv map's material constants)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
     // F2c-4b (frame-ownership.md 7.23): with table entries on, the persistent owned static draws come once per pass; a record that was covered last time and whose retained
