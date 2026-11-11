@@ -560,13 +560,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.tintDraws->isDefault()) applyTint(*rs.tintDraws);
         reg.onChange(*rs.tintDraws, applyTint, this);
     }
-    if (rs.debugCrashMarkers != nullptr) {
-        dev_.setCrashMarkers(rs.debugCrashMarkers->asBool());
-        reg.onChange(*rs.debugCrashMarkers, [this](const settings::Setting& s) { dev_.setCrashMarkers(s.asBool()); }, this);
-    }
+    // regions first: the crash markers follow them (applied the other way round, the markers warned "debug.regions is off" with regions on)
     if (rs.debugRegions != nullptr) {
         dev_.setRegionsEnabled(rs.debugRegions->asBool());
         reg.onChange(*rs.debugRegions, [this](const settings::Setting& s) { dev_.setRegionsEnabled(s.asBool()); }, this);
+    }
+    if (rs.debugCrashMarkers != nullptr) {
+        dev_.setCrashMarkers(rs.debugCrashMarkers->asBool());
+        reg.onChange(*rs.debugCrashMarkers, [this](const settings::Setting& s) { dev_.setCrashMarkers(s.asBool()); }, this);
     }
     if (rs.recordThreads != nullptr) {
         dev_.setRecordThreads(rs.recordThreads->asBool());
