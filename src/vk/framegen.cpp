@@ -22,6 +22,7 @@
 #include <vk/ffx_api_vk.h>
 
 #include "vk/context.h"
+#include "vk/fg_trace.h"
 
 namespace rvk::vk {
 
@@ -300,7 +301,9 @@ bool FrameGen::detachFromSwapchain() {
     c.frameGenerationEnabled = false;
     c.HUDLessColor = {};
     ffxContext ctx = context_;
+    fgtrace::note("configure(detach)>");
     const ffxReturnCode_t rc = fn_->api.Configure(&ctx, &c.header);
+    fgtrace::note("configure<", static_cast<std::uint64_t>(rc));
     cfgSwapchain_ = VK_NULL_HANDLE;
     if (rc != FFX_API_RETURN_OK) spdlog::warn("framegen: detaching from the swapchain failed ({})", rc);
     return rc == FFX_API_RETURN_OK;
@@ -363,7 +366,9 @@ bool FrameGen::configure(const FrameGenConfigure& cfg) {
     c.frameID = cfg.frameId;
     c.HUDLessColor = resource(cfg.hudless, kRead);
     ffxContext ctx = context_;
+    fgtrace::note(cfg.enabled ? "configure(on)>" : "configure(off)>", cfg.frameId);
     const ffxReturnCode_t rc = fn_->api.Configure(&ctx, &c.header);
+    fgtrace::note("configure<", static_cast<std::uint64_t>(rc));
     if (rc != FFX_API_RETURN_OK) {
         spdlog::error("framegen: ffxConfigure failed ({})", rc);
         return false;
