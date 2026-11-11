@@ -136,8 +136,16 @@ std::string displayValue(const settings::Spec& sp, double v) {
         if (!sp.autoLabel.empty() && v == sp.min) return sp.autoLabel;
         if (sp.format.empty()) return settings::Registry::formatValue(sp, v);
         char buf[64];
+        // the format is the setting's own spec (one %d / %f style conversion), registered in code
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
         if (sp.type == settings::Type::Int) std::snprintf(buf, sizeof(buf), sp.format.c_str(), static_cast<int>(v));
         else std::snprintf(buf, sizeof(buf), sp.format.c_str(), v);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
         return buf;
     }
     return {};

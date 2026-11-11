@@ -279,8 +279,6 @@ void StaticOps::recEnter(const Op& op) {
     orec::Stats& w = R.stats(shadowRec);
     ++w.opsAll;
     U8* ctx = static_cast<U8*>(op.raw.context);
-    U8* res = ptr(ctx, 0x28);
-    U8* entity = ptr(ctx, 0x10);
     R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), shadowRec ? ownedKeyNow() : 0};
     const orec::Excl ex = recExclusion(op);
     if (orec::f2dMeasure()) {

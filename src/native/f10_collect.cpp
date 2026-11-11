@@ -103,7 +103,7 @@ Hook<DbFn> g_request, g_extract;
 Hook<TreeFn> g_treeWalk;
 FadeFn g_engineFade = nullptr;
 std::uintptr_t g_meshLodFn = 0;
-std::uint64_t g_extractNs = 0, g_requestNs = 0;  // of the current Request (extract runs inside it)
+std::uint64_t g_extractNs = 0;  // of the current Request (extract runs inside it)
 const void* g_tree = nullptr;
 std::uint32_t g_leafMask = 0, g_leafValue = 0;  // of the database being compared (set per view from g_leafByDb)
 std::unordered_map<const void*, std::pair<std::uint32_t, std::uint32_t>> g_leafByDb;  // the query's mask / value per database (ctx +0x10 / +0x14)

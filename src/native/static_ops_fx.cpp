@@ -1685,7 +1685,7 @@ StaticOps::Skip StaticOps::composePrecipitation(const Op& op) {
 
 // F11 compare: the composed particle draw's state is set (shaders, declaration, streams, registers): its GPU form is drawn into a scratch copy of the target with
 // the same render states, samplers and pixel shader (render targets 1..3 unbound: the particles blend; depth writes off), then the device's state is put back
-void StaticOps::particleCompareBefore(const sc::DrawDesc& d) {
+void StaticOps::particleCompareBefore(const sc::DrawDesc& /*d*/) {
     using namespace d3d9;
     namespace pt = d3d9::particle;
     ptCmp_.scratch = ptCmp_.target = nullptr;

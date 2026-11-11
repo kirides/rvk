@@ -60,7 +60,6 @@ private:
     std::uint32_t peak_ = 0;
     d3d9::OwnedStats last_;
     double lastReport_ = 0.0;
-    std::uint64_t lastMatDraws_ = 0;
 };
 
 WindowTables& windowtables();

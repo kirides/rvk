@@ -90,7 +90,6 @@ void StaticOps::depRegister(orec::OpRecord& rec, const Op& op) {
     };
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* res = ptr(ctx, 0x28);
-    U8* entity = ptr(ctx, 0x10);
     add(res);
     add(ptr(res, 0x90));
     add(ptr(res, 0x98));

@@ -32,7 +32,6 @@ std::atomic<bool> g_registryThin{true};
 std::atomic<bool> g_registryComplete{false};
 std::atomic<std::uint64_t> g_registryGeneration{1};
 std::atomic<std::uint64_t> g_knownHash{0};
-std::atomic<std::uint64_t> g_completeStamp{0};
 std::mutex g_drawnMutex;
 struct DrawnLight {
     engine::lights::WorldLight l;

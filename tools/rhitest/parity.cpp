@@ -431,7 +431,6 @@ void testTranslatedDraw(Harness& h) {
     }
     const std::vector<std::uint8_t> px = pixelsOf(targets[0]);
     // probes at the centres of the quad's four quadrants: u' = u / 2 (the vertex hook), texel = floor(4 u'), colour = texel x (1, .5, 1, 1) x c0, rgb x 0.5
-    int probes = 0;
     for (int qy = 0; qy < 2; ++qy) {
         for (int qx = 0; qx < 2; ++qx) {
             const std::uint32_t x = 16 + 32 * qx, y = 16 + 32 * qy;
@@ -445,7 +444,6 @@ void testTranslatedDraw(Harness& h) {
             for (int c = 0; c < 3; ++c) ok = ok && std::abs(static_cast<int>(p[c]) - static_cast<int>(std::lround(want[c] * 255.0f))) <= 2;
             check(ok, std::format("translated draw, quadrant ({}, {}) texel ({}, {}): got ({}, {}, {}, {}) want ({:.0f}, {:.0f}, {:.0f}, 255)", qx, qy, tx, ty, p[0], p[1], p[2], p[3],
                                   want[0] * 255.0f, want[1] * 255.0f, want[2] * 255.0f));
-            ++probes;
         }
     }
     const std::uint8_t* corner = px.data();

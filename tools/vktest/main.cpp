@@ -29,8 +29,6 @@
 // (pixel centres on integers: the half-pixel fix-up must give 4i-2, not 4i). Exit code 0 = pass, no validation errors.
 
 #include <cmath>
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 #include <cstdio>
 #include <filesystem>

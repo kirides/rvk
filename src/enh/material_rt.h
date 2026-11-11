@@ -123,7 +123,6 @@ private:
     bool on_ = false, failed_ = false;
     std::unique_ptr<rhi::Pipeline> trace_, filter_, composite_, glassPipe_;
     std::future<std::unique_ptr<rhi::Pipeline>> glassBuild_;
-    bool glassOn_ = false;
     std::uint64_t glassPasses_ = 0;
     VkFormat compositeFormat_ = VK_FORMAT_UNDEFINED;
     std::future<std::unique_ptr<rhi::Pipeline>> traceBuild_, filterBuild_;

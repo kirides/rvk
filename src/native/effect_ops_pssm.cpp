@@ -47,7 +47,8 @@ inline T get(const void* p, std::size_t off, T fallback = T{}) {
 inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 constexpr std::size_t kIllumMask = 0x448;
-constexpr std::size_t kCellStride = 0x120, kPackedStride = 0xb0;
+constexpr std::size_t kCellStride = 0x120;
+[[maybe_unused]] constexpr std::size_t kPackedStride = 0xb0;  // layout record
 
 }  // namespace
 

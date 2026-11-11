@@ -263,8 +263,6 @@ int comparePreshaderCtab(const Preshader& p) {
 
 bool approx(double a, double b, double tol = 1e-4) { return std::fabs(a - b) <= tol * std::max(1.0, std::fabs(b)); }
 
-std::span<const std::byte> bytesOf(const std::vector<std::uint32_t>& v) { return std::as_bytes(std::span(v)); }
-
 // ---------------------------------------------------------------------------------------------------------------
 // hand-built binaries
 // ---------------------------------------------------------------------------------------------------------------

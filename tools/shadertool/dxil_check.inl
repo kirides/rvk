@@ -376,7 +376,7 @@ bool parseUberLine(const std::string& line, UberRequest& r) {
 
 int cmdDxilUber(int argc, char** argv) {
     int jobs = defaultJobs(), limit = 1 << 30, maxErrors = 30;
-    bool half = false;
+    [[maybe_unused]] bool half = false;  // --half is parsed but this command (the plain ubershader list) has no 16-bit build: uber-spv does
     std::vector<UberRequest> reqs, vsReqs;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
