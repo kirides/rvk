@@ -23,6 +23,14 @@ std::filesystem::path write(std::string_view tag, std::string_view report, void*
 // dump of ours, nothing else changes). Idempotent.
 void installUnhandledExceptionFilter();
 
+// Exit diagnostics (docs/research/shutdown.md): a hook on kernel32!ExitProcess marks the process as exiting; from then on a vectored handler writes
+// every access violation (first chance, any thread: the faults inside DLL detach never reach the unhandled-exception filter) as a text report
+// "rvk_<stamp>_exitfault_<n>.txt" (registers + pointees, unwound stack). `traceExitCall`: also the ExitProcess caller's stack ("_exit_0.txt").
+// Must be called before hooks::enableAll.
+bool installExitDiagnostics(bool traceExitCall);
+// true once ExitProcess was called (the hook above)
+bool exiting();
+
 constexpr int kMaxDumps = 4;
 
 }  // namespace rvk::crashdump

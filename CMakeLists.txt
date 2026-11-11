@@ -285,6 +285,8 @@ add_library(rvk_core STATIC
     src/engine/exposure.h
     src/engine/hemisphere.cpp
     src/engine/hemisphere.h
+    src/engine/exit_guard.cpp
+    src/engine/exit_guard.h
     src/engine/high_fps.cpp
     src/engine/high_fps.h
     src/engine/lod.cpp

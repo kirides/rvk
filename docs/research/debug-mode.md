@@ -229,7 +229,7 @@ reflections (`WaterRt`) call `RtScene::release` in their destructor. The user's 
 `rvk::enh::RtScene::release`, symbolized with the pdb next to that build) is this one: every quit with `rt.reflections` on.
 Fix: consumers first (`rtDebug_`, `water_`, `shadows_`), then the scene.
 
-**C. Not ours.** After the fixes a quit can still end in `SharedBase.dll+0x7caa9` (`call [rax+8]` on a code address while
+**C. Not ours (the `SharedBase` one is suppressed since 2026-11-11: shutdown.md).** After the fixes a quit can still end in `SharedBase.dll+0x7caa9` (`call [rax+8]` on a code address while
 Game.dll's static destructors run; also with the game's own D3D9 renderer in the same harness, and many times in the user's
 event log from earlier sessions; spass RE.md 13 saw it too) or in `tier0_s64.dll_unloaded` (a Steam client thread). Both happen
 after `ExitProcess(0)`: the save / config writes are done, the exit code is mostly 0. Left alone (game / Steam code).
