@@ -747,7 +747,7 @@ void Device::destroy() {
         std::unordered_set<rhi::ShaderModule> destroyed;  // (S-4: variant modules are shared by text: each destroyed once)
         for (auto& [h, s] : shaders_) {
             if (s->module != rhi::ShaderModule::None) {
-                game_->destroyShaderModule(s->module, false);
+                if (destroyed.insert(s->module).second) game_->destroyShaderModule(s->module, false);
                 s->module = rhi::ShaderModule::None;
             }
             for (rhi::ShaderModule* m : {&s->tintModule, &s->lodModule}) {
@@ -760,8 +760,37 @@ void Device::destroy() {
                 if (const rhi::ShaderModule v = m.exchange(rhi::ShaderModule::None); v != rhi::ShaderModule::None && destroyed.insert(v).second) game_->destroyShaderModule(v, false);
             }
         }
+        // 14.26: the variant modules no shader slot holds any more (reset by resetUberVariants / sourceAttached, replaced by a late request's rebuild, shared by text):
+        // they stayed alive for the pipelines that use them and were leaked at vkDestroyDevice (289 VkShaderModules in an all-on run)
+        const std::size_t inSlots = destroyed.size();
+        std::size_t unslotted = 0, sharedOnly = 0, retired = 0;
+        for (const auto& [m, owner] : variantHashes_) {
+            if (m != rhi::ShaderModule::None && destroyed.insert(m).second) {
+                game_->destroyShaderModule(m, false);
+                ++unslotted;
+            }
+        }
+        {
+            const std::lock_guard sl(sharedModuleMutex_);
+            for (const auto& [k, m] : sharedModules_) {
+                if (m != rhi::ShaderModule::None && destroyed.insert(m).second) {
+                    game_->destroyShaderModule(m, false);
+                    ++sharedOnly;
+                }
+            }
+            sharedModules_.clear();
+        }
+        for (const rhi::ShaderModule m : retiredModules_) {
+            if (m != rhi::ShaderModule::None && destroyed.insert(m).second) {
+                game_->destroyShaderModule(m, false);
+                ++retired;
+            }
+        }
+        spdlog::info("d3d9: shader modules destroyed: {} held by shader slots, {} variants reset out of their slots, {} shared only, {} replaced before a slot", inSlots, unslotted,
+                     sharedOnly, retired);
+        retiredModules_.clear();
+        variantHashes_.clear();
         shaders_.clear();
-        sharedModules_.clear();
     }
     vs_.reset();
     ps_.reset();
@@ -2152,6 +2181,10 @@ void Device::variantWorker() {
                 bool via2 = false;
                 const rhi::ShaderModule m2 = variantModule(*job.shader, o2, std::format("{}_t{}", provider.tag, kTranslatorVersion), &via2);
                 if (m2 != rhi::ShaderModule::None) {
+                    if (m != rhi::ShaderModule::None && m != m2) {
+                        const std::lock_guard lock(shaderMutex_);
+                        retiredModules_.push_back(m);  // (14.26: the first build is no slot's; destroyed with the device)
+                    }
                     m = m2;
                     viaUber = via2;
                     ++uberLateSource_;

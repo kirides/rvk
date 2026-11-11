@@ -16,6 +16,7 @@
 
 #include "api/capture.h"
 #include "core/caps.h"
+#include "core/crash_dump.h"
 #include "core/exports.h"
 #include "core/paths.h"
 #include "core/settings.h"
@@ -386,6 +387,12 @@ HalDevice::~HalDevice() {
         std::erase(g_liveDevices, this);
     }
     spdlog::info("hal: device released by the engine: shutting down");
+    // 14.26: a NtTerminateProcess of another thread waits for this shutdown (the game ends the process that way; it cut the shutdown half-way before)
+    crashdump::deviceShutdownBegin();
+    struct ShutdownMark {
+        ~ShutdownMark() { crashdump::deviceShutdownEnd(); }
+    } shutdownMark;
+    overlay::setWindowCloseHandler(nullptr, nullptr);
     engine::scene::detach(&dev_);
     settings::registry().removeCallbacks(this);
     if (framegen_) framegen_->shutdown();  // AMD's swapchain calls into the overlay from its threads: it goes first
@@ -437,6 +444,7 @@ HalDevice::~HalDevice() {
     // left alive they were leaked at vkDestroyDevice and the static ones' destructors at process exit retired them through the freed backend
     gpuscene::releaseGpuObjects(dev_);
     dev_.destroy();
+    spdlog::info("hal: device shutdown complete ({} process terminations of other threads waited for it)", crashdump::terminateWaits());
 }
 
 bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartParameters& p) {
@@ -930,6 +938,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             spdlog::warn("hal: the settings overlay is not available this session");
         }
     }
+    crashdump::deviceCreated();  // (14.26: from the window's WM_CLOSE on, a process termination waits for this device's shutdown)
+    // 14.26: the engine destroys its window before it releases the device; AMD's frame generation swapchain goes at WM_CLOSE, while the window exists
+    overlay::setWindowCloseHandler([](void* self) {
+        auto* d = static_cast<HalDevice*>(self);
+        if (d->framegen_) d->framegen_->windowClosing();
+    }, this);
     return true;
 }
 

@@ -1,4 +1,5 @@
 #include "core/crash_dump.h"
+#include "core/stall_sampler.h"
 
 #include "core/hooks.h"
 
@@ -17,6 +18,7 @@
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #pragma comment(lib, "dbghelp.lib")
 
@@ -200,6 +202,41 @@ void NTAPI detourExitProcess(LONG code) {
     g_exitProcess.original(code);
 }
 
+// 14.26 (frame-ownership.md): the game ends the process with NtTerminateProcess, not ExitProcess (the hook above never fires at a normal exit). When that call comes
+// from another thread while our device shutdown runs (HalDevice::~HalDevice: AMD's frame generation swapchain, the RT scene, vkDestroyDevice), it killed the shutdown
+// half-way (rvk.log ended at "framegen: shutdown", no leaked-objects report: nothing was destroyed). The terminating call now waits for the shutdown (at most 45 s).
+using TerminateFn = LONG(NTAPI*)(HANDLE, LONG);
+Hook<TerminateFn> g_terminate;
+std::atomic<DWORD> g_shutdownThread{0};
+HANDLE g_shutdownDone = nullptr;  // manual-reset event: set when no device shutdown runs
+std::atomic<int> g_terminateWaits{0};
+std::atomic<bool> g_deviceAlive{false};  // a HAL device exists and its shutdown has not finished
+std::atomic<bool> g_closing{false};      // the game window got WM_CLOSE (the player / a test harness quits)
+
+LONG NTAPI detourTerminate(HANDLE process, LONG code) {
+    const bool self = process == nullptr || process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId();
+    if (self) {
+        // (also when the window was closed and the device's shutdown has not begun yet: the test harness's terminate thread (risen-spass exit_on_finish, 1.5 s after
+        // the scenario's result) came before the engine released the device)
+        const DWORD shut = g_shutdownThread.load(std::memory_order_acquire);
+        const bool pending = shut != 0 || (g_closing.load(std::memory_order_acquire) && g_deviceAlive.load(std::memory_order_acquire));
+        if (pending && shut != GetCurrentThreadId() && g_shutdownDone != nullptr) {
+            g_terminateWaits.fetch_add(1);
+            WaitForSingleObject(g_shutdownDone, 45000);
+        }
+        if (g_exitTrace && !g_exiting.load(std::memory_order_relaxed)) {
+            CONTEXT ctx{};
+            RtlCaptureContext(&ctx);
+            try {
+                writeText("exit", "NtTerminateProcess(" + std::string(process == nullptr ? "null" : "self") + ", " + std::to_string(code) + "), waited for the device shutdown: " +
+                                      std::to_string(g_terminateWaits.load()) + "\r\n" + crashReport(nullptr, ctx));
+            } catch (...) {
+            }
+        }
+    }
+    return g_terminate.original(process, code);
+}
+
 LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* info) {
     std::string report;
     try {
@@ -271,10 +308,69 @@ bool installExitDiagnostics(bool traceExitCall) {
     HMODULE nt = GetModuleHandleW(L"ntdll.dll");
     auto* target = nt != nullptr ? reinterpret_cast<ExitProcessFn>(GetProcAddress(nt, "RtlExitUserProcess")) : nullptr;
     if (!g_exitProcess.install("ntdll!RtlExitUserProcess", target, &detourExitProcess)) return false;
+    if (g_shutdownDone == nullptr) g_shutdownDone = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    auto* term = nt != nullptr ? reinterpret_cast<TerminateFn>(GetProcAddress(nt, "NtTerminateProcess")) : nullptr;
+    if (term != nullptr) (void)g_terminate.install("ntdll!NtTerminateProcess", term, &detourTerminate);
     return AddVectoredExceptionHandler(1, &exitVectoredHandler) != nullptr;
 }
 
 bool exiting() { return g_exiting.load(std::memory_order_relaxed); }
+
+namespace {
+// the process's top-level windows (class, visible, minimised, rect): the shutdown watchdog's report (a FIFO acquire blocks while the window is hidden?)
+std::string processWindows() {
+    std::string out;
+    EnumWindows(
+        [](HWND w, LPARAM user) -> BOOL {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(w, &pid);
+            if (pid != GetCurrentProcessId()) return TRUE;
+            char cls[64] = {};
+            GetClassNameA(w, cls, sizeof(cls));
+            RECT r{};
+            GetWindowRect(w, &r);
+            auto& o = *reinterpret_cast<std::string*>(user);
+            o += "window " + std::string(cls) + ": visible " + std::to_string(IsWindowVisible(w) ? 1 : 0) + ", minimised " + std::to_string(IsIconic(w) ? 1 : 0) + ", rect (" +
+                 std::to_string(r.left) + "," + std::to_string(r.top) + " " + std::to_string(r.right - r.left) + "x" + std::to_string(r.bottom - r.top) + ")";
+            o += static_cast<char>(13);
+            o += static_cast<char>(10);
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&out));
+    return out;
+}
+}  // namespace
+
+void deviceShutdownBegin() {
+    if (g_shutdownDone != nullptr) ResetEvent(g_shutdownDone);
+    g_shutdownThread.store(GetCurrentThreadId(), std::memory_order_release);
+    // a shutdown watchdog: a shutdown that has not ended after 30 s writes every thread's stack ("_shutdownhang_<n>.txt"; a file, not rvk.log: the logger may be what
+    // hangs). (A failed run in run.ps1 -GracefulExit: a new file in the dumps.)
+    if (g_shutdownDone != nullptr) {
+        std::thread([] {
+            if (WaitForSingleObject(g_shutdownDone, 30000) != WAIT_TIMEOUT) return;
+            try {
+                writeText("shutdownhang", "the device shutdown has not ended after 30 s (shutdown thread " + std::to_string(g_shutdownThread.load()) + ")\r\n" + processWindows() + diag::allThreadStacks());
+            } catch (...) {
+            }
+        }).detach();
+    }
+}
+
+void deviceCreated() {
+    if (g_shutdownDone != nullptr) ResetEvent(g_shutdownDone);
+    g_deviceAlive.store(true, std::memory_order_release);
+}
+
+void windowClosing() { g_closing.store(true, std::memory_order_release); }
+
+void deviceShutdownEnd() {
+    g_deviceAlive.store(false, std::memory_order_release);
+    g_shutdownThread.store(0, std::memory_order_release);
+    if (g_shutdownDone != nullptr) SetEvent(g_shutdownDone);
+}
+
+int terminateWaits() { return g_terminateWaits.load(); }
 
 void installUnhandledExceptionFilter() {
     if (g_installed.exchange(true)) return;

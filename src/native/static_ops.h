@@ -756,6 +756,7 @@ private:
 
     hal::vulkan::HalDevice& hal_;
     d3d9::Device& dev_;
+    const void* curInstance_ = nullptr;  // 14.26: the render instance being composed (composeSolid's instance-list loop), copied into its draws
     std::array<GroupState, kGroups> groups_;
     GroupState* g_ = nullptr;  // the composed op's group (null: none)
     bool overlays_ = false;

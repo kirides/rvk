@@ -518,6 +518,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.passFlags = 0;
     d.zPass = false;
     d.tagWater = 0;
+    d.instance = curInstance_;  // (14.26)
     d.tagMaterialName = nullptr;
     d.drawClass = sc::DrawClass::Base;
     d.vertexStride = 0;
@@ -1861,8 +1862,14 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
             instW_.unbatchedInstances += static_cast<std::uint64_t>(n);
         }
         if (!batch || unbatch) {
+            // 14.26: each draw names its render instance (its illumination: one per instance) for the per-instance motion history (Device::rigidListPredict)
+            struct IdGuard {
+                const void*& p;
+                ~IdGuard() { p = nullptr; }
+            } idGuard{curInstance_};
             for (std::int32_t i = 0; i < n; ++i) {
                 const float* m = reinterpret_cast<const float*>(at(i));
+                curInstance_ = illumOf(i);  // (newDraw copies it into the draws of this instance)
                 if (const Skip k = subMeshDraws(res, s, 0, switchOf(i), combi, illumOf(i), 1.0f, m, false, at(i)[0x50], 0); k != Skip::None) return k;
             }
             return Skip::None;
@@ -2666,10 +2673,15 @@ void StaticOps::issue() {
     if (recOn) dev_.setSceneProbe(&recs_->probe);
     const bool bbOn = ownedBb_ && bb_ && bb_->active && !inNonOp_ && op_ != nullptr && op_ == bb_->op && bb_->probes.size() == drawCount_;
     if (bbOn) dev_.setSceneProbe(&bb_->probe);
+    struct InstanceIdReset {
+        d3d9::Device& d;
+        ~InstanceIdReset() { d.setInstanceIdentity(nullptr); }
+    } instanceIdReset{dev_};
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         if (recOn) recs_->probe = {};
         if (bbOn) bb_->probe = {};
+        dev_.setInstanceIdentity(d.instance);  // 14.26: the render instance of an instance-list draw (Device::rigidListPredict's per-instance history)
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
         PacketEntry* pe = nullptr;

@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <imgui_impl_win32.h>
 #include <spdlog/spdlog.h>
 
+#include "core/crash_dump.h"
 #include "core/perf_window.h"
 #include "core/settings.h"
 #include "api/capture.h"
@@ -260,7 +262,21 @@ void Overlay::setOpen(bool open) {
 
 // ---- input ----------------------------------------------------------------------------------------------------------
 
+namespace {
+std::atomic<void (*)(void*)> g_closeHandler{nullptr};
+std::atomic<void*> g_closeUser{nullptr};
+}  // namespace
+
+void setWindowCloseHandler(void (*handler)(void*), void* user) {
+    g_closeUser.store(user);
+    g_closeHandler.store(handler);
+}
+
 LRESULT CALLBACK Overlay::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) {
+        crashdump::windowClosing();  // (14.26: a process termination waits for the device's shutdown from now on)
+        if (auto* h = g_closeHandler.load(); h != nullptr) h(g_closeUser.load());  // (14.26: frame generation goes while the window exists)
+    }
     Overlay* o = g_instance.load();
     if (o == nullptr) {
         return g_unicode ? CallWindowProcW(g_original, hwnd, msg, wp, lp) : CallWindowProcA(g_original, hwnd, msg, wp, lp);

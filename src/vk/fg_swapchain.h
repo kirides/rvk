@@ -36,6 +36,10 @@
 
 namespace rvk::vk {
 
+// 14.26: the device proc address both FidelityFX frame generation contexts get (tracks the DLL's semaphores: fg_swapchain.cpp)
+PFN_vkGetDeviceProcAddr fgTrackedDeviceProcAddr();
+
+
 class Context;
 
 // pacing statistics of the real presents' gaps (ms): [debug] perf's sampler; pure (tests/framegen_tests.cpp). Gaps over `stallMs` are

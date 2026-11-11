@@ -113,7 +113,7 @@ FrameGeneration::~FrameGeneration() {
 
 void FrameGeneration::apply(const Settings& s) {
     const bool wasOn = on_;
-    const bool wantOn = s.mode != FrameGenMode::Off && !failed_;
+    const bool wantOn = s.mode != FrameGenMode::Off && !failed_ && !closing_;
     const bool modeChanged = s.mode != s_.mode;
     const bool manualChanged = s.manual != s_.manual;
     s_ = s;
@@ -205,8 +205,22 @@ void FrameGeneration::disable() {
     spdlog::info("enh: framegen: off ({} frames generated, {} shown)", frames_, shown_);
 }
 
+void FrameGeneration::windowClosing() {
+    if (closing_) return;
+    closing_ = true;
+    if (!on_ && !dev_.frameGenSwapchainActive()) return;
+    spdlog::info("enh: framegen: the game window is closing: frame generation off while the window exists");
+    if (on_) {
+        disable();
+    } else {
+        dropContext();
+    }
+    dev_.shutdownFrameGenSwapchain();
+}
+
 // before the overlay and the device go: the generator's context and AMD's swapchain are torn down in their order
 void FrameGeneration::shutdown() {
+    spdlog::info("enh: framegen: shutdown ({})", on_ ? "on" : "off");
     if (on_) {
         disable();
     } else {

@@ -332,6 +332,42 @@ bool Device::rigidListPredict(const DrawGeom& geom) {
     if (frame % 300 == 0 && rigidRowsSweep_ != frame) {
         rigidRowsSweep_ = frame;
         std::erase_if(rigidRows_, [&](const auto& kv) { return kv.second.frame + 600 < frame; });
+        std::erase_if(instanceRows_, [&](const auto& kv) { return kv.second.frame + 600 < frame; });
+    }
+    const auto still = [&](std::uint64_t& counter) {
+        ++counter;
+        obsRigidStill_ = true;
+        return false;
+    };
+    const float(*prevRows)[4] = nullptr;
+    bool byInstance = false;
+    if (instanceId_ != nullptr) {
+        // 14.26: the composition named the instance: its own rows of the last frame (any number of instances per key, any of them moving)
+        byInstance = true;
+        std::uint64_t ik = key;
+        ik ^= reinterpret_cast<std::uintptr_t>(instanceId_);
+        ik *= 1099511628211ull;
+        ik ^= 0x696e7374ull;
+        ik *= 1099511628211ull;
+        InstanceRows& r = instanceRows_[ik];
+        if (r.frame != frame) {
+            r.prevValid = r.frame != 0 && r.frame + 1 == frame && !r.conflict;
+            if (r.prevValid) std::memcpy(r.prev, r.cur, sizeof(r.prev));
+            std::memcpy(r.cur, vsF_[33], sizeof(r.cur));
+            r.conflict = false;
+            r.frame = frame;
+        } else if (std::memcmp(r.cur, vsF_[33], sizeof(r.cur)) != 0) {
+            r.conflict = true;  // (the same instance drawn with other rows in one frame: not an identity)
+        }
+        if (r.conflict) return still(boneStats.listAmbiguous);
+        if (!r.prevValid) return still(boneStats.listNew);
+        if (std::memcmp(r.prev, r.cur, sizeof(r.cur)) == 0) {
+            ++boneStats.instStill;
+            return still(boneStats.listStill);
+        }
+        const float dx = r.cur[0][3] - r.prev[0][3], dy = r.cur[1][3] - r.prev[1][3], dz = r.cur[2][3] - r.prev[2][3];
+        if (!(dx * dx + dy * dy + dz * dz <= gpuscene::ObjectTable::kJump * gpuscene::ObjectTable::kJump)) return still(boneStats.listNew);
+        prevRows = r.prev;
     }
     RigidRows& e = rigidRows_[key];
     if (e.frame != frame) {
@@ -352,19 +388,17 @@ bool Device::rigidListPredict(const DrawGeom& geom) {
     if (idx < 512) e.hashes.push_back(h);
     if (idx == 0) std::memcpy(e.first, vsF_[33], sizeof(e.first));
     ++e.n;
-    const auto still = [&](std::uint64_t& counter) {
-        ++counter;
-        obsRigidStill_ = true;
-        return false;
-    };
-    if (std::binary_search(e.prevHashes.begin(), e.prevHashes.end(), h)) return still(boneStats.listStill);
-    if (e.prevN == 0) return still(boneStats.listNew);
-    if (e.prevN != 1 || idx != 0) return still(boneStats.listAmbiguous);
-    const float dx = vsF_[33][3] - e.prevFirst[0][3], dy = vsF_[34][3] - e.prevFirst[1][3], dz = vsF_[35][3] - e.prevFirst[2][3];
-    if (!(dx * dx + dy * dy + dz * dz <= gpuscene::ObjectTable::kJump * gpuscene::ObjectTable::kJump)) return still(boneStats.listNew);
+    if (!byInstance) {
+        if (std::binary_search(e.prevHashes.begin(), e.prevHashes.end(), h)) return still(boneStats.listStill);
+        if (e.prevN == 0) return still(boneStats.listNew);
+        if (e.prevN != 1 || idx != 0) return still(boneStats.listAmbiguous);
+        const float dx = vsF_[33][3] - e.prevFirst[0][3], dy = vsF_[34][3] - e.prevFirst[1][3], dz = vsF_[35][3] - e.prevFirst[2][3];
+        if (!(dx * dx + dy * dy + dz * dz <= gpuscene::ObjectTable::kJump * gpuscene::ObjectTable::kJump)) return still(boneStats.listNew);
+        prevRows = e.prevFirst;
+    }
     // (the block holds c31..c36: a shader reading past c35 in window 2 would read our validity word / past the block)
     if (vs_->reflection.windowEnd[2] > 36) return still(boneStats.listRefused);
-    const bool push = !(sceneInstances_ && sceneActive());
+    const bool push = !(sceneInstances_ && sceneV2_ && sceneActive());  // (14.26: as bonePredict's)
     if (push) {
         const rhi::ShaderModule vsB = variant(vs_, VariantSlot::BoneVs);
         const rhi::ShaderModule psM = ps_.get() != nullptr ? variant(ps_, gbufferSlot(true)) : rhi::ShaderModule::None;
@@ -383,11 +417,12 @@ bool Device::rigidListPredict(const DrawGeom& geom) {
     if (a.ptr == nullptr || a.ref.null()) return still(boneStats.listRefused);
     auto* dst = static_cast<std::uint8_t*>(a.ptr);
     std::memcpy(dst, vsF_[31], 32);
-    std::memcpy(dst + 32, e.prevFirst, 48);
+    std::memcpy(dst + 32, prevRows, 48);
     const std::uint32_t valid[4] = {0u, 0u, 0u, 1u};
     std::memcpy(dst + 80, valid, 16);
     const rhi::GpuRef base = a.ref.plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);  // (biased like every window block: c[n] at base + n x 16)
     ++boneStats.listMoving;
+    if (byInstance) ++boneStats.instMoving;
     if (push) {
         bonePushPrev_ = base;
         ++boneStats.pushPredicted;
@@ -404,7 +439,8 @@ bool Device::bonePredict(draws::Kind kind, const scene::Phase& phase, const Draw
     const bool rigid = (kind == draws::Kind::StaticMesh || kind == draws::Kind::InstancedMesh) && rigidMotionOn();  // 14.15 b
     if (!skinned && !rigid) return false;
     // (no scene form for the kind: the push form, prevVs in the push block; F2f: with native.owned_instances an issued instance-list draw has the scene forms)
-    const bool push = kind == draws::Kind::InstancedMesh && !(sceneInstances_ && sceneActive());
+    // (14.26: an instance-list draw is a scene candidate only with the v2 ABI on (scene_draws' staticLike): without it the scene forms were predicted and never drawn)
+    const bool push = kind == draws::Kind::InstancedMesh && !(sceneInstances_ && sceneV2_ && sceneActive());
     if ((!push && !sceneActive()) || !gbuf_.active || gbuf_.motion == nullptr || owned_ == nullptr || vs_.get() == nullptr) return false;
     // (the forms' validity word is chosen per shader (boneVsOptions): a palette-indexing shader reads a bone image's c231, any other an object record's c36; a shader
     // whose addressing does not match its window's table never takes the forms: an object record read at c231 would leave the record, GPU safety)
@@ -505,10 +541,10 @@ void Device::boneMotionFrame() {
         if (rigidMode_) {
             spdlog::info("native: rigid motion (5 s): {}; static solid draws predicted {} (no object window {}, no history {}, forms pending {}); instanced-mesh draws "
                          "with the push form predicted {}, drawn {}; instanced-mesh draws without an object record: row image (still) {}, rows seen last frame {}, moved "
-                         "(previous rows block) {}, camera motion only: new {}, list changed {}, refused {}; replays drawn anew for the bone forms {}",
+                         "(previous rows block) {} (by the instance's identity: moved {}, still {}), camera motion only: new {}, list changed {}, refused {}; replays drawn anew for the bone forms {}",
                          rigidMotionOn() ? "on" : "waiting for upscale.object_motion=all", s.rigidPredicted - p.rigidPredicted, s.rigidNoWindow - p.rigidNoWindow,
                          s.rigidNoHistory - p.rigidNoHistory, s.rigidPending - p.rigidPending, s.pushPredicted - p.pushPredicted, s.pushDrawn - p.pushDrawn,
-                         s.rowStill - p.rowStill, s.listStill - p.listStill, s.listMoving - p.listMoving, s.listNew - p.listNew, s.listAmbiguous - p.listAmbiguous,
+                         s.rowStill - p.rowStill, s.listStill - p.listStill, s.listMoving - p.listMoving, s.instMoving - p.instMoving, s.instStill - p.instStill, s.listNew - p.listNew, s.listAmbiguous - p.listAmbiguous,
                          s.listRefused - p.listRefused, s.replayBoneRefused - p.replayBoneRefused);
         }
     } else {

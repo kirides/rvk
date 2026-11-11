@@ -1023,6 +1023,8 @@ public:
     bool boneMotionCovered() const { return obsBone_ || ((obsBonePending_ || obsRigidStill_) && !nocapOld()); }
     // 14.22: a rigid draw whose VS window 2 is an instance row image (F2f): no motion of its own (the record's stamp holds the instance's matrix, a moved instance remakes it)
     bool rigidRowWindow() const;
+    // 14.26: the render instance the next draws belong to (StaticOps' instance-list loop; null = unknown): rigidListPredict keys its history by it
+    void setInstanceIdentity(const void* id) { instanceId_ = id; }
     // 14.15 b (native.rigid_motion, restart; needs native.bone_motion=on): the static meshes' main solid draws whose VS window 2 is an object table record take the
     // bone-motion forms too (their second run reads the object table's previous-frame record), while object motion asks for moving rigid draws (upscale.object_motion=all)
     void setRigidMotion(bool on) { if (on != rigidMode_) ++variantEpoch_; rigidMode_ = on; }
@@ -1038,6 +1040,7 @@ public:
         // 14.22: instanced-mesh draws without an object record (an uploaded VS window 2 / a row image): still (rows seen last frame / a row image), moving with the previous
         // rows as a per-frame block, no source (new / ambiguous list / a jump / the shader reads c36): camera motion only
         std::uint64_t listStill = 0, rowStill = 0, listMoving = 0, listNew = 0, listAmbiguous = 0, listRefused = 0;
+        std::uint64_t instMoving = 0, instStill = 0;  // 14.26: of them, draws keyed by their instance's identity (the composition named it): moved / still
         std::uint64_t replayBoneRefused = 0;  // 14.22: packet-cache replays of draws that now take the bone-motion forms (cached without them): drawn by the normal path
         std::uint64_t compared = 0, compareMiss = 0, compareOver = 0;  // compare mode, from the GPU: vertices compared, without a previous capture, above 0.01 px
         float maxPx = 0.0f, maxWorld = 0.0f;  // (the largest seen; winPx / winWorld = of the current 5 s window)
@@ -2064,6 +2067,7 @@ private:
     void prewarmVariantKeys(std::uint64_t shaderHash, VariantSlot slot);  // F15-1: a variant module was built: the known keys waiting for it
     bool prewarmKey(std::size_t index);                                    // F15-1: false = a variant module is missing (requested; the key waits for it)
     std::unordered_map<rhi::ShaderModule, std::pair<std::uint64_t, std::uint8_t>> variantHashes_;  // variant module -> (shader hash, slot) (under shaderMutex_)
+    std::vector<rhi::ShaderModule> retiredModules_;  // 14.26: variant modules replaced before they reached a slot (under shaderMutex_): destroyed with the device
     std::unordered_multimap<std::uint64_t, std::size_t> variantWaitKeys_;  // mix(shader hash, slot) -> keys_ index waiting for that variant (under keysMutex_)
     std::unordered_set<std::uint64_t> backgroundKeys_;
     std::unordered_set<std::size_t> keysPrewarmed_;
@@ -2274,6 +2278,15 @@ private:
         std::vector<std::uint64_t> hashes, prevHashes;  // (the rows of each instance drawn under the key, this frame / the last; capped at 512)
     };
     std::unordered_map<std::uint64_t, RigidRows> rigidRows_;
+    // 14.26: an instance-list draw whose composition named its instance (setInstanceIdentity: the instance's illumination, one per render instance): its rows of this frame
+    // and the last keyed by (draw key, instance), so a list in which one instance moves gives that instance its own motion (the sorted position changes with the camera)
+    struct InstanceRows {
+        std::uint64_t frame = 0;
+        float cur[3][4] = {}, prev[3][4] = {};
+        bool prevValid = false, conflict = false;  // (conflict: the identity was drawn with other rows in the same frame: ambiguous)
+    };
+    std::unordered_map<std::uint64_t, InstanceRows> instanceRows_;
+    const void* instanceId_ = nullptr;
     std::uint64_t rigidRowsSweep_ = 0;
     bool rigidListPredict(const DrawGeom& geom);  // bonePredict's instanced-mesh branch without an object record
     CaptureSite obsSite_ = CaptureSite::Composed;  // the path showing the observers the draw (capture census)

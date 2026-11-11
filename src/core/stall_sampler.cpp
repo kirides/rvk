@@ -54,6 +54,81 @@ Range moduleRange(HMODULE m) {
     return {lo, lo + mi.SizeOfImage};
 }
 
+// 14.26 (frame-ownership.md): the unwinder must not take a lock while the thread it walks is suspended. RtlLookupFunctionEntry takes the loader's inverted
+// function table lock (shared); a thread suspended inside LoadLibrary / FreeLibrary holds it exclusively (RtlInsertInvertedFunctionTable) -> the sampler
+// blocked and never resumed the thread: the whole game hung (a D3D12 -CpuProfile run froze while the engine thread loaded AMD's FSR DLL; the hang watchdog's own
+// stack capture hung too). The function entries come from a snapshot of every module's exception directory instead (refreshUnwindModules, called before a
+// thread is suspended, at most every 0.5 s); a pc outside the snapshot ends the walk.
+struct UnwindModule {
+    std::uint64_t lo = 0, hi = 0;
+    const RUNTIME_FUNCTION* fns = nullptr;
+    std::uint32_t count = 0;
+};
+struct UnwindTable {
+    std::vector<UnwindModule> mods;  // sorted by lo
+};
+std::atomic<const UnwindTable*> g_unwind{nullptr};  // (old tables are kept: a walk may still read one; a few KiB per refresh, refreshed rarely)
+std::mutex g_unwindMutex;
+std::uint64_t g_unwindAt = 0;
+std::uint32_t g_unwindModuleCount = 0;
+
+void refreshUnwindModules() {
+    const std::lock_guard lock(g_unwindMutex);
+    const std::uint64_t now = GetTickCount64();
+    if (g_unwind.load() != nullptr && now - g_unwindAt < 500) return;
+    g_unwindAt = now;
+    HMODULE mods[1024];
+    DWORD bytes = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &bytes)) return;
+    const std::uint32_t n = std::min<std::uint32_t>(bytes / sizeof(HMODULE), 1024);
+    if (g_unwind.load() != nullptr && n == g_unwindModuleCount) return;  // (the same modules: the table holds)
+    auto* t = new UnwindTable();
+    for (std::uint32_t i = 0; i < n; ++i) {
+        MODULEINFO mi{};
+        if (!GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) continue;
+        const auto base = reinterpret_cast<const std::uint8_t*>(mi.lpBaseOfDll);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) continue;
+        const IMAGE_DATA_DIRECTORY& ex = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        if (ex.VirtualAddress == 0 || ex.Size < sizeof(RUNTIME_FUNCTION)) continue;
+        UnwindModule m;
+        m.lo = reinterpret_cast<std::uint64_t>(base);
+        m.hi = m.lo + mi.SizeOfImage;
+        m.fns = reinterpret_cast<const RUNTIME_FUNCTION*>(base + ex.VirtualAddress);
+        m.count = ex.Size / sizeof(RUNTIME_FUNCTION);
+        t->mods.push_back(m);
+    }
+    std::sort(t->mods.begin(), t->mods.end(), [](const UnwindModule& a, const UnwindModule& b) { return a.lo < b.lo; });
+    g_unwindModuleCount = n;
+    g_unwind.store(t);
+}
+
+// RtlLookupFunctionEntry without a lock: the snapshot's module of `pc`, its sorted RUNTIME_FUNCTION table (binary search); null = a leaf or no unwind data;
+// `known` = false: the pc is in no module of the snapshot (the walk stops)
+PRUNTIME_FUNCTION lookupFunctionEntry(std::uint64_t pc, std::uint64_t& imageBase, bool& known) {
+    known = false;
+    const UnwindTable* t = g_unwind.load();
+    if (t == nullptr) return nullptr;
+    auto it = std::upper_bound(t->mods.begin(), t->mods.end(), pc, [](std::uint64_t v, const UnwindModule& m) { return v < m.lo; });
+    if (it == t->mods.begin()) return nullptr;
+    --it;
+    if (pc >= it->hi) return nullptr;
+    known = true;
+    imageBase = it->lo;
+    const auto rva = static_cast<std::uint32_t>(pc - it->lo);
+    std::uint32_t lo = 0, hi = it->count;
+    while (lo < hi) {
+        const std::uint32_t mid = (lo + hi) / 2;
+        const RUNTIME_FUNCTION& f = it->fns[mid];
+        if (rva < f.BeginAddress) hi = mid;
+        else if (rva >= f.EndAddress) lo = mid + 1;
+        else return const_cast<PRUNTIME_FUNCTION>(&f);
+    }
+    return nullptr;
+}
+
 // Walks a suspended thread's stack (no allocation, no module lookups: only the unwinder). SEH-guarded: a frame without
 // unwind data that is not a leaf gives a bogus return address.
 int unwindStack(CONTEXT& ctx, std::uint64_t* pcs, int max) {
@@ -62,8 +137,10 @@ int unwindStack(CONTEXT& ctx, std::uint64_t* pcs, int max) {
         while (n < max && ctx.Rip != 0) {
             pcs[n++] = ctx.Rip;
             const DWORD64 rsp = ctx.Rsp;
-            DWORD64 imageBase = 0;
-            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &imageBase, nullptr);
+            std::uint64_t imageBase = 0;
+            bool known = false;
+            PRUNTIME_FUNCTION fe = lookupFunctionEntry(ctx.Rip, imageBase, known);  // (14.26: never RtlLookupFunctionEntry here: a lock the suspended thread may hold)
+            if (!known) break;
             if (fe == nullptr) {  // leaf function: the return address is on top of the stack
                 ctx.Rip = *reinterpret_cast<const DWORD64*>(ctx.Rsp);
                 ctx.Rsp += 8;
@@ -304,6 +381,7 @@ void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* u
                 HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, id);
                 if (h == nullptr) continue;
                 Taken tk{id, 0, {}};
+                refreshUnwindModules();
                 if (SuspendThread(h) != static_cast<DWORD>(-1)) {
                     tk.n = sampleThread(h, tk.pcs, kMaxFrames);  // nothing allocates while it is suspended
                     ResumeThread(h);
@@ -319,6 +397,47 @@ void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* u
             if (auto* report = g_hangReporter.load(); report != nullptr && reports == 1) report("hang watchdog");
         }
     }).detach();
+}
+
+std::string allThreadStacks() {
+    const DWORD self = GetCurrentThreadId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    std::vector<DWORD> ids;
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te{};
+        te.dwSize = sizeof(te);
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != self) ids.push_back(te.th32ThreadID);
+        }
+        CloseHandle(snap);
+    }
+    struct Taken {
+        DWORD id;
+        int n;
+        std::uint64_t pcs[kMaxFrames];
+    };
+    std::vector<Taken> taken;
+    taken.reserve(ids.size());
+    for (const DWORD id : ids) {
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, id);
+        if (h == nullptr) continue;
+        Taken tk{id, 0, {}};
+        refreshUnwindModules();
+        if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+            tk.n = sampleThread(h, tk.pcs, kMaxFrames);  // nothing allocates while it is suspended
+            ResumeThread(h);
+        }
+        CloseHandle(h);
+        taken.push_back(tk);
+    }
+    Symbolizer sym;
+    std::string out;
+    for (const Taken& tk : taken) {
+        out += "thread " + std::to_string(tk.id) + ": ";
+        for (int i = 0; i < tk.n; ++i) out += (i == 0 ? "" : " < ") + sym.name(tk.pcs[i]);
+        out += "\r\n";
+    }
+    return out;
 }
 
 void enablePresentSampler(const char* what, double thresholdMs) {
@@ -581,6 +700,7 @@ void StallSampler::Impl::run() {
         if (start == 0 || now - start < thresholdTicks) continue;
         const std::uint32_t seq = callSeq.load();
         HANDLE h = thread.load();
+        refreshUnwindModules();
         if (h == nullptr || SuspendThread(h) == static_cast<DWORD>(-1)) continue;
         const int n = sampleThread(h, pcs, kMaxFrames);
         const bool same = callSeq.load() == seq && callStart.load() == start;

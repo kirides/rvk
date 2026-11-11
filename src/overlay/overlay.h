@@ -28,6 +28,9 @@ struct ImDrawData;
 
 namespace rvk::overlay {
 
+// 14.26: called on the window's thread when the game window gets WM_CLOSE, before the game sees it (null = none)
+void setWindowCloseHandler(void (*handler)(void*), void* user);
+
 struct Options {
     bool intoBackBuffer = false;        // [debug] overlay_in_screenshots
     std::vector<std::string> commands;  // [debug] commands: "<frame>: <command>"

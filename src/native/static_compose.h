@@ -384,6 +384,7 @@ struct DrawDesc {
     const void* resource = nullptr;  // the mesh resource (eCMeshResource2) of a static mesh draw (gpuscene/mesh_parts)
     std::uint32_t passFlags = 0;  // the shader pass (0 for z draws)
     bool zPass = false;
+    const void* instance = nullptr;  // 14.26: the render instance of an instance-list draw (its illumination, one per instance); null = not an instance-list draw
     // the draw tag's sub-mesh fields as the engine's hooks set them (only eCSubMesh::Render sets them: solid non-instanced
     // draws; z draws and instanced batches keep the slot's null)
     const void* tagSubMesh = nullptr;
