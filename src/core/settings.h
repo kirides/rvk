@@ -505,6 +505,7 @@ struct RendererSettings {
     Setting* nativeOwnedOrdered = nullptr;  // native.owned_ordered: the order-dependent ops (blended terrain layers, alpha / refracted lists) owned at their place (frame-ownership.md 14.20, F9 + F14)
     Setting* nativeOwnedActors = nullptr;  // native.owned_actors: skinned actor ops owned (frame-ownership.md 7.40, F6-1)
     Setting* nativeOwnedShadows = nullptr;  // native.owned_shadows: the sun cascades' static mesh z ops owned (frame-ownership.md 7.36, F3-1)
+    Setting* nativeOwnedShadowViews = nullptr;  // native.owned_shadow_views: the terrain shadow map and the point-light atlas cells owned (frame-ownership.md 14.29, F3-4)
     Setting* nativeOwnedVegetation = nullptr;  // native.owned_vegetation: the vegetation ops' instance streams retained in persistent GPU buffers (frame-ownership.md 7.40, F7-1)
     Setting* nativeOwnedVegetationOps = nullptr;  // native.owned_vegetation_ops: the vegetation ops' draws owned (frame-ownership.md 7.42, F7-2)
     Setting* nativeOwnedBillboards = nullptr;  // native.owned_billboards: the tree billboards' ops retained as records and drawn from them (frame-ownership.md 7.17, F4-1)

@@ -2070,7 +2070,7 @@ mov oC0, r0
         ++g_failures;
         return;
     }
-    constexpr std::uint32_t kQuads = 8, kSlots = 16;
+    constexpr std::uint32_t kQuads = 8, kSlots = 64;  // (F3-4: the shadow views' slots 32..61 are tested too: the whole view table)
     std::vector<Vertex> verts;
     for (std::uint32_t k = 0; k < kQuads; ++k) {
         const float x0 = -1.0f + 0.25f * static_cast<float>(k), x1 = x0 + 0.25f;
@@ -2266,7 +2266,7 @@ mov oC0, r0
         in.strides[0] = sizeof(Vertex);
         in.indices = ib.get();
         in.alphaFunc = alphaFunc;
-        std::memcpy(in.psC5, regs[viewSlot == 9 ? 1 : 0].ps5, sizeof(in.psC5));
+        std::memcpy(in.psC5, regs[viewSlot == 9 || viewSlot == 46 ? 1 : 0].ps5, sizeof(in.psC5));
         const OwnedWindows ow = windowsOf(viewSlot);
         return dev.ownedDerive(cd[k], in, ow, tab.blockRef(slots[k]), tab.zeroRef(), true, out);
     };
@@ -2398,7 +2398,7 @@ mov oC0, r0
         int refused = 0;
         refused += dev.ownedDerive(cd[0], in, other, tab.blockRef(slots[0]), tab.zeroRef(), true, out) == 18;
         refused += dev.ownedDerive(cd[0], in, windowsOf(3), rhi::GpuRef{}, tab.zeroRef(), true, out) == 15;
-        refused += dev.ownedDerive(cd[0], in, windowsOf(40), tab.blockRef(slots[0]), tab.zeroRef(), true, out) == 17;
+        refused += dev.ownedDerive(cd[0], in, windowsOf(70), tab.blockRef(slots[0]), tab.zeroRef(), true, out) == 17;
         std::vector<Device::OwnedItem> items;
         for (std::uint32_t k = 0; k < kQuads; ++k) items.push_back({&cd[k], dev.ownedBucketKey(cd[k], 3), slots[k]});
         Device::OwnedArena arena;
@@ -2407,7 +2407,7 @@ mov oC0, r0
         Device::OwnedArena arena2;
         const bool reserved2 = dev.ownedReserve(kQuads, arena2);
         const bool noTable = reserved2 && !dev.ownedFlush(items, arena2, 3, rhi::GpuRef{}, tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
-        const bool badSlot = reserved2 && !dev.ownedFlush(items, arena2, 40, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        const bool badSlot = reserved2 && !dev.ownedFlush(items, arena2, 70, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
         // (an item whose slot was never written / is out of range)
         std::vector<Device::OwnedItem> bogus = {{&cd[0], dev.ownedBucketKey(cd[0], 3), gpuscene::DrawRecordTable::kCapacity}, {&cd[1], dev.ownedBucketKey(cd[1], 3), tab.alloc()}};
         Device::OwnedArena arena3;
@@ -2459,7 +2459,65 @@ mov oC0, r0
         }
         dev.setSceneIssue(false);
     }
-    // 7. F2c-4b bulk observers: the records of a pass arrive in observeOwned (not before), with entered / left against the previous pass of the kind; a mid-pass flush does not
+    // 6c. F3-4 (frame-ownership.md 14.29): the terrain map's / the point-light atlas cells' view slots (32, 33 + i; the trees' 47, 48 + i). (1) Persistent draws on cell slots 33
+    // and 46 draw exactly like the normal draws with those views (two buckets, two calls); (2) every slot keeps its OWN env epoch memo: before F3-4 every slot >= 8 shared
+    // the memo of slot 7, so cells 0 and 13 of one frame would move each other's epoch at every pass (every atlas draw derived again each frame); the same for the trees' slots
+    {
+        fillSlot(33, regs[0]);
+        fillSlot(46, regs[1]);
+        bool derive[kQuads];
+        for (auto& d : derive) d = true;
+        bad(ref2, frame("ownedp_cells", 33, 46, 4, derive, nullptr, calls), "atlas cell slots 33 / 46");
+        if (calls != 2) {
+            std::printf("  FAIL owned persistent: two atlas cell slots made %llu indirect calls (expected 2)\n", static_cast<unsigned long long>(calls));
+            ++g_failures;
+        }
+        const auto d0c = dev.ownedPersistStats.derived;
+        bad(ref2, frame("ownedp_cells_again", 33, 46, 4, nullptr, nullptr, calls), "atlas cell slots again, nothing derived");
+        if (dev.ownedPersistStats.derived != d0c) {
+            std::printf("  FAIL owned persistent: a frame of unchanged atlas cell draws derived something\n");
+            ++g_failures;
+        }
+        dev.setSceneIssue(true);
+        constexpr std::uint32_t kCellSlots[5] = {7, 32, 33, 46, 61};
+        std::uint64_t e1[5], e2[5];
+        bool ok1[5], ok2[5];
+        for (std::uint32_t i = 0; i < 5; ++i) e1[i] = dev.ownedEnvEpoch(false, kCellSlots[i], ok1[i]);
+        for (std::uint32_t i = 0; i < 5; ++i) e2[i] = dev.ownedEnvEpoch(false, kCellSlots[i], ok2[i]);
+        bool good = true;
+        for (std::uint32_t i = 0; i < 5; ++i) {
+            good = good && ok1[i] && ok2[i] && e1[i] == e2[i] && dev.ownedEnvSame(false, kCellSlots[i], e1[i]);
+            for (std::uint32_t j = i + 1; j < 5; ++j) good = good && e1[i] != e1[j];
+        }
+        // a cell of another size (viewport) moves ITS slot's epoch only: slot 46 keeps its epoch while 33 is asked under another viewport
+        const Viewport saved = dev.viewport();
+        Viewport changed = saved;
+        changed.width = saved.width / 2;
+        changed.height = saved.height / 2;
+        dev.setViewport(changed);
+        bool okc = false;
+        const std::uint64_t e33c = dev.ownedEnvEpoch(false, 33, okc);
+        dev.setViewport(saved);
+        good = good && okc && e33c != e1[2] && dev.ownedEnvSame(false, 46, e1[3]) && !dev.ownedEnvSame(false, 33, e1[2]);
+        // the trees' slots (47 terrain map, 48 / 61 atlas cells, 8 a cascade's): one memo each
+        constexpr std::uint32_t kTreeSlots[4] = {8, 47, 48, 61};
+        std::uint64_t t1[4], t2[4];
+        bool tok[4];
+        for (std::uint32_t i = 0; i < 4; ++i) t1[i] = dev.treeEnvEpoch(false, kTreeSlots[i], tok[i]);
+        for (std::uint32_t i = 0; i < 4; ++i) t2[i] = dev.treeEnvEpoch(false, kTreeSlots[i], tok[i]);
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            good = good && tok[i] && t1[i] == t2[i] && dev.treeEnvSame(false, kTreeSlots[i], t1[i]);
+            for (std::uint32_t j = i + 1; j < 4; ++j) good = good && t1[i] != t1[j];
+        }
+        if (!good) {
+            std::printf("  FAIL owned persistent: shadow views' env epochs per slot (cells %llu/%llu/%llu/%llu/%llu, a changed cell moved its own epoch %d, the other cell kept its own %d, trees %llu/%llu/%llu/%llu)\n",
+                        static_cast<unsigned long long>(e1[0]), static_cast<unsigned long long>(e1[1]), static_cast<unsigned long long>(e1[2]), static_cast<unsigned long long>(e1[3]),
+                        static_cast<unsigned long long>(e1[4]), e33c != e1[2], dev.ownedEnvSame(false, 46, e1[3]), static_cast<unsigned long long>(t1[0]), static_cast<unsigned long long>(t1[1]),
+                        static_cast<unsigned long long>(t1[2]), static_cast<unsigned long long>(t1[3]));
+            ++g_failures;
+        }
+        dev.setSceneIssue(false);
+    }    // 7. F2c-4b bulk observers: the records of a pass arrive in observeOwned (not before), with entered / left against the previous pass of the kind; a mid-pass flush does not
     // disturb the deltas; a per-draw (not bulk) observer sees every draw at once; the register images are loaded only on request; an ineligible kind stays per-draw
     {
         BulkTestObserver obs;

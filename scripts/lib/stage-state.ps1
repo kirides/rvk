@@ -15,6 +15,7 @@ $script:StageOfSetting = [ordered]@{
     'native.owned_persistent'      = 'owned_persistent'
     'native.owned_trees'           = 'owned_trees'
     'native.owned_shadows'         = 'owned_shadows'
+    'native.owned_shadow_views'    = 'owned_shadow_views'
     'native.owned_actors'          = 'owned_actors'
     'native.owned_instances'       = 'owned_instances'
     'native.owned_ordered'         = 'owned_ordered'
@@ -37,7 +38,7 @@ $script:StageOfSetting = [ordered]@{
 # stages whose input can legitimately be absent from a whole run (frame-ownership.md 14.22): bone_motion acts only on skinned solid draws that move (a frozen
 # rvkcompare spot animates nothing), tree_wind only on animated SpeedTrees inside the RT range of a swaying-tree consumer. For these an arm claimed on also passes
 # when EVERY window says `inactive(armed, nothing owned in the window)` (armed, nothing to act on); `setting on, code off`, `gated` and `setting off` still fail.
-$script:IdleCapableStages = @('bone_motion', 'tree_wind', 'own_particles', 'owned_decals')  # (own_particles / owned_decals: a place without a live particle emitter / a decal in view)
+$script:IdleCapableStages = @('bone_motion', 'tree_wind', 'own_particles', 'owned_decals', 'owned_shadow_views')  # (own_particles / owned_decals: a place without a live particle emitter / a decal in view; owned_shadow_views: no terrain map re-aim and no shadow-casting point light in the window)
 $script:ArmedIdle = 'inactive(armed, nothing owned in the window)'
 
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)

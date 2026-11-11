@@ -424,8 +424,7 @@ void StaticOps::vegCompEnd(const Op& op) {
     pend->matSlot = matSlot;
     pend->matHash = mixh(mixh(0, matSlot), mt.structVersion(matSlot));
     pend->viewStamp = recViewStamp();
-    const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
-                                  (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
+    const std::uint64_t viewKey = packetViewKey();
     const std::size_t cacheGroup = static_cast<std::size_t>(g_ - groups_.data());
     vro::OpRec* old = nullptr;
     if (const auto it = V.ops.find(P.key); it != V.ops.end()) old = it->second.get();

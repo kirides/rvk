@@ -479,7 +479,7 @@ StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::
         putp(geometry.meshResource);
         std::uint32_t alphaBits;
         std::memcpy(&alphaBits, &mirror_.global[1][3], 4);
-        put(alphaBits | static_cast<std::uint64_t>(viewKind_) << 32 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_) & 0xff) << 40);
+        put(alphaBits | static_cast<std::uint64_t>(viewKind_) << 32 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_) & 0xff) << 40 | retainCellBits());
         putp(mirror_.lightmapSlot[0]);
         putp(mirror_.lightmapSlot[1]);
         put(snapHash());
@@ -523,7 +523,7 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
         putp(geometry.subMesh);
         putp(geometry.material);
         putp(geometry.meshResource);
-        put(static_cast<std::uint64_t>(viewKind_) << 32 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_) & 0xff) << 40);
+        put(static_cast<std::uint64_t>(viewKind_) << 32 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_) & 0xff) << 40 | retainCellBits());
         putp(mirror_.lightmapSlot[0]);
         putp(mirror_.lightmapSlot[1]);
         put(snapHash());

@@ -2699,6 +2699,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedShadowViews = &reg.add({
+        .key = "native.owned_shadow_views",
+        .label = "Native frame: owned terrain map + point-light atlas",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs native.owned_shadows (frame-ownership.md 14.29, F3-4): the terrain shadow map's and the point-light atlas cells' z ops (static meshes, "
+                       "skinned actors with native.owned_actors, SpeedTrees with native.owned_trees) get op records per view (the terrain map, atlas cell i of the frame) and are drawn "
+                       "from persistent DrawRecords like the cascades' (view table slots 32 / 33 + i, the trees' 47 / 48 + i; 14 atlas cells per frame, later cells stay composed). "
+                       "native.owned_check frames compare with the composition (DIFFERING / MISS must stay 0: a difference turns the owned shadow views off with the cascades). "
+                       "Off = nothing changes. rvk.log `native: owned shadows [terrain map|point-light atlas] (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_shadows", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedVegetation = &reg.add({
         .key = "native.owned_vegetation",
         .label = "Native frame: owned vegetation",

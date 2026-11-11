@@ -302,6 +302,7 @@ void StaticOps::viewBegin(void* db, void* desc, const FrameDesc& view) {
     shadowMap_ = view.shadowMap;
     shadowFormat_ = view.mapFormat;
     cascade_ = view.cascade;
+    cell_ = view.view > 0 ? static_cast<std::int32_t>(view.view) - 1 : 0;  // (F3-4: an atlas cell's / the terrain map's index among the frame's views of its kind)
     if (viewKind_ != ViewKind::Main && groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) {
         ++shadowWindow_.views[static_cast<std::size_t>(viewKind_)];
     }
@@ -1320,12 +1321,12 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
         vs1Regs = mirror_.adminVs + 12;
         // (F3-1: a cascade's static mesh z ops are candidates too, while native.owned_shadows is on)
         const bool staticGroup = g_ == &groups_[static_cast<std::size_t>(Group::Static)] || orderedGroupNow(op_) ||
-                                 (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
+                                 (ownedShadowKind(viewKind_) && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
         const bool staticMesh = op_ != nullptr && staticGroup && op_->kind == OpKind::Mesh && op_->entity != nullptr && !inNonOp_;
         // F6-1 (7.40): a skinned actor draw of the main view (the Actors group) or a cascade (with owned_shadows): VS window 1 from the view block, VS window 2 from the bone table
         const bool actorDraw = ownedActorsOn() && op_ != nullptr && op_->kind == OpKind::Animation && !inNonOp_ &&
                                (g_ == &groups_[static_cast<std::size_t>(Group::Actors)] ||
-                                (ownedShadowsOn() && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
+                                (ownedShadowKind(viewKind_) && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
         // (F6-2 / 14.23: the alpha list's herbs' instance-data stream 3 of a draw that is not instanced is bound per vertex: such a draw is a plain mesh draw for the windows)
         const bool instanced = dev_.streamsInstanced(d.streams);
         if (actorDraw && !instanced) {
@@ -2692,8 +2693,7 @@ void StaticOps::issue() {
                                            (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]) ||
                                            (ownedVegOps_ && g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)]) || orderedGroupNow(op_))) ||
                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
-    const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
-                                  (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
+    const std::uint64_t viewKey = packetViewKey();
     const std::size_t cacheGroup = g_ == &groups_[static_cast<std::size_t>(Group::Trees)] || g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)] ? 1 : g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] ? 2 : 0;
     const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
     bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
@@ -2718,7 +2718,7 @@ void StaticOps::issue() {
     const bool sceneIssue = sceneDraws_ && ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue() || treeSceneIssue() ||
                                                                                     (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]) ||
                                            vegSceneIssue() || orderedGroupNow(op_))) ||
-                                            (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
+                                            (ownedShadowKind(viewKind_) && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
     dev_.setSceneIssue(sceneIssue);
     const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;
     if (recOn) dev_.setSceneProbe(&recs_->probe);

@@ -264,8 +264,8 @@ void StaticOps::recEnter(const Op& op) {
     R.pkeys.clear();
     recNoRetain_ = false;
     // F3-1 (7.36): the cascades' static mesh z ops are recorded too (key.view = 1 + the cascade), while native.owned_shadows is on
-    const bool shadowRec = ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && ownedKeyOf(viewKind_, cascade_) != 0 &&
-                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] && op.list == List::ZPass;
+    // (F3-4: the terrain map's and the atlas cells' too, while native.owned_shadow_views is on: key 5 / 8 + cell)
+    const bool shadowRec = ownedShadowKind(viewKind_) && ownedKeyNow() != 0 && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] && op.list == List::ZPass;
     // F6-1 (native.owned_actors): the skinned actors' ops are recorded too (the Actors group in the main view; the cascades' z ops with owned_shadows)
     const bool actorOp = op.kind == OpKind::Animation && ownedActorsOn();
     // F9 / F14 (native.owned_ordered): the main view's alpha / refracted mesh ops (the Mesh group) are recorded too
@@ -281,7 +281,7 @@ void StaticOps::recEnter(const Op& op) {
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* res = ptr(ctx, 0x28);
     U8* entity = ptr(ctx, 0x10);
-    R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), shadowRec ? ownedKeyOf(viewKind_, cascade_) : 0};
+    R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), shadowRec ? ownedKeyNow() : 0};
     const orec::Excl ex = recExclusion(op);
     if (orec::f2dMeasure()) {
         R.f2dCls = static_cast<int>(ex);

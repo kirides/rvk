@@ -461,7 +461,7 @@ void StaticOps::actorCensus(const Op& op) {
         why += kCenCheck;
     } else if (op.list == List::Alpha && !actorOrderedNow(&op)) {
         why += kCenAlphaList;
-    } else if (v == 2 || (v == 1 && !ownedShadows_)) {
+    } else if ((v == 2 && !ownedShadowKind(viewKind_)) || (v == 1 && !ownedShadows_)) {  // (F3-4: the terrain map / atlas cells are recorded with owned_shadow_views)
         why += kCenNotRecordedView;
     } else if (recs_->map.find(orec::Key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), ownedViewKey_}) != recs_->map.end()) {
         why += kCenRecordRefused;
