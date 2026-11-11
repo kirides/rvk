@@ -227,6 +227,8 @@ private:
     std::uint64_t bigCompareFrame_ = 0;
     std::uint64_t bigFrame_ = ~0ull;  // (compareUnit: the frame of the full-resolution compares counted in bigInFrame_)
     std::uint32_t bigInFrame_ = 0;
+    std::map<std::string, std::uint64_t> cmpFirst_;  // compared image -> the frame of its first compare (warm-up)
+    std::uint64_t cmpWarmup_ = 0;
     bool noFuse_ = false;
     bool noUnits_ = false;  // RVK_OWNPOST_UNITS=0: every single unit stays the engine's
     std::array<std::vector<Pending>, rhi::kFramesInFlight> cmpPending_;
