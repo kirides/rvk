@@ -26,6 +26,7 @@
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "engine/scene_hooks.h"
+#include "engine/exit_guard.h"
 #include "engine/high_fps.h"
 #include "engine/hemisphere.h"
 #include "engine/lights.h"
@@ -522,6 +523,14 @@ void onProcessAttach(void* module) {
     if (ok && g_config.mode != Mode::Vulkan && g_config.presentStalls > 0.0 &&
         !g_swapScreen.install("eCDX9Device::SwapScreen", reinterpret_cast<SwapScreenFn>(s.dx9SwapScreen), &detourSwapScreen)) {
         spdlog::warn("eCDX9Device::SwapScreen not hooked: [debug] present_stalls has nothing to watch");
+    }
+    // the game's exit crash (GUI bitmaps released by Game.dll's static destructors after the GUI is gone; any mode, docs/research/shutdown.md)
+    if (ok) engine::exitguard::install();
+    // exit diagnostics (any mode; docs/research/shutdown.md): faults after ExitProcess as text reports in bin\rvk\dumps
+    if (ok && g_config.crashDumps) {
+        char trace[8]{};
+        if (!crashdump::installExitDiagnostics(GetEnvironmentVariableA("RVK_EXIT_TRACE", trace, sizeof(trace)) > 0 && trace[0] == '1'))
+            spdlog::warn("exit diagnostics not installed (kernel32!ExitProcess hook)");
     }
     if (ok) {
         ok = hooks::enableAll();

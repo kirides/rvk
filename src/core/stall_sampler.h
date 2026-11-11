@@ -22,6 +22,8 @@ class StallSampler;
 // the process is suspended in turn and its stack logged ("diag: hang: thread ..."), again every 5 s while it lasts (3 times). Used
 // with [debug] perf to find a deadlock (frame generation swapchain F3).
 void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* user);
+// an extra report of the hang watchdog (after the stacks; e.g. vk::fgtrace::dump)
+void setHangReporter(void (*report)(const char* why));
 
 // The process-wide present sampler; null unless [debug] present_stalls is on.
 StallSampler* presentSampler();

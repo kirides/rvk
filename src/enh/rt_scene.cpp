@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -14,6 +16,7 @@
 #include "engine/scene_table.h"
 #include "enh/material_variant.h"
 #include "enh/rhi_scope.h"
+#include "enh/tree_wind.h"
 #include "shader/embedded.h"
 #include "engine/memread.h"
 #include "shader/pass_push.h"
@@ -35,6 +38,9 @@ constexpr std::uint64_t kChurnWindow = 90;   // frames: a range with kChurnLimit
 constexpr std::uint32_t kChurnLimit = 48;
 constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instance stays in the TLAS after its last sighting
 constexpr std::uint32_t kMaxAnimatedTrees = 160;  // SpeedTree draws captured per frame (their captures take 32 bytes per vertex of the frame's ring)
+// F4-5 (native.tree_wind): the stages line reads these (TreeWindState)
+std::atomic<bool> g_treeWindArmed{false};
+std::atomic<std::uint64_t> g_treeWindJobs{0}, g_treeWindOwned{0};
 constexpr float kBoxMaxRadius = 2000.0f;        // world units (20 m): bigger objects (cliffs, level meshes) never become boxes
 constexpr std::uint32_t kBoxMinTriangles = 64;  // a smaller BLAS gains nothing from a 12-triangle box
 constexpr float kBoxShrink = 0.92f;             // the box's half extents relative to the object's bounds
@@ -117,6 +123,8 @@ void RtScene::activate() {
     // screen probes); AfterOpaque builds it in frames without a z pre-pass
     passId_ = dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
     passId2_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
+    // F4-5: the animated trees' wind by compute (the frame's observations of the solid pass, before a scene built at AfterOpaque takes them)
+    passId3_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "rt.tree_wind", [this](d3d9::PassContext& ctx) { recordTreeWind(ctx); }, this, -110);
     lastLog_ = std::chrono::steady_clock::now();
     iv_ = {};
     spdlog::info("rt: scene: on (TLAS cap {} instances, {} builds / {}k triangles per frame, BLAS budget {} MiB, radius {:.0f})",
@@ -130,12 +138,14 @@ void RtScene::deactivate() {
     dev_.removeDrawObserver(this);
     if (passId_ != 0) dev_.removePass(passId_);
     if (passId2_ != 0) dev_.removePass(passId2_);
-    passId_ = passId2_ = 0;
+    if (passId3_ != 0) dev_.removePass(passId3_);
+    passId_ = passId2_ = passId3_ = 0;
     logStats(true);
     tableClear();
     registry_.clear();
     dropDynamic(true, 0);
     destroySkin();
+    destroyTreeWind();
     std::vector<std::uint64_t> ids;
     ids.reserve(blas_.size());
     for (const auto& [id, b] : blas_) ids.push_back(id);
@@ -611,11 +621,22 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             fromStream = true;
         }
     }
+    if (!fromStream && speedTree && treeWind_ != 0) {
+        // F4-5: the trees' instance stream is an identity ramp in every draw (the engine's 256-float one or ours, StaticOps::treeEnsureRamp; `instance stream check`
+        // logs it), but an owned tree run (Device::ownedTreeObserve) and a packet-cache replay of a composed tree draw (no capture variant asked: replayable now) show
+        // the observers a stream that cannot be read back: instance i = row i by construction
+        for (std::uint32_t i = 0; i < n; ++i) index[i] = static_cast<float>(i);
+        fromStream = true;
+        ++tw_.rampAssumed;
+    }
     TreeBatch treeBatch;
     const bool treeBatchOk = speedTree && animated_ && fromStream && q.phase.view == View::Main && q.phase.pass == Pass::Solid;
     for (std::uint32_t i = 0; i < n; ++i) {
         const float v = fromStream ? index[i] : static_cast<float>(i);
-        if (fromStream && v != static_cast<float>(i)) ++indexDeviations_;
+        if (fromStream && v != static_cast<float>(i)) {
+            ++indexDeviations_;
+            if (speedTree) ++tw_.rampMismatch;
+        }
         if (!std::isfinite(v) || v < 0.0f || v > 64.0f) continue;
         const std::uint32_t reg = kInstanceDataBase + static_cast<std::uint32_t>(std::floor(4.0f * v + 0.5f)) + 1;
         if (reg + 2 >= kInstanceDataEnd) continue;
@@ -2089,7 +2110,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "        }}\n"
         "    }}",
         tc);
-    d3d9::Device::boneCompareText(o);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
+    d3d9::Device::boneCompareText(o, s);  // (native.bone_motion=compare only: frame-ownership.md 14.13)
     return true;
 }
 
@@ -2170,69 +2191,142 @@ void RtScene::setAnimated(const void* consumer, bool on, float rangeUnits) {
 void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const rt::Registry::Instance& in, const rt::Rows& rows, TreeBatch& batch,
                           std::uint32_t index, std::uint32_t count) {
     ++iv_.treeDraws;
-    if (batch.failed || b.state != BlasState::Built || b.maxVertex == 0 || b.maxVertex >= (1u << 20) || b.triangles == 0 || q.indexBuffer == nullptr) return;
+    const bool replay = dev.ownedReplayActive();
+    const auto skip = [&](int why) {
+        if (replay) ++tw_.ownedSkip[why];  // (owned runs: why an observed instance got no job)
+    };
+    if (batch.failed || b.state != BlasState::Built || b.maxVertex == 0 || b.maxVertex >= (1u << 20) || b.triangles == 0 || q.indexBuffer == nullptr) return skip(0);
     const d3d9::scene::CameraBlock& cam = dev.camera().valid ? dev.camera() : dev.lastCamera();
-    if (!cam.valid) return;
+    if (!cam.valid) return skip(1);
     const float dx = rows[3] - cam.position[0], dy = rows[7] - cam.position[1], dz = rows[11] - cam.position[2];
     if (dx * dx + dy * dy + dz * dz > animRange_ * animRange_) {
         ++iv_.treeFar;
-        return;
+        return skip(2);
     }
     const std::uint64_t frame = dev.frameValue();
     rollDyn(frame);
-    if (dynTrees_ >= kMaxAnimatedTrees || dyn_.size() >= 512) return;
+    if (dynTrees_ >= kMaxAnimatedTrees || dyn_.size() >= 512) return skip(3);
     for (const DynDraw& d : dyn_) {
-        if (d.key == in.key && d.main) return;
+        if (d.key == in.key && d.main) return skip(4);
     }
     const bool index32 = b.key.index32 != 0;
     const rhi::GpuAddr indices = b.key.strip != 0 ? addrOf(*b.listIndices) : b.ibAddress.plus(static_cast<std::int64_t>(b.key.first) * (index32 ? 4u : 2u));
-    if (indices.null()) return;
+    if (indices.null()) return skip(5);
     const std::uint32_t slots = b.maxVertex + 1;
-    if (batch.base.null()) {
-        // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
-        // not they are all close enough: instance k always writes run k)
-        const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32 * count, 16);
-        if (a.ptr == nullptr) {
-            batch.failed = true;
-            return;
+    // F4-5 (native.tree_wind): the instance's positions by the compute pass; the capture only for a compare (composed draws: an owned run has no draw to capture)
+    // or when the compute cannot take the declaration (composed: the capture as before; owned: the rest pose, counted)
+    const TreeLayoutEntry* tl = treeWind_ != 0 && treeWindReady() ? &treeLayout(q) : nullptr;
+    const bool compute = tl != nullptr && tl->ok && index < kMaxBatch && kInstanceDataBase + 4 * index + 3 < kInstanceDataEnd;
+    if (tl != nullptr && !compute) ++tw_.refused;
+    const bool capture = !replay && (!compute || treeWind_ == 2);
+    if (!compute && !capture) return;
+    if (capture) {
+        if (batch.base.null()) {
+            // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
+            // not they are all close enough: instance k always writes run k)
+            const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32 * count, 16);
+            if (a.ptr == nullptr) {
+                batch.failed = true;
+                return;
+            }
+            // (compare: bit 31 = the capture stores the operand the vertex shader multiplies with its view-projection, i.e. its exact world position,
+            // not the clip position turned back into the world through the inverse matrix (that round trip alone is off by up to ~0.7 units at the jungle))
+            const std::uint32_t header[4] = {slots | (compute ? 0x80000000u : 0u), 0, 0, 0};
+            std::memcpy(a.ptr, header, 16);
+            // (compare: slots the vertex shader does not write must not look written)
+            if (compute) std::memset(static_cast<std::uint8_t*>(a.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32 * count);
+            batch.base = a.addr();
+            batch.baseRw = a.rw();
+            batch.slots = slots;
+            dev.requestVertexCapture(a, q.instanced, d3d9::Device::CaptureBy::RtTree, d3d9::Device::captureKindOf(q));
         }
-        const std::uint32_t header[4] = {slots, 0, 0, 0};
-        std::memcpy(a.ptr, header, 16);
-        batch.base = a.addr();
-        batch.slots = slots;
-        dev.requestVertexCapture(a, q.instanced);
+        if (batch.slots != slots) return;
     }
-    if (batch.slots != slots) return;
+    rhi::GpuAddr cap = capture ? batch.base.plus(static_cast<std::int64_t>(index) * slots * 32) : rhi::GpuAddr{};
+    rhi::GpuRef requested = capture ? batch.base.ref : rhi::GpuRef{};
+    if (compute) {
+        const rhi::GpuAddr vb = q.vertexBuffer != nullptr ? q.vertexBuffer->gpuAddress() : rhi::GpuAddr{};
+        const std::int64_t at = static_cast<std::int64_t>(q.vertexOffset) + static_cast<std::int64_t>(q.baseVertex) * q.vertexStride;
+        const rhi::RingAlloc out = !vb.null() && at >= 0 ? dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32, 16) : rhi::RingAlloc{};
+        const rhi::RingAlloc k = out.ptr != nullptr ? dev.ring(treewind::kConsts * 16u, 16) : rhi::RingAlloc{};
+        if (out.ptr == nullptr || k.ptr == nullptr) {
+            ++tw_.ringFull;
+            if (!capture) return;
+        } else {
+            if (treeJobsFrame_ != frame) {
+                treeJobs_.clear();
+                treeJobsFrame_ = frame;
+            }
+            const std::uint32_t header[4] = {slots, 0, 0, 0};
+            std::memcpy(out.ptr, header, 16);
+            auto* c = static_cast<float*>(k.ptr);
+            // c14..c29: what the draw's vertex shader reads: an owned view window (window 1 = c12..c30, served from the view table) holds them for the
+            // draw; the register file may hold an older copy then
+            const d3d9::OwnedWindows* ow = dev.ownedWindows();
+            const d3d9::OwnedWindows::Win* w1 = ow != nullptr ? &ow->w[0][1] : nullptr;
+            const bool fromWindow = w1 != nullptr && w1->kind != d3d9::OwnedWindows::Kind::None && w1->image != nullptr &&
+                                    shader::abi::kVsWindowFirst[1] <= 14 && w1->covered >= 30 - shader::abi::kVsWindowFirst[1];
+            const float* wind = fromWindow ? w1->image + 4 * (14 - shader::abi::kVsWindowFirst[1]) : dev.vsConstant(14);
+            if (fromWindow) {
+                ++tw_.windFromWindow;
+                if (std::memcmp(wind, dev.vsConstant(14), 16u * 16u) != 0) ++tw_.windRegisterStale;
+            }
+            std::memcpy(c, wind, 16u * 16u);                                                       // c14..c29
+            std::memcpy(c + 16 * 4, dev.vsConstant(kInstanceDataBase + 4 * index), 4u * 16u);  // the instance's row c32 + 4 i ..
+            TreeJob j;
+            j.vertices = vb.plus(at).ref;
+            j.consts = k.ref;
+            j.out = out.rw();
+            j.outKey = out.ref;
+            if (capture) j.ref = batch.baseRw.plus(16 + static_cast<std::int64_t>(index) * slots * 32);
+            j.slots = slots;
+            j.stride = q.vertexStride;
+            j.cls = tl->cls;
+            std::memcpy(j.words, tl->words, sizeof(j.words));
+            treeJobs_.push_back(j);
+            ++(replay ? tw_.owned : tw_.composed);
+            if (capture) ++tw_.compareJobs;
+            g_treeWindJobs.fetch_add(1, std::memory_order_relaxed);
+            if (replay) g_treeWindOwned.fetch_add(1, std::memory_order_relaxed);
+            // the scene takes the compute's output (a compare keeps the capture as its reference only)
+            cap = out.addr();
+            requested = out.ref;
+        }
+    }
     DynBlas& db = dynBlas_[in.key];
     if (db.id == 0) {
         db.id = nextDynId_++;
         db.updates = static_cast<std::uint32_t>((in.key >> 8) % 30);  // refits / rebuilds of the trees do not all fall in one frame
     }
-    DynDraw d{in.key, batch.base.plus(static_cast<std::int64_t>(index) * slots * 32), indices, slots, b.triangles, index32, false, true, b.id, batch.base.ref};
+    DynDraw d{in.key, cap, indices, slots, b.triangles, index32, false, true, b.id, requested};
     dyn_.push_back(d);
     ++dynTrees_;
-    ++iv_.treeCaptured;
+    if (capture) ++iv_.treeCaptured;
 }
 
-// the vertex layout the skinning pass reads (rt_skin.comp): stream 0 only, POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES0 UBYTE4,
-// TEXCOORD0 F2; morph targets (POSITION1..3 in streams 1..3, the heads') only while their weights (the vertex shader's c31.xyz) are
-// zero, then the vertex shader adds nothing of them; a draw with active morph targets keeps the vertex shader capture; `offsets`
-// packs the four byte offsets
-bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const {
+// the vertex layout the skinning pass reads (rt_skin.comp): stream 0: POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES0 UBYTE4, TEXCOORD0 F2; the morph targets
+// (POSITION1..3 F3 in streams 1..3, the heads') are added with the vertex shader's weights c31.xyz (14.15 c: before, a draw with active weights kept the vertex shader
+// capture, 27 - 72 solid draws per 5 s without a skinning job); `l.offsets` packs the four stream-0 byte offsets
+bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, SkinLayout& l) const {
+    l = SkinLayout{};
     if (q.decl == nullptr || q.vertexBuffer == nullptr || q.vertexStride == 0 || (q.vertexStride & 3u) != 0 || q.vertexStride > 255 ||
         q.vertexBuffer->ringCopied() || (q.vertexOffset & 3u) != 0) {
         return false;
     }
     int pos = -1, bw = -1, bi = -1, tc = -1;
-    bool morph = false;
+    int morph[3] = {-1, -1, -1};
     for (const d3d9::VertexElement& e : q.decl->elements()) {
         if (e.stream == d3d9::kDeclEndStream) break;
         if (e.stream != 0) {
-            morph = true;
+            // a morph target: POSITIONk F3 in stream k (the deltas of the normals are not needed: positions only)
+            if (e.stream >= 1 && e.stream <= 3 && e.usage == 0 && e.usageIndex == e.stream) {
+                if (e.type != 2) return false;
+                morph[e.stream - 1] = e.offset;
+            }
             continue;
         }
         if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = e.offset;
-        else if (e.usage == 0) morph = true;  // POSITION1..3
+        else if (e.usage == 0) return false;  // (a morph target in stream 0: not a layout the game uses)
         else if (e.usage == 1 && e.usageIndex == 0 && e.type == 3) bw = e.offset;
         else if (e.usage == 2 && e.usageIndex == 0 && e.type == 5) bi = e.offset;
         else if (e.usage == 5 && e.usageIndex == 0 && e.type == 1) tc = e.offset;
@@ -2240,9 +2334,29 @@ bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeight
     for (int o : {pos, bw, bi, tc}) {
         if (o < 0 || o > 252 || (o & 3) != 0) return false;
     }
-    if (morph && (std::fabs(morphWeights[0]) > 1e-6f || std::fabs(morphWeights[1]) > 1e-6f || std::fabs(morphWeights[2]) > 1e-6f)) return false;
-    offsets = static_cast<std::uint32_t>(pos) | (static_cast<std::uint32_t>(bw) << 8) | (static_cast<std::uint32_t>(bi) << 16) |
-              (static_cast<std::uint32_t>(tc) << 24);
+    // (c31 is the morph weights only for a layout with morph streams: other skinned shaders leave it to whatever the register file holds)
+    const bool morphLayout = morph[0] >= 0 || morph[1] >= 0 || morph[2] >= 0;
+    if (morphLayout && d3d9::Device::nocapOld() &&
+        (std::fabs(morphWeights[0]) > 1e-6f || std::fabs(morphWeights[1]) > 1e-6f || std::fabs(morphWeights[2]) > 1e-6f)) {
+        return false;  // (RVK_NOCAP_OLD: active morph targets kept the vertex shader capture)
+    }
+    for (std::uint32_t k = 0; k < 3 && morphLayout; ++k) {
+        const bool active = std::fabs(morphWeights[k]) > 1e-6f;
+        if (morph[k] < 0) {
+            if (active) return false;  // (weights for a target the layout does not have: the vertex shader reads something else)
+            continue;
+        }
+        const d3d9::Buffer* b = q.morphBuffer[k];
+        const std::uint32_t st = q.morphStride[k];
+        if (b == nullptr || b->ringCopied() || st == 0 || (st & 3u) != 0 || st > 255 || (q.morphOffset[k] & 3u) != 0 || morph[k] > 252 || (morph[k] & 3) != 0) {
+            if (active) return false;
+            continue;
+        }
+        l.morphOff[k] = static_cast<std::uint32_t>(morph[k]);
+        l.morphMask |= 1u << k;
+    }
+    l.offsets = static_cast<std::uint32_t>(pos) | (static_cast<std::uint32_t>(bw) << 8) | (static_cast<std::uint32_t>(bi) << 16) |
+                (static_cast<std::uint32_t>(tc) << 24);
     return true;
 }
 
@@ -2259,8 +2373,8 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const bool solid = mainView && q.phase.pass == Pass::Solid;
     // the skinning pass takes the draws of the z pre-pass and of the cascades (before the TLAS is built); the solid pass keeps
     // its vertex shader capture (the previous main-view positions: motion vectors, and the fallback for a character the others missed)
-    std::uint32_t skinOffsets = 0;
-    const bool skin = skinWanted_ && !solid && skinReady() && skinEligible(q, dev.vsConstant(31), skinOffsets);
+    SkinLayout skinLayout;
+    const bool skin = skinWanted_ && !solid && skinReady() && skinEligible(q, dev.vsConstant(31), skinLayout);
     if (skinWanted_ && !solid) ++(skin ? iv_.skinDraws : iv_.skinIneligible);
     if (skinWanted_ && !solid && !skin && skinReady_ && q.decl != nullptr && skinLogged_.insert(q.decl->id()).second && skinLogged_.size() <= 8) {
         std::string els;
@@ -2272,6 +2386,12 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                      q.vertexBuffer != nullptr && q.vertexBuffer->ringCopied(), els);
     }
     if (mainView && !solid && !skin) return;  // the pre-pass's draws only feed the skinning pass
+    // 14.15 (Full, native.bone_motion=on): a cascade's character draw while the skinning pipeline is still being built (the first second of a session) takes no
+    // capture either: the character enters the TLAS with the first skinning job (no capture-variant pipeline per skinned shader for a few frames)
+    if (!solid && !skin && skinWanted_ && !skinReady_ && !skinVerify_ && dev.boneMotion() == 1 && !d3d9::Device::nocapOld()) {
+        dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtCascade, d3d9::Device::captureKindOf(q));
+        return;
+    }
     // verify: only the cascades' draws (the vertex shader capture of the same draw is the reference)
     if (skin && skinVerify_ && mainView) return;
     // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
@@ -2293,22 +2413,31 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     for (const DynDraw& d : dyn_) {
         if (d.key == key && d.skin == skin && (skin || d.main == mainView)) return;
     }
+    bool solidHasJob = false;
     if (solid && skinWanted_ && skinReady_) {
         // diagnostics: a solid-pass character draw without a skinning job of this frame (the pose of the previous frame is used for it)
         bool has = false;
         for (const DynDraw& d : dyn_) has = has || (d.key == key && d.skin);
+        solidHasJob = has;
         ++(has ? iv_.solidWithSkin : iv_.solidNoSkin);
         // (F-VAR2: the skinning pass has this frame's pose of the character, nothing reads its capture: no request, so an owned solid draw stays owned)
         // (14.13: a bone-motion draw's motion needs no capture either: dev.boneMotionDraw)
-        if (has && (!characterMotion_ || dev.boneMotionDraw()) && !skinVerify_) {
+        if (has && (!characterMotion_ || dev.boneMotionCovered()) && !skinVerify_) {
             ++iv_.solidCaptureSkipped;
+            dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidMotion, d3d9::Device::captureKindOf(q));
+            return;
+        }
+        // 14.15: a solid-pass part without a job of this frame (its first frame: the pre-pass / cascades did not draw it yet) whose motion the bone forms give takes
+        // no capture: the TLAS takes it from the next frame's job (one frame without it), as the RT scene does for any part it first sees in a late pass
+        if (!has && dev.boneMotionCovered() && dev.boneMotion() == 1 && !skinVerify_ && !d3d9::Device::nocapOld()) {
+            dev.noteCaptureAvoided(d3d9::Device::CaptureBy::RtSolidNoJob, d3d9::Device::captureKindOf(q));
             return;
         }
         if (!has && skinLogged_.size() < 12 && skinLogged_.insert(key).second) {
-            std::uint32_t o = 0;
+            SkinLayout lo;
             spdlog::info("rt: skin: a solid-pass draw without a skinning job: entity {}, primitives {}, morph weights {:.3f} {:.3f} {:.3f}, eligible {}, maxIndex {}, jobs {}",
                          reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->entity : nullptr), q.primitives, dev.vsConstant(31)[0], dev.vsConstant(31)[1],
-                         dev.vsConstant(31)[2], skinEligible(q, dev.vsConstant(31), o), dynBlas_[key].maxIndex, skinJobs_.size());
+                         dev.vsConstant(31)[2], skinEligible(q, dev.vsConstant(31), lo), dynBlas_[key].maxIndex, skinJobs_.size());
         }
     }
     DynBlas& b = dynBlas_[key];
@@ -2342,6 +2471,21 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         const rhi::GpuAddr vb = q.vertexBuffer->gpuAddress();
         const std::int64_t at = static_cast<std::int64_t>(q.vertexOffset) + static_cast<std::int64_t>(q.baseVertex) * q.vertexStride;
         if (!vb.null() && at >= 0) vertexAddress = vb.plus(at);
+        // 14.15 c: the morph targets' streams (the same base vertex); a target whose stream has no address is left out when its weight is 0, else no skinning job
+        for (std::uint32_t k = 0; k < 3 && !vertexAddress.null(); ++k) {
+            if ((skinLayout.morphMask >> k & 1u) == 0) continue;
+            d3d9::Buffer* mb = q.morphBuffer[k];
+            mb->gpu(q.morphStride[k]);
+            const rhi::GpuAddr ma = mb->gpuAddress();
+            const std::int64_t mat = static_cast<std::int64_t>(q.morphOffset[k]) + static_cast<std::int64_t>(q.baseVertex) * q.morphStride[k];
+            if (!ma.null() && mat >= 0) {
+                skinLayout.morph[k] = ma.plus(mat).ref;
+            } else if (std::fabs(dev.vsConstant(31)[k]) > 1e-6f) {
+                vertexAddress = {};
+            } else {
+                skinLayout.morphMask &= ~(1u << k);
+            }
+        }
     }
     const bool useSkin = skin && !vertexAddress.null();
     if (mainView && !solid && !useSkin) return;
@@ -2369,7 +2513,14 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         j.outKey = a.ref;
         j.slots = slots;
         j.stride = q.vertexStride;
-        j.offsets = skinOffsets;
+        j.offsets = skinLayout.offsets;
+        j.morphMask = skinLayout.morphMask;
+        for (std::uint32_t k = 0; k < 3; ++k) {
+            j.morph[k] = skinLayout.morph[k];
+            j.morphOff[k] = skinLayout.morphOff[k];
+            j.morphStride[k] = (skinLayout.morphMask >> k & 1u) != 0 ? q.morphStride[k] : 0u;
+            j.morphWeight[k] = dev.vsConstant(31)[k];
+        }
         // the bone matrices: c32 .. c231 of this draw's vertex shader constants
         const rhi::RingAlloc bones = dev.ring(200u * 16u, 16);
         if (bones.ptr == nullptr) return;
@@ -2382,13 +2533,15 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
                 std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
-                dev.requestVertexCapture(ref);
+                dev.requestVertexCapture(ref, false, d3d9::Device::CaptureBy::RtSkinVerify, d3d9::Device::captureKindOf(q));
                 j.ref = ref.rw();
             }
         }
         skinJobs_.push_back(j);
     } else {
-        dev.requestVertexCapture(a);
+        // (census: a solid-pass draw without a skinning job of this frame, one kept for its motion, or a cascade's draw the skinning pass cannot take)
+        const d3d9::Device::CaptureBy by = !solid ? d3d9::Device::CaptureBy::RtCascade : solidHasJob ? d3d9::Device::CaptureBy::RtSolidMotion : d3d9::Device::CaptureBy::RtSolidNoJob;
+        dev.requestVertexCapture(a, false, by, d3d9::Device::captureKindOf(q));
     }
     // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -2596,7 +2749,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(skinJobs_.size(), 512));
     std::uint32_t chunks = 0;
     for (std::uint32_t i = 0; i < n; ++i) chunks += (skinJobs_[i].slots + 63) / 64;
-    const rhi::RingAlloc t = dev_.ring(16 + 64ull * n, 16);
+    const rhi::RingAlloc t = dev_.ring(16 + 64ull * n + 48ull * n, 16);  // (4 uint4 per job, then a 3-uint4 morph block per job: rt_skin.comp.hlsl)
     if (t.ptr == nullptr) {
         skinJobs_.clear();
         return;
@@ -2662,8 +2815,28 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         w[11] = j.ref.high();
         w[12] = j.offsets;
         w[13] = w[14] = w[15] = 0;
+        // 14.15 c: the morph targets (rt_skin.comp.hlsl: the job's morph block after the job table)
+        w[9] = j.morphMask;
+        if (j.morphMask != 0) {
+            const std::uint64_t at = 16 + 64ull * n + 48ull * i;
+            std::uint32_t* m = static_cast<std::uint32_t*>(t.ptr) + at / 4;
+            m[0] = j.morph[0].low();
+            m[1] = j.morph[0].high();
+            m[2] = j.morph[1].low();
+            m[3] = j.morph[1].high();
+            m[4] = j.morph[2].low();
+            m[5] = j.morph[2].high();
+            m[6] = j.morphStride[0] | (j.morphStride[1] << 8) | (j.morphStride[2] << 16);
+            m[7] = j.morphOff[0] | (j.morphOff[1] << 8) | (j.morphOff[2] << 16);
+            std::memcpy(&m[8], j.morphWeight, 3 * sizeof(float));
+            m[11] = 0;
+            const rhi::GpuRef mr = t.ref.plus(static_cast<std::int64_t>(at));
+            w[13] = mr.low();
+            w[14] = mr.high();
+        }
         chunk += (j.slots + 63) / 64;
         skinVerticesTotal_ += j.slots;
+        if (j.morphMask != 0) ++skinMorphTotal_;
     }
     {
         d3d9::RegionScope r(dev_, "rt.skin");
@@ -2686,8 +2859,206 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const double now = dev_.secondsSinceCreate();
     if (now >= skinLogAt_ + 5.0) {
         skinLogAt_ = now;
-        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame)", skinJobsTotal_, skinVerticesTotal_, n);
+        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame; {} draws with morph targets so far)", skinJobsTotal_, skinVerticesTotal_, n,
+                     skinMorphTotal_);
     }
+}
+
+// ---- F4-5: SpeedTrees in the wind by compute (native.tree_wind, docs/research/frame-ownership.md 14.17) ----------------------------------------------------
+
+TreeWindState treeWindState() { return {g_treeWindArmed.load(std::memory_order_relaxed), g_treeWindJobs.load(std::memory_order_relaxed), g_treeWindOwned.load(std::memory_order_relaxed)}; }
+
+void RtScene::setTreeWind(int mode) {
+    mode = std::clamp(mode, 0, 2);
+    if (mode == treeWind_) return;
+    static constexpr const char* kName[3] = {"off", "on", "compare"};
+    spdlog::info("rt: tree wind: {} (the animated SpeedTrees' positions {})", kName[mode], mode == 0 ? "from the vertex shader capture" : mode == 1 ? "by compute, no capture" : "by compute, compared with the capture of the composed draws");
+    treeWind_ = mode;
+    if (mode == 0) {
+        treeJobs_.clear();
+        g_treeWindArmed = false;
+    } else if (treeWindReady_) {
+        g_treeWindArmed = true;
+    }
+}
+
+// the pipeline builds in the background on first use; until it is ready the animated trees take the vertex shader captures (and stay composed)
+bool RtScene::treeWindReady() {
+    if (treeWind_ == 0 || treeWindFailed_) return false;
+    if (treeWindReady_) return true;
+    if (!treeWindStarted_) {
+        treeWindStarted_ = true;
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev == nullptr) {
+            treeWindFailed_ = true;
+            return false;
+        }
+        treeWindBuild_ = std::async(std::launch::async, [rdev]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv("rt/rt_tree_wind.comp");
+            d.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_tree_wind.comp");
+            d.name = "rt.tree_wind";
+            return rdev->createComputePipeline(d);
+        });
+        return false;
+    }
+    if (!treeWindBuild_.valid() || treeWindBuild_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    treeWindPipe_ = treeWindBuild_.get();
+    if (!treeWindPipe_) {
+        spdlog::error("rt: tree wind: the compute pipeline failed: the animated SpeedTrees keep the vertex shader captures");
+        treeWindFailed_ = true;
+        return false;
+    }
+    treeWindReady_ = true;
+    g_treeWindArmed = treeWind_ != 0;
+    spdlog::info("rt: tree wind: compute pipeline ready");
+    return true;
+}
+
+void RtScene::destroyTreeWind() {
+    treeJobs_.clear();
+    if (treeWindBuild_.valid()) treeWindBuild_.get();
+    treeWindPipe_.reset();
+    treeWindErr_.reset();
+    treeWindReady_ = treeWindStarted_ = treeWindFailed_ = false;
+    g_treeWindArmed = false;
+}
+
+const RtScene::TreeLayoutEntry& RtScene::treeLayout(const d3d9::ReplaceQuery& q) {
+    static const TreeLayoutEntry kNone{};
+    if (q.decl == nullptr || q.tag == nullptr) return kNone;
+    const std::uint32_t op = q.tag->opDesc > 1 ? 2u : q.tag->opDesc;
+    const std::uint64_t key = q.decl->id() * 4 + op;
+    auto [it, fresh] = treeLayouts_.try_emplace(key);
+    if (!fresh) return it->second;
+    std::vector<treewind::Element> els;
+    std::string d;
+    for (const d3d9::VertexElement& e : q.decl->elements()) {
+        if (e.stream == d3d9::kDeclEndStream) break;
+        els.push_back({e.stream, e.offset, e.type, e.usage, e.usageIndex});
+        d += std::format(" {}{}@{}+{}:t{}", e.usage, e.usageIndex, e.stream, e.offset, e.type);
+    }
+    const treewind::Layout l = treewind::layoutOf(els, q.tag->opDesc);
+    TreeLayoutEntry& t = it->second;
+    t.ok = l.ok && q.vertexStride >= 12 && q.vertexStride % 4 == 0 && q.vertexOffset % 4 == 0;
+    t.cls = l.cls;
+    std::memcpy(t.words, l.words, sizeof(t.words));
+    // (every word's offset must be 4-byte aligned: the compute reads words)
+    for (std::uint32_t w : t.words) {
+        if (w != treewind::kAbsent && (w & 3u) != 0) t.ok = false;
+    }
+    static constexpr const char* kCls[3] = {"wind only (branches / fronds)", "leaf mesh", "leaf cards"};
+    spdlog::info("rt: tree wind: declaration [{} ] (stride {}, op {}) -> {}", d, q.vertexStride, q.tag->opDesc,
+                 t.ok ? kCls[t.cls] : std::format("NOT taken ({})", l.why != nullptr ? l.why : "stride / offset alignment"));
+    if (treeLayouts_.size() > 4096) treeLayouts_.clear();  // (declarations live with the device: a bound, not a cache policy)
+    return t;
+}
+
+// one dispatch for the frame's tree jobs (every observation of the main view's solid pass, composed draws and owned runs), at AfterOpaque: the same frame the
+// capture would have run in, so the next frame's refit (buildDynamic: the previous frame's captures) takes the outputs unchanged
+void RtScene::recordTreeWind(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || treeJobs_.empty()) return;
+    const std::uint64_t frame = dev_.frameValue();
+    if (treeJobsFrame_ != frame || treeWind_ == 0 || !treeWindReady()) {
+        tw_.dropped += treeJobs_.size();
+        treeJobs_.clear();
+        return;
+    }
+    rhi::CommandList& cl = ctx.cmd;
+    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(treeJobs_.size(), 1024));
+    std::uint32_t chunks = 0;
+    for (std::uint32_t i = 0; i < n; ++i) chunks += (treeJobs_[i].slots + 63) / 64;
+    const rhi::RingAlloc t = dev_.ring(treewind::kHeadBytes + treewind::kJobWords * 4ull * n, 16);
+    if (t.ptr == nullptr || chunks == 0) {
+        tw_.ringFull += treeJobs_.size();
+        treeJobs_.clear();
+        return;
+    }
+    bool compare = false;
+    for (std::uint32_t i = 0; i < n && !compare; ++i) compare = !treeJobs_[i].ref.null();
+    rhi::GpuRef errAddress;
+    if (treeWind_ == 2) {
+        const std::uint32_t slot = dev_.frameSlot();
+        if (treeWindErr_ == nullptr) {
+            if (rhi::Device* rd = dev_.rhi(); rd != nullptr) {
+                treeWindErr_ = rd->createBuffer({treewind::kErrBytes * rhi::kFramesInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "rt tree wind compare"});
+            }
+            if (treeWindErr_ != nullptr && treeWindErr_->map() != nullptr) std::memset(treeWindErr_->map(), 0, treewind::kErrBytes * rhi::kFramesInFlight);
+        }
+        if (treeWindErr_ != nullptr && treeWindErr_->map() != nullptr) {
+            treeWindErr_->invalidate();
+            auto* e = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(treeWindErr_->map()) + treewind::kErrBytes * slot);
+            // this slot's previous frame has completed (Frames::begin waited for it)
+            float maxErr = 0.0f;
+            std::memcpy(&maxErr, &e[0], 4);
+            tw_.maxErr = std::max(tw_.maxErr, maxErr);
+            tw_.compared += e[1];
+            tw_.missing += e[2];
+            tw_.over01 += e[3];
+            tw_.over1 += e[4];
+            for (int c = 0; c < 3; ++c) {
+                float m = 0.0f;
+                std::memcpy(&m, &e[5 + c], 4);
+                tw_.clsMax[c] = std::max(tw_.clsMax[c], m);
+            }
+            std::memset(e, 0, treewind::kErrBytes);
+            treeWindErr_->flush();
+            if (compare) {
+                const std::array<std::uint32_t, 2> er = treeWindErr_->shaderRef(treewind::kErrBytes * slot);
+                errAddress = rhi::GpuRef::fromWords(er[0], er[1]);
+            }
+        }
+    }
+    auto* head = static_cast<std::uint32_t*>(t.ptr);
+    head[0] = n;
+    head[1] = chunks;
+    head[2] = errAddress.low();
+    head[3] = errAddress.high();
+    std::uint32_t* jobs = head + 4;
+    std::uint32_t chunk = 0;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const TreeJob& j = treeJobs_[i];
+        std::uint32_t* w = jobs + static_cast<std::size_t>(treewind::kJobWords) * i;
+        w[0] = j.vertices.low();
+        w[1] = j.vertices.high();
+        w[2] = j.consts.low();
+        w[3] = j.consts.high();
+        w[4] = j.out.low();
+        w[5] = j.out.high();
+        w[6] = j.slots;
+        w[7] = j.stride;
+        w[8] = chunk;
+        w[9] = j.cls;
+        w[10] = j.ref.low();
+        w[11] = j.ref.high();
+        std::memcpy(w + 12, j.words, sizeof(j.words));
+        chunk += (j.slots + 63) / 64;
+        tw_.vertices += j.slots;
+    }
+    {
+        d3d9::RegionScope r(dev_, "rt.tree_wind");
+        // compare: the reference captures were written by the solid pass's vertex shaders before the compute reads them
+        barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        dev_.game().captureAccess(cl, true);  // (D3D12: the capture pool in its write state)
+        cl.bindPipeline(*treeWindPipe_);
+        abi::SkinPush push{};
+        push.h.frame = 0;
+        push.table[0] = t.ref.low();
+        push.table[1] = t.ref.high();
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(chunks, 1, 1);
+        dev_.game().captureAccess(cl, false);
+        // the outputs -> a scene built at AfterOpaque of this frame (no z pre-pass) / the next frame's refits (their own barrier covers compute writes too)
+        barrier(cl, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    }
+    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(treeJobs_[i].outKey);
+    tw_.jobs += n;
+    tw_.dropped += treeJobs_.size() - n;
+    ++tw_.dispatches;
+    treeJobs_.clear();
 }
 
 // characters not seen for 2 s (all: off / deactivated): BLAS + material released
@@ -3265,6 +3636,22 @@ void RtScene::logStats(bool force) {
                      iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
                      iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, iv_.solidCaptureSkipped, dev_.game().gameCaps().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
+    }
+    if (treeWind_ != 0 || tw_.jobs != 0) {
+        // F4-5 (native.tree_wind): the animated trees' positions by compute (owned runs / composed draws), the compare with the capture (compare mode, composed draws)
+        std::string cmp;
+        if (treeWind_ == 2) {
+            cmp = std::format("; compare with the vertex shader capture: {} jobs, {} vertices compared, max error {:.5f} units (branches / fronds {:.5f}, leaf meshes {:.5f}, leaf cards {:.5f}), "
+                              "{} over 0.1, {} over 1, {} slots the capture did not write; wind registers from the draw's view window {} (register file differed {})",
+                              tw_.compareJobs, tw_.compared, tw_.maxErr, tw_.clsMax[0], tw_.clsMax[1], tw_.clsMax[2], tw_.over01, tw_.over1, tw_.missing, tw_.windFromWindow,
+                              tw_.windRegisterStale);
+        }
+        spdlog::info("rt: tree wind (5 s): {}, {} tree instances by compute ({} from owned runs, {} from composed draws), {} vertices, {} dispatches, captures requested {}, "
+                     "declarations refused {}, ring full {}, dropped {}; tree batches with the identity instance stream assumed {} (readable but not 0, 1, 2, ...: {}); "
+                     "owned-run instances without a job: BLAS not built {}, no camera {}, beyond the range {}, cap {}, already taken {}, no indices {}{}",
+                     treeWind_ == 0 ? "off" : treeWindReady_ ? (treeWind_ == 2 ? "compare" : "on") : "on (pipeline pending)", tw_.jobs, tw_.owned, tw_.composed, tw_.vertices,
+                     tw_.dispatches, iv_.treeCaptured, tw_.refused, tw_.ringFull, tw_.dropped, tw_.rampAssumed, tw_.rampMismatch, tw_.ownedSkip[0], tw_.ownedSkip[1], tw_.ownedSkip[2], tw_.ownedSkip[3], tw_.ownedSkip[4], tw_.ownedSkip[5], cmp);
+        tw_ = {};
     }
     if (iv_.holes > 0) {
         spdlog::info("rt: scene: TLAS built over fewer instances than counted in {} frames of the interval ({} dynamic instances dropped out: their registry instance or BLAS was gone)",

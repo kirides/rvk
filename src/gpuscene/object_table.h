@@ -40,6 +40,20 @@ public:
 
     void setActive(bool on) { active_ = on; }
     bool active() const { return active_; }
+    // 14.15 b (native.rigid_motion, restart): the table also keeps each record's image of the PREVIOUS frame at record kCapacity + slot (kHistoryDelta bytes past it); the
+    // history record's info.w = 1 when it is valid (the slot's record of the frame before, same generation, no jump of more than kJump units). Set before the first flush.
+    static constexpr std::int64_t kHistoryDelta = static_cast<std::int64_t>(kCapacity) * static_cast<std::int64_t>(sizeof(ObjectRecord));
+    static constexpr float kJump = 500.0f;
+    void setHistory(bool on) { if (!created_) history_ = on; }
+    bool history() const { return history_ && table_.ready(); }
+    // the history window base of a window base this table handed out (windowFor / serve), null otherwise (GPU safety: only bases of real records get one)
+    rhi::GpuRef prevOf(rhi::GpuRef base) const;
+    struct HistoryStats {
+        std::uint64_t changed = 0, valid = 0, invalidNew = 0, invalidGeneration = 0, invalidJump = 0, settled = 0;
+    };
+    const HistoryStats& historyStats() const { return hist_; }
+    // (tests) the CPU twin of `slot`'s history record (null without history / out of range)
+    const ObjectRecord* historyRecord(std::uint32_t slot) const { return history_ && table_.ready() && slot < kCapacity ? &table_.shadow()[kCapacity + slot] : nullptr; }
 
     // One draw: the entity's record for the draw whose VS registers c31..c35 were composed as `composed[5][4]` (bit i of `composedBits` = c(31 + i) was composed;
     // c32 .w = the fade). Fills `out` (kind Object, base, covered, masks, CPU twin) and returns Served, else the reason (out untouched).
@@ -80,6 +94,15 @@ private:
     std::uint64_t lastFrame_ = 0, lastBytes_ = 0, lastSlots_ = 0;
     double lastReport_ = 0.0;
     int changedLogged_ = 0;
+    // 14.15 b: the history
+    bool history_ = false;
+    void noteChanged(std::uint32_t slot);   // the CPU shadow of `slot` was rewritten this frame (before the rewrite: its record of the last flush is lastRec_)
+    void rollHistory();                     // at the flush: the history records of the slots changed this frame / settling after a change
+    std::vector<ObjectRecord> lastRec_;     // per slot: the record as uploaded at the last flush
+    std::vector<std::uint64_t> changedAt_;  // per slot: frame_ + 1 of the last change
+    std::vector<std::uint32_t> changed_, settling_;
+    std::vector<std::uint8_t> settlingMark_;
+    HistoryStats hist_, histLast_;
 };
 
 ObjectTable& objecttable();

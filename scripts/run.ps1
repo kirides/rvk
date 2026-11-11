@@ -287,7 +287,6 @@ if ($GracefulExit) {
         Write-Host "graceful exit: closing the window of pid $($p.Id)"
         $null = $p.CloseMainWindow()
         $closedAt = Get-Date
-        $knownExitCrash = $false
         if ($p.WaitForExit(60000)) {
             Write-Host ("graceful exit: exited, code 0x{0:X8}" -f $p.ExitCode)
             if ($p.ExitCode -ne 0) {
@@ -297,10 +296,9 @@ if ($GracefulExit) {
                     Where-Object { $v = [string]$_.Properties[8].Value; $id = if ($v -like '0x*') { [Convert]::ToInt32($v.Substring(2), 16) } else { [int]$v }; $id -eq $p.Id } | Select-Object -First 1
                 $fault = if ($ev) { '{0}+0x{1}' -f $ev.Properties[3].Value, ([string]$ev.Properties[7].Value -replace '^(0x)?0*', '') } else { '(no WER event)' }
                 Write-Host "graceful exit: crash in $fault"
-                # Known: SharedBase.dll+0x7caa9 (bCObjectBase::Read on a dead stream) crashes many graceful exits (intermittent) in every render mode, also
-                # Original (system D3D9): an engine / risen-spass exit crash, not the renderer's (2026-11-11); it does not fail the run
-                if ($fault -match '^SharedBase\.dll\+0x0*7caa9$') { $knownExitCrash = $true; Write-Host 'graceful exit: (the known engine exit crash, every render mode: not counted; its minidump neither)' }
-                else { $code = 3 }
+                # SharedBase.dll+0x7caa9 / Engine.dll+0x8f1bd = the game's own exit crash (GUI bitmaps released by Game.dll's static destructors), now
+                # suppressed by engine/exit_guard (docs/research/shutdown.md): if it shows again, the guard failed: counted
+                $code = 3
             }
         } else {
             Write-Host 'graceful exit: did NOT exit within 60 s of the close request; killed'
@@ -308,10 +306,11 @@ if ($GracefulExit) {
             $code = 3
         }
     }
-    $newDumps = @(Get-ChildItem $dumpDir -ErrorAction SilentlyContinue | Where-Object { $dumpsBefore -notcontains $_.Name })
+    # (rvk_<stamp>_exit_<n>.txt = the ExitProcess caller's stack of RVK_EXIT_TRACE=1: a trace, not a fault)
+    $newDumps = @(Get-ChildItem $dumpDir -ErrorAction SilentlyContinue | Where-Object { $dumpsBefore -notcontains $_.Name -and $_.Name -notmatch '_exit_\d+\.txt$' })
     if ($newDumps.Count -gt 0) {
         Write-Host "graceful exit: new dumps: $(($newDumps.Name) -join ', ')"
-        if (-not ($knownExitCrash -and @($newDumps | Where-Object { $_.Name -notlike '*_crash.dmp' }).Count -eq 0)) { $code = 3 }
+        $code = 3
     } else {
         Write-Host 'graceful exit: no new dumps'
     }

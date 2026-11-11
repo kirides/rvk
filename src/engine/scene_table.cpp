@@ -216,6 +216,17 @@ void checkEntity(const void* entity) {
     }
 }
 
+void testCacheIn(const void* entity) {
+    const auto it = g_index.find(entity);
+    if (it != g_index.end()) freeSlot(it->second);
+    allocate(entity);
+}
+void testCacheOut(const void* entity) {
+    const auto it = g_index.find(entity);
+    if (it != g_index.end()) freeSlot(it->second);
+}
+void testMove(const void* entity, const float world[16]) { onMatrix(const_cast<void*>(entity), world); }
+
 void onPresent() {
     ++g_frame;
     const auto now = std::chrono::steady_clock::now();

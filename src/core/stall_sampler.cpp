@@ -255,6 +255,12 @@ bool isSystemModule(std::string_view name) {
 
 StallSampler* presentSampler() { return g_present.get(); }
 
+namespace {
+std::atomic<void (*)(const char*)> g_hangReporter{nullptr};
+}
+
+void setHangReporter(void (*report)(const char* why)) { g_hangReporter = report; }
+
 void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* user) {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) return;
@@ -310,6 +316,7 @@ void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* u
                 for (int i = 0; i < tk.n; ++i) line += (i == 0 ? "" : " < ") + sym.name(tk.pcs[i]);
                 spdlog::error("diag: hang: thread {}: {}", tk.id, line);
             }
+            if (auto* report = g_hangReporter.load(); report != nullptr && reports == 1) report("hang watchdog");
         }
     }).detach();
 }

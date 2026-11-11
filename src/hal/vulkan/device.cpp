@@ -276,6 +276,9 @@ void HalDevice::applyStaticOps() {
         const bool objects = on(rs.nativeOwnedObjects) && owned;
         if (objects != gpuscene::objecttable().active()) spdlog::info("native: owned objects {}", objects ? "on" : "off");
         gpuscene::objecttable().setActive(objects);
+        // frame-ownership.md 14.15 b: rigid-object history motion (restart: the history doubles the object table's buffer, made at its first flush)
+        gpuscene::objecttable().setHistory(objects && rs.nativeRigidMotion != nullptr && rs.nativeRigidMotion->startValue() != 0.0 && rs.nativeBoneMotion != nullptr &&
+                                           rs.nativeBoneMotion->startValue() != 0.0);
         staticOps_->setOwnedObjects(objects);
         // frame-ownership.md 7.14: F2c-2 op records (compare only; needs the object table + the lighting images)
         staticOps_->setOwnedRecords(on(rs.nativeOwnedRecords) && objects && gpuscene::lightingimages().active());
@@ -318,6 +321,8 @@ void HalDevice::applyStaticOps() {
         }
         staticOps_->setOwnedVegetation(on(rs.nativeOwnedVegetation) && renderMode() == RenderMode::Full && staticOps_->active());
         staticOps_->setOwnFoliage(on(rs.nativeOwnFoliage) && renderMode() == RenderMode::Full && staticOps_->active());  // S-5 (frame-ownership.md 14.14)
+        // F4-5 (frame-ownership.md 14.17): the RT scene's animated SpeedTrees by compute (no capture: the owned trees stay owned with RT on; Full only)
+        if (rtScene_) rtScene_->setTreeWind(rs.nativeTreeWind != nullptr && renderMode() == RenderMode::Full ? rs.nativeTreeWind->asInt() : 0);
         {
             // frame-ownership.md 7.42: F7-2 owned vegetation draws (the persistent blocks + scene ABI v2; the grass draws' v2 scene forms are built while it is on)
             const bool vegOps = on(rs.nativeOwnedVegetationOps) && on(rs.nativeOwnedVegetation) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
@@ -333,6 +338,7 @@ void HalDevice::applyStaticOps() {
             const int bone = actors && rs.nativeBoneMotion != nullptr ? static_cast<int>(rs.nativeBoneMotion->startValue()) : 0;
             gpuscene::bonetable().setHistory(bone != 0);
             dev_.setBoneMotion(gpuscene::bonetable().history() ? bone : 0);
+            dev_.setRigidMotion(bone != 0 && rs.nativeRigidMotion != nullptr && rs.nativeRigidMotion->startValue() != 0.0 && gpuscene::objecttable().active());  // 14.15 b
             staticOps_->setOwnedActors(actors);
         }
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
@@ -729,7 +735,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1771,6 +1777,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::objecttable().flush(dev_);
         gpuscene::bonetable().flush(dev_);  // F6-1: the owned actors' bone images (before the frame's draws, with the other tables)
         dev_.boneMotionFrame();         // 14.13: bone-history motion (compare readback, the 5 s line)
+        dev_.captureCensusFrame();      // 14.15: the vertex-capture census (`native: captures (5 s)`)
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
         gpuscene::bbtable().flush(dev_);
     }

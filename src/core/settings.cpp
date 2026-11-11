@@ -2869,6 +2869,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeTreeWind = &reg.add({
+        .key = "native.tree_wind",
+        .label = "Native frame: SpeedTree wind by compute (RT scene)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F4-5 (docs/research/frame-ownership.md 14.17; Full): the ray tracing scene's animated SpeedTrees (RT shadows' wind, GI foliage) take their swaying "
+                       "positions from a compute pass that runs the trees' vertex shader wind (wind matrices, leaf rock / rustle, leaf cards and meshes) over each instance's "
+                       "vertex buffer instead of a vertex shader capture of the composed draw, so the trees stay owned (native.owned_trees) with ray tracing on. Compare = the "
+                       "captures of the composed draws too, both compared on the GPU (rvk.log `rt: tree wind (5 s)`: max error in world units). Off by default.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the vertex captures"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeBoneMotion = &reg.add({
         .key = "native.bone_motion",
         .label = "Native frame: bone-history motion",
@@ -2884,6 +2900,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "On", "Compare with the vertex captures"},
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (the bone table's history doubles its buffer, made once)
         .needs = {{"native.owned_actors", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeRigidMotion = &reg.add({
+        .key = "native.rigid_motion",
+        .label = "Native frame: rigid-object history motion",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Debug, Full (docs/research/frame-ownership.md 14.15 b; needs native.bone_motion = on, acts with upscale.object_motion = all): the object table keeps each "
+                       "record's previous-frame image, and the static meshes' main solid draws whose world rows come from the object table take the bone-motion vertex "
+                       "forms (the second run reads the previous record), so moving rigid objects get their per-object motion without a vertex capture and their owned "
+                       "draws stay owned. Restart. Off by default.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (the history doubles the object table's buffer, made once)
+        .needs = {{"native.bone_motion", "off", true, false}},
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnPost = &reg.add({

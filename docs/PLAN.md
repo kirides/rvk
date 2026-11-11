@@ -72,7 +72,7 @@ Each milestone ends verified (in the game where it touches the engine) and commi
 * M5: intermittent overexposed frames in the beach intro (pre-existing, probably the intro's own effect; needs a frame-indexed D3D9 sequence; performance.md).
 * M5: `VK_EXT_graphics_pipeline_library` is off (`[vulkan] pipeline_libraries`): the AMD driver crashes on 2 of 2561 shaders (`rvk_vktest --gpl-corpus`).
 * M5: the world's ~80 fps cap is an AMD Radeon Chill profile on `Risen.exe`, not ours (user action: Chill off; fps-limit.md 11).
-* M5: not ours: Ctrl+E (stock crash), exit faults in `SharedBase.dll+0x7caa9` / Steam's `tier0_s64` (debug-mode.md).
+* M5: not ours: Ctrl+E (stock crash), Steam's `tier0_s64` exit fault (debug-mode.md). The game's exit crash `SharedBase.dll+0x7caa9` / `Engine.dll+0x8f1bd` (Game.dll's static tutorial hints release dead GUI bitmaps; also Original mode) and the rich presence thread fault are suppressed by `engine/exit_guard` (shutdown.md).
 * M6: spass Lua binding for the settings exports; presets with the first enhancement; the camera moves in only ~half of the rendered frames in a flight (ocean.md); Preview / point-light views unseen; light-streak / dynamic-light contexts unseen; deferred: motion / normal outputs, previous-constants map, TAA jitter, CTAB-name overrides; lod.md 5 (cost, motion test, `lod.view` > 1).
 * M7: underwater post, area profiles, wet-sand sheen (water.md 10).
 * M8: ocean.md 10.

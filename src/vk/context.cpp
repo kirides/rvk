@@ -11,6 +11,7 @@
 #include "core/paths.h"
 #include "core/profile.h"
 #include "vk/debug_names.h"
+#include "vk/fg_trace.h"
 #include "vk/probe.h"
 
 namespace rvk::vk {
@@ -618,6 +619,11 @@ bool Context::createDevice(bool withRayTracing) {
         }
         fgQueues_.created = true;
         fgQueues_.reason.clear();
+        fgtrace::setDevice(device_);
+        fgtrace::nameQueue(queue_, "game");
+        fgtrace::nameQueue(fgQueues_.present, "present");
+        fgtrace::nameQueue(fgQueues_.acquire, "acquire");
+        fgtrace::nameQueue(fgQueues_.async, "async");
         spdlog::info("vulkan: frame generation queues: game {}:0, present {}:1, acquire {}:2, async compute {}", queueFamily_, queueFamily_,
                      queueFamily_,
                      fgQueues_.async != VK_NULL_HANDLE ? std::format("{}:{}", fgQueues_.asyncFamily, extraAsyncInCompute ? 0 : 3)
@@ -660,6 +666,7 @@ VkResult Context::queueSubmit(const VkSubmitInfo2& submit, VkFence fence) {
     {
         const std::lock_guard lock(queueMutex_);
         r = vkQueueSubmit2(queue_, 1, &submit, fence);
+        fgtrace::recordSubmit2("rvk", queue_, submit, fence, r);
     }
     if (r == VK_ERROR_DEVICE_LOST) reportDeviceLost("vkQueueSubmit2");
     return r;
@@ -670,6 +677,7 @@ VkResult Context::queueSubmit(std::uint32_t submitCount, const VkSubmitInfo* sub
     {
         const std::lock_guard lock(queueMutex_);
         r = vkQueueSubmit(queue_, submitCount, submits, fence);
+        fgtrace::recordSubmit("amd-game", queue_, submitCount, submits, fence, r);
     }
     if (r == VK_ERROR_DEVICE_LOST) reportDeviceLost("vkQueueSubmit");
     return r;

@@ -25,6 +25,7 @@ $script:StageOfSetting = [ordered]@{
     'native.vertex_pull'           = 'vertex_pull'
     'native.own_foliage'           = 'own_foliage'
     'native.bone_motion'           = 'bone_motion'
+    'native.tree_wind'             = 'tree_wind'
 }
 
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)

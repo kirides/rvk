@@ -259,7 +259,9 @@ struct RvkVsOut {
 #ifdef RVK_SCENE_RECORD
     [[vk::location(14)]] nointerpolation uint rvk_sceneIdx : VARY14;  // abi.h kSceneVaryingLocation: the DrawRecord index (scene variant)
 #endif
-#ifndef __spirv__
+#ifdef RVK_UBER_BONE_PREV
+    [[vk::location(15)]] float4 rvk_prevWorld : VARY15;  // enh::kPrevWorldLocation: the previous frame's world position (bone-history motion, 0 = none)
+#elif !defined(__spirv__)
     [[vk::location(15)]] float4 rvk_vPad15 : VARY15;
 #endif
     [[vk::location(16)]] float4 rvk_vColor0 : VARY16;
@@ -796,6 +798,39 @@ RvkVsOut rvkPortMain(RvkVsIn rvk_in) {
 #else
 #define RVK_TR_BODY rvkTr::VSMain
 #endif
+#ifdef RVK_UBER_BONE_PREV
+// Bone-history motion in the port (native.bone_motion + debug.ubershader, frame-ownership.md 14.15 item a). The port's own skinning (Transform: GetWorldMatrix reads
+// the bones through VS window 2, which RVK_BONE_PREV lets rvk_vsw2Ov redirect) runs on THIS frame's bone image and on the previous frame's (the record's prevVs = the
+// bone table's history image, valid when its c231.x = 1), both in one loop body so a part that did not move gives a displacement of exactly 0. The previous world
+// position = the translated clip position's world point (`trWorld`: the translated part reconstructs it through invViewProj as the translated bone form does) plus
+// that displacement: a still part's motion is exactly the camera's, as with the translated form; the clip position stays the translated one (RVK_UBER_TRPOS).
+float4 rvkUberBonePrev(float4 trWorld) {
+    float4 r = float4(0.0, 0.0, 0.0, 0.0);
+    const uint2 ref = rvkDrawPrevVs();
+    const bool has = any(ref != uint2(0u, 0u));
+    const uint2 prev = has ? ref : rvkVsWin(2u);  // (never the zero pair: a load hoisted above the test stays in a live buffer)
+#ifdef RVK_UBER_BONE_OBJ
+    // (a rigid draw's object record: the history record's info.w (c36.w) = 1 when valid, 14.15 b)
+    const bool valid = rvkRawLoad<uint4, 16>(rvkAddrAdd(rvkAddr(prev), 36u * 16u)).w == 1u;
+#else
+    const bool valid = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(prev), 231u * 16u)).x == 1.0;
+#endif
+    if (has && valid && trWorld.w == 1.0) {
+        float3 w0 = float3(0.0, 0.0, 0.0), w1 = float3(0.0, 0.0, 0.0);
+        [loop] for (uint k = 0u; k < 2u; ++k) {
+            rvk_vsw2Ov = k == 0u ? uint2(0u, 0u) : prev;
+            float3 wp, wn, wt, wb;
+            Transform(wp, wn, wt, wb);
+            if (k == 0u) w0 = wp;
+            else w1 = wp;
+        }
+        rvk_vsw2Ov = uint2(0u, 0u);
+        // (a vertex that did not move keeps w = 0: the motion pixel shader takes the camera's motion from its own reconstruction, as the translated form does)
+        if (any(w1 != w0)) r = float4(trWorld.xyz + (w1 - w0), 1.0);
+    }
+    return r;
+}
+#endif
 RvkVsOut rvkUberFromTr(rvkTr::RvkVsIn t) {
     RvkVsIn p = (RvkVsIn)0;
 #ifdef RVK_LOC_aPos
@@ -868,7 +903,11 @@ RvkVsOut rvkUberFromTr(rvkTr::RvkVsIn t) {
     p.rvk_sceneRef = t.rvk_sceneRef;
 #endif
     RvkVsOut o = rvkPortMain(p);
-    o.position = RVK_TR_BODY(t).position;
+    const rvkTr::RvkVsOut tr = RVK_TR_BODY(t);
+    o.position = tr.position;
+#ifdef RVK_UBER_BONE_PREV
+    o.rvk_prevWorld = rvkUberBonePrev(tr.rvk_prevWorld);
+#endif
     return o;
 }
 #ifdef RVK_UBER_PULL
