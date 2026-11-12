@@ -55,6 +55,11 @@ public:
     void markAll(std::uint32_t used);
     // uploads the marked slots (one ring block, one copy per contiguous run); `verify`: also copy the whole used range back and compare
     void flush(d3d9::Device& dev, bool verify, std::uint32_t used);
+    // the same into list (a pass's own command list: the uploads land at that point of the frame; the read-back too). False = the ring was full (the
+    // marked slots stay dirty, nothing was recorded): the GPU copy is NOT current
+    bool flushTo(d3d9::Device& dev, rhi::CommandList& list, bool verify, std::uint32_t used);
+    // zero() into list
+    void zeroTo(rhi::CommandList& list);
     // collects finished read-backs
     void collect(rhi::GameDevice& game, const char* name);
     // zeroes the whole device buffer in the frame's upload list (a table whose read-back covers slots that were never written: their CPU shadow is zero). Call it in the
@@ -66,7 +71,7 @@ public:
     std::size_t dirtyCount() const { return dirty_.size(); }
 
 private:
-    void startVerify(d3d9::Device& dev, std::uint32_t used);
+    void startVerify(d3d9::Device& dev, rhi::CommandList& list, std::uint32_t used);
 
     std::unique_ptr<rhi::Buffer> buffer_;
     rhi::GpuRef ref_;

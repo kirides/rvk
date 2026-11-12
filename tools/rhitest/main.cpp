@@ -45,6 +45,7 @@
 #include "core/cluster_cull.h"
 #include "core/crash_dump.h"
 #include "core/profile.h"
+#include "enh/rt_gpu_build.h"
 #include "enh/tree_wind.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
@@ -74,7 +75,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, treeWind, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, treeWind, instanceBuild, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;
     Blobs pzPos, pzFull, pzIa, pzKill, pzColor;  // 14.39: pulled depth-only draws  // the gap checks
 };
 
@@ -2338,6 +2339,289 @@ void testRayQuery(rhi::Device& dev, const Shaders& sh) {
 }
 
 
+// frame-ownership.md 14.43 (native.rt_gpu_build): the RT scene's TLAS instances + records written by shaders/rt/rt_instance_build.comp.hlsl from the persistent
+// tables, through the production path: device-local outputs written by the compute pass, the TLAS built from that buffer, ray queries against it. Every entry's
+// instance + record must equal enh::rtbuild::compose (the C++ twin the game's fallback uses) byte for byte: every rung (original / proxy / box), cut-out, glass,
+// segments, literal pairs, the material's / data word's / SpeedTree alpha, and the guards (input / BLAS row / literal out of range -> an inactive instance).
+// Entries 7 and 9 are the ray query check's instances A (opaque) and B (rotated, cut-out): the traced picture must be testRayQuery's.
+void testRtInstanceBuild(rhi::Device& dev, const Shaders& sh) {
+    namespace rb = rvk::enh::rtbuild;
+    namespace abi = rvk::shader::abi;
+    const int before = failures;
+    if (!dev.caps().rayQuery) {
+        skip(dev, "rt instance build", "no ray query");
+        return;
+    }
+    if (!sh.rt.ok || !sh.instanceBuild.ok) {
+        check(false, "rt instance build shaders did not compile");
+        report(dev, "rt instance build", before);
+        return;
+    }
+    constexpr std::uint32_t kRtSize = 64;
+    constexpr std::uint32_t kCount = 12;
+    const float verts[9] = {-0.8f, -0.8f, 0.0f, 0.8f, -0.8f, 0.0f, -0.8f, 0.8f, 0.0f};
+    const std::uint32_t idx[3] = {0, 1, 2};
+    auto vertices = dev.createBuffer({sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi ib vertices"});
+    auto indices = dev.createBuffer({sizeof(idx), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi ib indices"});
+    constexpr std::uint32_t kInputs = 8, kBlasRows = 3, kMats = 4, kLiterals = 2;
+    auto inputs = dev.createBuffer({kInputs * sizeof(rb::InstanceInput), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi ib inputs"});
+    auto blasRows = dev.createBuffer({kBlasRows * sizeof(rb::BlasRow), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi ib blas rows"});
+    auto mats = dev.createBuffer({kMats * sizeof(rb::MaterialRow), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi ib material rows"});
+    auto entries = dev.createBuffer({kCount * sizeof(rb::Entry), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi ib entries"});
+    auto literals = dev.createBuffer({kLiterals * sizeof(rb::Literal), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi ib literals"});
+    auto header = dev.createBuffer({sizeof(rb::Header), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi ib header"});
+    constexpr std::uint64_t kInstBytes = kCount * sizeof(VkAccelerationStructureInstanceKHR), kRecBytes = kCount * sizeof(abi::RtGeometryRecord);
+    auto outInst = dev.createBuffer({kInstBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi ib out instances"});
+    auto outRec = dev.createBuffer({kRecBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi ib out records"});
+    constexpr std::uint32_t kPixBytes = kRtSize * kRtSize * 4;
+    auto output = dev.createBuffer({kPixBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi ib rt output"});
+    auto readback = dev.createBuffer({kInstBytes + kRecBytes + kPixBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi ib readback"});
+    auto buildPipe = dev.createComputePipeline({sh.instanceBuild.shader(), "rhi rt instance build"});
+    auto rtPipe = dev.createComputePipeline({sh.rt.shader(), "rhi ib ray query"});
+    if (!vertices || !indices || !inputs || !blasRows || !mats || !entries || !literals || !header || !outInst || !outRec || !output || !readback || !buildPipe || !rtPipe) {
+        check(false, "rt instance build resource / pipeline creation");
+        report(dev, "rt instance build", before);
+        return;
+    }
+    std::memcpy(vertices->map(), verts, sizeof(verts));
+    std::memcpy(indices->map(), idx, sizeof(idx));
+    rhi::TriangleGeometry tri;
+    tri.vertices = vertices.get();
+    tri.vertexCount = 3;
+    tri.indices = indices.get();
+    tri.indexCount = 3;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.opaque = true;
+    auto blas = dev.createBlas({&tri, 1});
+    auto tlas = dev.createTlas(kCount);
+    if (!blas || !tlas) {
+        check(false, "rt instance build acceleration structures");
+        report(dev, "rt instance build", before);
+        return;
+    }
+    const std::uint64_t ba = blas->address();
+    const auto words = [](const std::array<std::uint32_t, 2>& a, std::uint32_t (&o)[2]) {
+        o[0] = a[0];
+        o[1] = a[1];
+    };
+    // the tables (as RtScene writes them; references are real buffer references, the shader copies them)
+    std::vector<rb::BlasRow> brow(kBlasRows);
+    for (std::uint32_t i = 0; i < kBlasRows; ++i) {
+        rb::BlasRow& r = brow[i];
+        r.as[0] = static_cast<std::uint32_t>(ba);
+        r.as[1] = static_cast<std::uint32_t>(ba >> 32);
+        words(vertices->shaderRef(0), r.vertices);
+        words(indices->shaderRef(0), r.indices);
+        if (i == 1) {  // a proxy at the active bias: the same BLAS, another index reference
+            r.proxyAs[0] = r.as[0];
+            r.proxyAs[1] = r.as[1];
+            words(indices->shaderRef(4), r.proxyIndices);
+        }
+        r.stride = 12;
+        r.normal = 12u | (2u << 16) | i;
+        r.texcoord0 = 24u | (1u << 16);
+        r.texcoord1 = abi::kRtAttribAbsent;
+        r.texcoord6 = 0x1234u + i;
+        r.color0 = abi::kRtAttribAbsent - i;
+    }
+    std::vector<rb::MaterialRow> mrow(kMats);
+    for (std::uint32_t i = 0; i < kMats; ++i) {
+        rb::MaterialRow& m = mrow[i];
+        m.albedoTex = i == 0 ? 0u : 100u + i;
+        m.albedoSampler = 3u + i;
+        m.uvSet = (i == 0 ? abi::kRtUvNoTexture : 0u) | (i << abi::kRtUvAlbedoAreaShift);
+        m.packWord = i == 2 ? 0xABCDu : 0u;
+        m.packLod = i == 2 ? 131u : 0u;
+        m.alphaWord = i == 3 ? (5u | (128u << 8)) : 0u;
+        m.bits = i == 0 ? 0u : rb::kMatHas | (i == 3 ? rb::kMatMasked | rb::kMatCut : 0u);
+        m.opacityTex = i == 3 ? 77u : 0u;
+        for (int r = 0; r < 2; ++r) {
+            for (int c = 0; c < 4; ++c) m.uvMap[r][c] = 0.25f * static_cast<float>(r * 4 + c) + static_cast<float>(i);
+        }
+    }
+    const auto away = [](float (&rows)[12], float x) {
+        const float r[12] = {1, 0, 0, x, 0, 1, 0, 0, 0, 0, 1, 0};
+        std::memcpy(rows, r, sizeof(r));
+    };
+    std::vector<rb::InstanceInput> in(kInputs);
+    // 0: A (identity), 1: B (rotated 180 degrees about z, z = 1), 2..7 off to the side (x = 100 + i): never hit by the rays
+    {
+        const float a[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        std::memcpy(in[0].rows, a, sizeof(a));
+        const float b[12] = {-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 1};
+        std::memcpy(in[1].rows, b, sizeof(b));
+    }
+    for (std::uint32_t i = 2; i < kInputs; ++i) {
+        away(in[i].rows, 100.0f + static_cast<float>(i));
+        away(in[i].boxRows, 200.0f + static_cast<float>(i));
+        in[i].boxRows[0] = 0.5f;
+    }
+    for (std::uint32_t i = 0; i < kInputs; ++i) {
+        in[i].blasRow = i % kBlasRows;
+        in[i].material = i % kMats;
+        in[i].flags = (i & 1u ? abi::kRtRecordIndex32 : 0u) | (i == 3 ? abi::kRtRecordSpeedTree | abi::kRtRecordAlphaTested : 0u) | (i == 4 ? abi::kRtRecordInstanced : 0u) |
+                      (1u << abi::kRtRecordViewShift);
+        in[i].data = (i == 5 ? (6u | (90u << 8)) : 0u) | ((i + 1) << 16);
+        in[i].instanceId = 1000u + i;
+    }
+    in[0].blasRow = 0;
+    in[0].material = 0;
+    in[1].material = 3;  // B: a cut-out
+    in[5].material = 2;  // (a pack word + pack LOD)
+    in[6].blasRow = kBlasRows + 5;  // (guard: BLAS row out of range)
+    // literals: two CPU-composed pairs (off to the side)
+    std::vector<rb::Literal> lit(kLiterals);
+    for (std::uint32_t i = 0; i < kLiterals; ++i) {
+        rb::Literal& l = lit[i];
+        away(*reinterpret_cast<float(*)[12]>(&l.vi.transform.matrix[0][0]), 300.0f + static_cast<float>(i));
+        l.vi.instanceCustomIndex = i == 0 ? 0u : 11u;
+        l.vi.mask = abi::kRtMaskDynamic;
+        l.vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        l.vi.accelerationStructureReference = ba;
+        words(vertices->shaderRef(0), l.r.vertices);
+        words(indices->shaderRef(0), l.r.indices);
+        l.r.stride = 32;
+        l.r.flags = abi::kRtRecordDynamic | (7u << abi::kRtRecordKindShift);
+        l.r.instanceId = 5000u + i;
+        l.r.alpha = 8u;
+        l.r.uvMap[1][2] = -1.5f;
+    }
+    // the entries: k = instanceCustomIndex
+    const std::uint32_t segRef[2] = {0x1111u, 0x2222u};
+    rb::Entry e[kCount]{};
+    e[0] = {rb::kEntryLiteral | 0u, 0u, {0u, 0u}};
+    e[1] = {2u, 1u | (3u << rb::kModeSegShift), {segRef[0], segRef[1]}};  // proxy (input 2 -> BLAS row 2 has none: address 0; see below), 3 segments
+    e[2] = {4u, 2u | rb::kModeGlass, {0u, 0u}};                           // box, glass
+    e[3] = {3u, rb::kModeAlpha, {0u, 0u}};                                // cut-out SpeedTree (alpha word 5 | 80 << 8)
+    e[4] = {kInputs + 100u, 0u, {0u, 0u}};                                // guard: input out of range
+    e[5] = {6u, 0u, {0u, 0u}};                                            // guard: BLAS row out of range
+    e[6] = {rb::kEntryLiteral | 9u, 0u, {0u, 0u}};                        // guard: literal out of range
+    e[7] = {0u, 0u, {0u, 0u}};                                            // A
+    e[8] = {5u, 0u | (1u << rb::kModeSegShift), {segRef[1], segRef[0]}}; // the data word's alpha test, 1 segment
+    e[9] = {1u, rb::kModeAlpha, {0u, 0u}};                                // B (cut-out)
+    e[10] = {7u, 1u, {0u, 0u}};                                           // proxy of BLAS row 1 (a real one)
+    e[11] = {rb::kEntryLiteral | 1u, 0u, {0u, 0u}};
+    in[2].blasRow = 2;
+    in[7].blasRow = 1;
+    std::memcpy(inputs->map(), in.data(), in.size() * sizeof(rb::InstanceInput));
+    std::memcpy(blasRows->map(), brow.data(), brow.size() * sizeof(rb::BlasRow));
+    std::memcpy(mats->map(), mrow.data(), mrow.size() * sizeof(rb::MaterialRow));
+    std::memcpy(entries->map(), e, sizeof(e));
+    std::memcpy(literals->map(), lit.data(), lit.size() * sizeof(rb::Literal));
+    rb::Header h{};
+    h.count = kCount;
+    h.literals = kLiterals;
+    h.inputCap = kInputs;
+    h.blasCap = kBlasRows;
+    h.matCap = kMats;
+    words(entries->shaderRef(0), h.entries);
+    words(inputs->shaderRef(0), h.inputs);
+    words(blasRows->shaderRef(0), h.blas);
+    words(mats->shaderRef(0), h.materials);
+    words(literals->shaderRef(0), h.literal);
+    words(outInst->shaderRefRw(0), h.outInst);
+    words(outRec->shaderRefRw(0), h.outRec);
+    h.boxAs[0] = static_cast<std::uint32_t>(ba);
+    h.boxAs[1] = static_cast<std::uint32_t>(ba >> 32);
+    words(vertices->shaderRef(0), h.boxVertices);
+    words(indices->shaderRef(0), h.boxIndices);
+    std::memcpy(header->map(), &h, sizeof(h));
+    struct BuildPush {
+        std::uint32_t frame[2], passId, passFlags;
+        std::uint32_t table[2], pad[2];
+    } bp{};
+    static_assert(sizeof(BuildPush) == 32);  // (shader::abi::SkinPush: the pass push header + the table reference)
+    words(header->shaderRef(0), bp.table);
+    struct RtPush {
+        std::uint32_t out[2], tlas, width, height, pad[3];
+    } rp{};
+    const auto o = output->shaderRefRw(0);
+    rp.out[0] = o[0];
+    rp.out[1] = o[1];
+    rp.tlas = tlas->tlasSlot();
+    rp.width = rp.height = kRtSize;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.bufferBarrier(*outInst, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*outRec, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*output, rhi::BufferAccess::ShaderWrite);
+        cl.buildBlas(*blas);
+        cl.bindPipeline(*buildPipe);
+        cl.setPushConstants(&bp, sizeof(bp));
+        cl.dispatch((kCount + 63) / 64, 1, 1);
+        cl.memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+        cl.bufferBarrier(*outRec, rhi::BufferAccess::ShaderRead);
+        cl.buildTlas(*tlas, *outInst, 0, kCount);  // (the production path: the TLAS from the compute pass's device buffer)
+        cl.bindPipeline(*rtPipe);
+        cl.setPushConstants(&rp, sizeof(rp));
+        cl.dispatch(kRtSize / 8, kRtSize / 8, 1);
+        cl.bufferBarrier(*output);
+        cl.copyBuffer(*readback, 0, *outInst, 0, kInstBytes);
+        cl.copyBuffer(*readback, kInstBytes, *outRec, 0, kRecBytes);
+        cl.copyBuffer(*readback, kInstBytes + kRecBytes, *output, 0, kPixBytes);
+    });
+    const auto* base = static_cast<const std::uint8_t*>(readback->map());
+    const auto* gi = reinterpret_cast<const VkAccelerationStructureInstanceKHR*>(base);
+    const auto* gr = reinterpret_cast<const abi::RtGeometryRecord*>(base + kInstBytes);
+    int bad = 0;
+    std::string first;
+    for (std::uint32_t k = 0; k < kCount; ++k) {
+        VkAccelerationStructureInstanceKHR vi;
+        abi::RtGeometryRecord r;
+        rb::compose(h, k, e[k], in.data(), brow.data(), mrow.data(), lit.data(), vi, r);
+        const bool di = std::memcmp(&gi[k], &vi, sizeof(vi)) != 0, dr = std::memcmp(&gr[k], &r, sizeof(r)) != 0;
+        if (di || dr) {
+            const auto* a = reinterpret_cast<const std::uint32_t*>(di ? static_cast<const void*>(&gi[k]) : static_cast<const void*>(&gr[k]));
+            const auto* b = reinterpret_cast<const std::uint32_t*>(di ? static_cast<const void*>(&vi) : static_cast<const void*>(&r));
+            const std::uint32_t n = di ? 16u : 28u;
+            std::uint32_t w = 0;
+            while (w < n && a[w] == b[w]) ++w;
+            if (bad++ == 0) first = std::format("entry {} {} word {}: gpu {:#010x}, twin {:#010x}", k, di ? "instance" : "record", w, w < n ? a[w] : 0u, w < n ? b[w] : 0u);
+        }
+    }
+    // the twin's own expectations at the corners (independent of the shader): guards inactive, the box's fixed fields, SpeedTree / data / material alphas
+    {
+        VkAccelerationStructureInstanceKHR vi;
+        abi::RtGeometryRecord r;
+        int wrong = 0;
+        for (const std::uint32_t k : {4u, 5u, 6u}) {
+            rb::compose(h, k, e[k], in.data(), brow.data(), mrow.data(), lit.data(), vi, r);
+            wrong += vi.accelerationStructureReference != 0 || vi.mask != 0 || r.stride != 0 ? 1 : 0;
+        }
+        rb::compose(h, 2, e[2], in.data(), brow.data(), mrow.data(), lit.data(), vi, r);
+        wrong += vi.mask != abi::kRtMaskGlass || r.stride != 12 || r.alpha != 8u || r.normal != abi::kRtAttribAbsent || vi.transform.matrix[0][3] != 204.0f ? 1 : 0;
+        rb::compose(h, 3, e[3], in.data(), brow.data(), mrow.data(), lit.data(), vi, r);
+        wrong += r.alpha != (rb::kSpeedTreeAlpha | (0u << 16)) || vi.mask != abi::kRtMaskAlphaTested || (vi.flags & VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR) == 0 ? 1 : 0;
+        rb::compose(h, 8, e[8], in.data(), brow.data(), mrow.data(), lit.data(), vi, r);
+        wrong += r.alpha != ((6u | (90u << 8)) | (131u << 16)) || r.segmentCount != 1 || (r.flags & abi::kRtRecordSegmented) == 0 || r.packWord != 0xABCDu ? 1 : 0;
+        rb::compose(h, 10, e[10], in.data(), brow.data(), mrow.data(), lit.data(), vi, r);
+        wrong += vi.accelerationStructureReference != ba || r.indices[0] != brow[1].proxyIndices[0] ? 1 : 0;
+        check(wrong == 0, std::format("rt instance build: the C++ twin's own expectations ({} wrong)", wrong));
+    }
+    check(bad == 0, std::format("rt instance build: {} of {} entries differ between the compute pass and the C++ twin{}{}", bad, kCount, bad ? ": " : "", first));
+    // the TLAS built from the compute pass's output: the ray query picture of testRayQuery (A opaque at index 7, B cut-out at index 9)
+    const auto* px = reinterpret_cast<const std::uint32_t*>(base + kInstBytes + kRecBytes);
+    int wrongPx = 0, hitsA = 0, hitsB = 0, misses = 0;
+    std::string firstPx;
+    for (std::uint32_t y = 0; y < kRtSize; ++y) {
+        for (std::uint32_t x = 0; x < kRtSize; ++x) {
+            bool ambiguous = false;
+            const std::uint32_t want = expectedRay(x, y, kRtSize, ambiguous);
+            const std::uint32_t got = px[y * kRtSize + x];
+            if (ambiguous) continue;
+            if (got != want) {
+                if (wrongPx++ == 0) firstPx = std::format("pixel ({}, {}) = 0x{:08x}, expected 0x{:08x}", x, y, got, want);
+                continue;
+            }
+            (got == 0 ? misses : (got & 0xFF) == 8 ? hitsA : hitsB)++;
+        }
+    }
+    check(wrongPx == 0 && hitsA > 0 && hitsB > 0 && misses > 0,
+          std::format("rt instance build: rays against the GPU-built TLAS: {} wrong pixel(s) {}; {} opaque hits, {} cut-out hits, {} misses", wrongPx, firstPx, hitsA, hitsB, misses));
+    report(dev, "rt instance build", before);
+}
+
 // Gap 6 (rt_scene's needs, hlsl-rhi.md 8): BLAS builds by raw addresses in a batch with pooled scratch, a refit (update), compacted sizes + compaction, a
 // TLAS built from a raw address, buffer fills and memory barriers.
 void testAccelOps(rhi::Device& dev, const Shaders& sh) {
@@ -2893,6 +3177,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testSkin(*dev, sh);
     testTreeWind(*dev, sh);
     testRayQuery(*dev, sh);
+    testRtInstanceBuild(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
     failures += abiprobe::run(*dev);
@@ -3001,6 +3286,7 @@ int main(int argc, char** argv) {
     compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
     compileBoth("rt/rt_skin.comp.hlsl", "CSMain", "cs_6_6", sh.skin);
     compileBoth("rt/rt_tree_wind.comp.hlsl", "CSMain", "cs_6_6", sh.treeWind);
+    compileBoth("rt/rt_instance_build.comp.hlsl", "CSMain", "cs_6_6", sh.instanceBuild);
     compileBoth("debug/picture_check.comp.hlsl", "CSMain", "cs_6_6", sh.picture);
     compileBoth("test/depth_z_scene.vert.hlsl", "VSMain", "vs_6_6", sh.dzVs);
     compileBoth("test/depth_z_scene.frag.hlsl", "PSMain", "ps_6_6", sh.dzPsOld);

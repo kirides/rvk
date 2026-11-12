@@ -34,6 +34,7 @@ $script:StageOfSetting = [ordered]@{
     'native.own_gui'               = 'own_gui'
     'native.own_particles'         = 'own_particles'
     'native.owned_decals'          = 'owned_decals'
+    'native.rt_gpu_build'          = 'rt_gpu_build'
 }
 
 # S-9 (frame-ownership.md 14.41): the owned stages and their prerequisites, all ON by default in Full (Wrapper / Original never run them). Get-OwnedStageSettings
@@ -46,7 +47,7 @@ $script:OwnedStageDefaults = [ordered]@{
     'native.owned_trees' = 'true'; 'native.owned_billboards' = 'true'; 'native.owned_vegetation' = 'true'; 'native.owned_vegetation_ops' = 'true'
     'native.owned_actors' = 'true'; 'native.owned_instances' = 'true'; 'native.owned_ordered' = 'true'
     'native.clusters' = 'true'; 'native.cluster_cull' = 'true'; 'native.cluster_cull_shadows' = 'true'
-    'native.rt_records' = 'true'; 'rt.table_entries' = 'true'; 'native.vertex_pull' = 'true'; 'native.own_foliage' = 'true'
+    'native.rt_records' = 'true'; 'native.rt_gpu_build' = 'true'; 'rt.table_entries' = 'true'; 'native.vertex_pull' = 'true'; 'native.own_foliage' = 'true'
     'native.bone_motion' = 'on'; 'native.rigid_motion' = 'true'; 'native.tree_wind' = 'on'; 'native.tree_motion' = 'on'; 'native.depth_z' = 'on'
     'native.own_post' = 'on'; 'native.own_sky' = 'owned'; 'native.own_gui' = 'owned'; 'native.own_particles' = 'on'; 'native.owned_decals' = 'on'
     'native.own_collection' = 'on'; 'native.own_extract' = 'on'; 'debug.ubershader' = 'true'
@@ -64,7 +65,7 @@ function Get-OwnedStageSettings([switch]$Off) {
 # stages whose input can legitimately be absent from a whole run (frame-ownership.md 14.22): bone_motion acts only on skinned solid draws that move (a frozen
 # rvkcompare spot animates nothing), tree_wind only on animated SpeedTrees inside the RT range of a swaying-tree consumer. For these an arm claimed on also passes
 # when EVERY window says `inactive(armed, nothing owned in the window)` (armed, nothing to act on); `setting on, code off`, `gated` and `setting off` still fail.
-$script:IdleCapableStages = @('bone_motion', 'tree_wind', 'tree_motion', 'own_particles', 'owned_decals', 'owned_shadow_views')  # (own_particles / owned_decals: a place without a live particle emitter / a decal in view; owned_shadow_views: no terrain map re-aim and no shadow-casting point light in the window)
+$script:IdleCapableStages = @('bone_motion', 'tree_wind', 'tree_motion', 'own_particles', 'owned_decals', 'owned_shadow_views', 'rt_gpu_build')  # (rt_gpu_build: no ray-traced consumer holds the RT scene; own_particles / owned_decals: a place without a live particle emitter / a decal in view; owned_shadow_views: no terrain map re-aim and no shadow-casting point light in the window)
 $script:ArmedIdle = 'inactive(armed, nothing owned in the window)'
 
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)
