@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 164);  // (14.44: native.ordered_bulk; 14.43: native.rt_gpu_build; 14.42: native.tree_motion; 14.33: native.own_extract; 14.31: native.own_collection; 14.30: native.rt_records; 14.29: native.owned_shadow_views; 14.26: native.own_particles, native.owned_decals; 14.24: native.own_sky, native.own_gui; 14.20: native.owned_ordered; 14.19: native.owned_instances; 14.15: native.rigid_motion; F4-5: native.tree_wind; S-5: native.own_foliage; 14.13: native.bone_motion; S-4: native.vertex_pull) 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
+    CHECK(n == 165);  // (overlay.compile_progress; 14.44: native.ordered_bulk; 14.43: native.rt_gpu_build; 14.42: native.tree_motion; 14.33: native.own_extract; 14.31: native.own_collection; 14.30: native.rt_records; 14.29: native.owned_shadow_views; 14.26: native.own_particles, native.owned_decals; 14.24: native.own_sky, native.own_gui; 14.20: native.owned_ordered; 14.19: native.owned_instances; 14.15: native.rigid_motion; F4-5: native.tree_wind; S-5: native.own_foliage; 14.13: native.bone_motion; S-4: native.vertex_pull) 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 96);
     CHECK(info.size == 96);
@@ -44,10 +44,10 @@ TEST(settings_api_info_get_set) {
     CHECK(api::settingSet(reg, nullptr, "on", 0) == RVK_SETTING_BAD_ARGUMENT);
     reg.lock(*reg.find("vulkan.adapter"), 0, "test");
     CHECK(api::settingSet(reg, "vulkan.adapter", "1", 0) == RVK_SETTING_LOCKED);
-    CHECK(api::settingInfo(reg, 10, &info, sizeof(info)) == 96);  // vulkan.adapter (System tab, after renderer.mode, the menu settings and vulkan.api)
+    CHECK(api::settingInfo(reg, 11, &info, sizeof(info)) == 96);  // vulkan.adapter (System tab, after renderer.mode, the menu settings and vulkan.api)
     CHECK((info.flags & (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED)) == (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED));
     // capability resolution: rt.allow needs ray tracing hardware; this registry has no device report
-    CHECK(api::settingInfo(reg, 13, &info, sizeof(info)) == 96);
+    CHECK(api::settingInfo(reg, 14, &info, sizeof(info)) == 96);
     CHECK(std::string(info.key) == "rt.allow");
     CHECK((info.flags & RVK_SETTING_UNAVAILABLE) != 0);
     CHECK(api::settingGet(reg, "rt.allow", buf, sizeof(buf)) == 4);  // the request ("true") is kept

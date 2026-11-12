@@ -528,8 +528,52 @@ bool Overlay::active() {
         lastB_ = b;
         if (r.abBadge == nullptr || r.abBadge->asBool()) flipShownUntil_ = now + std::chrono::milliseconds(1500);
     }
+    sampleCompiles();
     return isOpen() || now < flipShownUntil_ || (r.fpsCounter != nullptr && r.fpsCounter->asBool()) ||
-           (b && r.abBadge != nullptr && r.abBadge->asBool());
+           (b && r.abBadge != nullptr && r.abBadge->asBool()) || compileBatch_;
+}
+
+// A batch of compiles: from the first queued compile after an idle time to one second without any (short gaps between bursts stay one batch, the
+// bar is shown full for that second). The badge shows the batch's finished share; its total grows while the engine keeps creating shaders.
+void Overlay::sampleCompiles() {
+    const auto& r = settings::renderer();
+    if (r.compileBadge == nullptr || !r.compileBadge->asBool() || device_ == nullptr) {
+        compileBatch_ = false;
+        return;
+    }
+    const d3d9::Device::CompileProgress p = device_->compileProgress();
+    const auto now = std::chrono::steady_clock::now();
+    compilePending_ = p.pending();
+    compileDone_ = p.done();
+    if (compilePending_ > 0) {
+        if (!compileBatch_) {
+            compileBatch_ = true;
+            compileBase_ = compileDone_;
+            compileSince_ = now;
+        }
+        compileIdleSince_ = {};
+    } else if (compileBatch_) {
+        if (compileIdleSince_ == std::chrono::steady_clock::time_point{}) compileIdleSince_ = now;
+        else if (now - compileIdleSince_ > std::chrono::seconds(1)) compileBatch_ = false;
+    }
+}
+
+void Overlay::buildCompileBadge(float top, int flags) {
+    // a few compiles that end within a quarter second (a new material in the world with a warm cache miss) show nothing
+    if (!compileBatch_ || std::chrono::steady_clock::now() - compileSince_ < std::chrono::milliseconds(250)) return;
+    const std::uint64_t finished = compileDone_ > compileBase_ ? compileDone_ - compileBase_ : 0;
+    const std::uint64_t total = finished + compilePending_;
+    const float frac = total > 0 ? static_cast<float>(finished) / static_cast<float>(total) : 1.0f;
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    const float scale = ImGui::GetStyle().FontScaleMain;
+    ImGui::SetNextWindowPos(ImVec2(display.x - 10.0f, top), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    if (ImGui::Begin("##rvk_compile", nullptr, flags)) {
+        if (compilePending_ > 0) ImGui::Text("Compiling shaders  %llu / %llu", static_cast<unsigned long long>(finished), static_cast<unsigned long long>(total));
+        else ImGui::TextUnformatted("Shaders compiled");
+        ImGui::ProgressBar(frac, ImVec2(220.0f * scale, 6.0f * scale), "");
+    }
+    ImGui::End();
 }
 
 ImDrawData* Overlay::buildFrame(VkExtent2D extent) {
@@ -623,6 +667,7 @@ void Overlay::buildBadges() {
     const ImGuiWindowFlags badge = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
     const bool b = reg.bActive();
+    float topRight = 10.0f;  // the compile badge's top: below the B tag when that is shown
     if (std::chrono::steady_clock::now() < flipShownUntil_) {
         ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.12f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
         ImGui::SetNextWindowBgAlpha(0.6f);
@@ -641,9 +686,11 @@ void Overlay::buildBadges() {
             ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 2.0f);
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "B");
             ImGui::PopFont();
+            topRight += ImGui::GetWindowHeight() + 6.0f;
         }
         ImGui::End();
     }
+    buildCompileBadge(topRight, badge);
     if (!isOpen() && r.fpsCounter != nullptr && r.fpsCounter->asBool()) {
         float sum = 0.0f;
         const std::size_t n = std::min<std::size_t>(historyCount_, 60);

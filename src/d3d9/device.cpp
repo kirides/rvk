@@ -1805,6 +1805,7 @@ void Device::enqueueShaderJob(Shader* shader, std::function<void()> job) {
     {
         const std::lock_guard lock(shaderJobMutex_);
         shaderJobs_.push_back({shader, std::move(job)});
+        shaderJobsQueued_.fetch_add(1, std::memory_order_relaxed);
         if (shaderThreads_.empty()) {
             shaderStop_ = false;
             // all but two hardware threads (the engine thread and the render thread keep running), at least two
@@ -1828,6 +1829,7 @@ void Device::shaderWorker() {
             shaderJobs_.pop_front();
         }
         job.run();
+        shaderJobsDone_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -2585,6 +2587,24 @@ void Device::variantQueue(std::size_t& waiting, std::uint64_t& built, std::uint6
     }
     built = variantsBuilt_.load(std::memory_order_relaxed);
     failed = variantsFailed_.load(std::memory_order_relaxed);
+}
+
+Device::CompileProgress Device::compileProgress() {
+    CompileProgress p;
+    std::size_t waiting = 0;
+    std::uint64_t built = 0, failed = 0;
+    variantQueue(waiting, built, failed);
+    p.variantsPending = waiting;
+    p.variantsDone = built + failed;
+    bool stopped = false;
+    {
+        const std::lock_guard lock(shaderJobMutex_);
+        stopped = shaderStop_;  // (stopped: the dropped jobs never finish)
+    }
+    const std::uint64_t queued = shaderJobsQueued_.load(std::memory_order_relaxed), done = shaderJobsDone_.load(std::memory_order_relaxed);
+    p.shadersDone = done;
+    p.shadersPending = !stopped && queued > done ? queued - done : 0;
+    return p;
 }
 
 void Device::stopVariantWorker() {

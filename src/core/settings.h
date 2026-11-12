@@ -379,6 +379,7 @@ struct RendererSettings {
     Setting* toggleKey = nullptr;    // overlay.toggle_key
     Setting* abKey = nullptr;        // overlay.ab_key
     Setting* fpsCounter = nullptr;   // overlay.fps_counter: small fps readout while the overlay is closed
+    Setting* compileBadge = nullptr; // overlay.compile_progress: shader compile progress in the top right corner while compiles are queued
     Setting* abBadge = nullptr;      // overlay.ab_badge: "B" tag while side B is active and the overlay is closed
     Setting* debugMode = nullptr;    // overlay.debug_mode: shows the Flag::Debug settings, the A/B comparison, diagnostics
     Setting* showAdvanced = nullptr; // overlay.show_advanced: shows the Flag::Advanced settings (hidden: the overlay's checkbox)

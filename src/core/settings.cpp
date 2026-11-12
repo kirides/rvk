@@ -912,6 +912,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB,
         .page = "System",
     });
+    r.compileBadge = &reg.add({
+        .key = "overlay.compile_progress",
+        .label = "Show shader compile progress",
+        .category = "Menu",
+        .tab = kTabSystem,
+        .description = "While shaders are being compiled (the first start, after an update or a driver change), a small progress bar "
+                       "in the top right corner shows how many are left.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB,
+        .page = "System",
+    });
     r.debugMode = &reg.add({
         .key = "overlay.debug_mode",
         .label = "Debug mode",

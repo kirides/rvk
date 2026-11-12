@@ -120,6 +120,13 @@ private:
     bool lastB_ = false;
     std::chrono::steady_clock::time_point flipShownUntil_{};
 
+    // shader compile progress badge (buildCompileBadge): sampled in active(); a batch starts when compiles appear after an idle time
+    void sampleCompiles();
+    void buildCompileBadge(float top, int flags);  // below `top` (the B tag's bottom edge) at the right edge
+    std::uint64_t compilePending_ = 0, compileDone_ = 0, compileBase_ = 0;
+    std::chrono::steady_clock::time_point compileSince_{}, compileIdleSince_{};
+    bool compileBatch_ = false;
+
     // performance panel
     static constexpr std::size_t kHistory = 240;
     float intervals_[kHistory]{};

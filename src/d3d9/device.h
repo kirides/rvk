@@ -1547,6 +1547,15 @@ public:
     std::uint32_t sampleSlot2D(Texture* t);
     // F15-1: the variant build queue now: jobs waiting + building, and the run's built / failed totals (the composed-late census)
     void variantQueue(std::size_t& waiting, std::uint64_t& built, std::uint64_t& failed);
+    // the shader compiles in flight for the overlay's progress badge: translated game shaders (queued + being compiled) and enhancement / scene
+    // variants (waiting + building), with the run's finished totals of each (cheap: two short locks)
+    struct CompileProgress {
+        std::uint64_t shadersDone = 0, shadersPending = 0;
+        std::uint64_t variantsDone = 0, variantsPending = 0;
+        std::uint64_t pending() const { return shadersPending + variantsPending; }
+        std::uint64_t done() const { return shadersDone + variantsDone; }
+    };
+    CompileProgress compileProgress();
     int lastVariantSite() const { return lastVariantSite_; }
     bool lastVariantPending() const { return lastVariantPending_; }
     int lastVariantSite_ = 0;
@@ -2750,6 +2759,7 @@ private:
         std::function<void()> run;
     };
     std::deque<ShaderJob> shaderJobs_;
+    std::atomic<std::uint64_t> shaderJobsQueued_{0}, shaderJobsDone_{0};  // compile jobs ever queued / finished (compileProgress)
     std::vector<std::thread> shaderThreads_;  // the compile workers of translated shaders (started by the first one)
     bool shaderStop_ = false;
     bool variantStop_ = false;
