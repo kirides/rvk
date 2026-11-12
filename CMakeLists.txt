@@ -294,6 +294,8 @@ add_library(rvk_core STATIC
     src/enh/rt_lod.cpp
     src/enh/rt_lod.h
     src/enh/rt_scene.cpp
+    src/enh/rt_gpu_build.cpp
+    src/enh/rt_gpu_tables.cpp
     src/enh/rt_scene.h
     src/enh/rt_shadows.cpp
     src/enh/rt_shadows.h

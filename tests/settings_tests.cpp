@@ -505,7 +505,7 @@ TEST(settings_owned_stages_default_on_in_full) {
         {"native.owned_static", "true"}, {"native.owned_persistent", "true"}, {"native.owned_shadows", "true"}, {"native.owned_shadow_views", "true"},
         {"native.owned_trees", "true"}, {"native.owned_billboards", "true"}, {"native.owned_vegetation", "true"}, {"native.owned_vegetation_ops", "true"},
         {"native.owned_actors", "true"}, {"native.owned_instances", "true"}, {"native.owned_ordered", "true"}, {"native.clusters", "true"},
-        {"native.cluster_cull", "true"}, {"native.cluster_cull_shadows", "true"}, {"native.rt_records", "true"}, {"native.rigid_motion", "true"},
+        {"native.cluster_cull", "true"}, {"native.cluster_cull_shadows", "true"}, {"native.rt_records", "true"}, {"native.rt_gpu_build", "true"}, {"native.rigid_motion", "true"},
         {"native.vertex_pull", "true"}, {"native.own_foliage", "true"}, {"rt.table_entries", "true"}, {"debug.ubershader", "true"},
         {"native.bone_motion", "on"}, {"native.tree_wind", "on"}, {"native.depth_z", "on"}, {"native.own_post", "on"}, {"native.own_collection", "on"},
         {"native.own_extract", "on"}, {"native.own_particles", "on"}, {"native.owned_decals", "on"}, {"native.own_sky", "owned"}, {"native.own_gui", "owned"},

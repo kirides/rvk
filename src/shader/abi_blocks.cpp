@@ -16,6 +16,7 @@
 #include "enh/material_rt.h"
 #include "enh/ocean.h"
 #include "enh/rt_debug.h"
+#include "enh/rt_gpu_build.h"
 #include "enh/rt_shadows.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
@@ -158,6 +159,9 @@ END(SkinPush, Push, abi::SkinPush)
 BLOCK(TreeWindPush, Push, abi::SkinPush)
 PH F(uint2, table, 1) F(uint2, pad, 1)
 END(TreeWindPush, Push, abi::SkinPush)
+BLOCK(RtInstanceBuildPush, Push, abi::SkinPush)
+PH F(uint2, table, 1) F(uint2, pad, 1)
+END(RtInstanceBuildPush, Push, abi::SkinPush)
 
 BLOCK(RtShadowPush, Push, enh::RtShadowPush)
 PH F(uint2, params, 1) F(uint2, pad, 1)
@@ -319,6 +323,23 @@ BLOCK(RvkClusterRow, Raw, gpuscene::ClusterRow)
 FM(float4, sphere, 1, c) FM(uint4, info, 1, firstIndex)
 END(RvkClusterRow, Raw, gpuscene::ClusterRow)
 
+// the RT scene's GPU instance build (enh/rt_gpu_build.h, shaders/rt/rt_instance_build.comp.hlsl: frame-ownership.md 14.43)
+BLOCK(RvkRtBuildInput, Raw, enh::rtbuild::InstanceInput)
+FM(float4, rows, 3, rows) FM(float4, boxRows, 3, boxRows) FM(uint4, w6, 1, blasRow) FM(uint4, w7, 1, instanceId)
+END(RvkRtBuildInput, Raw, enh::rtbuild::InstanceInput)
+BLOCK(RvkRtBuildBlas, Raw, enh::rtbuild::BlasRow)
+FM(uint4, b0, 1, as) FM(uint4, b1, 1, indices) FM(uint4, b2, 1, proxyIndices) FM(uint4, b3, 1, texcoord0)
+END(RvkRtBuildBlas, Raw, enh::rtbuild::BlasRow)
+BLOCK(RvkRtBuildMaterial, Raw, enh::rtbuild::MaterialRow)
+FM(uint4, m0, 1, albedoTex) FM(uint4, m1, 1, packLod) FM(float4, uvMap, 2, uvMap)
+END(RvkRtBuildMaterial, Raw, enh::rtbuild::MaterialRow)
+BLOCK(RvkRtBuildEntry, Raw, enh::rtbuild::Entry)
+FM(uint4, e, 1, input)
+END(RvkRtBuildEntry, Raw, enh::rtbuild::Entry)
+BLOCK(RvkRtBuildHeader, Raw, enh::rtbuild::Header)
+FM(uint4, h0, 1, count) FM(uint4, h1, 1, matCap) FM(uint4, h2, 1, entries) FM(uint4, h3, 1, blas) FM(uint4, h4, 1, literal) FM(uint4, h5, 1, outRec) FM(uint4, h6, 1, boxVertices)
+END(RvkRtBuildHeader, Raw, enh::rtbuild::Header)
+
 #undef BLOCK
 #undef END
 #undef F
@@ -335,7 +356,7 @@ std::span<const Block> blocks() {
         REG(LightClusterPush, Push, enh::LightClusterPush) REG(LightShadowPush, Push, enh::LightShadowPush) REG(MaterialRtPush, Push, enh::MaterialRtPush)
         REG(MaterialRtCompositePush, Push, enh::MaterialRtCompositePush) REG(PostLumPush, Push, native::PostLumPush) REG(PostBrightPush, Push, native::PostGroupPush)
         REG(PostGlowPush, Push, native::PostGroupPush) REG(PostBloomPush, Push, native::PostGroupPush) REG(PostDofMidPush, Push, native::PostGroupPush)
-        REG(RtDebugPush, Push, enh::RtDebugPush) REG(SkinPush, Push, abi::SkinPush) REG(TreeWindPush, Push, abi::SkinPush) REG(RtShadowPush, Push, enh::RtShadowPush) REG(UpscalePush, Push, abi::DepthPrepPush)
+        REG(RtDebugPush, Push, enh::RtDebugPush) REG(SkinPush, Push, abi::SkinPush) REG(TreeWindPush, Push, abi::SkinPush) REG(RtInstanceBuildPush, Push, abi::SkinPush) REG(RtShadowPush, Push, enh::RtShadowPush) REG(UpscalePush, Push, abi::DepthPrepPush)
         REG(ExposurePush, Push, abi::ExposurePush) REG(OceanPush, Push, enh::OceanPush) REG(FoamPush, Push, enh::OceanFoamPush) REG(MipPush, Push, enh::OceanMipPush)
         REG(WaterRtPush, Push, enh::WaterRtPush) REG(WetPush, Push, enh::WetShorePush)
         REG(RvkFrameData, Ptr, abi::FrameBlock) REG(RvkStageData, Ptr, StageConstsLayout) REG(RvkDrawData, Ptr, abi::DrawBlock) REG(RvkDrawRecord, Ptr, abi::DrawRecord)
@@ -346,6 +367,8 @@ std::span<const Block> blocks() {
         REG(WaterRtParams, Ptr, enh::WaterRtParams) REG(WaterBlockData, Ptr, enh::WaterBlock) REG(ShadowBlock, Ptr, enh::ShadowBlock)
         REG(RtShadowParams, Ptr, enh::RtShadowParams) REG(RvkLight, Ptr, enh::GpuLight)
         REG(RvkInstance, Raw, gpuscene::InstanceRecord) REG(RvkMeshPart, Raw, gpuscene::PartRecord) REG(RvkClusterRow, Raw, gpuscene::ClusterRow) REG(RvkVertexFetch, Raw, abi::VertexFetch)
+        REG(RvkRtBuildInput, Raw, enh::rtbuild::InstanceInput) REG(RvkRtBuildBlas, Raw, enh::rtbuild::BlasRow) REG(RvkRtBuildMaterial, Raw, enh::rtbuild::MaterialRow)
+        REG(RvkRtBuildEntry, Raw, enh::rtbuild::Entry) REG(RvkRtBuildHeader, Raw, enh::rtbuild::Header)
     };
 #undef REG
     return kBlocks;

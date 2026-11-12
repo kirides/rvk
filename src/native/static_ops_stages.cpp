@@ -162,6 +162,15 @@ void StaticOps::stagesReport() {
         line += stage("rt_records", settingOn(rs.nativeRtRecords), st.armed, a, std::format("{} owned draws replayed from their record scripts", a),
                       needsOf(rs.nativeRtRecords, {rs.nativeOwnedPersistent}));
     }
+    // frame-ownership.md 14.43: the RT scene's TLAS instances built on the GPU (native.rt_gpu_build; acted = instances the compute pass wrote in the window)
+    {
+        static std::uint64_t last = 0;
+        const enh::RtGpuBuildState st = enh::rtGpuBuildState();
+        const std::uint64_t a = st.built - last;
+        last = st.built;
+        line += stage("rt_gpu_build", settingOn(rs.nativeRtGpuBuild), st.armed, a,
+                      std::format("{} TLAS instances written by the compute pass; run: {} check frames compared, DIFFERING {}", a, st.compared, st.differing));
+    }
     // F10-1: the main view's static mesh contexts requested natively (native.own_collection; acted = contexts requested by the port in the window)
     {
         static std::uint64_t last = 0, lastDef = 0, lastCmp = 0;

@@ -523,6 +523,7 @@ struct RendererSettings {
     Setting* nativeOwnCollection = nullptr;    // native.own_collection: F10-1 (frame-ownership.md 14.31): the main view's static mesh contexts requested natively, z / solid ops handed to the owned path (Full, Debug)
     Setting* nativeOwnExtract = nullptr;       // native.own_extract: F10-2 (frame-ownership.md 14.33): the main view's ExtractFromFrustum done natively (Full, Debug)
     Setting* nativeRtRecords = nullptr;        // native.rt_records: F8-1 (frame-ownership.md 14.30): the RT scene's sightings of owned draws replayed from their record scripts (Full, Debug)
+    Setting* nativeRtGpuBuild = nullptr;       // native.rt_gpu_build: frame-ownership.md 14.43: the RT scene's TLAS instances + records written by a compute pass from persistent tables (Full, Debug)
     Setting* nativeTreeMotion = nullptr;       // native.tree_motion: off | on | compare (frame-ownership.md 14.42: the swaying SpeedTrees' / grass' per-object motion from the previous frame's wind constants; Full)
     Setting* nativeTreeWind = nullptr;         // native.tree_wind: off | on | compare (F4-5, frame-ownership.md 14.17: the RT scene's animated SpeedTrees by compute, no capture; Full)
     Setting* nativeVertexPull = nullptr;       // native.vertex_pull: S-4 vertex pulling of the persistent owned draws (no vertex input: one indirect command per pipeline x state x index binding)
