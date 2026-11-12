@@ -2903,6 +2903,12 @@ void RtScene::rollDyn(std::uint64_t frame) {
     if (dynFrame_ + 1 == frame) {
         dynPrev_ = std::move(dyn_);
     } else {
+        // a frame value jump (a mid-frame submit: Device::flushFrameAndWait): the previous frame's capture memory is reused, its trees / characters
+        // are missing from this frame's TLAS (the RT shadows' temporal filter showed that for ~20 frames: frame-ownership.md 14.38)
+        if (!dyn_.empty() && dynFrame_ != 0 && ++dynJumpDrops_ <= 8) {
+            spdlog::info("rt: scene: frame value jumped {} -> {}: the previous frame's {} captured draws are not used{}", dynFrame_, frame, dyn_.size(),
+                         dynJumpDrops_ == 8 ? " (last such line)" : "");
+        }
         dynPrev_.clear();
     }
     dyn_.clear();

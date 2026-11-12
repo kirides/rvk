@@ -274,6 +274,11 @@ void CaptureQueue::finishLocked(std::uint32_t ticket, int state, std::string msg
     }
 }
 
+bool CaptureQueue::dueNextPresent() const {
+    const std::lock_guard lock(mutex_);
+    return std::ranges::any_of(jobs_, [](const Job& j) { return j.wait == 0; });
+}
+
 void CaptureQueue::onPresent(std::uint64_t frame, const ReadBack& read, const ReadBack& generated) {
     std::vector<Job> due;
     {

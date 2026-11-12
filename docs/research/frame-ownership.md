@@ -3849,9 +3849,9 @@ check's compare then also copies the current frame: debug only).
 **Case 2 (the jungle window of the capture burst, 12.97 % colour): a scene transient, not ownership.** Every back-buffer capture (`rvk_screenshot`, `-Screenshots`) ends its frame
 with a submit + wait (`Device::flushFrameAndWait`), the frame value jumps by two, and the next ~20 frames are not steady: sunlit foliage patches get ~16 % brighter, then decay back
 (dumps: the composed control views show the same, e.g. Vulkan control 7.9 % at age 10, owned 12.7 % at age 7; the same on Vulkan and D3D12; the cause inside the passes was not
-identified: a consumer of "the previous frame" or a temporal history disturbed by the jump; open). The old verdict compared a window's worst owned view with the window's worst
+identified: a consumer of "the previous frame" or a temporal history disturbed by the jump; found and fixed in 14.38: the RT scene dropped the previous frame's tree captures, the RT shadows' temporal filter kept it). The old verdict compared a window's worst owned view with the window's worst
 control: in d2 the cycle's closing control (the composed frame that compares with the same reference) fell into the next window, which the teleport made UNRELIABLE, so the
-owned spike stood against a quiet control. Note for refcompare: a burst's b1 / b2 are captured 10 / 20 frames after the previous capture, inside this transient.
+owned spike stood against a quiet control. Note for refcompare: a burst's b1 / b2 are captured 10 / 20 frames after the previous capture, inside this transient (until 14.38).
 
 **Case 1 (harbour_night's first window, 2,076 depth pixels) and the rest: real owned-only glitches, D3D12 only.** Long holds at harbour_docks (~120 fps) made them frequent: 1 - 11
 FAILED cycles per 4-min hold, single owned frames with displaced geometry (a black sliver of 1,040 / 1,081 depth pixels along the ship's railing: the z pass wrote depth a few
@@ -3892,6 +3892,52 @@ UNRELIABLE windows: the intro's owned frames differ more than its composed ones,
 4205,4605,5005`, `set native.owned_persistent false` at 4400 = the stage line `inactive(setting off)` around 4605, `true` at 4800): owned vs composed 112 / 76 pixels > 6 / 255
 (0.008 / 0.005 %, max 26 / 32), owned vs owned 92 (0.006 %, max 17): the same noise. `rvk_tests` 352 / 0, `rvk_rhitest --validation` PASS (the picture check case binds the
 two new storage images), `rvk_d3d9test --validation` Vulkan + D3D12 PASS (0 validation errors), `rvk_shadertool dxil-check embedded` 182 / 182.
+
+### 14.38 The post-capture transient of 14.37 case 2: the RT shadows lost the animated trees for one frame (2026-11-12; no new setting; `-Environment 'RVK_CAPTURE_FLUSH=1'` = the old mid-frame read-back, `RVK_CROP_LUMA=x,y,w,h[;...]` = per-present crop luma)
+
+Setup: private copy `risen-test-vk-cap`, lock `rvk-cap`, Full + player defaults + the 14.36 all-on set (upscaling / frame generation off), rvkcompare `jungle`; scripts and logs in
+`rvk-work/scratch/cap/` (`run.ps1`, `toggles.ps1`, `shots.ps1`, `ana.py` = crop luma around each `shot`).
+
+**Instrument.** `RVK_CROP_LUMA=x,y,w,h[;x,y,w,h ...]` (`Device::diagCropLuma`, d3d9/device.cpp): every present copies the back buffer (+ the engine's 1x1 adapted luminance) into a
+read-back buffer of its own submission and reads it once that frame completed (no wait, no extra submit): `diag: crop: present P (frame value V): adapted luminance L, luma a b c ...`
+(one value per crop; the scripts use a 4 x 3 grid of the 1600 x 900 picture).
+
+**Bisection in one session** (t1, Vulkan; each candidate off 200 presents before a `shot`, back on 100 after; worst crop deviation over the 40 presents after the capture against the
+30 before, same-state noise 0.02 - 0.09 %): base captures **9.8 %** (crop 9 = the sunlit tree / bush in the middle, crops 8 / 0 too), `ao.enabled=false` 9.4 %, `gi.enabled=false`
+9.3 %, `lighting.light_shadows=off` 9.9 %, `debug.shadow_stride=1` 9.8 %, `native.own_post=off` 9.9 %, `upscale.object_motion=off` 9.9 %, **`shadows.rt=off` 0.21 %**,
+`shadows.enabled=false` (no RT term either) 0.20 %. The adapted luminance does not move (0.3381 -> 0.3385). The curve: present +0 (the captured frame) unchanged, +1 +9.8 %,
++2 +7.5 %, +5 +5.5 %, +10 +3.6 %, +20 +1.4 %, +37 +0.3 %: one bad raw RT-shadow frame decaying through the RT shadows' temporal history.
+
+**Cause.** A capture read the back buffer with `readBackBuffer` -> `readImageLevel` -> `Device::flushFrameAndWait` (submit + wait + `beginFrame`): the frame value advances
+twice in that present. The RT scene keeps the previous frame's vertex captures (animated SpeedTrees within the RT range, characters) only when the frame value is consecutive
+(`RtScene::rollDyn`: `dynFrame_ + 1 == frame`), because the capture ring memory of a frame slot is reset when the slot is reused, which after the jump happens in the very
+next frame. So the frame after every capture built its TLAS without the swaying trees (their main-view captures of this frame come after the RT shadow trace at
+AfterDepthPrepass): the sunlit foliage under them lost its tree shadows for one frame, and `shadows.rt temporal` carried the error ~20 frames. Not ownership, not a backend
+matter (the owned and the composed frames, Vulkan and D3D12 alike). rvk.log now says so: `rt: scene: frame value jumped A -> B: the previous frame's N captured draws are
+not used` (first 8).
+
+**Fix (`hal/vulkan/device.cpp` Present, `Device::armBackBufferRead / takeBackBufferRead`, `api::CaptureQueue::dueNextPresent`).** When a capture is due at a present, the
+back-buffer copy is recorded into the frame's own command list before `Device::present()`, and the pixels are read after the present's submission (a CPU wait for that frame
+value, no extra submit): the frame value no longer jumps, nothing downstream sees a capture. Same bytes as before (the raw BGRA8 back buffer). Still mid-frame (still a jump):
+the engine's own `SaveBackbufferToFile` snapshot and `GetRenderTargetData`, the manual frame generation's `_gen.png`, the diagnostics read-backs (`RVK_EXPOSURE_LOG`,
+`RVK_NAN_BISECT`).
+
+**Evidence** (`shots.ps1`: singles 200 presents apart, a burst every 10 presents like rvkcompare's b0 - b3, singles again; `native.picture_check=true`; worst crop deviation
+over the 40 presents after each capture vs the same-state noise of the 30 before):
+
+| run | captures | worst after a capture | same-state noise | frame value at the capture | `frame value jumped` lines |
+|---|---|---|---|---|---|
+| s1 Vulkan, fixed | 9 | 0.03 - 0.07 % | 0.03 - 0.04 % | +1 | 0 |
+| s2 D3D12, fixed | 9 | 0.33 - 0.49 % | 0.14 - 0.45 % (D3D12's own 2-frame dips of crops 2 / 6, also outside captures) | +1 | 0 |
+| s3 D3D12, `RVK_CAPTURE_FLUSH=1` | 9 | **12.2 %** (burst: still 6 - 10 % from the previous capture) | 0.04 - 0.33 % | **+2** | 8 (`... the previous frame's 139 captured draws are not used`) |
+| t1 Vulkan, old path (bisection run) | 12 | **9.8 %** | 0.02 - 0.09 % | +2 | (before the line existed) |
+
+Picture check through the burst (s1, s2): every settled window `ok`, `settling after a frame jump 0 (0 jumps)` in all of them after the world was up (before: every capture
+dropped 32 frames); no FAILED window, MISS / DIFFERING 0. Pictures are the same bytes as before (BGRA8 of the back buffer; s1 / s2 PNGs checked). Gates: `rvk_tests` 353 / 0,
+`rvk_d3d9test --validation` Vulkan + D3D12 PASS (0 validation errors), `rvk_rhitest --validation` PASS.
+
+Consequence for earlier A/B work: rvkcompare burst pictures b1 / b2 / b3 (10 / 20 / 30 presents after the previous capture) of runs with `shadows.rt` on were taken inside the
+transient (+3.6 % / +1.4 % / +0.6 % on the worst crop at jungle); single captures and b0 were not.
 
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
