@@ -366,7 +366,7 @@ void OwnPost::report() {
     {
         // frame-ownership.md 7.47: the state line the A/B scripts assert (setting vs what the code runs)
         const settings::Setting* st = settings::renderer().nativeOwnPost;
-        const int want = st != nullptr ? static_cast<int>(st->asInt()) : 0;
+        const int want = st != nullptr && settings::fullNow() ? static_cast<int>(st->asInt()) : 0;  // (S-9: default on, acts in Full only)
         const int have = static_cast<int>(mode_);
         spdlog::info("native: own post state (5 s): {} (setting {}, code {}){}", mode_ == Mode::Off ? "inactive" : "active", want, have, want != have ? " INCONSISTENT" : "");
     }

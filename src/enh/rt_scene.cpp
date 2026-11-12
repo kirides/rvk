@@ -40,6 +40,7 @@ constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instan
 constexpr std::uint32_t kMaxAnimatedTrees = 160;  // SpeedTree draws captured per frame (their captures take 32 bytes per vertex of the frame's ring)
 // F4-5 (native.tree_wind): the stages line reads these (TreeWindState)
 std::atomic<bool> g_treeWindArmed{false};
+std::atomic<bool> g_treeWindRequested{false};
 std::atomic<std::uint64_t> g_treeWindJobs{0}, g_treeWindOwned{0};
 constexpr float kBoxMaxRadius = 2000.0f;        // world units (20 m): bigger objects (cliffs, level meshes) never become boxes
 constexpr std::uint32_t kBoxMinTriangles = 64;  // a smaller BLAS gains nothing from a 12-triangle box
@@ -3623,7 +3624,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
 
 // ---- F4-5: SpeedTrees in the wind by compute (native.tree_wind, docs/research/frame-ownership.md 14.17) ----------------------------------------------------
 
-TreeWindState treeWindState() { return {g_treeWindArmed.load(std::memory_order_relaxed), g_treeWindJobs.load(std::memory_order_relaxed), g_treeWindOwned.load(std::memory_order_relaxed)}; }
+TreeWindState treeWindState() { return {g_treeWindArmed.load(std::memory_order_relaxed), g_treeWindRequested.load(std::memory_order_relaxed), g_treeWindJobs.load(std::memory_order_relaxed), g_treeWindOwned.load(std::memory_order_relaxed)}; }
 
 void RtScene::setTreeWind(int mode) {
     mode = std::clamp(mode, 0, 2);
@@ -3645,6 +3646,7 @@ bool RtScene::treeWindReady() {
     if (treeWindReady_) return true;
     if (!treeWindStarted_) {
         treeWindStarted_ = true;
+        g_treeWindRequested = true;
         rhi::Device* rdev = dev_.rhi();
         if (rdev == nullptr) {
             treeWindFailed_ = true;
@@ -3679,6 +3681,7 @@ void RtScene::destroyTreeWind() {
     treeWindErr_.reset();
     treeWindReady_ = treeWindStarted_ = treeWindFailed_ = false;
     g_treeWindArmed = false;
+    g_treeWindRequested = false;
 }
 
 const RtScene::TreeLayoutEntry& RtScene::treeLayout(const d3d9::ReplaceQuery& q) {

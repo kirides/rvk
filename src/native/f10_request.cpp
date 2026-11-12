@@ -207,7 +207,7 @@ inline std::uint64_t nowNs() {
 
 int settingMode() {
     const auto& rs = settings::renderer();
-    return rs.nativeOwnCollection != nullptr ? static_cast<int>(rs.nativeOwnCollection->asInt()) : 0;
+    return rs.nativeOwnCollection != nullptr && settings::fullNow() ? static_cast<int>(rs.nativeOwnCollection->asInt()) : 0;  // (S-9: default on, Full only)
 }
 
 // ---- the port of eCRenderContextMesh::RequestRenderOps for an eligible context ----

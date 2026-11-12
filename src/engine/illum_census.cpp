@@ -206,7 +206,7 @@ bool install() {
     char buf[8]{};
     const bool census = GetEnvironmentVariableA("RVK_ILLUM_CENSUS", buf, sizeof(buf)) != 0 && buf[0] == '1';
     const auto* setting = settings::renderer().nativeIllumTable;
-    const bool table = setting != nullptr && setting->asBool();
+    const bool table = setting != nullptr && setting->asBool() && settings::startedFull();  // (S-9: default on, Full sessions only)
     if (!census && !table) return false;
     const auto& s = sym();
     bool ok = true;

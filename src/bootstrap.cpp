@@ -498,13 +498,14 @@ void onProcessAttach(void* module) {
         native::f10::install();  // RVK_F10_COMPARE=1: the native main-view collection compared with the engine's (frame-ownership.md 7.31)
         engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 or native.illum_table (frame-ownership.md F0)
         {
+            // (S-9, frame-ownership.md 14.41: the owned stages default on but their start-time pieces exist only in a session STARTED in Full: settings::startedFull)
             // F2e-1: the owned op records' dependency events (frame-ownership.md 7.30), only when native.owned_static is on at start (RVK_F2E_NO_EVENTS=1: the polled path, the A/B arm)
             char noEv[8]{};
-            if (const auto& rs = settings::renderer(); rs.nativeOwnedStatic != nullptr && rs.nativeOwnedStatic->asBool() && GetEnvironmentVariableA("RVK_F2E_NO_EVENTS", noEv, sizeof(noEv)) == 0) {
+            if (const auto& rs = settings::renderer(); settings::startedFull() && rs.nativeOwnedStatic != nullptr && rs.nativeOwnedStatic->asBool() && GetEnvironmentVariableA("RVK_F2E_NO_EVENTS", noEv, sizeof(noEv)) == 0) {
                 engine::depevents::install();
             }
         }
-        if (const auto& rs = settings::renderer(); rs.nativeMaterialTable != nullptr && rs.nativeMaterialTable->asBool()) {
+        if (const auto& rs = settings::renderer(); settings::startedFull() && rs.nativeMaterialTable != nullptr && rs.nativeMaterialTable->asBool()) {
             gpuscene::materialtable().setActive(true);  // frame-ownership.md F0: the material table (polled: no hooks)
             spdlog::info("native: material table on (native.material_table)");
         }

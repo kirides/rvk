@@ -772,6 +772,10 @@ void Device::destroy() {
     }
     game_->waitIdle();
     cropDiag_.reset();
+    // the in-frame reads' read-back buffers (14.40) go with the device, not with the Device object after it (S-9 soak: D3D12 logged `waitIdle after the queue /
+    // fence were released` at every exit after a screenshot; on Vulkan the buffer was freed after vkDestroyDevice)
+    bbRead_ = InFrameRead{};
+    deferredReads_.clear();
     // the pipeline cache and its threads are the backend's (the backend's GameRecord), destroyed with the device
     processReleases();
     backBuffer_.reset();

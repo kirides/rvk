@@ -71,6 +71,9 @@ param(
     [string[]]$Setting = @(),
     [switch]$KeepSettings,
     [switch]$PlayerDefaults,
+    # S-9 (frame-ownership.md 14.41): every owned stage is on by default in Full (the baseline and -PlayerDefaults test that); -NoOwned turns them all off
+    # (the Full of before S-9: everything composed) for bisecting; one stage off: -Setting 'native.owned_trees=false' (list: scripts/lib/stage-state.ps1)
+    [switch]$NoOwned,
     # the in-game overlay: -NoOverlay = [overlay] enabled = false; -OverlayInScreenshots draws it into the back buffer so
     # -Screenshots / rvk_screenshot capture it; -Commands '450: overlay open','600: set vulkan.max_fps 30' ([debug] commands)
     [switch]$NoOverlay,
@@ -189,8 +192,10 @@ if ($NoRenderer) {
             $values['rt.reflections'] = 'medium'
             $values['shadows.enabled'] = 'false'; $values['shadows.filter'] = 'high'; $values['shadows.map_size'] = 'auto'
             $values['lod.trees'] = '1'; $values['lod.meshes'] = '1'; $values['lod.view'] = '1'
-            $values['lighting.clustered'] = 'false'; $values['lighting.full_lit'] = 'false'
+            # (S-9, frame-ownership.md 14.41: lighting.clustered / full_lit are no longer pinned off: the owned Full frame needs the table lighting, the baseline tests the
+            # player's Full; the old pass = -Setting 'lighting.clustered=false','lighting.full_lit=false', which gates the owned stages off)
         }
+        if ($NoOwned) { . (Join-Path $PSScriptRoot 'lib\stage-state.ps1'); foreach ($kv in (Get-OwnedStageSettings -Off)) { $k, $v = $kv -split '=', 2; $values[$k] = $v } }
         foreach ($kv in $Setting) { $k, $v = $kv -split '=', 2; $values[$k] = $v }
         # "table.key=value" -> [table] key = value (strings quoted unless number / bool)
         $tables = [ordered]@{}

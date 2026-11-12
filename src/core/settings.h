@@ -100,6 +100,9 @@ struct Spec {
     // group applies at once; between groups only at the next start (restartPending, "restart needed" in the overlay), e.g.
     // renderer.mode: original {0} | wrapper, full {1}. Empty = no such rule.
     std::vector<std::uint8_t> restartGroups;
+    // Enum: an option that applies at once but has its FULL effect only after a restart into it (restartPending while the value is this option and the
+    // session started with another one; the change itself is not deferred). renderer.mode: Full (its owned stages' start-time tables, S-9).
+    std::optional<double> restartInto;
     // Prerequisites (docs/research/settings-audit.md; Registry::setWithNeeds / needsReason): all must be met for the setting to act.
     // Rules: (1) turning a dependent ON through setWithNeeds (a Bool true, an Enum option > 0 of an option list that starts with
     // "off") switches its unmet prerequisites on first (chains followed, cycles cut; a restart-only prerequisite is set and shows
@@ -177,6 +180,7 @@ public:
     double startValue() const { return start_; }
     bool restartPending() const {
         if (restart()) return value() != start_;
+        if (spec_.restartInto && value() == *spec_.restartInto && start_ != *spec_.restartInto) return true;
         return !spec_.restartGroups.empty() && restartGroup(value()) != restartGroup(start_);
     }
 
@@ -539,6 +543,12 @@ const std::vector<std::string>& hotkeyNames();
 RendererSettings registerRendererSettings(Registry& reg);
 // the renderer's settings in registry() (null pointers before registerRendererSettings(registry()))
 const RendererSettings& renderer();
+// S-9 (docs/research/frame-ownership.md 14.41): the owned stages (native.owned_*, own_*, clusters, debug.ubershader, ...) default ON but act only in Full.
+// fullNow(): renderer.mode resolves to Full in this session right now (run-time stages; Wrapper / Original never run them);
+// startedFull(): the session STARTED in Full (start-time infrastructure: the material / illumination tables, the mesh part table, the clusters, the
+// dependency events: a session started in Wrapper and switched to Full at run time has none of it until a restart: renderer.mode shows "restart needed").
+bool fullNow();
+bool startedFull();
 
 // ---- graphics presets (the overlay's Graphics tab) ----
 struct Preset {

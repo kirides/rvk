@@ -450,9 +450,13 @@ TEST(settings_renderer_mode) {
     CHECK(m.asEnum() == "wrapper" && static_cast<RenderMode>(m.asInt()) == kDefaultRenderMode);
     CHECK(m.spec().options.size() == 3 && m.spec().options[0] == "original" && m.spec().options[2] == "full");
     reg.markStarted();
-    // wrapper -> full: no restart, A/B eligible
+    // wrapper -> full: applies at once, A/B eligible; S-9: "restart needed" for its full effect (the owned stages' start-time tables)
     CHECK(reg.setText("renderer.mode", "full") == Result::Ok);
-    CHECK(m.asEnum() == "full" && !m.restartPending() && m.abEligible());
+    CHECK(m.asEnum() == "full" && m.restartPending() && m.abEligible());
+    // a session started in Full: back to wrapper and to full again need no restart
+    reg.markStarted();
+    CHECK(reg.setText("renderer.mode", "wrapper") == Result::Ok && !m.restartPending());
+    CHECK(reg.setText("renderer.mode", "full") == Result::Ok && !m.restartPending());
     // -> original: restart pending (another backend); back to full / wrapper: none
     CHECK(reg.setText("renderer.mode", "original") == Result::Ok);
     CHECK(m.restartPending());
@@ -490,6 +494,41 @@ TEST(settings_renderer_mode) {
     CHECK(reg.toToml().find("mode = \"full\"") != std::string::npos);
 }
 
+// S-9 (docs/research/frame-ownership.md 14.41): every owned stage defaults on (Debug overrides: outside debug mode they apply as the default) and acts
+// in Full only (settings::fullNow / startedFull; the code gates on the mode, the overlay's needs name it)
+TEST(settings_owned_stages_default_on_in_full) {
+    Registry reg;
+    registerRendererSettings(reg);
+    const std::pair<const char*, const char*> on[] = {
+        {"native.material_table", "true"}, {"native.illum_table", "true"}, {"native.lighting_images", "true"}, {"native.mesh_parts", "true"},
+        {"native.owned_windows", "true"}, {"native.owned_objects", "true"}, {"native.owned_records", "true"}, {"native.scene_draws", "true"},
+        {"native.owned_static", "true"}, {"native.owned_persistent", "true"}, {"native.owned_shadows", "true"}, {"native.owned_shadow_views", "true"},
+        {"native.owned_trees", "true"}, {"native.owned_billboards", "true"}, {"native.owned_vegetation", "true"}, {"native.owned_vegetation_ops", "true"},
+        {"native.owned_actors", "true"}, {"native.owned_instances", "true"}, {"native.owned_ordered", "true"}, {"native.clusters", "true"},
+        {"native.cluster_cull", "true"}, {"native.cluster_cull_shadows", "true"}, {"native.rt_records", "true"}, {"native.rigid_motion", "true"},
+        {"native.vertex_pull", "true"}, {"native.own_foliage", "true"}, {"rt.table_entries", "true"}, {"debug.ubershader", "true"},
+        {"native.bone_motion", "on"}, {"native.tree_wind", "on"}, {"native.depth_z", "on"}, {"native.own_post", "on"}, {"native.own_collection", "on"},
+        {"native.own_extract", "on"}, {"native.own_particles", "on"}, {"native.owned_decals", "on"}, {"native.own_sky", "owned"}, {"native.own_gui", "owned"},
+    };
+    for (const auto& [key, value] : on) {
+        const Setting* s = reg.find(key);
+        CHECK_MSG(s != nullptr, key);
+        if (s == nullptr) continue;
+        CHECK_MSG(Registry::formatValue(s->spec(), s->spec().defaultValue) == value, key);
+        CHECK_MSG((s->spec().flags & Flag::Debug) != 0, key);  // (a bisect override: players get the default)
+    }
+    // the check frames stay the safety net; the compares stay off
+    CHECK(reg.find("native.owned_check")->asInt() == 10);
+    for (const char* key : {"native.picture_check", "native.owned_observe", "native.coverage", "native.frame_tap", "native.static_ops_compare", "native.scene_ops_compare"})
+        CHECK_MSG(!reg.find(key)->asBool(), key);
+    // the roots name the mode: in Wrapper the overlay greys them with the reason
+    CHECK(reg.find("native.scene_draws")->spec().needs.size() == 1 && reg.find("native.scene_draws")->spec().needs[0].key == "renderer.mode");
+    CHECK(!reg.needsReason(*reg.find("native.scene_draws")).empty());
+    CHECK(reg.setText("renderer.mode", "full") == Result::Ok);
+    CHECK(reg.needsReason(*reg.find("native.scene_draws")).empty());
+    // a switch into Full from a session started in Wrapper says "restart needed" (the start-time tables)
+    CHECK(reg.find("renderer.mode")->spec().restartInto == 2.0 && reg.find("renderer.mode")->restartPending());
+}
 TEST(rt_presets_match_defaults_and_apply) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);

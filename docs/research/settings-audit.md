@@ -135,9 +135,21 @@ hardware settings: api, adapter, rt.allow, materials.budget, upscale provider).
 | `shadows.filter` | low | high | the baseline is the better filter, the opposite of parity |
 | `shadows.map_size` | 2048 (Medium) | auto | |
 | `lod.trees` / `lod.meshes` / `lod.view` | 2 | 1 | |
-| `lighting.clustered` / `lighting.full_lit` | on | false | |
+| `lighting.clustered` / `lighting.full_lit` | on | on (pinned false until S-9, 2026-11-12) | the owned Full frame needs the table lighting: with them off every owned stage is gated (`table lighting off`) |
 | `overlay.debug_mode` | off | true | Flag::Debug settings apply their values in tests; players get the defaults |
 | not pinned | `materials.pack`, `materials.quality` medium, `materials.derive_from_specular`, `lighting.light_shadows` nearby, `debug.shadow_stride` 2, `debug.prefetch_stride` 4 | | the first three need a pack folder with files, so they do nothing in the baseline |
+
+### S-9: the owned stages default on in Full (2026-11-12, frame-ownership.md 14.41)
+
+38 Debug settings changed their default to on (`native.material_table` / `illum_table` / `lighting_images` / `mesh_parts` / `owned_windows` / `owned_objects` /
+`owned_records` / `scene_draws` / `owned_static` / `owned_persistent` / `owned_shadows` / `owned_shadow_views` / `owned_trees` / `owned_billboards` / `owned_vegetation`
+/ `owned_vegetation_ops` / `owned_actors` / `owned_instances` / `owned_ordered` / `clusters` / `cluster_cull` / `cluster_cull_shadows` / `rt_records` / `vertex_pull` /
+`own_foliage` / `rigid_motion` = true, `bone_motion` / `tree_wind` / `depth_z` / `own_post` / `own_collection` / `own_extract` / `own_particles` / `owned_decals` = on,
+`own_sky` / `own_gui` = owned, `rt.table_entries` / `debug.ubershader` = true). No setting added or removed (count unchanged). They stay `Flag::Debug` (players get the
+default; debug mode makes them bisect overrides) and act in Full only (`settings::fullNow` / `startedFull`; the roots need `renderer.mode = full`, greyed in Wrapper).
+`renderer.mode` got `Spec::restartInto = full`: a switch from a Wrapper start into Full applies at once but shows "restart needed" (the start-time tables). Neither the
+test baseline nor `-PlayerDefaults` pins them, and the baseline no longer pins `lighting.clustered` / `full_lit` off (the owned path is gated without the table
+lighting): both test the player's Full; `run.ps1 -NoOwned` = all off; `native.owned_check` stays 10, the compares stay off.
 
 ### Restart / requirement gaps
 

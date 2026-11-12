@@ -52,6 +52,7 @@ namespace rvk::enh {
 // tree instances it evaluated so far (the process total; the caller takes the window's difference)
 struct TreeWindState {
     bool armed = false;
+    bool requested = false;  // (S-9) a consumer asked for the compute (its pipeline build started); false = no ray-traced consumer of the swaying trees: idle, not off
     std::uint64_t jobs = 0, owned = 0;
 };
 TreeWindState treeWindState();
