@@ -80,3 +80,24 @@ pointers) are off.
 Result: `rvk_tests` 351 / 351, `rvk_d3d9test` (Vulkan and `--backend d3d12`) PASS with 0 validation errors, no check fired (shift,
 signed overflow, alignment, null, bounds, bool / enum, unreachable, return, VLA, ... all clean on what these tests execute).
 Game-path code that only runs in the game (hooks, engine reads) is not exercised by them.
+
+## Pass 2 (2026-11-12)
+
+Same presets, tree at `c603752` + the F10 collection / extract ports, the particle GPU path, owned records, frame epochs, the picture
+check and the shutdown changes. Full `clang-pedantic` build (494 steps, `-k 0`): **0 warnings** (the first pass's suppressions held and
+nothing new tripped them; no new `-Wuninitialized` / `-Wnull-dereference` / `-Wcast-align` / `-Wshorten-64-to-32` hits), **1 hard error**
+that only clang reports:
+
+- `src/d3d9/device.cpp`: `Device::CropDiag` (the `RVK_CROP_LUMA` diagnostic, `std::unique_ptr<CropDiag> cropDiag_`) was defined at line
+  ~1190, after `Device::Device() = default`, `Device::~Device()` and `destroy()` (`cropDiag_.reset()`) had already instantiated
+  `std::default_delete<CropDiag>` on an incomplete type (`sizeof` of an incomplete type: ill-formed; MSVC accepts it because it
+  instantiates `default_delete::operator()` lazily at the end of the translation unit). Not UB in practice with MSVC (the struct is
+  complete by the time the code is generated), fixed by moving the struct definition above the constructor. No behaviour change, so no
+  new test: the existing `rvk_d3d9test` run covers the constructor / destructor path.
+
+`clang-ubsan` (trap mode, `rvk_tests` / `rvk_d3d9test` / `rvk_d3d9`): `rvk_tests` 353 / 353, `rvk_d3d9test` Vulkan and
+`--backend d3d12` PASS (0 failures, 0 validation errors), no trap. Same caveat: only what the tests execute.
+
+Gotchas for the next pass: with the multi-config Ninja generator one object is built with `ninja -C build-clang-pedantic -f
+build-RelWithDebInfo.ninja CMakeFiles/rvk_core.dir/RelWithDebInfo/src/<file>.obj` (fast check of a single file); a full cold clang
+build is long while a game soak runs on the machine (keep `-j` at hardware threads - 4).
