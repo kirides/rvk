@@ -586,7 +586,7 @@ ComPtr<ID3D12PipelineState> D3D12DeviceImpl::buildPso(const PsoEntry& e, const R
     pd.pRootSignature = rootSignature_.Get();
     pd.VS = {vs->dxil.data(), vs->dxil.size()};
     if (ps) pd.PS = {ps->dxil.data(), ps->dxil.size()};
-    // diagnostic (frame-ownership.md 14.38): RVK_D3D12_NULL_PS=1 gives a pipeline without a pixel shader an empty one
+    // diagnostic (frame-ownership.md 14.39): RVK_D3D12_NULL_PS=1 gives a pipeline without a pixel shader an empty one
     static const bool nullPs = GetEnvironmentVariableA("RVK_D3D12_NULL_PS", nullptr, 0) != 0;
     if (!ps && nullPs) {
         const auto np = shader::embedded::dxil("depth/null.frag");
@@ -1010,7 +1010,7 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
             if (sceneSig_ != nullptr) cmd->ExecuteIndirect(sceneSig_, p.count, res, p.indirectOffset, res, p.first);
         } else if (p.op == DrawPacket::Op::DrawIndexedIndirect) {
             // F2b-1 scene draws: p.count records of VkDrawIndexedIndirectCommand layout in a ring block (an upload heap: readable as an indirect argument)
-            // diagnostic (frame-ownership.md 14.38): RVK_D3D12_EI_DIRECT=1 issues the CPU-written records as single draws (with RVK_F2C4C_CPU=1 for the owned flushes)
+            // diagnostic (frame-ownership.md 14.39): RVK_D3D12_EI_DIRECT=1 issues the CPU-written records as single draws (with RVK_F2C4C_CPU=1 for the owned flushes)
             static const bool eiDirect = GetEnvironmentVariableA("RVK_D3D12_EI_DIRECT", nullptr, 0) != 0;
             auto* ab = reinterpret_cast<D3DBuffer*>(p.indirectBuffer);
             if (eiDirect && ab->map() != nullptr) {

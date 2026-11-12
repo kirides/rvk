@@ -1,4 +1,4 @@
-// RHI backend test (tools/rhitest testPullDepthOnly, frame-ownership.md 14.38): vertex-pulled depth-only draws in an ExecuteIndirect (count buffer) against the
+// RHI backend test (tools/rhitest testPullDepthOnly, frame-ownership.md 14.39): vertex-pulled depth-only draws in an ExecuteIndirect (count buffer) against the
 // input assembler. The renderer's pulled scene vertex shaders (rvk_pull.hlsli) in miniature: the instance-rate ref stream gives the draw's slot, the slot's
 // 128-byte block in a table holds the two vertex streams' references, strides, the base vertex and the mesh's placement; SV_VertexID (the index value, vertexOffset 0) + the
 // base vertex addresses the vertex. VSIa* read the same vertices through the input assembler (the record's vertexOffset = the base vertex). Every form computes
@@ -108,3 +108,5 @@ OutFull VSIaFull(IaIn i) { return full(loadBlock(i.ref.x), i.p, i.n, i.uv, i.ref
 void PSKill(OutFull i) { clip(i.v1.z + 0.5); }
 // the colour pass form: one R32F target
 float PSColor(OutFull i) : SV_Target0 { return i.v1.z + i.v0.x * 0.001; }
+// (the embedded-shader checks compile every file's stage entry: VSMain)
+OutFull VSMain(PullIn i) { return VSPulledFull(i); }

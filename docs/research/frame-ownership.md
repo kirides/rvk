@@ -3939,6 +3939,62 @@ dropped 32 frames); no FAILED window, MISS / DIFFERING 0. Pictures are the same 
 Consequence for earlier A/B work: rvkcompare burst pictures b1 / b2 / b3 (10 / 20 / 30 presents after the previous capture) of runs with `shadows.rt` on were taken inside the
 transient (+3.6 % / +1.4 % / +0.6 % on the worst crop at jungle); single captures and b0 were not.
 
+### 14.39 The intro's FAILED cycles = the weather's global light, not ownership (the check now pairs on the global light); the D3D12 PS-less pulled glitch narrowed to the driver's compile of a position-only pulled vertex shader (2026-11-12; no new setting; `RVK_PICTURE_IGNORE_LIGHT=1` = the old pairing, `RVK_PICTURE_FAKE_OWNED=<n>` / `RVK_PICTURE_DUMP_RANGE=<a>-<b>` + `RVK_PICTURE_DUMP_MIN=<share>` = check diagnostics, `RVK_D3D12_NULL_PS=1` / `RVK_D3D12_EI_DIRECT=1` = D3D12 diagnostics)
+
+Setup: private copy `risen-test-vk-intro`, lock `rvk-intro`, the 14.36 / 14.37 set (anm all-on + `native.picture_check=true`, upscaling and frame generation off), rvkcompare `jungle`
+(the new game's intro runs before the teleport) and long `harbour_docks` holds (`freeze_wait` 24000, `RisenTest.exe`, ~130 fps); logs, scripts and dumps in `rvk-work/scratch/intro/`
+(`run.ps1`, `arms.ps1`, `pc2.ps1`).
+
+**Item 1: the intro.** New diagnostics in `src/enh/picture_check.*`: `RVK_PICTURE_FAKE_OWNED=<n>` treats frames whose value % n >= 2 as "owned" (run it with
+`native.owned_persistent=false`: the check's cycles with nothing owned = its own control), `RVK_PICTURE_DUMP_RANGE=<a>-<b>` dumps every compared view of those frames (any window;
+`RVK_PICTURE_DUMP_MIN=<share>` = only views differing on at least that share, at most 48). Runs (D3D12):
+
+| run | owned | intro FAILED cycles (> 50 % of the picture) |
+|---|---|---|
+| n1 / n4 (n4 after main's capture fix 841c3ef) | yes | 1 / 3 (1 / 3) |
+| f1 / f2 / f6 (fake cycles, nothing owned) | no | 13 / 5 / 11 (2 / 1 / 3) |
+
+The FAILED cycles come with nothing owned: they are the scene. Dumps (f2) show why: the owned (or fake-owned) view differs from its reference on 93 - 98 % of the picture by ONE
+colour factor (0.87 or 1.6 - 1.9 on every channel; depth only where the sea moves): the intro's weather (Stormy_Rain -> Sunny_Half_02, lightning) moves the global light between
+two frames of one camera; a cycle whose closing control fell after the flash looks clean. 14.37's "the intro's owned frames differ more" was this; main's capture fix (14.38) did
+not change it (n4 / f6). **Fix (the check's premise):** a pair needs the same camera AND the same global light: `PictureCheck::lightStamp` = a hash of the hemisphere light
+(`engine::hemisphere::latest`: the weather's sky SH in the 7 registers, the intensity, the indoor colour), stored with the reference; a compare (owned or control) under another
+stamp is skipped (`skipped: ... global light changed N` in the 5 s line) and the window is UNRELIABLE like a moved camera. The stamp stands still in the settled holds (0 skips
+in every settled window of every run). After the fix: D3D12 n3 0 FAILED cycles (1,903 light skips in the intro), Vulkan v1 0 (982 skips); n3 / v1 settled windows ok.
+
+Left (also composed-only): in some jungle holds after the storm (f2, f3, n2: 3 of 7 runs, a slightly different camera framing of the spot) settled windows FAIL with 0.3 - 0.5 %
+colour-only views at ages 3 / 6 against closing controls of 0.05 - 0.13 % - in the fake runs too (f3: 3 FAILED windows with nothing owned), so not ownership: a temporal pattern
+of the scene (the RT shadows' / GI's per-frame noise is the suspect: f4 `shadows.rt=off` and f5 `gi.enabled=false` were clean, but so were f1 / n1 with both on). The check
+cannot tell it from an owned difference without a composed control of the same age; use `RVK_PICTURE_FAKE_OWNED=10` with `native.owned_persistent=false` as the control when a
+spot FAILs with small colour-only views.
+
+**Item 2: D3D12 pixel-shader-less pulled draws.** *Minimal case* (`rvk_rhitest` "pulled depth-only draws vs the input assembler (14.39)", `tools/rhitest/main.cpp`
+testPullDepthOnly, `shaders/test/rhi_pullz.vert.hlsl`): 1,024 grid meshes in 8 vertex buffers x 2 streams, the renderer's pull pattern (instance-rate ref stream ->
+128-byte slot block -> heap-slot raw loads at SV_VertexID + base vertex), back-face culling, folds, sub-pixel meshes, meshes off the target; forms: pulled without a pixel
+shader (SV_Position only / four varyings), pulled + a texkill PS without colour, buckets alternating with / without a PS, pulled direct draws, pulled + colour PS, the IA
+without PS (one call per buffer); 16- and 32-bit indices; ExecuteIndirect with a count buffer. Every depth image equals the IA's bit for bit: 300 iterations per form on
+D3D12 (600 k pulled pixel-shader-less draws, 0 differing pixels), 50 on Vulkan. The RHI pass pipelines can now be built without a pixel shader (`vk/passes.cpp`,
+`d3d12_device.cpp`: an empty `ps`). It does not reproduce the glitch. *In-game arms* (harbour_docks, one ~3.5-min hold each, `RVK_PULL_PSLESS=1` = the old pulling):
+
+| arm | FAILED windows / cycles (cycles with depth pixels) |
+|---|---|
+| B0 pulled PS-less (14.37's state) | 9 / 9 (6) |
+| B1 + `RVK_D3D12_NULL_PS=1` (an empty pixel shader, no outputs, on every PS-less PSO) | 4 / 5 (5) |
+| B2 + `RVK_F2C4C_CPU=1` + `RVK_D3D12_EI_DIRECT=1` (CPU arguments issued as single DrawIndexedInstanced) | 3 / 3 (2) |
+| B3 + `RVK_F2C4C_CPU=1` (CPU arguments, ExecuteIndirect) | 0 / 0 |
+| G0 the fix of 14.37 (PS-less draws through the IA) | 0 / 0 (41 ok windows) |
+
+With 14.37 (pixel shader kept: 0; vertex pulling off: 0; depth_z off: 0; one frame in flight, a fence, CPU arguments: still failing): not ExecuteIndirect (single draws fail
+too; B3's 0 is one hold, 14.37's CPU-argument arm failed 3 times), not the absence of a pixel shader object (an empty PS fails), but a pixel shader that READS the vertex
+outputs removes it. The difference between those: with no PS or a PS without inputs the driver links the vertex shader position-only (every varying dead) - a different
+compiled vertex program (and on AMD the depth-only primitive-culling path) for the same DXIL; our inputs, root arguments, records and synchronisation are identical in all arms.
+**Conclusion: the AMD D3D12 driver's compile of the game's pulled vertex shader as a position-only stage** (sporadic: ~1 displaced triangle per 100 owned frames; never on
+Vulkan, never through the IA, not in the synthetic shader). Not proven further (the trigger needs the game's shaders; the synthetic VS with the same load pattern stays exact).
+The workaround of 14.37 stays (`fillCapture`: PS-less draws are not pulled on D3D12; `RVK_PULL_PSLESS=1` = the old behaviour); the diagnostics knobs stay for a later driver.
+
+Gates: `rvk_tests` 353 / 0, `rvk_shadertool dxil-check embedded` 184 / 184, `rvk_rhitest --validation` PASS (Vulkan + D3D12, incl. the new case), `rvk_d3d9test --validation`
+Vulkan + D3D12 PASS (0 validation errors); game: D3D12 n3 / G0 and Vulkan v1 (after a warm-up run each) 0 FAILED cycles, MISS / DIFFERING 0, no error line.
+
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
 User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us

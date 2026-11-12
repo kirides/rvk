@@ -75,7 +75,7 @@ struct Blobs {
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
     Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, treeWind, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;
-    Blobs pzPos, pzFull, pzIa, pzKill, pzColor;  // 14.38: pulled depth-only draws  // the gap checks
+    Blobs pzPos, pzFull, pzIa, pzKill, pzColor;  // 14.39: pulled depth-only draws  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -1289,7 +1289,7 @@ void testDepthZ(rhi::Device& dev, const Shaders& sh) {
     report(dev, name, before);
 }
 
-// frame-ownership.md 14.38: vertex-pulled draws WITHOUT a pixel shader (native.depth_z's colour-less z passes) in one ExecuteIndirect with a count buffer, against the
+// frame-ownership.md 14.39: vertex-pulled draws WITHOUT a pixel shader (native.depth_z's colour-less z passes) in one ExecuteIndirect with a count buffer, against the
 // same meshes through the input assembler: the minimal form of the D3D12 glitch of 14.37 (displaced triangles in pulled pixel-shader-less owned z draws). 1,024 grid
 // meshes (16 x 16 vertices, local indices) in 8 vertex buffers with two streams each (positions; normal + uv), placed by their slot blocks (shaders/test/rhi_pullz.vert.hlsl;
 // the ref stream, instance rate, firstInstance = the slot, names the slot), back faces culled, a strong perspective (folds), tiny meshes, meshes off the target. Forms:
@@ -1298,7 +1298,7 @@ void testDepthZ(rhi::Device& dev, const Shaders& sh) {
 // must equal the input assembler's bit for bit in every iteration (RVK_PULLZ_ITERS, default 4; RVK_PULLZ_ONLY = this test alone).
 void testPullDepthOnly(rhi::Device& dev, const Shaders& sh) {
     const int before = failures;
-    const char* name = "pulled depth-only draws vs the input assembler (14.38)";
+    const char* name = "pulled depth-only draws vs the input assembler (14.39)";
     if (!sh.pzPos.ok || !sh.pzFull.ok || !sh.pzIa.ok || !sh.pzKill.ok || !sh.pzColor.ok) {
         check(false, "pullz shaders did not compile");
         report(dev, name, before);

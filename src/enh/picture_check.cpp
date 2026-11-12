@@ -145,7 +145,7 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
     const auto& cam = dev_.camera().viewProjection.m;
     static_assert(sizeof(cam) == sizeof(refCamera_));
     const bool sameCamera = refValid_ && refW_ == w && refH_ == h && std::memcmp(cam.data(), refCamera_, sizeof(refCamera_)) == 0;
-    // the global lighting (frame-ownership.md 14.38): the weather's sky light (the hemisphere's SH, intensity, indoor colour) moves while the weather changes and with
+    // the global lighting (frame-ownership.md 14.39): the weather's sky light (the hemisphere's SH, intensity, indoor colour) moves while the weather changes and with
     // every lightning flash; two frames of one camera under different global light are no pair (the whole picture changes, owned or composed)
     const std::uint64_t light = lightStamp();
     const bool sameLight = light == refLight_;
