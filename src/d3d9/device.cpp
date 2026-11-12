@@ -55,6 +55,19 @@ std::uint64_t fnv1a(const void* data, std::size_t size, std::uint64_t h = 0xcbf2
 
 }  // namespace
 
+// Defined before the first use of cropDiag_ (destroy()): unique_ptr::reset needs the complete type (clang rejects a later place, MSVC accepts it).
+struct Device::CropDiag {
+    struct Slot {
+        std::unique_ptr<rhi::Buffer> image;
+        std::unique_ptr<rhi::Buffer> lum;
+        std::uint64_t value = 0;      // the frame value of the submission that copied (completed: read)
+        std::uint64_t presented = 0;  // stats_.frames + 1 of that present
+        std::uint32_t width = 0, height = 0, pitch = 0;
+        bool busy = false, lumValid = false;
+    };
+    std::array<Slot, 8> slots;
+};
+
 Device::Device() = default;
 Device::~Device() { destroy(); }
 
@@ -1186,18 +1199,6 @@ void diagAfterDraw(Device& d, const char* what) {
         last = nan;
     }
 }
-
-struct Device::CropDiag {
-    struct Slot {
-        std::unique_ptr<rhi::Buffer> image;
-        std::unique_ptr<rhi::Buffer> lum;
-        std::uint64_t value = 0;      // the frame value of the submission that copied (completed: read)
-        std::uint64_t presented = 0;  // stats_.frames + 1 of that present
-        std::uint32_t width = 0, height = 0, pitch = 0;
-        bool busy = false, lumValid = false;
-    };
-    std::array<Slot, 8> slots;
-};
 
 void Device::diagCropLuma() {
     // "x,y,w,h[;x,y,w,h ...]"
