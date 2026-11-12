@@ -322,6 +322,7 @@ void StaticOps::ShadowStats::add(const ShadowStats& o) {
 
 void StaticOps::viewEnd() {
     orderedFlushRun();  // F9 / F14: a pending run of ordered draws (the end of the view's last list)
+    dev_.ownedOrderedEnd();  // 14.44: the last list segment's `left` for the ordered bulk observers
     finishOp();
     simulatedOp_ = nullptr;
     inView_ = false;

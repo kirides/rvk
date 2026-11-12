@@ -96,6 +96,12 @@ void StaticOps::stagesReport() {
         last = ordTotalOwned_;
         line += stage("owned_ordered", settingOn(rs.nativeOwnedOrdered), ownedOrderedOn(), a, std::format("{} ordered ops owned", a),
                       needsOf(rs.nativeOwnedOrdered, {rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), gateMain);
+        // 14.44 (native.ordered_bulk): acted = ordered draws delivered to the bulk observers in the window
+        static std::uint64_t lastBulk = 0;
+        const std::uint64_t b = dev_.orderedBulkTotal() - lastBulk;
+        lastBulk = dev_.orderedBulkTotal();
+        line += stage("ordered_bulk", settingOn(rs.nativeOrderedBulk), ownedOrderedOn() && dev_.orderedBulk(), b, std::format("{} ordered draws observed in bulk", b),
+                      needsOf(rs.nativeOrderedBulk, {rs.nativeOwnedOrdered, rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), gateMain);
     }
     line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained), needsOf(rs.nativeOwnedVegetation, {}));
     const std::uint64_t vegViews = vro_ ? vro_->window.ownedViews : 0;

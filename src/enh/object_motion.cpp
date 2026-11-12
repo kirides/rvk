@@ -79,6 +79,25 @@ void ObjectMotion::bufferChanged(std::uint64_t bufferId) {
     std::erase_if(states_, [&](const auto& kv) { return kv.second.vb == bufferId || kv.second.ib == bufferId; });
 }
 
+// (asked in the draw's device state: its windows and the motion flags, as observe() would see them)
+bool ObjectMotion::bulkOrderedDraw(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
+    return (q.kind == Kind::Skinned || isRigid(q.kind)) && (dev.boneMotionCovered() || (isRigid(q.kind) && dev.rigidRowWindow()));
+}
+
+void ObjectMotion::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
+    if (!f.ordered) {
+        DrawObserver::observeOwned(dev, f);
+        return;
+    }
+    for (std::size_t i = 0; i < f.count; ++i) {
+        const d3d9::Device::OwnedRecordView& r = f.records[i];
+        if ((r.wanted & f.observerBit) == 0) continue;
+        // (the scope sets the motion flags as ownedObserve did: observe() takes its covered branch; it reads no register there)
+        d3d9::Device::OwnedDrawScope scope(dev, r);
+        observe(dev, scope.query());
+    }
+}
+
 void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // diagnostics: why rigid draws are not captured (logged with the capture stats)
     if (isRigid(q.kind)) {

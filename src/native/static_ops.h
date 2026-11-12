@@ -1062,6 +1062,7 @@ private:
         bool active = false;
         std::uint64_t serial = 0, epoch = 0;
         std::uint32_t slot = 0;
+        std::uint32_t ordinal = 0;  // (14.44: the run's ordinal in its list segment, OwnedRecordView::run)
     } ordRun_;
     std::vector<d3d9::Device::OwnedItem> ordItems_;
     d3d9::Device::OwnedArena ordArena_;
@@ -1076,6 +1077,7 @@ private:
         std::size_t envIndex = 0;
         std::uint64_t viewStamp = 0;
         d3d9::OwnedWindows viewWin[2];
+        std::uint32_t runs = 0;  // (14.44: runs begun in this segment)
     } ordPass_;
     struct OrderedStats {
         // per list: 0 solid, 1 refracted, 2 alpha
@@ -1087,6 +1089,7 @@ private:
         std::uint64_t devWhy[3][24] = {};   // ... of the refused draws: the device's derivation codes (ownedReplayStats::why)
         std::uint64_t observer[3] = {}, tableFull[3] = {}, notRetained[3] = {};
         std::uint64_t runs = 0, lostDraws = 0, flushNs = 0, validNs = 0, prepNs = 0, drawNs = 0, sideNs = 0;
+        std::uint64_t bulkNs = 0;  // (14.44: the ordered bulk observers' delivery per op)
         std::uint64_t ns = 0;
     } ordW_;
     std::uint64_t ordTotalOwned_ = 0;  // (the run's ordered ops owned: the stage line's window difference)

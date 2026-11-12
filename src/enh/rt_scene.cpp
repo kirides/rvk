@@ -401,6 +401,7 @@ void RtScene::learnEngineMaterials(d3d9::Device& dev, const d3d9::ReplaceQuery& 
 std::uint8_t RtScene::viewBit(View v) const { return v == View::Main ? 1 : v == View::Shadow ? 2 : 4; }
 
 void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
+    if (ordProbe_ != nullptr) *ordProbe_ = kOrdNothing;  // (14.44 verify: the outcome reached, set at the branches below)
     if (!active_) return;
     const bool timed = dev.perfEnabled();
     const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -472,6 +473,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const bool water = !glassDraw && (q.kind == Kind::Refracted || realWater);
     if (water || (mainBlended && !glassDraw)) {
         learnExcluded(q, water);
+        if (ordProbe_ != nullptr) *ordProbe_ = water ? kOrdExclWater : kOrdExclBlended;
         // the terrain: a z pre-pass of the range (opaque, its BLAS) and blended layers in the solid pass (each its own
         // material on the same geometry): the frame's first layer is the base, its material is the range's
         if (!water && q.vertexBuffer != nullptr && q.indexBuffer != nullptr && !q.vertexBuffer->ringCopied() &&
@@ -487,41 +489,13 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 // the draw's instances (a plain draw's rows c33..c35; a batch's c[32 + 4 i + 1 ..], the instance stream is
                 // 0, 1, 2, ...): the solid pass's layers (the terrain's base, objects fading in)
                 if (b != nullptr && b->state != BlasState::Failed && q.phase.pass == Pass::Solid) {
-                    std::uint8_t rank = 0;
-                    bool overlay = false;
-                    // a hardware batch fading in (blended, ExecuteRenderInstances: no material in the tag) takes its sub-mesh's material as the
-                    // opaque batches do (learnEngineMaterials), not the bytecode heuristic (rt-reflections.md 3.3.2)
-                    d3d9::draws::Tag batchTag;
-                    d3d9::ReplaceQuery qb = q;
-                    if (const void* batch = batchHeuristic_ ? nullptr : batchMaterial(q); batch != nullptr) {
-                        batchTag = *q.tag;
-                        batchTag.material = batch;
-                        qb.tag = &batchTag;
-                        ++iv_.batchMaterials;
-                    }
-                    const std::uint32_t id = materialOf(dev, qb, *b, rank, overlay);
-                    // an untextured blended layer (a wet-sand specular layer with a cube as the diffuse, seen unblended in the
-                    // cascades / z pre-pass): the range's untextured materials are overlays on another surface (a textured
-                    // object fading in is drawn blended too: not this)
-                    if (const RtMaterial* layer = id != 0 ? materials_.get(id) : nullptr; layer != nullptr && (layer->uvSet & abi::kRtUvNoTexture) != 0) {
-                        for (Blas::MaterialSlot& m : b->materials) {
-                            const RtMaterial* mat = materials_.get(m.id);
-                            if (mat != nullptr && (mat->uvSet & abi::kRtUvNoTexture) != 0) m.overlay = true;
-                        }
-                    }
-                    const std::uint32_t count = q.instanced ? std::min(q.instances, kMaxBatch) : 1u;
-                    for (std::uint32_t i = 0; id != 0 && i < count; ++i) {
-                        const std::uint32_t reg = kInstanceDataBase + (q.instanced ? 4 * i : 0) + 1;
-                        if (reg + 2 >= kInstanceDataEnd) break;
-                        rt::Rows rows;
-                        for (std::uint32_t r = 0; r < 3; ++r) std::memcpy(&rows[r * 4], dev.vsConstant(reg + r), sizeof(float) * 4);
-                        if (!rt::finite(rows)) continue;
-                        if (rt::Registry::Instance* in = registry_.find(rt::instanceKey(b->id, rows))) applyMaterial(*in, id, rank, overlay, dev.frameValue());
-                    }
+                    if (ordProbe_ != nullptr) *ordProbe_ = kOrdLayer;
+                    layerMaterial(dev, q, *b, nullptr, ordKeys_);
                 }
             } else if (q.phase.pass == Pass::Solid && q.blended && !q.instanced) {
                 // a range only drawn as blended layers (no BLAS of its own): the material of its first layer of the frame,
                 // for the merged ranges that cover it (the z pre-pass / the cascades draw level meshes in one range)
+                if (ordProbe_ != nullptr) *ordProbe_ = kOrdLayer;
                 learnLayer(dev, q, key);
             }
         }
@@ -530,6 +504,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate) && !glassDraw) return skip();
     if (q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.contains(q.tag->material)) return skip();
     if (q.blending && !glassDraw) return reject("blended");                          // alpha-blended: not P1
+    if (ordProbe_ != nullptr) *ordProbe_ = kOrdOpaque;
     // SpeedTree leaves (op > 1): cards positioned by their vertex shader (wind, facing), so there is no rest pose to put in the
     // TLAS: only the animated capture of the main view's solid pass stands for them (observeTree), the static BLAS only gives
     // the topology and the material (`animatedOnly`)
@@ -1039,6 +1014,10 @@ bool RtScene::tableCover(const d3d9::CoverQuery& d, bool& entryDecides) {
 // period; check frames always take the long way. Everything else is the per-draw procedure of ownedObserve: the pre-filter, then the full observation.
 void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
     if (!active_) return;
+    if (f.ordered) {
+        observeOrdered(dev, f);
+        return;
+    }
     const auto tb0 = dev.perfEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     struct BulkTimer {
         RtScene& s;
@@ -1107,6 +1086,145 @@ void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
         observe(dev, scope.query());
         ++bs_.observed;
     }
+}
+
+// ---- 14.44: the ordered owned draws in bulk ------------------------------------------------------------------------------------------------------------------
+
+// what observe() does with an ordered owned draw (the main view's static / instanced / refracted meshes of the solid list's blended / no-z-write ops and the alpha / refracted
+// lists), from the retained query + tag alone: kOrdNothing (a reject / skip: opaque cut-outs of the alpha list, water materials, ...), kOrdExclBlended / kOrdExclWater (only
+// learnExcluded: the alpha list's blended meshes, water), kOrdFull = the observation needs the draw's registers or more (the solid list's blended layers: their BLAS material per
+// instance and learnLayer's resolve; glass; the opaque path). The branches are observe()'s, in its order; the verify frames compare the prediction with the outcome observe reaches
+int RtScene::ordClassify(const d3d9::ReplaceQuery& q) {
+    if (q.kind == Kind::Skinned || q.kind == Kind::SpeedTree) return kOrdFull;
+    if (q.primitiveType != 4 && q.primitiveType != 5) return kOrdNothing;
+    if (q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.engineVs == nullptr) return kOrdNothing;
+    const bool mainBlended = q.phase.view == View::Main && q.blending;
+    const bool realWater = q.tag != nullptr && q.tag->water != d3d9::draws::Water::None;
+    const bool glassDraw = q.phase.view == View::Main && (q.blending || q.kind == Kind::Refracted) && !realWater && isGlassDraw(q);
+    const bool water = !glassDraw && (q.kind == Kind::Refracted || realWater);
+    if (water || (mainBlended && !glassDraw)) {
+        if (!water && q.phase.pass == Pass::Solid) {
+            // the solid list's blended layers: over a BLAS that learnExcluded keeps = the layer material from the record's window rows (kOrdLayer); a range drawn only as
+            // layers (learnLayer resolves with the registers) or a BLAS learnExcluded drops: the long way
+            if (q.vertexBuffer->ringCopied() || q.indexBuffer->ringCopied()) return kOrdExclBlended;
+            ordKey_ = keyOf(q);
+            const auto it = blasByKey_.find(ordKey_);
+            if (it == blasByKey_.end()) return q.blended && !q.instanced ? kOrdFull : kOrdExclBlended;
+            Blas* b = it->second;
+            if (b == nullptr) return kOrdExclBlended;
+            if (b->opaqueMainFrame + kOpaqueRecent < dev_.frameValue()) return kOrdFull;
+            ordBlas_ = b;  // (kOrdLayer: the BLAS learnExcluded keeps, the key it stamps)
+            return b->state == BlasState::Failed ? kOrdExclBlended : kOrdLayer;
+        }
+        return water ? kOrdExclWater : kOrdExclBlended;
+    }
+    if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate) && !glassDraw) return kOrdNothing;
+    if (q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.contains(q.tag->material)) return kOrdNothing;
+    if (q.blending && !glassDraw) return kOrdNothing;
+    return kOrdFull;
+}
+
+void RtScene::observeOrdered(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
+    const auto t0 = dev.perfEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    struct Timer {
+        RtScene& s;
+        bool on;
+        std::chrono::steady_clock::time_point t0;
+        ~Timer() {
+            if (on) s.ob_.ms += msSince(t0);
+        }
+    } timer{*this, dev.perfEnabled(), t0};
+    ++ob_.calls;
+    ob_.left += f.leftCount;
+    // verify frames (every 10th, between the owned path's check frames, which compose the ordered ops): every draw the classifier would do from its query takes the long way
+    // and the outcome (+ a layer's instance keys) is compared
+    const bool verify = gpuscene::periodic(dev.stats().frames + 5, 10);
+    for (std::size_t i = 0; i < f.count; ++i) {
+        const d3d9::Device::OwnedRecordView& r = f.records[i];
+        if ((r.wanted & f.observerBit) == 0) continue;
+        ++ob_.records;
+        ob_.entered += r.entered ? 1 : 0;
+        const d3d9::Device::CachedDraw& cd = *r.cd;
+        ordQ_ = cd.query;
+        ordQ_.tag = &r.tag;
+        ordQ_.textures = cd.tex;
+        const int predicted = ordClassify(ordQ_);
+        if (predicted != kOrdFull && !verify) {
+            if (predicted == kOrdLayer) {
+                // = learnExcluded(q, false) for a range whose BLAS it keeps (the classifier's test): the blended stamp of the key
+                blendedKeys_[ordKey_] = dev.frameValue();
+                if (layerMaterial(dev, ordQ_, *ordBlas_, r.ow, nullptr)) {
+                    ++ob_.fast[kOrdLayer];
+                    continue;
+                }
+                ++ob_.layerFallback;  // (a material resolve due / a row outside the windows: the long way below; learnExcluded again changes nothing)
+            } else {
+                if (predicted == kOrdExclBlended || predicted == kOrdExclWater) learnExcluded(ordQ_, predicted == kOrdExclWater);
+                ++ob_.fast[predicted];
+                continue;
+            }
+        }
+        // verify: the layer's instance keys from the window rows (nothing applied), against what the long way reads from the register file
+        ordKeysA_.clear();
+        ordKeysB_.clear();
+        const bool layerCheck = verify && predicted == kOrdLayer;
+        if (layerCheck) {
+            if (!layerMaterial(dev, ordQ_, *ordBlas_, r.ow, &ordKeysA_, false)) ordKeysA_.push_back(0);
+        }
+        // the long way = what ownedObserve does per draw: the pre-filter (F8-0 entry / F8-1 script, with the record's identity), then the observation in the draw's state
+        ++ob_.full;
+        d3d9::CoverQuery cq = d3d9::coverOf(cd.query);
+        cq.tag = &r.tag;
+        cq.textures = cd.tex;
+        coveredEntry_ = nullptr;
+        f81Cur_ = {true, r.id, &cd, r.sig, r.epoch, r.changed, r.ow};
+        struct CurReset {
+            F81Key& k;
+            ~CurReset() { k.valid = false; }
+        } curReset{f81Cur_};
+        int outcome = -1;
+        if (coversDraw(cq)) {
+            ++ob_.covered;
+            outcome = kOrdOpaque;  // (only the opaque path's draws have entries / scripts)
+        } else {
+            d3d9::Device::OwnedDrawScope scope(dev, r);
+            scope.loadRegisters();
+            ordProbe_ = &outcome;
+            ordKeys_ = layerCheck ? &ordKeysB_ : nullptr;
+            observe(dev, scope.query());
+            ordProbe_ = nullptr;
+            ordKeys_ = nullptr;
+            ++ob_.observed;
+        }
+        if (outcome >= 0 && outcome < kOrdOutcomes) ++ob_.by[outcome];
+        if (verify && predicted != kOrdFull) {
+            ++ob_.verified;
+            if (outcome != predicted || ordKeysA_ != ordKeysB_) {
+                ++ob_.differing;
+                if (ordDiffLogged_ < 8) {
+                    ++ordDiffLogged_;
+                    spdlog::error("rt: scene ordered bulk: DIFFERING: draw (record {}, material '{}', {} {}, kind {}, blending {}) predicted outcome {} but the observation reached {} (layer instance keys from the windows {} vs the registers {})", r.id,
+                                  r.tag.materialName != nullptr ? r.tag.materialName : "?", d3d9::scene::name(cd.phase.view), d3d9::scene::name(cd.phase.pass), d3d9::draws::name(cd.kind),
+                                  cd.query.blending, predicted, outcome, ordKeysA_.size(), ordKeysB_.size());
+                }
+            }
+        }
+    }
+}
+
+void RtScene::logOrdered(double frames) {
+    if (ob_.calls == 0) return;
+    const OrdBulkStats& o = ob_;
+    spdlog::info("rt: scene ordered bulk (5 s, per frame): {:.1f} calls, {:.0f} records ({:.1f} entered, {:.1f} left); from the query: nothing {:.0f}, blended range {:.0f}, water {:.0f}, layer from the window rows {:.0f} (fell back {:.0f}); long way {:.0f} "
+                 "(covered by the pre-filter {:.0f}, observed {:.0f}; outcomes: nothing {:.0f}, blended {:.0f}, water {:.0f}, layer {:.0f}, opaque {:.0f}); verify: {} compared, DIFFERING {}; {:.3f} ms; fast layer gave up: row not in the windows {}, resolve {}; materialOf (all draws): memo {}, slot {}, refresh due {}, no slot {}, slot material gone {} / dead {}",
+                 static_cast<double>(o.calls) / frames, static_cast<double>(o.records) / frames, static_cast<double>(o.entered) / frames, static_cast<double>(o.left) / frames,
+                 static_cast<double>(o.fast[kOrdNothing]) / frames, static_cast<double>(o.fast[kOrdExclBlended]) / frames, static_cast<double>(o.fast[kOrdExclWater]) / frames,
+                 static_cast<double>(o.fast[kOrdLayer]) / frames, static_cast<double>(o.layerFallback) / frames, static_cast<double>(o.full) / frames, static_cast<double>(o.covered) / frames, static_cast<double>(o.observed) / frames, static_cast<double>(o.by[kOrdNothing]) / frames,
+                 static_cast<double>(o.by[kOrdExclBlended]) / frames, static_cast<double>(o.by[kOrdExclWater]) / frames, static_cast<double>(o.by[kOrdLayer]) / frames,
+                 static_cast<double>(o.by[kOrdOpaque]) / frames, o.verified, o.differing, o.ms / frames, layerWhy_[0], layerWhy_[1], matPath_[0], matPath_[1], matPath_[2], matPath_[3], matPath_[4], matPath_[5]);
+    std::fill(std::begin(matPath_), std::end(matPath_), 0ull);
+    layerWhy_[0] = layerWhy_[1] = 0;
+    ob_ = {};
 }
 
 bool RtScene::readInstanceIndex(d3d9::Device& dev, int stream, std::uint32_t offset, std::uint32_t n, float* index) const {
@@ -1920,7 +2038,7 @@ void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
     }
 }
 
-std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, std::uint8_t& rank, bool& overlay) {
+std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, std::uint8_t& rank, bool& overlay, bool* noResolve) {
     // layers blended otherwise than alpha-over (additive caustics, multiplied detail) are overlays, never a base
     if (q.blending && !q.blended) return 0;
     rank = q.phase.view != View::Main ? 1 : q.phase.pass != Pass::Solid ? 2 : q.blending ? 3 : 4;
@@ -1928,6 +2046,7 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
     const std::uint64_t sig = RtMaterials::signature(q);
     if (b.memoFrame == frame && b.memoSig == sig && b.memoRank == rank && b.memoBlending == q.blending && b.memoId != 0) {
         overlay = b.memoOverlay;
+        ++matPath_[0];
         return b.memoId;
     }
     for (Blas::MaterialSlot& m : b.materials) {
@@ -1946,9 +2065,15 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
             b.memoBlending = q.blending;
             b.memoId = m.id;
             b.memoOverlay = m.overlay;
+            ++matPath_[1];
             return m.id;
         }
         // a texture died or the refresh is due (animated uv maps): resolved again
+        ++matPath_[mat == nullptr ? 4 : mat->dead ? 5 : 2];
+        if (noResolve != nullptr) {
+            *noResolve = true;
+            return 0;
+        }
         const std::uint32_t id = materials_.resolve(dev, q);
         if (id == 0) return 0;
         materials_.release(m.id);
@@ -1958,6 +2083,11 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
         m.rank = std::max(m.rank, rank);
         overlay = m.overlay;
         return id;
+    }
+    ++matPath_[3];
+    if (noResolve != nullptr) {
+        *noResolve = true;
+        return 0;
     }
     const std::uint32_t id = materials_.resolve(dev, q);
     if (id == 0) return 0;
@@ -1978,6 +2108,65 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
     }
     b.materials.push_back({sig, id, frame, frame, rank, overlay});
     return id;
+}
+
+bool RtScene::layerMaterial(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const d3d9::OwnedWindows* rowsFrom, std::vector<std::uint64_t>* keys, bool apply) {
+    std::uint8_t rank = 0;
+    bool overlay = false;
+    // the draw's instances (a plain draw's rows c33..c35; a batch's c[32 + 4 i + 1 ..], the instance stream is 0, 1, 2, ...); read first: the fast path (rows from the
+    // owned record's window images) gives up before anything changed when one is not in its windows
+    const std::uint32_t count = q.instanced ? std::min(q.instances, kMaxBatch) : 1u;
+    rt::Rows rowsOf[kMaxBatch];
+    std::uint32_t n = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t reg = kInstanceDataBase + (q.instanced ? 4 * i : 0) + 1;
+        if (reg + 2 >= kInstanceDataEnd) break;
+        rt::Rows& rows = rowsOf[n++];
+        if (rowsFrom != nullptr) {
+            const float* src = windowRows(*rowsFrom, reg);  // (the three rows reg .. reg + 2 of one window image)
+            if (src == nullptr) {
+                ++layerWhy_[0];
+                return false;
+            }
+            std::memcpy(rows.data(), src, sizeof(float) * 12);
+        } else {
+            for (std::uint32_t r = 0; r < 3; ++r) std::memcpy(&rows[r * 4], dev.vsConstant(reg + r), sizeof(float) * 4);
+        }
+        if (keys != nullptr && rt::finite(rows)) keys->push_back(rt::instanceKey(b.id, rows));
+    }
+    if (!apply) return true;
+    // a hardware batch fading in (blended, ExecuteRenderInstances: no material in the tag) takes its sub-mesh's material as the
+    // opaque batches do (learnEngineMaterials), not the bytecode heuristic (rt-reflections.md 3.3.2)
+    d3d9::draws::Tag batchTag;
+    d3d9::ReplaceQuery qb = q;
+    const void* batch = batchHeuristic_ ? nullptr : batchMaterial(q);
+    if (batch != nullptr) {
+        batchTag = *q.tag;
+        batchTag.material = batch;
+        qb.tag = &batchTag;
+    }
+    bool wouldResolve = false;
+    const std::uint32_t id = materialOf(dev, qb, b, rank, overlay, rowsFrom != nullptr ? &wouldResolve : nullptr);
+    if (wouldResolve) {
+        ++layerWhy_[1];
+        return false;
+    }
+    if (batch != nullptr) ++iv_.batchMaterials;
+    // an untextured blended layer (a wet-sand specular layer with a cube as the diffuse, seen unblended in the
+    // cascades / z pre-pass): the range's untextured materials are overlays on another surface (a textured
+    // object fading in is drawn blended too: not this)
+    if (const RtMaterial* layer = id != 0 ? materials_.get(id) : nullptr; layer != nullptr && (layer->uvSet & abi::kRtUvNoTexture) != 0) {
+        for (Blas::MaterialSlot& m : b.materials) {
+            const RtMaterial* mat = materials_.get(m.id);
+            if (mat != nullptr && (mat->uvSet & abi::kRtUvNoTexture) != 0) m.overlay = true;
+        }
+    }
+    for (std::uint32_t i = 0; id != 0 && i < n; ++i) {
+        const rt::Rows& rows = rowsOf[i];
+        if (!rt::finite(rows)) continue;
+        if (rt::Registry::Instance* in = registry_.find(rt::instanceKey(b.id, rows))) applyMaterial(*in, id, rank, overlay, dev.frameValue());
+    }
+    return true;
 }
 
 void RtScene::learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const rt::BlasKey& key) {
@@ -4423,6 +4612,7 @@ void RtScene::logStats(bool force) {
                  static_cast<double>(iv_.observed) / f, static_cast<double>(iv_.skipped) / f, static_cast<double>(iv_.sightings) / f, iv_.buildCpuMs / f, iv_.passCpuMs / f,
                  std::string("-PerfFrame: pass rt.scene"));
     logTable(f);
+    logOrdered(f);
     logRecords(f);
     if (dev_.perfEnabled()) {
         // F8-1 census (frame-ownership.md 14.30): who calls observe() and what it costs, per frame

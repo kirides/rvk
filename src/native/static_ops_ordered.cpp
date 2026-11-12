@@ -10,7 +10,9 @@
 //              command per run of consecutive equal buckets, recorded after the pending batch); the slot is skipped and its side effects run (ownedSideEffects).
 //              The engine's own sort result is the order: nothing is re-sorted.
 //   checking   check / warm-up frames compose the op as before; recDraw compares the derivation with the composed draw (DIFFERING), ownedMissCheck the persistent content (MISS)
-// Observers see an ordered draw per draw (the bulk contract of F2c-4b is plain opaque static draws only); a draw an observer wants a capture of is composed.
+// Observers: 14.44 (native.ordered_bulk) shows the op's draws to the bulk observers (DrawObserver::bulkOrdered: the RT scene, object motion) once the op is queued
+// (Device::ownedOrderedOp / Deliver / Drop, list segments by ownedOrderedSegment / End); the others (and every draw with the setting off) see it per draw; a draw an observer
+// wants a capture of is composed.
 // The view: the solid list's ops read view slot 1 (the solid pass's, the same registers), the refracted / alpha ops slots 16 / 17 (set once per view and frame).
 
 #include <windows.h>
@@ -138,6 +140,8 @@ bool StaticOps::orderedPassBegin(const Op& op, const orec::OpRecord& rec) {
     ordPass_.viewSerial = recViewSerial_;
     ordPass_.list = static_cast<std::uint8_t>(op.list);
     ++ordW_.passes;
+    // 14.44: the bulk observers' list segment (`entered` / `left` against the previous segment of this list; the previous segment's `left` goes now)
+    dev_.ownedOrderedSegment(op.list == List::Solid ? 1 : op.list == List::Refracted ? 2 : 3, static_cast<std::uint32_t>(ordPass_.serial));
     if (!view_.valid) {
         U8* admin = ptr(rec.anchors[7], 0x220);  // (the shader's material admin: the view's)
         if (admin == nullptr || !composeView(admin)) return false;
@@ -252,6 +256,7 @@ bool StaticOps::orderedPlace(const Op& op) {
         ordRun_.serial = ordPass_.serial;
         ordRun_.slot = slot;
         ordRun_.epoch = epoch;
+        ordRun_.ordinal = ordPass_.runs++;
         ordItems_.clear();
         ++ordW_.runs;
     }
@@ -275,10 +280,31 @@ bool StaticOps::orderedPlace(const Op& op) {
     const std::size_t before = ordItems_.size();
     ownedItems_.swap(ordItems_);  // (ownedDrawOpPersistent appends to ownedItems_: here the run's list)
     lap(ordW_.prepNs, tl);
+    dev_.ownedOrderedOp(ordRun_.ordinal, static_cast<std::uint32_t>(before));  // 14.44: the op's draws for the ordered bulk observers (run ordinal, the first draw's position)
     bool done = ownedDrawOpPersistent(op, rec, ordPass_.viewWin[vw], ordRun_.slot, ordRun_.epoch, gpuscene::checksOff() ? 0u : 16u, scrubPhase, why);
     lap(ordW_.drawNs, tl);
     ownedItems_.swap(ordItems_);
     persistEnvIndex_ = -1;
+    bool guarded = true;
+    if (done) {
+        // GPU safety: the flush's own guards, per item now (a refusal at the run's flush would lose ops whose slots were skipped): a written record with a block address,
+        // window 2 / PS window 3 bases, a v2 pipeline
+        const shader::abi::DrawRecord* shadow = gpuscene::drawrecords().recordsShadow();
+        for (std::size_t i = before; i < ordItems_.size() && guarded; ++i) {
+            const d3d9::Device::OwnedItem& it = ordItems_[i];
+            if (shadow == nullptr || it.cd == nullptr || it.slot >= gpuscene::DrawRecordTable::kCapacity || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 ||
+                shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == d3d9::GamePipeline::None) {
+                guarded = false;
+            }
+        }
+    }
+    // 14.44: the bulk observers see the op's queued draws now, in the op's device state (shaders, tag, the armed register file: restored below); a composed op's views go
+    if (done && guarded) {
+        dev_.ownedOrderedDeliver();
+        lap(ordW_.bulkNs, tl);
+    } else {
+        dev_.ownedOrderedDrop();
+    }
     dev_.setOwnedBulkSuspended(false);
     dev_.setSceneIssue(false);
     dev_.ownedRegsRestore();
@@ -291,18 +317,9 @@ bool StaticOps::orderedPlace(const Op& op) {
         ordW_.tableFull[li] += persistStats().tableFull - full0;
         return refuse(kOwDraw);
     }
-    {
-        // GPU safety: the flush's own guards, per item now (a refusal at the run's flush would lose ops whose slots were skipped): a written record with a block address,
-        // window 2 / PS window 3 bases, a v2 pipeline
-        const shader::abi::DrawRecord* shadow = gpuscene::drawrecords().recordsShadow();
-        for (std::size_t i = before; i < ordItems_.size(); ++i) {
-            const d3d9::Device::OwnedItem& it = ordItems_[i];
-            if (shadow == nullptr || it.cd == nullptr || it.slot >= gpuscene::DrawRecordTable::kCapacity || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 ||
-                shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == d3d9::GamePipeline::None) {
-                ordItems_.resize(before);
-                return refuse(kOwFlush);
-            }
-        }
+    if (!guarded) {
+        ordItems_.resize(before);
+        return refuse(kOwFlush);
     }
     const std::size_t drawn = ordItems_.size() - before;
     dev_.setOrderedPending(true);  // (anything else the device records queues the run first)
@@ -394,6 +411,17 @@ void StaticOps::orderedReport() {
                  w.buckets, w.flushFailed, w.lostDraws, w.passes,
                  static_cast<double>(w.ns) / nv / 1000.0, static_cast<double>(w.validNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.drawNs) / nv / 1000.0,
                  static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.flushNs) / nv / 1000.0);
+    {
+        // 14.44: the observers' share of the ordered draws (the per-draw ownedObserve calls + the bulk deliveries; times with -Perf)
+        d3d9::Device::OrderedBulkStats& b = dev_.ordBulkStats;
+        spdlog::info("native: ordered observers (5 s): bulk {}; {} ordered draws observed: {} in bulk ({} ops delivered, {} dropped with their op), {} shown per draw ({} refused by a bulk observer, {} for a replacer: the enhanced water's sea floor learning); "
+                     "{} entered, {} left, {} segments; CPU per main view: observe {:.1f} us + bulk deliveries {:.1f} us (op level {:.1f} us); per owned ordered op: {:.2f} us at the op + {:.2f} us in the run flushes ({} ops)",
+                     dev_.orderedBulk() ? "on" : "off", b.draws, b.bulk, b.delivers, b.dropped, b.perDraw, b.refusedByObserver, b.perDrawReplacer, b.entered, b.left, b.segments,
+                     static_cast<double>(b.observeNs) / nv / 1000.0, static_cast<double>(b.deliverNs) / nv / 1000.0, static_cast<double>(w.bulkNs) / nv / 1000.0,
+                     static_cast<double>(w.ns) / static_cast<double>(std::max<std::uint64_t>(1, w.owned[0] + w.owned[1] + w.owned[2])) / 1000.0,
+                     static_cast<double>(w.flushNs) / static_cast<double>(std::max<std::uint64_t>(1, w.owned[0] + w.owned[1] + w.owned[2])) / 1000.0, w.owned[0] + w.owned[1] + w.owned[2]);
+        b = {};
+    }
     w = {};
 }
 
