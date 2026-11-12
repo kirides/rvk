@@ -100,6 +100,7 @@ RtScene::RtScene(d3d9::Device& device) : dev_(device) {
     };
     registry_.onRemoved = [this](const rt::Registry::Instance& in) {
         ++sceneEvents_;
+        if (in.gpuSlot != rtbuild::kNone) gpu_.inputSlots.release(in.gpuSlot, dev_.frameValue());  // (frame-ownership.md 14.43)
         if (Blas* b = findBlas(in.blas); b != nullptr && b->refs > 0) --b->refs;
         if (in.pinned) tableInstanceRemoved(in.key);
     };
@@ -1149,6 +1150,213 @@ void RtScene::setRecordReplay(bool on) {
                  kRecordCheck, kRecordRelearn);
 }
 
+// ---- frame-ownership.md 14.43: the TLAS instances built on the GPU (native.rt_gpu_build) ------------------------------------------------------------------------
+
+namespace {
+std::atomic<bool> g_gpuBuildArmed{false};
+std::atomic<std::uint64_t> g_gpuBuilt{0}, g_gpuDiffering{0}, g_gpuCompared{0};
+}  // namespace
+
+RtGpuBuildState rtGpuBuildState() {
+    return {g_gpuBuildArmed.load(std::memory_order_relaxed), g_gpuBuilt.load(std::memory_order_relaxed), g_gpuDiffering.load(std::memory_order_relaxed),
+            g_gpuCompared.load(std::memory_order_relaxed)};
+}
+
+void RtScene::setGpuBuild(bool on) {
+    if (on == gpuOn_) return;
+    gpuOn_ = on;
+    if (!on) gpuRelease();
+    g_gpuBuildArmed.store(on, std::memory_order_relaxed);
+    spdlog::info("rt: gpu build: {} (TLAS instances + geometry records {}; check frame every {} frames: GPU output vs the CPU path, byte for byte)", on ? "on" : "off",
+                 on ? "written by a compute pass from persistent tables" : "written by the CPU", kRecordCheck);
+}
+
+void RtScene::gpuRelease() {
+    gpu_.release();
+    gpuMats_.clear();
+    for (const rt::Registry::Instance& in : registry_.instances()) in.gpuSlot = rtbuild::kNone;
+    for (auto& [id, b] : blas_) {
+        b.gpuRow = rtbuild::kNone;
+        b.gpuRowFrame = 0;
+    }
+    gpuEntries_.clear();
+    gpuLiterals_.clear();
+    refInst_.clear();
+    refRec_.clear();
+}
+
+std::uint64_t RtScene::materialStamp(const RtMaterial* m, const GpuMat& g) const {
+    std::uint64_t h = 0xCBF29CE484222325ull;
+    const auto fold = [&h](std::uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
+    const auto tex = [&](const d3d9::Texture* t) {
+        fold(reinterpret_cast<std::uintptr_t>(t));
+        if (t == nullptr) return;
+        fold(t->isNull() ? 1u : 0u);
+        fold(t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? 1u : 0u);
+        fold(t->bindlessSlot());
+        fold(static_cast<std::uint64_t>(t->desc().width) | static_cast<std::uint64_t>(t->desc().height) << 32);
+    };
+    if (m == nullptr) return h;
+    fold(m->dead ? 1u : 0u);
+    tex(m->albedo);
+    if ((m->uvSet & abi::kRtUvOpacityTexture) != 0) tex(m->opacity);
+    fold(reinterpret_cast<std::uintptr_t>(pack_));
+    if (pack_ != nullptr) {
+        const std::uint32_t gen = pack_->generation();
+        fold(gen);
+        // the pack map of the last evaluation: its pointer is valid only within the generation it came from (a reload frees the maps)
+        if (g.packOwner == pack_ && g.packGen == gen) tex(g.packTex);
+        else fold(0xA5A5A5A5u);
+    }
+    return h;
+}
+
+rtbuild::MaterialRow RtScene::materialRow(const RtMaterial* m, const MaterialFields& f) const {
+    rtbuild::MaterialRow row{};
+    row.albedoTex = f.albedoTex;
+    row.albedoSampler = f.albedoSampler;
+    row.uvSet = f.uvSet;
+    row.packWord = f.packWord;
+    row.packLod = f.packLod;
+    row.alphaWord = m != nullptr ? m->alpha : 0u;
+    row.bits = (m != nullptr ? rtbuild::kMatHas : 0u) | (m != nullptr && m->masked ? rtbuild::kMatMasked : 0u) |
+               (m != nullptr && f.opacityTex != 0 && (m->uvSet & abi::kRtUvOpacityOpaque) == 0 ? rtbuild::kMatCut : 0u);
+    row.opacityTex = f.opacityTex;
+    std::memcpy(row.uvMap, f.uvMap, sizeof(row.uvMap));
+    return row;
+}
+
+const RtScene::GpuMat* RtScene::gpuMaterial(std::uint32_t id, const RtMaterial* m, std::uint64_t frame, bool check) {
+    if (m == nullptr) id = 0;
+    auto [it, fresh] = gpuMats_.try_emplace(id);
+    GpuMat& g = it->second;
+    if (fresh) {
+        g.slot = gpu_.matSlots.alloc();
+        if (g.slot == rtbuild::kNone) {
+            gpuMats_.erase(it);
+            return nullptr;
+        }
+    }
+    if (!fresh && g.frame == frame) return &g;
+    g.frame = frame;
+    const auto apply = [&](const MaterialFields& f, const d3d9::Texture* packTex) {
+        g.f = f;
+        g.packTex = packTex;
+        g.packOwner = pack_;
+        g.packGen = pack_ != nullptr ? pack_->generation() : 0u;
+        g.stamp = materialStamp(m, g);
+        const rtbuild::MaterialRow row = materialRow(m, f);
+        rtbuild::MaterialRow& sh = gpu_.materials.shadow()[g.slot];
+        if (!(sh == row)) {
+            sh = row;
+            gpu_.materials.mark(g.slot);
+            ++gpu_.stats.matWrites;
+        }
+    };
+    if (fresh || materialStamp(m, g) != g.stamp) {
+        const d3d9::Texture* packTex = nullptr;
+        const MaterialFields f = materialFields(m, &packTex);
+        ++gpu_.stats.matEvals;
+        apply(f, packTex);
+    } else if (check) {
+        // a reference frame: the row against a fresh evaluation (a change the stamp does not see would show here)
+        const d3d9::Texture* packTex = nullptr;
+        const MaterialFields f = materialFields(m, &packTex);
+        ++gpu_.stats.matChecked;
+        if (std::memcmp(&f, &g.f, sizeof(f)) != 0 || !(materialRow(m, f) == gpu_.materials.shadow()[g.slot])) {
+            ++gpu_.stats.matStale;
+            if (!gpuStaleLogged_) {
+                gpuStaleLogged_ = true;
+                spdlog::error("rt: gpu build: material row of '{}' (id {}) was STALE (albedo slot {} -> {}, uvSet {:#x} -> {:#x}, pack word {:#x} -> {:#x}): its stamp missed a change",
+                              m != nullptr ? m->name : std::string("(none)"), id, g.f.albedoTex, f.albedoTex, g.f.uvSet, f.uvSet, g.f.packWord, f.packWord);
+            }
+            apply(f, packTex);
+        }
+    }
+    return &g;
+}
+
+void RtScene::gpuAgeMaterials(std::uint64_t frame) {
+    for (auto it = gpuMats_.begin(); it != gpuMats_.end();) {
+        if (it->first != 0 && it->second.frame + 600 < frame) {
+            gpu_.matSlots.release(it->second.slot, frame);
+            it = gpuMats_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::uint32_t RtScene::gpuBlasRow(Blas& b, std::uint64_t frame) {
+    if (b.gpuRow == rtbuild::kNone) {
+        b.gpuRow = gpu_.blasSlots.alloc();
+        if (b.gpuRow == rtbuild::kNone) return rtbuild::kNone;
+        b.gpuRowFrame = 0;
+    }
+    if (b.gpuRowFrame == frame) return b.gpuRow;
+    b.gpuRowFrame = frame;
+    rtbuild::BlasRow row{};
+    const std::uint64_t as = b.as != nullptr ? b.as->address() : 0;
+    row.as[0] = static_cast<std::uint32_t>(as);
+    row.as[1] = static_cast<std::uint32_t>(as >> 32);
+    const rt::BlasKey& key = b.key;
+    split(b.vbAddress.plus(static_cast<std::int64_t>(key.vertexOffset) + static_cast<std::int64_t>(key.baseVertex) * key.stride).ref, row.vertices);
+    if (key.strip != 0) {
+        if (b.listIndices != nullptr) split(addrOf(*b.listIndices).ref, row.indices);
+    } else {
+        split(b.ibAddress.plus(static_cast<std::int64_t>(key.first) * (key.index32 != 0 ? 4u : 2u)).ref, row.indices);
+    }
+    if (b.proxy.state == Blas::Proxy::State::Built && b.proxy.level == static_cast<std::uint32_t>(lodBias_) && b.proxy.as != nullptr && b.proxy.indices != nullptr) {
+        const std::uint64_t pa = b.proxy.as->address();
+        row.proxyAs[0] = static_cast<std::uint32_t>(pa);
+        row.proxyAs[1] = static_cast<std::uint32_t>(pa >> 32);
+        split(addrOf(*b.proxy.indices).ref, row.proxyIndices);
+    }
+    row.stride = key.stride;
+    row.normal = b.layout.normal;
+    row.texcoord0 = b.layout.texcoord0;
+    row.texcoord1 = b.layout.texcoord1;
+    row.texcoord6 = b.layout.texcoord6;
+    row.color0 = b.layout.color0;
+    rtbuild::BlasRow& sh = gpu_.blas.shadow()[b.gpuRow];
+    if (std::memcmp(&sh, &row, sizeof(row)) != 0) {
+        sh = row;
+        gpu_.blas.mark(b.gpuRow);
+        ++gpu_.stats.blasWrites;
+    }
+    return b.gpuRow;
+}
+
+std::uint32_t RtScene::gpuInput(rt::Registry::Instance& in, std::uint32_t blasRow, std::uint32_t matSlot, const float* boxRows) {
+    bool dirty = false;
+    if (in.gpuSlot == rtbuild::kNone) {
+        in.gpuSlot = gpu_.inputSlots.alloc();
+        if (in.gpuSlot == rtbuild::kNone) return rtbuild::kNone;
+        rtbuild::InstanceInput& sh = gpu_.inputs.shadow()[in.gpuSlot];
+        sh = rtbuild::InstanceInput{};
+        std::memcpy(sh.rows, in.rows.data(), sizeof(sh.rows));
+        dirty = true;
+    }
+    rtbuild::InstanceInput& sh = gpu_.inputs.shadow()[in.gpuSlot];
+    if (sh.blasRow != blasRow || sh.material != matSlot || sh.flags != in.flags || sh.data != in.data || sh.instanceId != in.id) {
+        sh.blasRow = blasRow;
+        sh.material = matSlot;
+        sh.flags = in.flags;
+        sh.data = in.data;
+        sh.instanceId = in.id;
+        dirty = true;
+    }
+    if (boxRows != nullptr && std::memcmp(sh.boxRows, boxRows, sizeof(sh.boxRows)) != 0) {
+        std::memcpy(sh.boxRows, boxRows, sizeof(sh.boxRows));
+        dirty = true;
+    }
+    if (dirty) {
+        gpu_.inputs.mark(in.gpuSlot);
+        ++gpu_.stats.inputWrites;
+    }
+    return in.gpuSlot;
+}
+
 // the VS register `reg` .. reg + 2 as an owned window's CPU image holds them (null: no image there / not covered / across two windows)
 const float* RtScene::windowRows(const d3d9::OwnedWindows& ow, std::uint32_t reg) {
     for (std::uint32_t w = 0; w < abi::kConstWindows; ++w) {
@@ -2022,8 +2230,9 @@ void RtScene::applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::u
     in.materialRank = rank;
 }
 
-RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
+RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m, const d3d9::Texture** packTex) const {
     MaterialFields f;
+    if (packTex != nullptr) *packTex = nullptr;
     const auto slotOf = [](d3d9::Texture* t) -> std::uint32_t {
         return t != nullptr && !t->isNull() && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
     };
@@ -2055,6 +2264,7 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     if (pack_ != nullptr && !m->name.empty()) {
         // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
         const auto hit = pack_->lookup(m->name);
+        if (packTex != nullptr) *packTex = hit.texture;
         if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
             f.packWord = hit.word;
             // the map's mip offset against the albedo (the hit shading's lod: log2 of the width ratio, as the raster's derivatives give it)
@@ -2117,12 +2327,17 @@ void RtScene::refreshSegments(Blas& b) {
 }
 
 const RtMaterial* RtScene::bestMaterial(const Blas& b) const {
+    const std::uint32_t id = bestMaterialId(b);
+    return id != 0 ? materials_.get(id) : nullptr;
+}
+
+std::uint32_t RtScene::bestMaterialId(const Blas& b) const {
     const Blas::MaterialSlot* best = nullptr;
     for (const Blas::MaterialSlot& m : b.materials) {
         if (m.overlay && b.materials.size() > 1) continue;
         if (best == nullptr || m.rank > best->rank || (m.rank == best->rank && m.used > best->used)) best = &m;
     }
-    return best != nullptr ? materials_.get(best->id) : nullptr;
+    return best != nullptr ? best->id : 0u;
 }
 
 void RtScene::textureReleased(const d3d9::Texture* texture) {
@@ -2178,6 +2393,7 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
         blasBytes_ -= std::min(blasBytes_, b->listIndices->desc().size);
         b->listIndices.reset();
     }
+    if (b->gpuRow != rtbuild::kNone) gpu_.blasSlots.release(b->gpuRow, dev_.frameValue());  // (frame-ownership.md 14.43)
     if (countEvicted) ++iv_.evicted;
     blas_.erase(id);
 }
@@ -2223,6 +2439,7 @@ bool RtScene::ensureResources() {
 
 // (the RHI objects are destroyed with the frame being recorded: the GPU may still use them; a TLAS gives its slot back)
 void RtScene::destroyResources() {
+    gpuRelease();
     for (Tlas& t : tlas_) t = {};
     compactQuery_.reset();
     for (auto& c : compactions_) c.clear();
@@ -4002,18 +4219,23 @@ void RtScene::record(d3d9::PassContext& ctx) {
     const std::uint32_t worldCount = std::min<std::uint32_t>(static_cast<std::uint32_t>(chosen.size()), tlas_[slot].capacity - dynCount);
     const std::uint32_t n = worldCount + dynCount;
     const double msSelect = msSince(t0);
-    const rhi::RingAlloc ia = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
-    const rhi::RingAlloc ra = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
-    if (ia.ptr == nullptr || ra.ptr == nullptr) {
-        dev_.setRtScene({});
-        return;
+    // frame-ownership.md 14.43 (native.rt_gpu_build): the instances + records written by a compute pass from the persistent tables; the CPU path below stays the
+    // reference (check / digest / debug-content frames compose it too) and the A/B arm
+    bool gpu = false;
+    if (gpuOn_) {
+        gpu_.inputSlots.tick(frame);
+        gpu_.blasSlots.tick(frame);
+        gpu_.matSlots.tick(frame);
+        gpu = gpu_.ready(dev_, tlas_[slot].capacity);
+        if (!gpu) ++gpu_.stats.notReady;
+        gpu_.collect(dev_);
+        if (frame % 64 == 0) gpuAgeMaterials(frame);
+        g_gpuDiffering.store(gpu_.totalDiffering, std::memory_order_relaxed);
+        g_gpuCompared.store(gpu_.stats.compares, std::memory_order_relaxed);
     }
-    fieldsMemo_.clear();
+    if (!gpu) ++gpu_.stats.cpuFrames;
+    const bool gpuCheck = gpu && gpuscene::periodic(frame, kRecordCheck);
     const bool digestFrame = (f81On_ || f81TlasAlways_) && (gpuscene::periodic(frame, kRecordCheck) || gpuscene::periodic(frame + 1, kRecordCheck));
-    digestSrc_.clear();
-    auto* insts = static_cast<VkAccelerationStructureInstanceKHR*>(ia.ptr);
-    auto* recs = static_cast<abi::RtGeometryRecord*>(ra.ptr);
-    std::uint64_t triangles = 0;
     // the contents for diagnostics (rt.debug's probes) while a debug view is on
     std::vector<Entry>* content = nullptr;
     if (keepContents_) {
@@ -4022,6 +4244,36 @@ void RtScene::record(d3d9::PassContext& ctx) {
         content = &contents_.back().second;
         content->reserve(n);
     }
+    // compose the CPU path's instance + record (the CPU arm, and in the GPU arm the reference of check / digest / debug frames)
+    const bool ref = !gpu || digestFrame || gpuCheck || content != nullptr;
+    const bool useRows = gpu && !ref;  // material fields from the table's rows (stamp-checked), not evaluated again
+    rhi::RingAlloc ia{}, ra{};
+    VkAccelerationStructureInstanceKHR* insts = nullptr;
+    abi::RtGeometryRecord* recs = nullptr;
+    if (!gpu) {
+        ia = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
+        ra = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
+        if (ia.ptr == nullptr || ra.ptr == nullptr) {
+            dev_.setRtScene({});
+            return;
+        }
+        insts = static_cast<VkAccelerationStructureInstanceKHR*>(ia.ptr);
+        recs = static_cast<abi::RtGeometryRecord*>(ra.ptr);
+    } else {
+        gpuEntries_.clear();
+        gpuLiterals_.clear();
+        gpuEntries_.reserve(n);
+        if (ref) {
+            refInst_.clear();
+            refRec_.clear();
+            refInst_.reserve(n);
+            refRec_.reserve(n);
+        }
+    }
+    fieldsMemo_.clear();
+    digestSrc_.clear();
+    const auto tw0 = std::chrono::steady_clock::now();
+    std::uint64_t triangles = 0;
     std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0, glassCount = 0;
     std::vector<abi::RtMaterialSegment> segs;              // the frame's segment table
     std::vector<std::pair<std::uint32_t, std::uint32_t>> segRecords;  // record -> its first segment
@@ -4034,14 +4286,28 @@ void RtScene::record(d3d9::PassContext& ctx) {
         for (BandStat& s : bands_) s = {};
         bandsValid_ = true;
     }
+    // the material fields of `m` (id `id`) this frame: the table row's (GPU arm off the reference frames) or evaluated (memo per frame)
+    const auto fieldsFor = [&](std::uint32_t id, const RtMaterial* m) -> const MaterialFields& {
+        if (useRows) {
+            if (const GpuMat* g = gpuMaterial(id, m, frame, false)) return g->f;
+        }
+        return fieldsOf(m);
+    };
     auto& mutableList = registry_.instancesMutable();
     for (std::uint32_t k = 0; k < worldCount; ++k) {
         rt::Registry::Instance& in = mutableList[chosen[k]];
         Blas& b = *blasOf(in);
         // the material (M9 P2): the bindless slots of this frame (a texture that died is gone from the entry)
+        std::uint32_t matId = in.material;
         const RtMaterial* m = in.material != 0 ? materials_.get(in.material) : nullptr;
-        if (m == nullptr || m->dead) m = bestMaterial(b);
-        const MaterialFields& mf = fieldsOf(m);
+        if (m == nullptr || m->dead) {
+            matId = bestMaterialId(b);
+            m = matId != 0 ? materials_.get(matId) : nullptr;
+        }
+        if (m == nullptr) matId = 0;
+        // GPU arm: the material's row (validated against its stamp once per frame; on reference frames also against a fresh evaluation)
+        const GpuMat* gm = gpu ? gpuMaterial(matId, m, frame, ref) : nullptr;
+        const MaterialFields& mf = useRows && gm != nullptr ? gm->f : fieldsOf(m);
         const std::uint32_t albedoTex = mf.albedoTex;
         const std::uint32_t opacityTex = mf.opacityTex;
         // alpha-tested (the draw's alpha test, fronds, a masked material) and something to test against: non-opaque
@@ -4050,38 +4316,11 @@ void RtScene::record(d3d9::PassContext& ctx) {
         (albedoTex != 0 ? textured : untextured) += 1;
         speedTrees += (in.flags & abi::kRtRecordSpeedTree) != 0 ? 1 : 0;
         cutOut += alpha ? 1 : 0;
-        VkAccelerationStructureInstanceKHR vi{};
-        std::memcpy(vi.transform.matrix, in.rows.data(), sizeof(vi.transform.matrix));
-        vi.instanceCustomIndex = k;
         const bool glass = (in.flags & abi::kRtRecordGlass) != 0 && !glassConsumers_.empty();
         glassCount += glass ? 1 : 0;
-        vi.mask = glass ? abi::kRtMaskGlass : alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
-        vi.instanceShaderBindingTableRecordOffset = 0;
-        vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
-                   (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
-        vi.accelerationStructureReference = b.as != nullptr ? b.as->address() : 0;  // (released: replaced below by the proxy or the box)
-        abi::RtGeometryRecord r{};
-        const rt::BlasKey& key = b.key;
-        split(b.vbAddress.plus(static_cast<std::int64_t>(key.vertexOffset) + static_cast<std::int64_t>(key.baseVertex) * key.stride).ref, r.vertices);
-        split(key.strip != 0 ? addrOf(*b.listIndices).ref : b.ibAddress.plus(static_cast<std::int64_t>(key.first) * (key.index32 != 0 ? 4u : 2u)).ref,
-              r.indices);
-        r.stride = key.stride;
-        r.flags = (in.flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) |
-                  (((in.data >> 16) & 0xFFu) << abi::kRtRecordKindShift);
-        r.normal = b.layout.normal;
-        r.texcoord0 = b.layout.texcoord0;
-        r.texcoord1 = b.layout.texcoord1;
-        r.texcoord6 = b.layout.texcoord6;
-        r.color0 = b.layout.color0;
-        r.instanceId = in.id;
-        r.alpha = recordAlpha(in.flags, in.data, m) | (mf.packLod << abi::kRtAlphaPackLodShift);
-        r.albedoTex = mf.albedoTex;
-        r.albedoSampler = mf.albedoSampler;
-        r.packWord = mf.packWord;
-        r.uvSet = mf.uvSet;
-        std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
         // a range without a main-view material of its own (a cascade's merged level-mesh range): per-triangle materials from
         // the main view's sub-ranges inside it
+        std::uint32_t segCount = 0;
         const bool strong = std::any_of(b.materials.begin(), b.materials.end(), [](const auto& ms) { return ms.rank >= 3 && !ms.overlay; });
         if (!strong && b.key.primitives >= 64 && b.key.strip == 0) {
             if (b.segmentsFrame == 0 || frame >= b.segmentsFrame + 60) {
@@ -4090,23 +4329,25 @@ void RtScene::record(d3d9::PassContext& ctx) {
             }
             if (!b.segments.empty()) {
                 segRecords.emplace_back(k, static_cast<std::uint32_t>(segs.size()));
+                const std::uint32_t recAlpha = recordAlpha(in.flags, in.data, m) & 0xFFFFu;
                 for (const Blas::Segment& seg : b.segments) {
                     const Blas* sub = seg.blas != 0 ? findBlas(seg.blas) : nullptr;
-                    const RtMaterial* sm = sub != nullptr ? bestMaterial(*sub) : seg.material != 0 ? materials_.get(seg.material) : nullptr;
-                    const MaterialFields& sf = fieldsOf(sm);
+                    std::uint32_t smId = sub != nullptr ? bestMaterialId(*sub) : seg.material;
+                    const RtMaterial* sm = smId != 0 ? materials_.get(smId) : nullptr;
+                    if (sm == nullptr) smId = 0;
+                    const MaterialFields& sf = fieldsFor(smId, sm);
                     abi::RtMaterialSegment e{};
                     e.firstPrimitive = seg.firstPrimitive;
                     e.primitiveCount = seg.primitiveCount;
                     e.albedoTex = sf.albedoTex;
                     e.albedoSampler = sf.albedoSampler;
-                    e.alpha = (r.alpha & 0xFFFFu) | (sf.packLod << abi::kRtAlphaPackLodShift);
+                    e.alpha = recAlpha | (sf.packLod << abi::kRtAlphaPackLodShift);
                     e.uvSet = sf.uvSet;
                     e.packWord = sf.packWord;
                     std::memcpy(e.uvMap, sf.uvMap, sizeof(e.uvMap));
                     segs.push_back(e);
                 }
-                r.segmentCount = static_cast<std::uint32_t>(b.segments.size());
-                r.flags |= abi::kRtRecordSegmented;
+                segCount = static_cast<std::uint32_t>(b.segments.size());
                 ++segmented;
             }
         }
@@ -4121,17 +4362,16 @@ void RtScene::record(d3d9::PassContext& ctx) {
         }
         std::uint32_t instTriangles = b.triangles;
         bool proxied = false, boxed = false;
+        float boxRows[12]{};
         const bool noOriginal = b.as == nullptr;
         if (lodOn && (in.lod != 0 || noOriginal)) {
             std::uint8_t rung = in.lod;
             if (noOriginal) rung = rung == 1 && b.proxy.state == Blas::Proxy::State::Built ? 1 : 2;  // coming back / released: whatever stands in
-            if ((alpha || r.segmentCount != 0) && !noOriginal) {
+            if ((alpha || segCount != 0) && !noOriginal) {
                 in.lod = 0;  // (cut-outs and per-triangle materials index the original's triangles)
             } else if (rung == 1) {
                 if (b.proxy.state == Blas::Proxy::State::None) queueProxy(b);
                 if (b.proxy.state == Blas::Proxy::State::Built && b.proxy.level == static_cast<std::uint32_t>(lodBias_)) {
-                    vi.accelerationStructureReference = b.proxy.as->address();
-                    split(addrOf(*b.proxy.indices).ref, r.indices);
                     instTriangles = b.proxy.triangles;
                     proxied = true;
                 }
@@ -4149,12 +4389,60 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 if ((in.flags & abi::kRtRecordSpeedTree) != 0) {
                     for (int a2 = 0; a2 < 3; ++a2) h[a2] *= a2 == tall ? 1.0f : kTreeThin;
                 }
-                auto& mat = vi.transform.matrix;
                 for (int row = 0; row < 3; ++row) {
                     const float* A = &in.rows[row * 4];
-                    for (int col = 0; col < 3; ++col) mat[row][col] = A[col] * h[col];
-                    mat[row][3] = A[0] * c[0] + A[1] * c[1] + A[2] * c[2] + A[3];
+                    for (int col = 0; col < 3; ++col) boxRows[row * 4 + col] = A[col] * h[col];
+                    boxRows[row * 4 + 3] = A[0] * c[0] + A[1] * c[1] + A[2] * c[2] + A[3];
                 }
+                instTriangles = 12;
+                boxed = true;
+            }
+        }
+        // the GPU arm's entry: the instance's input slot (its BLAS row, material row, flags, box rows) + this frame's choices
+        std::uint32_t inputSlot = rtbuild::kNone;
+        if (gpu && gm != nullptr) {
+            const std::uint32_t row = gpuBlasRow(b, frame);
+            if (row != rtbuild::kNone) inputSlot = gpuInput(in, row, gm->slot, boxed ? boxRows : nullptr);
+        }
+        const bool cpuCompose = ref || inputSlot == rtbuild::kNone;
+        VkAccelerationStructureInstanceKHR vi{};
+        abi::RtGeometryRecord r{};
+        if (cpuCompose) {
+            std::memcpy(vi.transform.matrix, in.rows.data(), sizeof(vi.transform.matrix));
+            vi.instanceCustomIndex = k;
+            vi.mask = glass ? abi::kRtMaskGlass : alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
+            vi.instanceShaderBindingTableRecordOffset = 0;
+            vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
+                       (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
+            vi.accelerationStructureReference = b.as != nullptr ? b.as->address() : 0;  // (released: replaced below by the proxy or the box)
+            const rt::BlasKey& key = b.key;
+            split(b.vbAddress.plus(static_cast<std::int64_t>(key.vertexOffset) + static_cast<std::int64_t>(key.baseVertex) * key.stride).ref, r.vertices);
+            split(key.strip != 0 ? addrOf(*b.listIndices).ref : b.ibAddress.plus(static_cast<std::int64_t>(key.first) * (key.index32 != 0 ? 4u : 2u)).ref,
+                  r.indices);
+            r.stride = key.stride;
+            r.flags = (in.flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) |
+                      (((in.data >> 16) & 0xFFu) << abi::kRtRecordKindShift);
+            r.normal = b.layout.normal;
+            r.texcoord0 = b.layout.texcoord0;
+            r.texcoord1 = b.layout.texcoord1;
+            r.texcoord6 = b.layout.texcoord6;
+            r.color0 = b.layout.color0;
+            r.instanceId = in.id;
+            r.alpha = recordAlpha(in.flags, in.data, m) | (mf.packLod << abi::kRtAlphaPackLodShift);
+            r.albedoTex = mf.albedoTex;
+            r.albedoSampler = mf.albedoSampler;
+            r.packWord = mf.packWord;
+            r.uvSet = mf.uvSet;
+            std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
+            if (segCount != 0) {
+                r.segmentCount = segCount;
+                r.flags |= abi::kRtRecordSegmented;
+            }
+            if (proxied) {
+                vi.accelerationStructureReference = b.proxy.as->address();
+                split(addrOf(*b.proxy.indices).ref, r.indices);
+            } else if (boxed) {
+                std::memcpy(vi.transform.matrix, boxRows, sizeof(vi.transform.matrix));
                 vi.accelerationStructureReference = box_.as->address();
                 const rhi::GpuAddr base = addrOf(*box_.buffer);
                 split(base.ref, r.vertices);
@@ -4166,15 +4454,31 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 r.alpha = 8u;
                 r.uvSet = abi::kRtUvNoTexture | abi::kRtUvOpacityOpaque;
                 std::memset(r.uvMap, 0, sizeof(r.uvMap));
-                const std::uint32_t colour = 0xFF5C6166u;  // a neutral stone / earth grey-brown (the box has no texture coordinates)
+                const std::uint32_t colour = rtbuild::kBoxColour;  // a neutral stone / earth grey-brown (the box has no texture coordinates)
                 std::memcpy(&r.uvMap[0][3], &colour, 4);
-                instTriangles = 12;
-                boxed = true;
             }
         }
-        // (written once, at the end: the ring is write-combined upload memory, never read back)
-        insts[k] = vi;
-        recs[k] = r;
+        if (!gpu) {
+            // (written once, at the end: the ring is write-combined upload memory, never read back)
+            insts[k] = vi;
+            recs[k] = r;
+        } else {
+            rtbuild::Entry e{};
+            if (inputSlot != rtbuild::kNone) {
+                e.input = inputSlot;
+                e.mode = (proxied ? 1u : boxed ? 2u : 0u) | (alpha ? rtbuild::kModeAlpha : 0u) | (glass ? rtbuild::kModeGlass : 0u) | (segCount << rtbuild::kModeSegShift);
+            } else {
+                // (a table is full / the material row could not be had: this instance as a literal pair)
+                e.input = rtbuild::kEntryLiteral | static_cast<std::uint32_t>(gpuLiterals_.size());
+                gpuLiterals_.push_back({vi, r});
+                ++gpu_.stats.refusedFull;
+            }
+            gpuEntries_.push_back(e);
+            if (ref) {
+                refInst_.push_back(vi);
+                refRec_.push_back(r);
+            }
+        }
         if (digestFrame) digestSrc_.push_back({vi, r, in.blas, in.lod});
         triangles += instTriangles;
         if (snap) {
@@ -4250,6 +4554,20 @@ void RtScene::record(d3d9::PassContext& ctx) {
     // fewer than the n counted above). The TLAS must be built from exactly these: the ring's tail would hold the instances of
     // earlier frames, with references to acceleration structures that may be destroyed by now (a GPU hang in the TLAS build).
     std::uint32_t used = worldCount;
+    // (a dynamic pair: the CPU arm's ring, the GPU arm's literal list)
+    const auto putDynamic = [&](std::uint32_t k, const VkAccelerationStructureInstanceKHR& vi, const abi::RtGeometryRecord& r) {
+        if (!gpu) {
+            insts[k] = vi;
+            recs[k] = r;
+            return;
+        }
+        gpuEntries_.push_back({rtbuild::kEntryLiteral | static_cast<std::uint32_t>(gpuLiterals_.size()), 0u, {0u, 0u}});
+        gpuLiterals_.push_back({vi, r});
+        if (ref) {
+            refInst_.push_back(vi);
+            refRec_.push_back(r);
+        }
+    };
     {
         std::uint32_t k = worldCount;
         std::uint32_t treesNow = 0;
@@ -4271,15 +4589,19 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 const Blas* sb = findBlas(d.blas);
                 const rt::Registry::Instance* in = registry_.find(d.key);
                 if (sb == nullptr || in == nullptr) continue;
+                std::uint32_t mId = in->material;
                 const RtMaterial* m = in->material != 0 ? materials_.get(in->material) : nullptr;
-                if (m == nullptr || m->dead) m = bestMaterial(*sb);
-                const MaterialFields& mf = fieldsOf(m);
+                if (m == nullptr || m->dead) {
+                    mId = bestMaterialId(*sb);
+                    m = mId != 0 ? materials_.get(mId) : nullptr;
+                }
+                if (m == nullptr) mId = 0;
+                const MaterialFields& mf = fieldsFor(mId, m);
                 const bool wantsCut = (in->flags & abi::kRtRecordAlphaTested) != 0 || (m != nullptr && m->masked);
                 const bool alpha = wantsCut && m != nullptr && mf.opacityTex != 0 && (m->uvSet & abi::kRtUvOpacityOpaque) == 0;
                 vi.mask = alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
                 vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                            (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
-                insts[k] = vi;
                 abi::RtGeometryRecord r{};
                 split(d.capture.plus(16).ref, r.vertices);
                 split(d.indices.ref, r.indices);
@@ -4296,7 +4618,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 r.albedoSampler = mf.albedoSampler;
                 r.uvSet = mf.uvSet;
                 std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
-                recs[k] = r;
+                putDynamic(k, vi, r);
                 triangles += d.triangles;
                 animatedTreeTriangles += d.triangles;
                 ++treesNow;
@@ -4304,7 +4626,6 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 ++k;
                 continue;
             }
-            insts[k] = vi;
             abi::RtGeometryRecord r{};
             split(d.capture.plus(16).ref, r.vertices);
             split(d.indices.ref, r.indices);
@@ -4319,12 +4640,13 @@ void RtScene::record(d3d9::PassContext& ctx) {
             r.instanceId = b.id;
             r.alpha = 8u;
             const RtMaterial* m = b.material != 0 ? materials_.get(b.material) : nullptr;
-            const MaterialFields& mf = fieldsOf(m != nullptr && !m->dead ? m : nullptr);
+            const bool live = m != nullptr && !m->dead;
+            const MaterialFields& mf = fieldsFor(live ? b.material : 0u, live ? m : nullptr);
             r.albedoTex = mf.albedoTex;
             r.albedoSampler = mf.albedoSampler;
             r.uvSet = mf.uvSet | abi::kRtUvOpacityOpaque;
             std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
-            recs[k] = r;
+            putDynamic(k, vi, r);
             triangles += d.triangles;
             characterTriangles += d.triangles;
             if (content != nullptr) content->push_back({0, b.id, r.flags, b.material, {0.0f, 0.0f, 0.0f}});
@@ -4338,23 +4660,108 @@ void RtScene::record(d3d9::PassContext& ctx) {
     // the segment table (after the records: their addresses)
     if (!segs.empty()) {
         const rhi::RingAlloc sa = frames.ring(segs.size() * sizeof(abi::RtMaterialSegment), 16);
-        if (sa.ptr != nullptr) {
-            std::memcpy(sa.ptr, segs.data(), segs.size() * sizeof(abi::RtMaterialSegment));
-            for (const auto& [rec, first] : segRecords) split(sa.ref.plus(static_cast<std::int64_t>(first) * sizeof(abi::RtMaterialSegment)), recs[rec].segments);
-        } else {
-            for (const auto& [rec, first] : segRecords) {
-                recs[rec].segmentCount = 0;
-                recs[rec].flags &= ~abi::kRtRecordSegmented;
+        if (sa.ptr != nullptr) std::memcpy(sa.ptr, segs.data(), segs.size() * sizeof(abi::RtMaterialSegment));
+        for (const auto& [rec, first] : segRecords) {
+            std::uint32_t ref2[2] = {0u, 0u};
+            if (sa.ptr != nullptr) split(sa.ref.plus(static_cast<std::int64_t>(first) * sizeof(abi::RtMaterialSegment)), ref2);
+            const auto patch = [&](abi::RtGeometryRecord& r) {
+                if (sa.ptr != nullptr) {
+                    r.segments[0] = ref2[0];
+                    r.segments[1] = ref2[1];
+                } else {
+                    r.segmentCount = 0;
+                    r.flags &= ~abi::kRtRecordSegmented;
+                }
+            };
+            if (!gpu) {
+                patch(recs[rec]);
+                continue;
             }
+            rtbuild::Entry& e = gpuEntries_[rec];
+            if ((e.input & rtbuild::kEntryLiteral) != 0) {
+                patch(gpuLiterals_[e.input & ~rtbuild::kEntryLiteral].r);
+            } else if (sa.ptr != nullptr) {
+                e.seg[0] = ref2[0];
+                e.seg[1] = ref2[1];
+            } else {
+                e.mode &= (1u << rtbuild::kModeSegShift) - 1u;
+            }
+            if (ref) patch(refRec_[rec]);
         }
     }
     iv_.segmented = segmented;
     iv_.speedTree = speedTrees;
     iv_.segments = segs.size();
 
-    const double msWrite = msSince(t0);
     Tlas& t = tlas_[slot];
-    {
+    rhi::GpuRef recordsRef = ra.ref;
+    double msWrite = 0.0;
+    if (gpu) {
+        // the tables' uploads, then the dispatch; a failed upload (ring full) or dispatch: this frame by the CPU twin from the tables' CPU copies
+        bool ok = gpu_.upload(dev_, cl, frame);
+        if (!ok) ++gpu_.stats.uploadFailed;
+        rtbuild::Header h{};
+        h.count = used;
+        h.literals = static_cast<std::uint32_t>(gpuLiterals_.size());
+        const rhi::RingAlloc ea = frames.ring(std::max<std::uint64_t>(used, 1) * sizeof(rtbuild::Entry), 16);
+        const rhi::RingAlloc la = frames.ring(std::max<std::uint64_t>(gpuLiterals_.size(), 1) * sizeof(rtbuild::Literal), 16);
+        ok = ok && ea.ptr != nullptr && la.ptr != nullptr && gpuEntries_.size() == used;
+        if (box_.as != nullptr && box_.buffer != nullptr) {
+            const std::uint64_t ba = box_.as->address();
+            h.boxAs[0] = static_cast<std::uint32_t>(ba);
+            h.boxAs[1] = static_cast<std::uint32_t>(ba >> 32);
+            const rhi::GpuAddr base = addrOf(*box_.buffer);
+            split(base.ref, h.boxVertices);
+            split(base.plus(96).ref, h.boxIndices);
+        }
+        if (ok) {
+            if (used != 0) std::memcpy(ea.ptr, gpuEntries_.data(), static_cast<std::size_t>(used) * sizeof(rtbuild::Entry));
+            if (!gpuLiterals_.empty()) std::memcpy(la.ptr, gpuLiterals_.data(), gpuLiterals_.size() * sizeof(rtbuild::Literal));
+            split(ea.ref, h.entries);
+            split(la.ref, h.literal);
+            d3d9::RegionScope r(dev_, "rt.instance build");
+            ok = gpu_.dispatch(dev_, cl, slot, h);
+            if (ok) g_gpuBuilt.store(gpu_.totalInstances, std::memory_order_relaxed);
+        }
+        if (ok) {
+            const auto rr = gpu_.outRecords(slot)->shaderRef(0);
+            recordsRef = rhi::GpuRef::fromWords(rr[0], rr[1]);
+            gpu_.stats.cpuMs += msSince(tw0);
+            msWrite = msSince(t0);
+            {
+                d3d9::RegionScope r(dev_, "rt.tlas build");
+                cl.buildTlas(*t.as, *gpu_.outInstances(slot), 0, used);  // (ends with the barrier to the ray queries of this submission)
+            }
+            if (gpuCheck && ref && refInst_.size() == used) gpu_.queueCompare(dev_, cl, slot, std::move(refInst_), std::move(refRec_));
+        } else {
+            // the CPU twin into the ring (the tables' CPU copies are what the GPU would have read)
+            ++gpu_.stats.fallbackFrames;
+            ia = frames.ring(std::max<std::uint64_t>(used, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
+            ra = frames.ring(std::max<std::uint64_t>(used, 1) * sizeof(abi::RtGeometryRecord), 16);
+            if (ia.ptr == nullptr || ra.ptr == nullptr || gpuEntries_.size() != used) {
+                dev_.setRtScene({});
+                return;
+            }
+            h.inputCap = rtbuild::GpuBuild::kInputCap;
+            h.blasCap = rtbuild::GpuBuild::kBlasCap;
+            h.matCap = rtbuild::GpuBuild::kMatCap;
+            auto* fi = static_cast<VkAccelerationStructureInstanceKHR*>(ia.ptr);
+            auto* fr = static_cast<abi::RtGeometryRecord*>(ra.ptr);
+            for (std::uint32_t k = 0; k < used; ++k) {
+                VkAccelerationStructureInstanceKHR vi;
+                abi::RtGeometryRecord r;
+                rtbuild::compose(h, k, gpuEntries_[k], gpu_.inputs.shadow().data(), gpu_.blas.shadow().data(), gpu_.materials.shadow().data(), gpuLiterals_.data(), vi, r);
+                fi[k] = vi;
+                fr[k] = r;
+            }
+            recordsRef = ra.ref;
+            msWrite = msSince(t0);
+            d3d9::RegionScope r(dev_, "rt.tlas build");
+            cl.buildTlasAt(*t.as, ia.gpuVa, used);
+        }
+    } else {
+        gpu_.stats.cpuMsCpuArm += msSince(tw0);
+        msWrite = msSince(t0);
         d3d9::RegionScope r(dev_, "rt.tlas build");
         cl.buildTlasAt(*t.as, ia.gpuVa, used);  // (ends with the barrier to the ray queries of this submission)
     }
@@ -4364,7 +4771,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         ++iv_.holeFrames;
         iv_.holes += n - used;
     }
-    dev_.setRtScene({t.as->address(), ra.ref, t.slot, used, used, frame});
+    dev_.setRtScene({t.as->address(), recordsRef, t.slot, used, used, frame});
 
     lastInstances_ = used;
     lastTriangles_ = triangles;
@@ -4424,6 +4831,7 @@ void RtScene::logStats(bool force) {
                  std::string("-PerfFrame: pass rt.scene"));
     logTable(f);
     logRecords(f);
+    if (gpuOn_ || gpu_.created()) gpu_.log(f);  // (frame-ownership.md 14.43)
     if (dev_.perfEnabled()) {
         // F8-1 census (frame-ownership.md 14.30): who calls observe() and what it costs, per frame
         static constexpr const char* kK[5] = {"static", "instanced", "SpeedTree", "skinned", "other"};

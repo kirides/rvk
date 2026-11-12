@@ -2991,6 +2991,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeRtGpuBuild = &reg.add({
+        .key = "native.rt_gpu_build",
+        .label = "Native frame: RT instances built on the GPU",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "14.43 (docs/research/frame-ownership.md; Full): the ray tracing scene's TLAS instances and geometry records are written by a compute pass from "
+                       "persistent GPU tables (one input per scene instance, one row per BLAS, one row per RT material: rewritten only when they change) and one 16-byte "
+                       "entry per instance and frame, instead of the CPU composing every field every frame; the CPU still decides membership, level of detail, proxies "
+                       "and boxes. Check frames compose the CPU path too and compare the GPU's output with it byte for byte (rvk.log `rt: gpu build (5 s)`: DIFFERING "
+                       "must stay 0). Off = the CPU path (A/B). Default on (acts in Full only).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (acts in Full only, like S-9's stages)
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnCollection = &reg.add({
         .key = "native.own_collection",
         .label = "Native frame: own collection (static meshes)",

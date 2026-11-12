@@ -44,6 +44,7 @@
 #include "enh/rt_lod.h"
 #include "gpuscene/verify.h"
 #include "enh/rt_registry.h"
+#include "enh/rt_gpu_tables.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 
@@ -63,6 +64,13 @@ struct RtRecordsState {
     std::uint64_t replayed = 0;
 };
 RtRecordsState rtRecordsState();
+// frame-ownership.md 14.43 (native.rt_gpu_build): for the stages line: armed (setting on, the tables + pipeline ready), the instances the GPU built so far and the
+// check frames' differing instances + records (process totals)
+struct RtGpuBuildState {
+    bool armed = false;
+    std::uint64_t built = 0, differing = 0, compared = 0;
+};
+RtGpuBuildState rtGpuBuildState();
 
 class RtScene final : public d3d9::DrawObserver {
 public:
@@ -155,6 +163,10 @@ public:
     // world instances with the previous frame's when the camera did not move (rvk.log `rt: scene records (5 s)`).
     void setRecordReplay(bool on);
     bool recordReplay() const { return f81On_; }
+    // frame-ownership.md 14.43 (native.rt_gpu_build, Full, Debug): the TLAS instances + geometry records written by a compute pass from persistent tables
+    // (enh/rt_gpu_build.h); off = the CPU writes them (the reference: check frames compose it in the GPU arm too and compare byte for byte)
+    void setGpuBuild(bool on);
+    bool gpuBuild() const { return gpuOn_; }
 
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
@@ -221,6 +233,8 @@ private:
         bool rebuild = false;        // released and queued to be built again (state Pending): still in the TLAS through its proxy / box
         std::uint64_t lastUsedFrame = 0;
         double lastUsedTime = 0.0;
+        std::uint32_t gpuRow = 0xFFFFFFFFu;  // frame-ownership.md 14.43: its row in the GPU instance build's BLAS table (validated once per frame)
+        std::uint64_t gpuRowFrame = 0;
         std::uint64_t opaqueMainFrame = 0;  // the main view's last opaque draw of it (blended-only ranges stay out)
         std::uint32_t kind = 0;      // draws::Kind of the first draw (records)
         // churn (rt-shadows.md 5): a range whose instances are new almost every frame (grass blades fading by distance, rigid parts
@@ -317,6 +331,7 @@ private:
     // an instance takes it: the best rank wins, the first eligible draw per frame and rank (layers keep their base)
     static void applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::uint8_t rank, bool overlay, std::uint64_t frame);
     const RtMaterial* bestMaterial(const Blas& b) const;
+    std::uint32_t bestMaterialId(const Blas& b) const;  // (the id of bestMaterial: 0 = none)
     void refreshSegments(Blas& b);
     void learnEngineMaterials(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, d3d9::draws::Tag& tagOut, bool& single);
     void learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const rt::BlasKey& key);
@@ -326,7 +341,8 @@ private:
         std::uint32_t packLod = 0;  // the record alpha's bits 16-23 (abi::kRtAlphaPackLodShift; 0 = no map)
         float uvMap[2][4]{};
     };
-    MaterialFields materialFields(const RtMaterial* m) const;
+    // `packTex` (optional): the pack map the fields depend on (its readiness is part of the GPU table row's stamp)
+    MaterialFields materialFields(const RtMaterial* m, const d3d9::Texture** packTex = nullptr) const;
     // record(): the frame's materialFields per material (a pure function of the material and its textures' state at that moment: one evaluation per material and
     // frame instead of one per instance; frame-ownership.md 14.30)
     std::unordered_map<const RtMaterial*, MaterialFields> fieldsMemo_;
@@ -335,6 +351,34 @@ private:
         if (fresh) it->second = materialFields(m);
         return it->second;
     }
+    // ---- frame-ownership.md 14.43: the GPU instance build (native.rt_gpu_build) ----
+    bool gpuOn_ = false;
+    rtbuild::GpuBuild gpu_;
+    struct GpuMat {
+        std::uint32_t slot = 0xFFFFFFFFu;
+        std::uint64_t stamp = 0, frame = 0;
+        MaterialFields f;
+        const d3d9::Texture* packTex = nullptr;  // (dereferenced only while the pack and its generation are packOwner / packGen)
+        const void* packOwner = nullptr;
+        std::uint32_t packGen = 0;
+    };
+    std::unordered_map<std::uint32_t, GpuMat> gpuMats_;  // RT material id (0 = none) -> its material row
+    // the material row of `id` / `m` this frame (validated against the stamp once per frame; `check`: also against a fresh evaluation, STALE counted and
+    // corrected); null = the table is full
+    const GpuMat* gpuMaterial(std::uint32_t id, const RtMaterial* m, std::uint64_t frame, bool check);
+    std::uint64_t materialStamp(const RtMaterial* m, const GpuMat& g) const;
+    rtbuild::MaterialRow materialRow(const RtMaterial* m, const MaterialFields& f) const;
+    void gpuAgeMaterials(std::uint64_t frame);
+    // the BLAS's row this frame (re-derived once per frame, uploaded when it changed); kNone = the table is full
+    std::uint32_t gpuBlasRow(Blas& b, std::uint64_t frame);
+    // the instance's input slot with its fields (uploaded when one changed); `boxRows` = rung 2's transform; kNone = the table is full
+    std::uint32_t gpuInput(rt::Registry::Instance& in, std::uint32_t blasRow, std::uint32_t matSlot, const float* boxRows);
+    void gpuRelease();  // every slot, table and buffer (setting off, scene off)
+    std::vector<rtbuild::Entry> gpuEntries_;
+    std::vector<rtbuild::Literal> gpuLiterals_;
+    std::vector<VkAccelerationStructureInstanceKHR> refInst_;
+    std::vector<shader::abi::RtGeometryRecord> refRec_;
+    bool gpuStaleLogged_ = false;
     matpack::MaterialPack* pack_ = nullptr;
     // glass panes (materials.glass, docs/research/material-rt.md 8): the main view's blended draws of pack entries with transmission > 0 enter the scene
     // under their own mask (they are in no other ray's way)

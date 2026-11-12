@@ -124,6 +124,8 @@ public:
         // the owner's object for `blas` (RtScene: its Blas node, stable while the instance lives: a BLAS's instances are removed before it goes), set by onAdded;
         // the per-frame loops read it instead of a lookup by id (frame-ownership.md 14.30)
         mutable void* user = nullptr;
+        // the RT scene's GPU instance build (frame-ownership.md 14.43): the instance's input slot in the persistent table (0xFFFFFFFF = none); released by onRemoved
+        mutable std::uint32_t gpuSlot = 0xFFFFFFFFu;
     };
     struct Counters {
         std::uint64_t added = 0, replaced = 0, aged = 0, tooFar = 0, capped = 0, dropped = 0;

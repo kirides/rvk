@@ -3,6 +3,7 @@
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/bone_table.h"
+#include "enh/rt_gpu_build.h"
 
 #include <algorithm>
 #include <chrono>
@@ -107,22 +108,70 @@ void GpuTable<T>::flush(d3d9::Device& dev, bool verify, std::uint32_t used) {
         dirty_.clear();
     }
     if (verify) {
-        startVerify(dev, used);
+        startVerify(dev, dev.uploadList(), used);
     } else if (list != nullptr) {
         list->bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
     }
 }
 
 template <class T>
-void GpuTable<T>::startVerify(d3d9::Device& dev, std::uint32_t used) {
+bool GpuTable<T>::flushTo(d3d9::Device& dev, rhi::CommandList& list, bool verify, std::uint32_t used) {
+    if (!buffer_) return false;
+    rhi::GameDevice& game = dev.game();
+    bool wrote = false;
+    if (!dirty_.empty()) {
+        std::sort(dirty_.begin(), dirty_.end());
+        const std::uint64_t bytes = static_cast<std::uint64_t>(dirty_.size()) * sizeof(T);
+        rhi::RingAlloc a = game.allocRing(bytes, 16);
+        if (a.ptr == nullptr) return false;  // (kept dirty)
+        auto* dst = static_cast<std::uint8_t*>(a.ptr);
+        for (const std::uint32_t i : dirty_) {
+            std::memcpy(dst, &shadow_[i], sizeof(T));
+            dst += sizeof(T);
+        }
+        rhi::Buffer& ring = game.ringBuffer(a);
+        std::uint64_t pos = 0;
+        for (std::size_t k = 0; k < dirty_.size();) {
+            std::size_t e = k + 1;
+            while (e < dirty_.size() && dirty_[e] == dirty_[e - 1] + 1) ++e;
+            const std::uint64_t n = (e - k) * sizeof(T);
+            list.copyBuffer(*buffer_, pad_ + static_cast<std::uint64_t>(dirty_[k]) * sizeof(T), ring, a.offset + pos, n);
+            pos += n;
+            ++stats_.runs;
+            k = e;
+        }
+        stats_.slotsUploaded += dirty_.size();
+        stats_.bytes += bytes;
+        ++stats_.flushes;
+        for (const std::uint32_t i : dirty_) isDirty_[i] = 0;
+        dirty_.clear();
+        wrote = true;
+    }
+    if (verify) {
+        startVerify(dev, list, used);
+    } else if (wrote) {
+        list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+    }
+    return true;
+}
+
+template <class T>
+void GpuTable<T>::zeroTo(rhi::CommandList& list) {
+    if (!buffer_) return;
+    list.fillBuffer(*buffer_, 0, buffer_->desc().size, 0);
+    list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+}
+
+template <class T>
+void GpuTable<T>::startVerify(d3d9::Device& dev, rhi::CommandList& list, std::uint32_t used) {
     rhi::GameDevice& game = dev.game();
     Pending& p = pending_[game.frameSlot() % rhi::kFramesInFlight];
     if (p.busy) {
-        dev.uploadList().bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+        list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
         return;
     }
     if (used == 0) {  // nothing served yet: a read-back would compare never-written GPU memory (the bone table flake)
-        dev.uploadList().bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
+        list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
         return;
     }
     const std::uint64_t bytes = static_cast<std::uint64_t>(used) * sizeof(T);
@@ -130,7 +179,6 @@ void GpuTable<T>::startVerify(d3d9::Device& dev, std::uint32_t used) {
         p.buffer = dev.rhi()->createBuffer({static_cast<std::uint64_t>(capacity_) * sizeof(T), VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "gpu table verify"});
         if (!p.buffer) return;
     }
-    rhi::CommandList& list = dev.uploadList();
     list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);  // the uploads' copies are complete before the read-back copies them
     list.copyBuffer(*p.buffer, 0, *buffer_, pad_, bytes);
     list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
@@ -197,6 +245,9 @@ template class GpuTable<shader::abi::DrawBlock>;
 template class GpuTable<shader::abi::VertexFetch>;  // S-4: the persistent draws' vertex fetch blocks (draw_record_table.cpp)
 template class GpuTable<ZeroBlock>;
 template class GpuTable<ClusterRow>;  // the cluster table (cluster_table.cpp, F5-1)
+template class GpuTable<enh::rtbuild::InstanceInput>;  // the RT scene's GPU instance build (enh/rt_gpu_tables.cpp, frame-ownership.md 14.43)
+template class GpuTable<enh::rtbuild::BlasRow>;
+template class GpuTable<enh::rtbuild::MaterialRow>;
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 
