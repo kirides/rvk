@@ -289,7 +289,7 @@ private:
     bool texcoord4_ = false;
 };
 
-inline constexpr std::size_t kVariantSlots = 30;  // VariantSlot::Count
+inline constexpr std::size_t kVariantSlots = 32;  // VariantSlot::Count
 
 class Shader {
 public:
@@ -391,14 +391,22 @@ enum class VariantSlot : std::uint8_t {
     SceneGbufferMotion2 = 27,
     SceneGbufferMotionM2 = 28,
     SceneVsBonePull = 29,
+    // tree / grass wind motion (native.tree_motion, frame-ownership.md 14.42): WindVs = the provider slot of the SpeedTree / vegetation vertex shaders' wind-motion variant (the
+    // translated program run a second time with VS window 1 = the previous frame's wind constants c12..c30: its world position -> rvk_prevWorld, location 15), drawn as the
+    // push form by composed draws / replays; SceneVsWind2 = its scene ABI v2 form (the owned tree / grass flushes). Neither is a "+3" / "+7" form
+    WindVs = 30,
+    SceneVsWind2 = 31,
     Count
 };
 static_assert(static_cast<std::size_t>(VariantSlot::Count) == kVariantSlots, "Shader::variants / variantState sizes");
 // the slot a scene form is built from (its provider's options + sceneRecord); Count = none (SceneVs / ScenePs: sceneRecord alone)
 // a scene form (built by Device::variantWorker from its base slot's provider + sceneRecord); BoneVs is a provider slot only
-inline bool isSceneSlot(VariantSlot s) { return s >= VariantSlot::SceneVs && s != VariantSlot::BoneVs; }
-inline bool isBoneScene(VariantSlot s) { return s >= VariantSlot::SceneVsBone && s < VariantSlot::Count; }
-inline bool isSceneView(VariantSlot s) { return isBoneScene(s) ? s >= VariantSlot::SceneVsBone2 : s >= VariantSlot::SceneVs2 && s <= VariantSlot::SceneVsPull; }
+inline bool isSceneSlot(VariantSlot s) { return s >= VariantSlot::SceneVs && s != VariantSlot::BoneVs && s != VariantSlot::WindVs; }
+inline bool isBoneScene(VariantSlot s) { return s >= VariantSlot::SceneVsBone && s <= VariantSlot::SceneVsBonePull; }
+inline bool isSceneView(VariantSlot s) {
+    if (s == VariantSlot::SceneVsWind2) return true;  // (14.42: v2 only)
+    return isBoneScene(s) ? s >= VariantSlot::SceneVsBone2 : s >= VariantSlot::SceneVs2 && s <= VariantSlot::SceneVsPull;
+}
 // SceneVs..SceneGbufferA -> the v2 form (+7); SceneVsBone..SceneGbufferMotionM -> theirs (+3)
 inline VariantSlot sceneView2Of(VariantSlot v1) {
     return static_cast<VariantSlot>(static_cast<std::uint8_t>(v1) + (isBoneScene(v1) ? 3 : 7));
@@ -407,6 +415,7 @@ inline VariantSlot sceneView2Of(VariantSlot v1) {
 inline VariantSlot sceneView1Of(VariantSlot s) {
     if (s == VariantSlot::SceneVsPull) return VariantSlot::SceneVs;
     if (s == VariantSlot::SceneVsBonePull) return VariantSlot::SceneVsBone;
+    if (s == VariantSlot::SceneVsWind2) return s;  // (14.42: no v1 form; Device::variantWorker treats it by name)
     if (!isSceneView(s)) return s;
     return static_cast<VariantSlot>(static_cast<std::uint8_t>(s) - (isBoneScene(s) ? 3 : 7));
 }
@@ -417,6 +426,7 @@ inline VariantSlot sceneBaseSlot(VariantSlot s) {
     case VariantSlot::SceneGbufferM: return VariantSlot::GbufferM;
     case VariantSlot::SceneGbufferA: return VariantSlot::GbufferA;
     case VariantSlot::SceneVsBone: return VariantSlot::BoneVs;
+    case VariantSlot::SceneVsWind2: return VariantSlot::WindVs;
     case VariantSlot::SceneGbufferMotion: return VariantSlot::GbufferMotion;
     case VariantSlot::SceneGbufferMotionM: return VariantSlot::GbufferMotionM;
     default: return VariantSlot::Count;
@@ -1093,6 +1103,32 @@ public:
     static bool boneCompareOn();
     static void boneCompareForce(bool on);  // tools (rvk_shadertool --capture-bone): the compare text without a device
     static const char* captureTag() { return boneCompareOn() ? "cap6c8" : "cap6"; }  // the capture variant's cache tag (its text changes in compare mode)
+    // ---- tree / grass wind motion (native.tree_motion = off | on | compare, frame-ownership.md 14.42; d3d9/tree_motion.cpp). On: the main view's solid SpeedTree / grass draws
+    // that write the G-buffer's motion target are drawn with the wind-motion forms (WindVs push form for composed draws and packet replays, SceneVsWind2 for the owned tree /
+    // grass flushes): the vertex shader runs a second time with VS window 1 = the previous frame's c12..c30 (a per-frame block of the history below; prevVs) and outputs the
+    // previous world position (rvk_prevWorld) that the G-buffer motion pixel variants turn into the motion vector. The first run is unchanged: the clip position stays
+    // bit-identical to every other form (z-equal colour pass). Compare (Vulkan): the forms also evaluate F4-5's wind math (rvk_tree_wind.hlsli) with the previous
+    // constants and accumulate the difference (rvk.log `native: tree motion compare (5 s)`)
+    void setTreeMotion(int mode);
+    int treeMotion() const { return windMode_; }
+    void setTreeMotionTest(bool on) { windTest_ = on; }  // rvk_d3d9test: the push form without a G-buffer motion target (the plain pixel shader)
+    static bool windVsOptions(const Shader& s, shader::TranslateOptions& o);  // the WindVs provider (vertex shaders)
+    static bool windCompareOn();
+    static void windCompareForce(bool on);  // tools (rvk_shadertool / rvk_d3d9test): the compare text without a device setting
+    static int windKindOf(draws::Kind k) { return k == draws::Kind::SpeedTree ? 0 : k == draws::Kind::Vegetation ? 1 : -1; }
+    // the history: c12..c30 (19 float4) of the kind's main solid draws this frame (the register file of a composed / replayed draw, the view block of an owned flush)
+    void windNote(int kind, const float (*c12)[4]);
+    // the previous frame's c12..c30 of the kind as this frame's ring block (biased: c[n] at base + n x 16); null = no motion of its own (no / ambiguous history, still wind)
+    rhi::GpuRef windPrev(int kind);
+    struct TreeMotionStats {
+        std::uint64_t notes = 0, conflicts = 0, epochGaps = 0, prevValid = 0, prevNone = 0, prevStill = 0, blocks = 0;
+        std::uint64_t pushDrawn = 0, pushPending = 0, replays = 0, staleRefused = 0, ownedItems = 0, ownedInstances = 0, ownedPlain = 0, v2Pending = 0, v2Chosen = 0;
+        std::uint64_t perKind[2] = {};  // draws / instances drawn with the forms, trees / grass
+        std::uint64_t compared = 0, compareOver = 0, compareStill = 0, compareFloorOver = 0;  // compare mode, from the GPU
+        float winPx = 0.0f, winWorld = 0.0f, winFloorPx = 0.0f, winFloorWorld = 0.0f, maxPx = 0.0f, maxWorld = 0.0f;
+    } windStats;
+    // once per present: compare readback + the next frame's compare slot (frame param kFrameParamTreeMotion), the 5 s line
+    void treeMotionFrame();
     void setSceneVeg(bool on) { if (on != sceneVeg_) ++variantEpoch_; sceneVeg_ = on; }  // F7-2: the grass draws' scene ABI v2 form
     void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
@@ -1221,6 +1257,9 @@ public:
         GamePipeline scenePipelinePull = GamePipeline::None;
         bool ordered = false;     // F9 / F14 (native.owned_ordered): not batchable, its scene forms were made for the ordered owned path (drawn at its op's place)
         bool boneMotion = false;  // 14.13 (native.bone_motion): the scene forms above are the bone-motion forms (the record's prevVs = the bone window's history image)
+        // 14.42 (native.tree_motion): a main solid tree / grass draw's wind-motion pipelines (the packet's / scenePipeline2's with the WindVs / SceneVsWind2 vertex shader and
+        // the motion pixel variant): drawn instead of the plain ones while the kind has a previous wind block this frame; None = no form (yet)
+        GamePipeline windPipeline = GamePipeline::None, windPipeline2 = GamePipeline::None;
         // 14.22: what the observers of the composing draw were told (replayDraw repeats it): 0 nothing, 1 bone forms predicted but not taken (declined: no form
         // for the draw's state), 2 forms pending, 3 rigid without motion of its own
         std::uint8_t boneObs = 0;
@@ -1324,6 +1363,8 @@ public:
     // 14.35: the composition's bone-motion decision for a retained skinned main solid draw with this VS window 2 now (sceneDecide + bonePredict's skinned branch, read only):
     // 1 = the bone forms, 0 = not, -1 = not decidable here (not such a draw / the window unknown)
     int boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, OwnedWindows::Kind win2Kind, bool gbufTaken) const;
+    // a retained main solid tree / grass draw that has no wind-motion form while its forms are built now: made again (replayBuild, the owned templates)
+    bool windStale(const CachedDraw& c, bool v2) const;
     struct BoneDeriveStats {
         std::uint64_t refusedGained = 0, refusedLost = 0;  // records without the forms whose window has a history now / with the forms whose window has none
     } boneDeriveStats;
@@ -2410,6 +2451,23 @@ private:
     bool bonePredict(draws::Kind kind, const scene::Phase& phase, const DrawGeom* geom = nullptr);  // prepareDraw, before the observers: the draw will take the bone-motion forms
     bool noMotionOf(const CachedDraw& c) const;  // (F6-2: see noMotionNow)
     bool boneOfCached(const CachedDraw& c) const { return c.boneMotion && boneMode_ == 1 && gbuf_.active && gbuf_.motion != nullptr; }
+    // ---- tree / grass wind motion (native.tree_motion, frame-ownership.md 14.42; d3d9/tree_motion.cpp)
+    int windMode_ = 0;  // 0 off, 1 on, 2 compare (on + the GPU compare)
+    bool windTest_ = false;
+    struct WindHist {
+        std::uint64_t epoch = 0;  // the present count (+1) of `cur`
+        std::uint64_t noteEpoch = 0;  // the memory epoch of its first note (diagnostics)
+        float cur[19][4] = {}, prev[19][4] = {};
+        bool prevValid = false, conflict = false;
+        std::uint64_t blockEpoch = 0;
+        rhi::GpuRef block;  // this epoch's ring block of `prev` (biased), null = none
+    } windHist_[2];
+    GamePipeline windPipe_ = GamePipeline::None;   // prepareDraw: the wind-motion push form's pipeline of the draw being prepared
+    GamePipeline windPipe2_ = GamePipeline::None;  // sceneDecide: its v2 form
+    std::unique_ptr<rhi::Buffer> windCmp_;  // compare mode: per frame slot 32 bytes the wind forms accumulate into (Readback)
+    std::uint64_t windCmpFrame_ = 0;
+    double windLog_ = -1e9;
+    TreeMotionStats windLast_;
     std::unique_ptr<rhi::Buffer> boneCmp_;  // compare mode: kBoneCmpSlots x 16 bytes the capture vertex shaders accumulate into (Readback)
     std::uint64_t boneCmpFrame_ = 0;
     double boneLog_ = -1e9;

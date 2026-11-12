@@ -489,7 +489,7 @@ void StaticOps::vegCompEnd(const Op& op) {
                     chk(d.tagSubMesh != o.tagSubMesh || d.tagMaterial != o.tagMaterial || d.tagMaterialName != o.tagMaterialName, "tag");
                     spdlog::error("native: {}: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template ({})", what, describe(op), d.treeKey, why);
                 }
-                if (same && !texMoved && !ot->second->stale && !ot->second->r.cd->v.scenePending) {
+                if (same && !texMoved && !ot->second->stale && !ot->second->r.cd->v.scenePending && !dev_.windStale(*ot->second->r.cd, true)) {  // (14.42)
                     pend->tpls[d.treeKey] = std::move(old->tpls[d.treeKey]);
                     continue;
                 }

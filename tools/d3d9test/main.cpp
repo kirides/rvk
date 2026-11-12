@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -6063,6 +6064,190 @@ mov o2, v2
     bt.setHistory(false);
 }
 
+// 14.42 (native.tree_motion): tree / grass wind motion. (1) The device's wind history on the CPU: a new kind = no block, a changed wind = the last frame's block, a still
+// wind = none, a gap of a frame = none, a frame whose draws disagree on the kind's registers = none. (2) Vulkan: the wind-motion push form of a SpeedTree-like
+// vertex shader (wind matrix c14 + 3 BLENDINDICES0.x blended by BLENDWEIGHT0.x, then the instance rows c33 + 4 TEXCOORD4.x) drawn in compare mode: its rerun on the
+// previous frame's window 1 against F4-5's wind math (rvk_tree_wind.hlsli) with the previous constants, identity camera: ~0 px. Negative control: a shader whose
+// wind reads the next matrix (c17) disagrees with the math.
+void testTreeMotion(Fixture& f) {
+    Device& dev = f.dev;
+    float a[19][4] = {}, b[19][4] = {};
+    a[2][0] = 1.0f;
+    b[2][0] = 0.5f;
+    b[0][0] = 7.0f;  // (c12: not a tree register)
+    const auto frameEnd = [&] { dev.present(); };
+    dev.setTreeMotion(2);  // (the compare text: fixed for the process at the first switch-on)
+    {
+        bool ok = true;
+        dev.windNote(0, a);
+        ok = ok && dev.windPrev(0).null();  // a new history: none
+        frameEnd();
+        dev.windNote(0, b);
+        ok = ok && !dev.windPrev(0).null();  // changed: last frame's block
+        frameEnd();
+        dev.windNote(0, b);
+        ok = ok && dev.windPrev(0).null();  // still: none
+        frameEnd();
+        frameEnd();  // (a frame without a tree draw: a gap)
+        dev.windNote(0, a);
+        ok = ok && dev.windPrev(0).null();
+        frameEnd();
+        dev.windNote(0, b);
+        dev.windNote(0, a);  // (the draws of one frame disagree on c14..c29)
+        ok = ok && dev.windPrev(0).null();
+        frameEnd();
+        dev.windNote(0, b);  // (after a conflicting frame: no history)
+        ok = ok && dev.windPrev(0).null();
+        frameEnd();
+        dev.windNote(1, a);
+        frameEnd();
+        float g[19][4] = {};
+        std::memcpy(g, a, sizeof(g));
+        g[0][0] = 3.0f;  // grass: c12 moved
+        dev.windNote(1, g);
+        ok = ok && !dev.windPrev(1).null();
+        frameEnd();
+        if (!ok) {
+            std::printf("  FAIL tree motion: the wind history\n");
+            ++g_failures;
+        }
+    }
+    if (g_backend != rhi::Backend::Vulkan || !dev.game().gameCaps().vertexStores) {
+        std::printf("  (tree motion: the compare part is Vulkan only / needs vertex stores: skipped)\n");
+        dev.setTreeMotion(0);
+        return;
+    }
+    const auto treeVs = [&](int matrix) {
+        const std::string src = std::format(R"(
+vs_3_0
+def c5, 3, 4, 1, 0
+dcl_position v0
+dcl_blendindices v1
+dcl_blendweight v2
+dcl_texcoord4 v3
+dcl_position o0
+dcl_color o1
+mov o1, c5.zzzz
+mul r0.x, v1.x, c5.x
+mova a0.x, r0.x
+dp3 r1.x, v0, c{}[a0.x]
+dp3 r1.y, v0, c{}[a0.x]
+dp3 r1.z, v0, c{}[a0.x]
+add r2.xyz, r1, -v0
+mad r1.xyz, r2, v2.x, v0
+mov r1.w, c5.z
+mul r0.y, v3.x, c5.y
+mova a0.y, r0.y
+dp4 r3.x, r1, c33[a0.y]
+dp4 r3.y, r1, c34[a0.y]
+dp4 r3.z, r1, c35[a0.y]
+mov r3.w, c5.z
+dp4 o0.x, r3, c0
+dp4 o0.y, r3, c1
+dp4 o0.z, r3, c2
+dp4 o0.w, r3, c3
+)", matrix, matrix + 1, matrix + 2);
+        return shaderFrom(dev, src.c_str());
+    };
+    const auto vsGood = treeVs(14), vsBad = treeVs(17);
+    if (!vsGood || !vsBad) {
+        std::printf("  FAIL tree motion: shaders\n");
+        ++g_failures;
+        dev.setTreeMotion(0);
+        return;
+    }
+    struct TreeVertex {
+        float x, y, z;
+        std::uint8_t idx[4];
+        float weight, inst;
+    };
+    static_assert(sizeof(TreeVertex) == 24);
+    const VertexElement treeDecl[] = {
+        {0, 0, DECLTYPE_FLOAT3, 0, 0 /*POSITION*/, 0},  {0, 12, DECLTYPE_UBYTE4, 0, 2 /*BLENDINDICES*/, 0},
+        {0, 16, DECLTYPE_FLOAT1, 0, 1 /*BLENDWEIGHT*/, 0}, {0, 20, DECLTYPE_FLOAT1, 0, 5 /*TEXCOORD*/, 4},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    auto decl = dev.createVertexDecl(treeDecl);
+    const TreeVertex verts[4] = {{-0.5f, 0.5f, 0.5f, {0, 0, 0, 0}, 1.0f, 0.0f}, {0.5f, 0.5f, 0.5f, {0, 0, 0, 0}, 0.75f, 0.0f},
+                                 {-0.5f, -0.5f, 0.5f, {0, 0, 0, 0}, 0.5f, 0.0f}, {0.5f, -0.5f, 0.5f, {0, 0, 0, 0}, 0.0f, 0.0f}};
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(sizeof(verts), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts, sizeof(verts));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    scene::CameraInput cam;
+    cam.view = cam.projection = cam.viewProjection = cam.inverseView = scene::Mat4::identity();
+    cam.engineFar = 1000.0f;
+    dev.setTreeMotionTest(true);
+    const auto frame = [&](const std::shared_ptr<Shader>& vs, int k) {
+        f.reset();
+        dev.setMainCamera(cam);
+        dev.setVertexDecl(decl.get());
+        dev.setVertexShader(vs);
+        // (clip = 2 x world: w = 2, the compare takes vertices with w > 1 only; the reconstruction through the identity camera divides it out)
+        const float ident[4][4] = {{2, 0, 0, 0}, {0, 2, 0, 0}, {0, 0, 2, 0}, {0, 0, 0, 2}};
+        dev.setVertexShaderConstantF(0, ident[0], 4);
+        // the wind: matrices 0 and 1 (c14..c19) = a rotation about z by an angle that moves every frame (a sway), the rest of window 1 constant
+        float w1[19][4] = {};
+        for (int m = 0; m < 2; ++m) {
+            const float ang = 0.05f * static_cast<float>(k % 7) + 0.3f * static_cast<float>(m), cs = std::cos(ang), sn = std::sin(ang);
+            // mulWindMatrix: component r = dot(v, c(14 + 3 i + r)): the rows of the rotation
+            const float rows[3][4] = {{cs, -sn, 0, 0}, {sn, cs, 0, 0}, {0, 0, 1, 0}};
+            std::memcpy(w1[2 + 3 * m], rows, sizeof(rows));
+        }
+        dev.setVertexShaderConstantF(12, w1[0], 19);
+        const float inst[4][4] = {{0.7f, 0.3f, 0, 0}, {1, 0, 0, 0.05f}, {0, 1, 0, -0.02f}, {0, 0, 1, 0}};  // c32 (rock / rustle scales) + the instance rows c33..c35
+        dev.setVertexShaderConstantF(32, inst[0], 4);
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::SpeedTree;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(TreeVertex));
+        dev.setIndices(ib.get());
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        dev.phases().pop();
+        dev.treeMotionFrame();
+        dev.present();
+    };
+    const auto run = [&](const std::shared_ptr<Shader>& vs) {
+        const d3d9::Device::TreeMotionStats s0 = dev.windStats;
+        dev.windStats.maxPx = dev.windStats.maxWorld = 0.0f;
+        int k = 0;
+        for (; k < 600; ++k) {
+            frame(vs, k);
+            if (dev.windStats.compared - s0.compared >= 40 && dev.windStats.pushDrawn - s0.pushDrawn >= 12) break;
+            if (k > 8 && dev.windStats.pushDrawn == s0.pushDrawn) Sleep(5);  // (the wind form and its pipeline build in the background)
+        }
+        for (int j = 0; j < 6; ++j) frame(vs, ++k);  // (the compare slots are read kFramesInFlight + 2 frames later)
+        d3d9::Device::TreeMotionStats d = dev.windStats;
+        d.compared -= s0.compared;
+        d.pushDrawn -= s0.pushDrawn;
+        std::printf("  (tree motion run: %d frames, notes %llu, blocks given %llu, none %llu, still %llu, push pending %llu, drawn %llu)\n", k, static_cast<unsigned long long>(d.notes - s0.notes),
+                    static_cast<unsigned long long>(d.prevValid - s0.prevValid), static_cast<unsigned long long>(d.prevNone - s0.prevNone), static_cast<unsigned long long>(d.prevStill - s0.prevStill),
+                    static_cast<unsigned long long>(d.pushPending - s0.pushPending), static_cast<unsigned long long>(d.pushDrawn));
+        return d;
+    };
+    const d3d9::Device::TreeMotionStats good = run(vsGood);
+    std::printf("  tree motion compare: %llu vertices compared (%llu push draws), max %.6f px / %.6f units against the wind math with the previous constants\n",
+                static_cast<unsigned long long>(good.compared), static_cast<unsigned long long>(good.pushDrawn), good.maxPx, good.maxWorld);
+    if (good.compared == 0 || good.pushDrawn == 0 || good.maxPx > 1e-3f || good.maxWorld > 1e-4f) {
+        std::printf("  FAIL tree motion: the wind-motion form and the wind math disagree (or nothing was compared)\n");
+        ++g_failures;
+    }
+    const d3d9::Device::TreeMotionStats bad = run(vsBad);
+    std::printf("  tree motion compare, negative control (the shader reads the next wind matrix): %llu compared, max %.6f px / %.6f units\n", static_cast<unsigned long long>(bad.compared),
+                bad.maxPx, bad.maxWorld);
+    if (bad.compared == 0 || bad.maxWorld < 0.01f) {
+        std::printf("  FAIL tree motion: the negative control shows no difference\n");
+        ++g_failures;
+    }
+    dev.setTreeMotionTest(false);
+    dev.setTreeMotion(0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 // 14.15 b: rigid-object history motion. The object table's history records (CPU twin: changed slot = last frame's record, valid; still = the record itself; a new
 // record / a jump = invalid; prevOf guards), then the compare mode's capture vertex shader on a rigid shader (no relative addressing: the object record's validity
 // word c36.w and the object table's history delta) against the capture chain, identity camera: 0 difference; negative control: the capture of two frames ago.
@@ -6458,7 +6643,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"tree motion (14.42)", testTreeMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
         {"flush keeps frame memory (14.40)", testFlushKeepsFrameMemory}, {"in-frame read (14.40)", testInFrameRead},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)
     };

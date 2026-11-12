@@ -236,6 +236,16 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) return false;
+    // 14.42 (native.tree_motion): the main solid flush's previous wind block (the view block's c12..c30 = this frame's wind constants of the pass): the items whose template has
+    // the wind-motion form draw with it, every record carries the block as prevVs (the plain forms do not read it)
+    rhi::GpuRef windPrevBlock;
+    const int windKind = inst != nullptr ? 1 : 0;
+    if (windMode_ != 0 && gbuf_.motion != nullptr && scopeGbuf_ && items[0].cd->phase.view == scene::View::Main && items[0].cd->phase.pass == scene::Pass::Solid &&
+        sceneViews_.shadow != nullptr) {
+        windNote(windKind, sceneViews_.shadow[viewSlot].vs1);
+        windPrevBlock = windPrev(windKind);
+    }
+    const auto pipeOf = [&](const CachedDraw& c) { return !windPrevBlock.null() && c.windPipeline2 != GamePipeline::None ? c.windPipeline2 : c.scenePipeline2; };
     rhi::RingAlloc ra = game_->allocRing(static_cast<std::uint64_t>(recs.size()) * sizeof(shader::abi::DrawRecord), 16);
     rhi::RingAlloc la = game_->allocRing(static_cast<std::uint64_t>(positions) * 8, 16);
     rhi::RingAlloc aa = game_->allocRing(static_cast<std::uint64_t>(n) * rhi::kIndirectStride, 16);
@@ -251,6 +261,9 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
     auto* args = static_cast<std::uint32_t*>(aa.ptr);
     const std::uint64_t frame = frameValue();
     std::memcpy(recs_, recs.data(), recs.size() * sizeof(shader::abi::DrawRecord));
+    if (!windPrevBlock.null()) {
+        for (std::size_t r = 0; r < recs.size(); ++r) recs_[r].prevVs = windPrevBlock.bits;
+    }
     for (std::uint32_t p = 0; p < positions; ++p) {
         list[2 * p] = posRec[p];
         list[2 * p + 1] = viewSlot;
@@ -275,6 +288,15 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
             draws_.count(c.kind, c.phase.view);
         }
         replayStats.replayed += it.instances;
+        if (!windPrevBlock.null()) {
+            if (c.windPipeline2 != GamePipeline::None) {
+                ++windStats.ownedItems;
+                windStats.ownedInstances += it.instances;
+                windStats.perKind[windKind] += it.instances;
+            } else {
+                ++windStats.ownedPlain;
+            }
+        }
         sceneStats_.replayedSceneDraws += it.instances;
         sceneStats_.candidates += it.instances;
     }
@@ -285,7 +307,7 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
         const CachedDraw& c0 = *items[start].cd;
         while (end < n && items[end].bucket == items[start].bucket) {
             const CachedDraw& c = *items[end].cd;
-            if (&c != &c0 && (c.scenePipeline2 != c0.scenePipeline2 || !viEqual(c.vi, c0.vi) || !dynEqual(c.dyn, c0.dyn) || c.packet.indexBuffer != c0.packet.indexBuffer ||
+            if (&c != &c0 && (pipeOf(c) != pipeOf(c0) || !viEqual(c.vi, c0.vi) || !dynEqual(c.dyn, c0.dyn) || c.packet.indexBuffer != c0.packet.indexBuffer ||
                               c.packet.indexOffset != c0.packet.indexOffset || c.packet.index32 != c0.packet.index32)) {
                 break;  // (a bucket key that merges different pipelines / inputs: cut the run here)
             }
@@ -303,7 +325,7 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
             m.vi = internSceneViAt(c0.vi, la.buffer, la.offset);
         }
         m.dyn = internDyn(c0.dyn);
-        m.pipeline = c0.scenePipeline2;
+        m.pipeline = pipeOf(c0);
         m.op = DrawPacket::Op::DrawIndexedIndirect;
         m.scene = 0;
         m.count = end - start;

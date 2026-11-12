@@ -358,6 +358,8 @@ void HalDevice::applyStaticOps() {
         staticOps_->setOwnFoliage(on(rs.nativeOwnFoliage) && renderMode() == RenderMode::Full && staticOps_->active());  // S-5 (frame-ownership.md 14.14)
         // F4-5 (frame-ownership.md 14.17): the RT scene's animated SpeedTrees by compute (no capture: the owned trees stay owned with RT on; Full only)
         if (rtScene_) rtScene_->setTreeWind(rs.nativeTreeWind != nullptr && renderMode() == RenderMode::Full ? rs.nativeTreeWind->asInt() : 0);
+        // frame-ownership.md 14.42: the swaying trees' / grass' wind motion (Full only; the compare text is decided at the first switch-on)
+        dev_.setTreeMotion(rs.nativeTreeMotion != nullptr && renderMode() == RenderMode::Full && staticOps_->active() ? rs.nativeTreeMotion->asInt() : 0);
         // F8-1 (frame-ownership.md 14.30): the RT scene from the owned record set (Full, the persistent records)
         if (rtScene_) rtScene_->setRecordReplay(on(rs.nativeRtRecords) && on(rs.nativeOwnedPersistent) && renderMode() == RenderMode::Full);
         {
@@ -799,7 +801,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeRtRecords}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1851,6 +1853,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::objecttable().flush(dev_);
         gpuscene::rowtable().flush(dev_);  // F2f (frame-ownership.md 14.19): the owned instance-list draws' window 2 images
         gpuscene::bonetable().flush(dev_);  // F6-1: the owned actors' bone images (before the frame's draws, with the other tables)
+        dev_.treeMotionFrame();         // 14.42: tree / grass wind motion (compare readback, the 5 s line)
         dev_.boneMotionFrame();         // 14.13: bone-history motion (compare readback, the 5 s line)
         dev_.captureCensusFrame();      // 14.15: the vertex-capture census (`native: captures (5 s)`)
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)

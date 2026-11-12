@@ -144,6 +144,16 @@ return {
         time = { 13, 0 }, weather = "Sunny_Full", freeze = false, explicit = true,
         notes = "the hero in his idle animation, the world clock running",
     },
+    -- swaying foliage in wind (freeze = false; run with -Param wind=1 so the vegetation wind is kept): the trees' / grass' wind motion vectors
+    -- (native.tree_motion, docs/research/frame-ownership.md 14.42); not reproducible, judge smearing / motion only
+    {
+        id = "jungle_wind",
+        player = { x = 8130, y = 5541, z = -1188, yaw = 0 },
+        camera = { target = { 0, 200, 0 }, yaw = 0, pitch = -12, distance = 1200 },
+        hide_player = true, hide_npcs = 3000,
+        time = { 15, 0 }, weather = "Stormy_Rain", freeze = false, explicit = true,
+        notes = "the jungle spot in a storm with the clock running: SpeedTrees, leaf cards and grass swaying",
+    },
     {
         id = "torch_hero",
         -- (not snapped: the navigation mesh query returned a point up to 70 units apart from run to run, the hero's shadow with it)

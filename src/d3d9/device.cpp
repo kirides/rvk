@@ -855,6 +855,7 @@ void Device::destroy() {
     // the device's own lazily made backend buffers (native.bone_motion = compare, native.scene_draws_check): before the backend goes. As members they were
     // destroyed in ~Device after it (a leaked VkBuffer at vkDestroyDevice, then the buffer's destructor read the freed backend: an access violation at exit)
     boneCmp_.reset();
+    windCmp_.reset();
     sceneCheck_.buffer.reset();
     sceneCheck_.busy = false;
     game_.reset();  // the backend: the present thread and the swapchain, the frame ring, the heaps, every API object
@@ -1606,7 +1607,7 @@ void Device::sourceAttached(Shader& s) {
     for (std::size_t i = 0; i < kVariantSlots; ++i) {
         if ((uber >> i & 1u) != 0 || s.variantState[i].load(std::memory_order_acquire) != 2) continue;
         const VariantSlot slot = static_cast<VariantSlot>(i);
-        if (slot == VariantSlot::Capture || slot == VariantSlot::BoneVs) continue;  // (never the ubershader: provider slots / the capture variant)
+        if (slot == VariantSlot::Capture || slot == VariantSlot::BoneVs || slot == VariantSlot::WindVs) continue;  // (never the ubershader: provider slots / the capture variant)
         s.variants[i].store(rhi::ShaderModule::None, std::memory_order_release);
         s.variantState[i].store(0, std::memory_order_release);
         reset |= 1u << i;
@@ -2083,6 +2084,15 @@ bool uberBoneTranslated() {
     return v;
 }
 
+// 14.42: RVK_UBER_WIND_TR=1 = the wind-motion vertex form stays the translated program even with the ubershader on (the A/B of the port's wind form)
+bool uberWindTranslated() {
+    static const bool v = [] {
+        char e[8];
+        return GetEnvironmentVariableA("RVK_UBER_WIND_TR", e, sizeof e) > 0 && e[0] == '1';
+    }();
+    return v;
+}
+
 bool uberVertexOptions(const Shader& s, shader::TranslateOptions& o) {
     const MaterialSource* src = s.source.load(std::memory_order_acquire);
     if (s.stage != shader::Stage::Vertex || src == nullptr || !uberVsCovers(*src)) return false;
@@ -2184,7 +2194,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         to.uberDefines.clear();
         // 14.15 a: the port's bone-history form (RVK_UBER_BONE_PREV): the translated part keeps the bone form's defines (RVK_BONE_PREV: window 2 can be redirected) and its
         // rvk_prevWorld output, but instead of the second translated run it only hands the port the world point of its clip position (the port adds its own displacement)
-        const bool bonePrev = options.uberDefines.find("RVK_UBER_BONE_PREV") != std::string::npos;
+        const bool bonePrev = options.uberDefines.find("RVK_UBER_BONE_PREV") != std::string::npos || options.uberDefines.find("RVK_UBER_WIND_PREV") != std::string::npos;  // (14.42: the wind form likewise)
         if (bonePrev) {
             to.rerunnable = false;
             to.epilogue =
@@ -2469,12 +2479,13 @@ void Device::variantWorker() {
                 const bool pull = job.slot == VariantSlot::SceneVsPull || job.slot == VariantSlot::SceneVsBonePull;
                 const VariantSlot v1 = sceneView1Of(job.slot);
                 const bool lodVs = v1 == VariantSlot::SceneVsLod;
-                const bool pixel = v1 != VariantSlot::SceneVs && v1 != VariantSlot::SceneVsBone && !lodVs;
+                const bool windVs = job.slot == VariantSlot::SceneVsWind2;  // (14.42: the wind-motion form's v2, no v1 form)
+                const bool pixel = v1 != VariantSlot::SceneVs && v1 != VariantSlot::SceneVsBone && !lodVs && !windVs;
                 provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "") +
                                (pull ? std::format("p{:08x}", shader::hlslPullHash()) : "");
                 const bool uberOn = ubershader_.load(std::memory_order_relaxed);
                 const bool boneVs = v1 == VariantSlot::SceneVsBone;
-                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn, pull, boneVs](const Shader& sh, shader::TranslateOptions& o) {
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view, uberOn, pull, boneVs, windVs](const Shader& sh, shader::TranslateOptions& o) {
                     if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
                     // S-1a: the plain scene pixel shader of a request the ubershader covers is built from it (the enhancement variants say so through their own hooks)
@@ -2486,6 +2497,8 @@ void Device::variantWorker() {
                         o.uberDefines += "#define RVK_UBER_BONE_PREV 1\n";
                         if (!sh.reflection.relativeConstants) o.uberDefines += "#define RVK_UBER_BONE_OBJ 1\n";  // (14.15 b: a rigid draw's object record history)
                     }
+                    // 14.42: the wind-motion vertex form of a request the port covers is the port's wind form (RVK_UBER_WIND_PREV; RVK_UBER_WIND_TR=1 keeps it translated)
+                    if (!pixel && hasBase && windVs && uberOn && !uberWindTranslated() && !windCompareOn() && uberVertexOptions(sh, o)) o.uberDefines += "#define RVK_UBER_WIND_PREV 1\n";  // (compare mode: translated)
                     if (lodVs) {  // (the translated fallback of an ubershader build that failed needs it too)
                         o.inputOverrides.push_back({shader::Usage::BlendWeight, 1,
                                                     std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});

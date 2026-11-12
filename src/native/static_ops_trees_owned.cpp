@@ -376,7 +376,7 @@ void StaticOps::treeCompEnd(const Op& op) {
                         spdlog::error("native: owned trees: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template ({})", describe(op), d.treeKey, what);
                     }
                 }
-                if (!same || texMoved || ot->second->stale || ot->second->r.cd->v.scenePending) {
+                if (!same || texMoved || ot->second->stale || ot->second->r.cd->v.scenePending || dev_.windStale(*ot->second->r.cd, true)) {  // (14.42: or a template without the wind-motion form it can have now)
                     // replaced below
                 } else {
                     treeMissCheck(*old, *ot->second, solid);

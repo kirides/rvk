@@ -259,7 +259,7 @@ struct RvkVsOut {
 #ifdef RVK_SCENE_RECORD
     [[vk::location(14)]] nointerpolation uint rvk_sceneIdx : VARY14;  // abi.h kSceneVaryingLocation: the DrawRecord index (scene variant)
 #endif
-#ifdef RVK_UBER_BONE_PREV
+#if defined(RVK_UBER_BONE_PREV) || defined(RVK_UBER_WIND_PREV)
     [[vk::location(15)]] float4 rvk_prevWorld : VARY15;  // enh::kPrevWorldLocation: the previous frame's world position (bone-history motion, 0 = none)
 #elif !defined(__spirv__)
     [[vk::location(15)]] float4 rvk_vPad15 : VARY15;
@@ -831,6 +831,32 @@ float4 rvkUberBonePrev(float4 trWorld) {
     return r;
 }
 #endif
+#ifdef RVK_UBER_WIND_PREV
+// Tree / grass wind motion in the port (native.tree_motion + debug.ubershader, frame-ownership.md 14.42). The port's own Transform (XFX_SPEEDTREE: the wind matrices c14..c22,
+// the leaf angle matrix c23..c25, the rock / rustle angles c26..c29; XFX_VEGETATION: the clock / wind c12: all in VS window 1, which RVK_WIND_PREV lets rvk_vsw1Ov redirect)
+// runs on THIS frame's window 1 and on the previous frame's (the record's / push block's prevVs = a block of the previous frame's c12..c30, 0 = none), both in one loop
+// body so a vertex the wind does not move gives a displacement of exactly 0. The previous world position = the translated clip position's world point (`trWorld`)
+// plus that displacement; the clip position stays the translated one (RVK_UBER_TRPOS): bit-identical to the z pass of the same geometry.
+float4 rvkUberWindPrev(float4 trWorld) {
+    float4 r = float4(0.0, 0.0, 0.0, 0.0);
+    const uint2 ref = rvkDrawPrevVs();
+    const bool has = any(ref != uint2(0u, 0u));
+    const uint2 prev = has ? ref : rvkVsWin(1u);  // (never the zero pair: a load hoisted above the test stays in a live buffer)
+    if (has && trWorld.w == 1.0) {
+        float3 w0 = float3(0.0, 0.0, 0.0), w1 = float3(0.0, 0.0, 0.0);
+        [loop] for (uint k = 0u; k < 2u; ++k) {
+            rvk_vsw1Ov = k == 0u ? uint2(0u, 0u) : prev;
+            float3 wp, wn, wt, wb;
+            Transform(wp, wn, wt, wb);
+            if (k == 0u) w0 = wp;
+            else w1 = wp;
+        }
+        rvk_vsw1Ov = uint2(0u, 0u);
+        if (any(w1 != w0)) r = float4(trWorld.xyz + (w1 - w0), 1.0);
+    }
+    return r;
+}
+#endif
 RvkVsOut rvkUberFromTr(rvkTr::RvkVsIn t) {
     RvkVsIn p = (RvkVsIn)0;
 #ifdef RVK_LOC_aPos
@@ -907,6 +933,9 @@ RvkVsOut rvkUberFromTr(rvkTr::RvkVsIn t) {
     o.position = tr.position;
 #ifdef RVK_UBER_BONE_PREV
     o.rvk_prevWorld = rvkUberBonePrev(tr.rvk_prevWorld);
+#endif
+#ifdef RVK_UBER_WIND_PREV
+    o.rvk_prevWorld = rvkUberWindPrev(tr.rvk_prevWorld);
 #endif
     return o;
 }

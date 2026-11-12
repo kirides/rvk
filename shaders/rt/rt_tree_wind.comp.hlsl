@@ -14,6 +14,7 @@
 // (native.tree_wind=compare): a job may carry the vertex shader capture of the same instance; slots it wrote are compared (max error, counts).
 
 #include "rvk_common.hlsli"
+#include "rvk_tree_wind.hlsli"  // (the position math, shared with native.tree_motion's compare: frame-ownership.md 14.42)
 
 struct TreeWindPush {
     RVK_PASS_PUSH_HEADER
@@ -68,28 +69,6 @@ float4 twAttr(RvkAddr vertex, uint word) {
     }
 }
 
-// the job's constants: index 0..15 = c14..c29, 16..19 = c32..c35; any other register the shader would read is outside them (0, as the port's vsC for registers it
-// does not hold: the wind index / leaf angle index of a real vertex stays inside)
-float4 twC(RvkAddr consts, int i) {
-    if (i < 0 || i >= 20) return float4(0.0, 0.0, 0.0, 0.0);
-    return rvkRawLoad<float4, 16>(rvkAddrAdd(consts, uint(i) * 16u));
-}
-// c(reg) of the vertex shader for reg in 14..29
-float4 twReg(RvkAddr consts, int reg) { return reg >= 14 && reg <= 29 ? twC(consts, reg - 14) : float4(0.0, 0.0, 0.0, 0.0); }
-
-float3x3 twRotX(float a) {
-    float2 sc = float2(sin(a), cos(a));
-    return float3x3(float3(1.0, 0.0, 0.0), float3(0.0, sc.y, -sc.x), float3(0.0, sc.x, sc.y));
-}
-float3x3 twRotY(float a) {
-    float2 sc = float2(sin(a), cos(a));
-    return float3x3(float3(sc.y, 0.0, sc.x), float3(0.0, 1.0, 0.0), float3(-sc.x, 0.0, sc.y));
-}
-float3x3 twRotZ(float a) {
-    float2 sc = float2(sin(a), cos(a));
-    return float3x3(float3(sc.y, -sc.x, 0.0), float3(sc.x, sc.y, 0.0), float3(0.0, 0.0, 1.0));
-}
-
 [numthreads(64, 1, 1)]
 void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     RvkAddr table = rvkAddr(pc.table);
@@ -112,35 +91,21 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     float4 inPos = twAttr(v, j3.x);
     int windIndex = int(twAttr(v, j3.y).x);  // (the port: int4(BLENDINDICES0); UBYTE4 = the byte values)
     float4 w0 = twAttr(v, j3.z);
-    // wind (mulWindMatrix: the 3x3 with the columns c(14 + 3 i), c(15 + 3 i), c(16 + 3 i), v * M)
-    float3 windPos = float3(dot(inPos.xyz, twReg(k, 14 + 3 * windIndex).xyz), dot(inPos.xyz, twReg(k, 15 + 3 * windIndex).xyz), dot(inPos.xyz, twReg(k, 16 + 3 * windIndex).xyz));
-    float4 position = inPos;
-    position.xyz = lerp(inPos.xyz, windPos, w0.x);
-
-    float3 offset = float3(0.0, 0.0, 0.0);
     uint cls = j2.y;
+    // the job's constants: index 0..15 = c14..c29, 16..19 = c32..c35
+    RvkTreeWindConsts kc;
+    [unroll] for (uint i = 0u; i < 20u; ++i) kc.k[i] = rvkRawLoad<float4, 16>(rvkAddrAdd(k, i * 16u));
+    float4 w1 = float4(0.0, 0.0, 0.0, 1.0), w2 = float4(0.0, 0.0, 0.0, 1.0);
+    float3 n1 = float3(0.0, 0.0, 0.0), n2 = float3(0.0, 0.0, 0.0);
     if (cls != 0u) {
-        float4 w1 = twAttr(v, j3.w);
-        float4 w2 = twAttr(v, j4.x);
-        float4 inst = twC(k, 16);  // c32 of the instance (g_vInstanceData(vInstance * 4))
-        float2 rockAndRustle = inst.xy * twReg(k, 26 + int(w2.w)).xy;
+        w1 = twAttr(v, j3.w);
+        w2 = twAttr(v, j4.x);
         if (cls == 1u) {
-            // leaf mesh: placement using SpeedWind leaf rocking
-            float3 n1 = twAttr(v, j4.y).xyz, n2 = twAttr(v, j4.z).xyz;
-            float3x3 meshMatrix = float3x3(n1, -cross(n1, n2), n2);
-            offset = mul(twRotX(rockAndRustle.x), w2.xyz);
-            offset = mul(meshMatrix, offset);
-        } else {
-            // leaf cards
-            offset = float3(w1.yx * w2.yz, 0.0);
-            offset = mul(twRotZ(w1.w + rockAndRustle.x), offset);
-            offset = mul(twRotY(w1.z + rockAndRustle.y), offset);
-            // g_vLeafAngleMatrix = the 3x3 with the columns c23, c24, c25: M * v
-            offset = twReg(k, 23).xyz * offset.x + twReg(k, 24).xyz * offset.y + twReg(k, 25).xyz * offset.z;
+            n1 = twAttr(v, j4.y).xyz;
+            n2 = twAttr(v, j4.z).xyz;
         }
     }
-    float4 r0 = twC(k, 17), r1 = twC(k, 18), r2 = twC(k, 19);
-    float3 world = float3(dot(position, r0), dot(position, r1), dot(position, r2)) + offset;
+    float3 world = rvkTreeWindWorld(kc, inPos, windIndex, w0, w1, w2, n1, n2, cls);
     float4 tc = j4.w == TW_ABSENT ? float4(0.0, 0.0, 0.0, 0.0) : twAttr(v, j4.w);
 
     uint2 refAddr = j2.zw;
