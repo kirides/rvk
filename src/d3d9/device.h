@@ -1364,7 +1364,7 @@ public:
     // 1 = the bone forms, 0 = not, -1 = not decidable here (not such a draw / the window unknown)
     int boneFormsNow(const CachedDraw& c, rhi::GpuRef win2, OwnedWindows::Kind win2Kind, bool gbufTaken) const;
     // a retained main solid tree / grass draw that has no wind-motion form while its forms are built now: made again (replayBuild, the owned templates)
-    bool windStale(const CachedDraw& c, bool v2) const;
+    bool windStale(const CachedDraw& c, bool v2);
     struct BoneDeriveStats {
         std::uint64_t refusedGained = 0, refusedLost = 0;  // records without the forms whose window has a history now / with the forms whose window has none
     } boneDeriveStats;

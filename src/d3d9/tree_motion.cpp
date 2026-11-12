@@ -228,13 +228,18 @@ rhi::GpuRef Device::windPrev(int kind) {
     return h.block;
 }
 
-bool Device::windStale(const CachedDraw& c, bool v2) const {
+bool Device::windStale(const CachedDraw& c, bool v2) {
     if (windMode_ == 0 || windKindOf(c.kind) < 0 || c.phase.view != scene::View::Main || c.phase.pass != scene::Pass::Solid || !c.v.gbufWanted || gbuf_.motion == nullptr ||
         c.vs == nullptr || c.ps == nullptr) {
         return false;
     }
     if ((v2 ? c.windPipeline2 : c.windPipeline) != GamePipeline::None) return false;
-    const auto built = [](const Shader& s, VariantSlot v) { return s.variantState[static_cast<std::size_t>(v)].load(std::memory_order_acquire) == 2; };
+    // (a form never requested is requested here: a draw retained while the stage was off (a run-time switch-on) reaches no sceneDecide / prepareDraw that would)
+    const auto built = [this](const Shader& s, VariantSlot v) {
+        const std::uint8_t st = s.variantState[static_cast<std::size_t>(v)].load(std::memory_order_acquire);
+        if (st == 0) (void)variant(ShaderRef(const_cast<Shader*>(&s)), v);
+        return st == 2;
+    };
     const VariantSlot fs = gbufferSlot(true);
     if (v2) {
         const VariantSlot fs2 = sceneView2Of(sceneSlotOf(fs));
