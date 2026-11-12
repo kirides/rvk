@@ -37,6 +37,11 @@ public:
     Registers registersRead() const override { return Registers::Material; }  // F-VAR (frame-ownership.md 7.44): reads the object window (c31..c37, a rigid draw's placement) and asks for vertex captures (an owned draw that is captured is composed late)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
     void bufferChanged(std::uint64_t bufferId) override;
+    // 14.44 (frame-ownership.md; native.ordered_bulk): the ordered owned draws whose motion is covered (the bone-motion forms, an instance row window: observe() only counts
+    // them) come in bulk, without their registers; a draw it would capture stays per draw (bulkOrderedDraw false)
+    bool bulkOrdered() const override { return true; }
+    bool bulkOrderedDraw(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
+    void observeOwned(d3d9::Device& device, const d3d9::OwnedFrame& frame) override;
 
 private:
     struct State {

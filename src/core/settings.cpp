@@ -2800,6 +2800,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOrderedBulk = &reg.add({
+        .key = "native.ordered_bulk",
+        .label = "Native frame: ordered draws to the observers in bulk",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, with owned ordered draws (frame-ownership.md 14.44): the ordered owned draws are shown to the draw observers that can take them in bulk (the RT "
+                       "scene, object motion) once per op with their run / position, instead of one by one; the RT scene learns what it needs of the alpha list's blended meshes "
+                       "from the retained draw alone (no registers), every 10th frame it observes them in full and compares (rvk.log `rt: scene ordered bulk (5 s)`: DIFFERING must "
+                       "stay 0). Off = every ordered draw is observed per draw. rvk.log `native: ordered observers (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_ordered", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedBillboards = &reg.add({
         .key = "native.owned_billboards",
         .label = "Native frame: owned tree billboards",

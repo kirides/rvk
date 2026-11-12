@@ -618,6 +618,13 @@ public:
     // windows with the batch's lighting entry loaded into the register file, instances = the batch's count); it must not need a vertex capture for these draws
     virtual bool ownedVegOk() const { return false; }
     virtual void observeOwned(Device& device, const OwnedFrame& frame);
+    // 14.44 (frame-ownership.md; native.ordered_bulk): the bulk contract for the ORDERED owned draws (native.owned_ordered: the solid list's blended / no-z-write draws, the alpha /
+    // refracted lists' mesh ops), which are drawn at their op's place in the engine's order. An observer that returns true is not shown them one by one: observeOwned gets them once
+    // per op (OwnedFrame::ordered, list / run / position of every draw: the order), `entered` / `left` per list segment. Unlike the plain static contract the draws may blend,
+    // write no depth, be instanced; bulkOrderedDraw is asked per draw (inside the draw's device state: tag, windows, the motion flags) before it is queued: false = this draw is
+    // shown per draw (an observer that would ask a capture of it)
+    virtual bool bulkOrdered() const { return false; }
+    virtual bool bulkOrderedDraw(Device& /*device*/, const ReplaceQuery& /*query*/) { return true; }
 };
 
 // The ray tracing scene of the frame, for the FrameBlock (shader/abi.h FrameBlock::rtScene / rtInfo): valid only in the
@@ -1037,6 +1044,22 @@ public:
     bool sceneOrdered() const { return sceneOrdered_; }
     // (an ordered owned draw: the bulk observers' contract (plain opaque static draws) does not hold; its observers see it per draw)
     void setOwnedBulkSuspended(bool on) { ownedBulkSuspended_ = on; }
+    // 14.44 (native.ordered_bulk): the bulk contract for ordered owned draws (DrawObserver::bulkOrdered). StaticOps::orderedPlace brackets each op: ownedOrderedOp (the op's run
+    // ordinal and its first draw's position in the run) before its draws are observed, ownedOrderedDeliver once they are all queued (the op's record views to the bulk
+    // observers, inside the op's saved device state) or ownedOrderedDrop when the op is composed instead; ownedOrderedSegment / ownedOrderedEnd bracket a list segment (the
+    // `left` ids against the previous segment of that list go with the end). Off = every ordered draw is shown per draw (the 14.22 path)
+    void setOrderedBulk(bool on) { ordBulkOn_ = on; }
+    bool orderedBulk() const { return ordBulkOn_; }
+    std::uint64_t orderedBulkTotal() const { return ordBulkTotal_; }  // (record views delivered since the start: the stage line)
+    void ownedOrderedSegment(std::uint8_t list, std::uint32_t segment);
+    void ownedOrderedEnd();
+    void ownedOrderedOp(std::uint32_t run, std::uint32_t pos);
+    void ownedOrderedDeliver();
+    void ownedOrderedDrop();
+    struct OrderedBulkStats {
+        std::uint64_t draws = 0, bulk = 0, perDraw = 0, perDrawReplacer = 0, refusedByObserver = 0, ops = 0, delivers = 0, dropped = 0, entered = 0, left = 0, segments = 0;
+        std::uint64_t observeNs = 0, deliverNs = 0;  // (with -Perf: ownedObserve of the ordered draws, the deliveries)
+    } ordBulkStats;
     // F9 / F14: a run of ordered owned draws is pending (consecutive ordered ops of a list, one flush for all): anything else the device records first queues the run
     // (submitInterned, flushBatch: every draw, clear, scope end, copy), so the run stays at its place in the frame. `fn(ctx)` queues it (and clears the flag)
     using OrderedHook = void (*)(void*);
@@ -1427,6 +1450,10 @@ public:
         std::uint64_t sig = 0, epoch = 0;
         bool entered = false;      // not in the previous pass of this kind
         bool changed = false;
+        // 14.44 ordered draws: the list (1 solid, 2 refracted, 3 alpha; 0 = a plain static pass), the run's ordinal in its list segment, the draw's position in the run (its
+        // indirect command order), the draw's ordinal among the segment's ordered draws (the place in the list)
+        std::uint8_t list = 0;
+        std::uint32_t run = 0, pos = 0, seq = 0;
     };
     // a pass of persistent owned draws begins (z pre-pass / solid): the bulk list and the entered / left bookkeeping of the pass kind; ownedBulkFlush delivers the draws added so far
     // (`last` = the end of the pass: the `left` list goes with it). Called before an op is composed late (its record may be dropped) and at the pass's end
@@ -2117,10 +2144,23 @@ private:
     float ownedRegSnapVs_[kVsFloatConsts][4]{};
     float ownedRegSnapPs_[kPsFloatConsts][4]{};
     std::vector<OwnedRecordView> ownedBulk_;
-    std::vector<std::uint32_t> ownedBulkIds_[2];        // this pass's ids per kind (z, solid): the next pass's `left` is made from them
-    std::vector<std::uint32_t> ownedBulkPrevIds_[2];
-    std::vector<std::uint32_t> ownedBulkSeen_[2];       // per id: the serial of the last pass that held it
-    std::uint32_t ownedBulkSerial_[2] = {0, 0}, ownedBulkPrevSerial_[2] = {0, 0};
+    // per kind: 0 z, 1 solid (the plain static passes), 2 + list - 1 the ordered list segments (14.44: solid, refracted, alpha)
+    static constexpr std::size_t kBulkKinds = 5;
+    std::vector<std::uint32_t> ownedBulkIds_[kBulkKinds];        // this pass's ids per kind: the next pass's `left` is made from them
+    std::vector<std::uint32_t> ownedBulkPrevIds_[kBulkKinds];
+    std::vector<std::uint32_t> ownedBulkSeen_[kBulkKinds];       // per id: the serial of the last pass that held it
+    std::uint32_t ownedBulkSerial_[kBulkKinds] = {}, ownedBulkPrevSerial_[kBulkKinds] = {};
+    // 14.44: the ordered op being observed (ownedOrderedOp .. Deliver / Drop) and its record views
+    bool ordBulkOn_ = true;
+    std::uint64_t ordBulkTotal_ = 0;
+    struct OrdCtx {
+        bool open = false, active = false;
+        std::uint8_t list = 0;
+        std::uint32_t segment = 0, run = 0, pos = 0, seq = 0;
+    } ordCtx_;
+    std::vector<OwnedRecordView> ordBulk_;
+    void bulkPassBegin(std::uint32_t k);
+    void bulkLeft(std::uint32_t k);
     std::vector<std::uint32_t> ownedBulkLeft_;
     std::uint32_t ownedBulkKind_ = 0;
     void blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], rhi::Texture& dst,
@@ -2796,6 +2836,10 @@ struct OwnedFrame {
     std::size_t leftCount = 0;
     bool last = false;                    // the end of the pass (the `left` list is complete)
     std::uint32_t observerBit = 0;        // this observer's bit in OwnedRecordView::wanted
+    // 14.44: ordered owned draws (DrawObserver::bulkOrdered): the draws of ONE op at its place (records in the run's order), `last` = the list segment ended
+    bool ordered = false;
+    std::uint8_t list = 0;                // 1 solid, 2 refracted, 3 alpha
+    std::uint32_t segment = 0;            // the list segment's serial (a view's list = one segment)
 };
 
 }  // namespace rvk::d3d9

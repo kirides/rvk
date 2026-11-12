@@ -2231,6 +2231,40 @@ struct BulkTestObserver final : DrawObserver {
     }
 };
 
+// 14.44: an ordered bulk observer (DrawObserver::bulkOrdered): logs every observation (the draw's base vertex = which quad, blending, pass, the query's tag / object rows, a
+// loaded register) in the order it happens, per draw or from its bulk calls (the default observeOwned loop); keeps the ordered record views it was given
+struct OrderedTestObserver final : DrawObserver {
+    bool bulk = true, inBulk = false;
+    std::int32_t refuseFirst = -1;  // bulkOrderedDraw refuses the draw of this base vertex
+    int calls = 0, lastCalls = 0, left = 0, immediate = 0;
+    std::vector<std::uint64_t> perDrawLog;
+    std::vector<Device::OwnedRecordView> views;
+    bool observes(draws::Kind kind, scene::Phase phase) const override { return kind == draws::Kind::StaticMesh && phase.view == scene::View::Main; }
+    void observe(Device& d, const ReplaceQuery& q) override {
+        if (!inBulk) ++immediate;
+        std::uint32_t reg = 0;
+        std::memcpy(&reg, d.vsConstant(33), 4);
+        perDrawLog.push_back(static_cast<std::uint64_t>(static_cast<std::uint32_t>(q.baseVertex) & 0xffffu) | (static_cast<std::uint64_t>(q.blending) << 16) |
+                             (static_cast<std::uint64_t>(q.phase.pass) << 17) | (static_cast<std::uint64_t>(q.tag != nullptr) << 24) | (static_cast<std::uint64_t>(q.objectRows != nullptr) << 25) |
+                             (static_cast<std::uint64_t>(reg) << 32));
+    }
+    Registers registersRead() const override { return Registers::Material; }
+    bool bulkOrdered() const override { return bulk; }
+    bool bulkOrderedDraw(Device&, const ReplaceQuery& q) override { return q.baseVertex != refuseFirst; }
+    void observeOwned(Device& d, const OwnedFrame& f) override {
+        if (!f.ordered) return;
+        ++calls;
+        if (f.last) ++lastCalls;
+        left += static_cast<int>(f.leftCount);
+        for (std::size_t i = 0; i < f.count; ++i) {
+            if ((f.records[i].wanted & f.observerBit) != 0) views.push_back(f.records[i]);
+        }
+        inBulk = true;
+        DrawObserver::observeOwned(d, f);
+        inBulk = false;
+    }
+};
+
 // F2c-4a persistent owned draws through the device's own path (frame-ownership.md 7.21): the eight quads of the v2 case, each owned draw a SLOT of the real
 // gpuscene::drawrecords() tables (derived once by Device::ownedDerive, written by DrawRecordTable::write, uploaded by its flush) and drawn by Device::ownedFlush as
 // indirect draws over a CPU-written ref list. Checked against the normal draws (0 bytes differ): (1) one bucket = one indirect call over eight slots; (2) the same
@@ -2769,6 +2803,97 @@ mov oC0, r0
         dev.phases().pop();
         std::printf("  owned bulk observers: %llu flushes, %llu records, %llu entered, %llu left\n", static_cast<unsigned long long>(dev.ownedBulkStats.flushes), static_cast<unsigned long long>(dev.ownedBulkStats.records),
                     static_cast<unsigned long long>(dev.ownedBulkStats.entered), static_cast<unsigned long long>(dev.ownedBulkStats.left));
+    }
+    // 7a. 14.44 (native.ordered_bulk): ORDERED owned draws in bulk. One alpha-list segment of four ops (draws {0, 1} {2} {3, 4} {5, 6, 7}; the third op is composed instead:
+    // its views are dropped) is observed per draw (bulk off) and in bulk: the observer's state (the draws it observed, in order, with their queries) is the same; the bulk
+    // views carry list / run / position / ordinal; a second segment without draws 6, 7 reports them `left`, the others not `entered`; a draw the observer refuses per draw
+    // (bulkOrderedDraw) is shown at once and not in the bulk call
+    {
+        OrderedTestObserver obs;
+        dev.addDrawObserver(&obs);
+        begin();
+        OwnedWindows ows[kQuads];
+        for (auto& w : ows) w = windowsOf(3);
+        struct OpDef {
+            std::uint32_t first, count, run, pos;
+            bool composed;
+        };
+        const OpDef ops[] = {{0, 2, 0, 0, false}, {2, 1, 0, 2, false}, {3, 2, 0, 3, true}, {5, 3, 1, 0, false}};
+        const auto segment = [&](std::uint32_t serial, std::uint32_t upTo) {
+            dev.ownedOrderedSegment(3, serial);
+            for (const OpDef& op : ops) {
+                const std::size_t mark = obs.perDrawLog.size();
+                dev.ownedOrderedOp(op.run, op.pos);
+                dev.setOwnedBulkSuspended(true);
+                for (std::uint32_t k = op.first; k < op.first + op.count && k < upTo; ++k) {
+                    Device::OwnedObsInfo info;
+                    info.id = slots[k];
+                    info.sig = 100 + k;
+                    info.epoch = 7;
+                    if (!dev.ownedObserve(cd[k], ows[k], info)) {
+                        std::printf("  FAIL ordered bulk: an observer wanted a capture\n");
+                        ++g_failures;
+                    }
+                }
+                if (op.composed) {
+                    dev.ownedOrderedDrop();
+                    obs.perDrawLog.resize(mark);  // (the composition observes them again: not part of the compared state)
+                } else {
+                    dev.ownedOrderedDeliver();
+                }
+                dev.setOwnedBulkSuspended(false);
+            }
+            dev.ownedOrderedEnd();
+        };
+        // per draw: the reference state
+        dev.setOrderedBulk(false);
+        obs.bulk = false;
+        segment(1, kQuads);
+        const std::vector<std::uint64_t> reference = obs.perDrawLog;
+        const int bulkCallsOff = obs.calls;
+        // in bulk
+        obs.perDrawLog.clear();
+        dev.setOrderedBulk(true);
+        obs.bulk = true;
+        const std::uint64_t dropped0 = dev.ordBulkStats.dropped;
+        segment(2, kQuads);
+        bool good = bulkCallsOff == 0 && obs.perDrawLog == reference && reference.size() == 6 && obs.calls == 3 && dev.ordBulkStats.dropped == dropped0 + 1;
+        good = good && obs.views.size() == 6;
+        // the views: list 3, runs / positions / ordinals as the ops gave them, all entered (the first segment of the bulk kind after a per-draw one: nothing was seen)
+        static constexpr std::uint32_t kRun[6] = {0, 0, 0, 1, 1, 1}, kPos[6] = {0, 1, 2, 0, 1, 2}, kSeq[6] = {0, 1, 2, 5, 6, 7};
+        for (std::size_t i = 0; good && i < 6; ++i) {
+            const auto& v = obs.views[i];
+            good = v.list == 3 && v.run == kRun[i] && v.pos == kPos[i] && v.seq == kSeq[i] && v.entered;
+        }
+        // (the composed op's two draws took ordinals 3 / 4: the ordinal is the place among the segment's ordered draws, composed ones included)
+        // a second bulk segment without quads 6, 7: they are `left`, nothing entered
+        obs.views.clear();
+        obs.perDrawLog.clear();
+        obs.left = obs.lastCalls = 0;
+        segment(3, 6);
+        good = good && obs.left == 2 && obs.lastCalls == 1 && obs.views.size() == 4;
+        for (const auto& v : obs.views) good = good && !v.entered;
+        // a draw the observer refuses for bulk (quad 1) is shown per draw at once, the rest of its op in bulk
+        obs.views.clear();
+        obs.perDrawLog.clear();
+        obs.immediate = 0;
+        obs.refuseFirst = static_cast<std::int32_t>(cd[1].query.baseVertex);
+        segment(4, kQuads);
+        good = good && obs.views.size() == 5 && obs.perDrawLog.size() == 6 && obs.immediate == 1;
+        obs.refuseFirst = -1;
+        if (!good) {
+            std::printf("  FAIL ordered bulk: per draw %zu observations, in bulk %zu (equal %d), bulk calls %d (off %d), views %zu, left %d, last calls %d, immediate %d, dropped %llu\n", reference.size(),
+                        obs.perDrawLog.size(), obs.perDrawLog == reference, obs.calls, bulkCallsOff, obs.views.size(), obs.left, obs.lastCalls, obs.immediate,
+                        static_cast<unsigned long long>(dev.ordBulkStats.dropped - dropped0));
+            ++g_failures;
+        }
+        dev.setOrderedBulk(true);
+        dev.removeDrawObserver(&obs);
+        dev.phases().pop();
+        std::printf("  ordered bulk observers: %llu ordered draws, %llu in bulk, %llu per draw, %llu ops delivered, %llu dropped, %llu entered, %llu left\n",
+                    static_cast<unsigned long long>(dev.ordBulkStats.draws), static_cast<unsigned long long>(dev.ordBulkStats.bulk), static_cast<unsigned long long>(dev.ordBulkStats.perDraw),
+                    static_cast<unsigned long long>(dev.ordBulkStats.delivers), static_cast<unsigned long long>(dev.ordBulkStats.dropped), static_cast<unsigned long long>(dev.ordBulkStats.entered),
+                    static_cast<unsigned long long>(dev.ordBulkStats.left));
     }
     // 7. F9 / F14 (frame-ownership.md 14.20, native.owned_ordered): blended draws whose result depends on their order (four quads over the same pixels, alpha blending, two pixel
     // shaders = two pipelines alternating A B A B): with setSceneOrdered they get their scene forms although they are not batchable (CachedDraw::ordered); an ORDERED flush keeps

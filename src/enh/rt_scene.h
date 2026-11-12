@@ -178,6 +178,10 @@ public:
     // draw, signature and env epoch are unchanged, whose entry is alive and whose slot has not moved is skipped without a lookup (the F8-2 hand-over)
     bool bulkOwned() const override { return tableOn_ && active_; }
     void observeOwned(d3d9::Device& device, const d3d9::OwnedFrame& frame) override;
+    // 14.44 (frame-ownership.md; native.ordered_bulk): the ordered owned draws (blended terrain layers, no-z-write draws, the alpha / refracted lists' meshes) come once per op;
+    // a draw whose observation needs no register (the alpha list's blended meshes: only "this range is drawn blended" is learned; opaque cut-outs of the alpha list; water) is
+    // done from the retained query alone, the rest (the solid list's layers: their BLAS material per instance; no-z-write opaque draws: the F8-1 scripts) takes the long way
+    bool bulkOrdered() const override { return active_; }
     // F4-3 (frame-ownership.md 7.25b): the owned SpeedTree runs are shown to observe() through Device::ownedTreeObserve (rows in c32 + 4 i, one batch of <= 50 instances per call) as the
     // composed batches were; only the animated trees (their vertex capture needs the composed draw) keep them composed
     // (F4-5: with native.tree_wind the animated trees need no capture either: the compute pass takes them from the owned runs' observations)
@@ -327,7 +331,12 @@ private:
     void learnExcluded(const d3d9::ReplaceQuery& q, bool water);  // water / alpha-blended meshes of the main view
     // the material of the draw `q` for the BLAS (0 = none / not eligible) and the draw's rank: 4 the main view's opaque
     // solid draw, 3 its alpha-over blended solid layers (the terrain), 2 its z pre-pass, 1 the cascades
-    std::uint32_t materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, std::uint8_t& rank, bool& overlay);
+    // `noResolve` (14.44's fast layers): where the material would be resolved (it reads the draw's registers) nothing is changed, *noResolve = true and 0 is returned
+    std::uint32_t materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, std::uint8_t& rank, bool& overlay, bool* noResolve = nullptr);
+    // the solid pass's blended layer over a BLAS: its material for the draw's instances (observe; 14.44's fast path with `rowsFrom` = the owned record's window images instead of
+    // the register file: false = it would need the registers (a row outside the windows, a material resolve), nothing changed). `keys` (optional) collects the instance keys
+    // `apply` false = only the instance keys of the rows (verify: nothing changes)
+    bool layerMaterial(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const d3d9::OwnedWindows* rowsFrom, std::vector<std::uint64_t>* keys, bool apply = true);
     // an instance takes it: the best rank wins, the first eligible draw per frame and rank (layers keep their base)
     static void applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::uint8_t rank, bool overlay, std::uint64_t frame);
     const RtMaterial* bestMaterial(const Blas& b) const;
@@ -737,6 +746,26 @@ private:
     struct BulkStats {
         std::uint64_t calls = 0, records = 0, entered = 0, left = 0, skipped = 0, slow = 0, covered = 0, observed = 0;
     } bs_;
+    // 14.44: the ordered owned draws in bulk (observeOrdered). The outcome of observe() for such a draw, as the classifier predicts it from the retained query (kOrdFull = the long
+    // way) and as the observation reached it (ordProbe_: verify frames run both and compare)
+    enum OrdOutcome : int { kOrdNothing = 0, kOrdExclBlended = 1, kOrdExclWater = 2, kOrdFull = 3, kOrdLayer = 4, kOrdOpaque = 5, kOrdOutcomes = 6 };
+    int ordClassify(const d3d9::ReplaceQuery& q);
+    void observeOrdered(d3d9::Device& dev, const d3d9::OwnedFrame& f);
+    void logOrdered(double frames);
+    int* ordProbe_ = nullptr;
+    std::vector<std::uint64_t>* ordKeys_ = nullptr;  // (verify: the instance keys the long way's layer took)
+    std::vector<std::uint64_t> ordKeysA_, ordKeysB_;
+    d3d9::ReplaceQuery ordQ_;
+    rt::BlasKey ordKey_{};
+    Blas* ordBlas_ = nullptr;
+    struct OrdBulkStats {
+        std::uint64_t calls = 0, records = 0, entered = 0, left = 0, fast[kOrdOutcomes] = {}, layerFallback = 0, full = 0, covered = 0, observed = 0, verified = 0, differing = 0;
+        std::uint64_t by[kOrdOutcomes] = {};  // (the long way's outcomes)
+        double ms = 0.0;
+    } ob_;
+    int ordDiffLogged_ = 0;
+    std::uint64_t layerWhy_[2] = {};
+    std::uint64_t matPath_[6] = {};  // (diagnostics: materialOf's paths: memo, slot, refresh due, no slot, slot material gone, dead)
     static std::uint8_t tableClass(d3d9::scene::Phase p);
     static std::uint64_t tableKey(const void* entity, std::uint32_t opDesc, std::uint32_t first, std::uint32_t primitives);
     void tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Registry::Instance& in, const rt::Rows& rows, bool fresh,
@@ -745,7 +774,7 @@ private:
     void tableErase(std::unordered_map<std::uint64_t, TableEntry, IdHash>::iterator it, bool unpin);
     void tableInstanceRemoved(std::uint64_t instKey);
     void tableClear();
-    void logTable(double frames);
+    void logTable(double frames);  // (+ logOrdered)
     bool tableCompareFrame(std::uint64_t frame) const { return tableCompare_ && frame % kTableCompare == 0 && !gpuscene::checksOff(); }
     static constexpr std::uint64_t kTableRelearn = 32;  // frames: a covered draw is observed again (<= half of the materials' refresh period)
     static constexpr std::uint64_t kTableCompare = 10;  // frames between check frames
