@@ -84,7 +84,7 @@ public:
 
     // the pipeline cache (create() after the bindless set exists; destroyed with the device)
     bool create(Context& ctx, VkPipelineLayout layout, const std::filesystem::path& cacheFile, bool libraries);
-    rhi::GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created = nullptr);
+    rhi::GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created = nullptr, bool wait = true);
     rhi::GamePipeline findPipeline(const PipelineDesc& desc) const;
     bool containsPipeline(const PipelineDesc& desc) const;
     void prewarmPipeline(const PipelineDesc& desc);

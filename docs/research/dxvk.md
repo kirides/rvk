@@ -48,7 +48,8 @@ Cold pipeline state (`pipelines.bin` / `pipelines.keys` deleted), rvkcompare `ju
 The AMD compiler crash that disabled libraries (2 fragment libraries, driver of 2026-10, performance.md 6) does not reproduce
 with driver 26.10.1 (`rvk_vktest --gpl-corpus`, 2561 modules, both recipes). Turning `[vulkan] pipeline_libraries` on by
 default (or per driver version) is open: a player on an older AMD driver could still hit the crash. Test switch:
-`run.ps1 -PipelineLibraries` (+ `-Environment 'RVK_GPL_RECIPE=lto'`).
+`run.ps1 -PipelineLibraries` (+ `-Environment 'RVK_GPL_RECIPE=lto'`). **Done 2026-11-12**: on by default, off on AMD
+drivers before 26.10.1; the draw path never compiles a pipeline (performance.md 6); `run.ps1 -NoPipelineLibraries` = off.
 
 ## 3. Candidates not done (ranked)
 

@@ -669,7 +669,8 @@ struct DeviceOptions {
     bool offscreen = false;          // no swapchain (tests)
     std::uint32_t logDraws = 0;      // log the first N draws in detail
     bool perf = false;               // [debug] perf: GPU timestamps + CPU timings (Device::takePerf)
-    bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (off: AMD driver crash, vk/pipeline_library.cpp)
+    bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (the game: on where PipelineCache::librariesAllowed; vk/pipeline_library.cpp)
+    bool backgroundPipelines = false;  // the game: a draw whose pipeline is not made yet is skipped, never compiled on the render thread (tests: synchronous)
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
     bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (GameDeviceOptions)
     bool frameGenQueues = false;     // framegen.mode != off at start: the extra queues of the frame generation swapchain

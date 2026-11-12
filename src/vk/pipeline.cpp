@@ -91,7 +91,12 @@ bool PipelineCache::create(Context& ctx, VkPipelineLayout layout, const std::fil
         }
     }
     spdlog::info("vulkan: pipeline cache {} ({} KiB loaded)", file_.string(), blob.size() / 1024);
-    if (libraries && librariesSupported(ctx)) {
+    std::string why;
+    if (!libraries) {
+        spdlog::info("vulkan: pipeline libraries off ([vulkan] pipeline_libraries = false): new pipelines are built in the background, their draws wait");
+    } else if (!librariesAllowed(ctx, &why)) {
+        spdlog::info("vulkan: pipeline libraries not used ({}): new pipelines are built in the background, their draws wait", why);
+    } else {
         startLibraries();
         spdlog::info("vulkan: pipelines are linked from graphics pipeline libraries");
     }
@@ -188,6 +193,7 @@ void PipelineCache::destroy() {
         }
     }
     pipelines_.clear();
+    fastLinks_.clear();
     destroyLibraries();
     if (cache_ != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(ctx_->device(), cache_, nullptr);
@@ -220,12 +226,13 @@ void PipelineCache::prewarm(const PipelineDesc& desc, bool urgent) {
 std::size_t PipelineCache::HashOf::operator()(const PipelineDesc& d) const { return Hash{}(d); }
 bool PipelineCache::EqOf::operator()(const PipelineDesc& a, const PipelineDesc& b) const { return Eq{}(a, b); }
 
-void PipelineCache::prewarmOnce(const PipelineDesc& desc) {
+bool PipelineCache::prewarmOnce(const PipelineDesc& desc) {
     {
         const std::lock_guard lock(prewarmMutex_);
-        if (!prewarmRequested_.insert(desc).second) return;
+        if (!prewarmRequested_.insert(desc).second) return false;
     }
     prewarm(desc, true);  // a draw is waiting for it (skipped meanwhile): ahead of the pipelines known from earlier runs
+    return true;
 }
 
 void PipelineCache::prewarmWorker() {
@@ -245,7 +252,10 @@ void PipelineCache::prewarmWorker() {
             // claimed under the lock, built outside it: draws meanwhile find their pipelines, a get() of this one waits for it
             // instead of compiling it a second time (DXVK: parallel duplicate compiles are "problematic on some drivers")
             const std::lock_guard pl(mutex_);
-            claimed = !pipelines_.contains(d) && building_.insert(d).second;
+            const auto it = pipelines_.find(d);
+            // (a fast link is replaced by this whole build: the optimiser then skips it)
+            const bool missing = it == pipelines_.end() || fastLinks_.contains(it->second);
+            claimed = missing && building_.insert(d).second;
         }
         if (claimed) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -258,7 +268,7 @@ void PipelineCache::prewarmWorker() {
             }
             {
                 const std::lock_guard pl(mutex_);
-                if (p != VK_NULL_HANDLE) pipelines_.emplace(d, p);  // a failure is left to get(), which logs and caches it
+                if (p != VK_NULL_HANDLE) insertBuilt(d, p);  // a failure is left to get(), which logs and caches it
                 building_.erase(d);
             }
             builtCv_.notify_all();
@@ -310,18 +320,94 @@ VkPipeline PipelineCache::get(const PipelineDesc& desc, bool* created) {
     buildNs_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
                        std::memory_order_relaxed);
     lock.lock();
-    pipelines_.emplace(desc, p);  // also caches failures (VK_NULL_HANDLE) so they are logged once
+    VkPipeline result = p;
+    if (const auto [it, inserted] = pipelines_.emplace(desc, p); !inserted) {
+        // (a getNoWait link of the same description arrived meanwhile: keep that one)
+        if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx_->device(), p, nullptr);
+        result = it->second;
+        building_.erase(desc);
+        lock.unlock();
+        builtCv_.notify_all();
+        return result;
+    }
+    // (the map also caches failures (VK_NULL_HANDLE) so they are logged once)
+    if (linked) fastLinks_.insert(p);
     building_.erase(desc);
     lock.unlock();
     builtCv_.notify_all();
     if (linked) {
         {
             const std::lock_guard ol(optMutex_);
-            optQueue_.push_back(desc);
+            optQueue_.emplace_back(desc, p);
         }
         optCv_.notify_one();
     }
-    return p;
+    return result;
+}
+
+VkPipeline PipelineCache::getNoWait(const PipelineDesc& desc, bool* created) {
+    if (created != nullptr) *created = false;
+    {
+        const std::lock_guard lock(mutex_);
+        if (auto it = pipelines_.find(desc); it != pipelines_.end()) {
+            return it->second;
+        }
+    }
+    if (useLibraries_) {
+        // a fast link of libraries that exist: no shader compile here (the shaders' libraries are made on the shader workers;
+        // the vertex input / fragment output parts are a handful, made on their first use: a few ms once per format set)
+        const auto t0 = std::chrono::steady_clock::now();
+        VkPipeline p = link(desc, false, false);
+        if (p != VK_NULL_HANDLE) {
+            {
+                std::unique_lock lock(mutex_);
+                const auto [it, inserted] = pipelines_.emplace(desc, p);
+                if (!inserted) {
+                    // (another thread made it meanwhile: a prewarm build or a get)
+                    VkPipeline existing = it->second;
+                    lock.unlock();
+                    vkDestroyPipeline(ctx_->device(), p, nullptr);
+                    return existing;
+                }
+                fastLinks_.insert(p);
+            }
+            built_.fetch_add(1, std::memory_order_relaxed);
+            fastLinkedCount_.fetch_add(1, std::memory_order_relaxed);
+            buildNs_.fetch_add(static_cast<std::uint64_t>(
+                                   std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+                               std::memory_order_relaxed);
+            {
+                const std::lock_guard ol(optMutex_);
+                optQueue_.emplace_back(desc, p);
+            }
+            optCv_.notify_one();
+            if (created != nullptr) *created = true;
+            return p;
+        }
+    }
+    // not linkable now (no libraries, a shader library still compiling, a polygon mode without one): the prewarm workers
+    // build it whole; the draw is skipped until it exists
+    if (prewarmOnce(desc)) {
+        deferred_.fetch_add(1, std::memory_order_relaxed);
+        if (created != nullptr) *created = true;
+    }
+    return VK_NULL_HANDLE;
+}
+
+void PipelineCache::insertBuilt(const PipelineDesc& d, VkPipeline p) {
+    // under mutex_
+    auto it = pipelines_.find(d);
+    if (it == pipelines_.end()) {
+        pipelines_.emplace(d, p);
+        return;
+    }
+    if (fastLinks_.erase(it->second) > 0) {
+        // command buffers may still use the fast link: kept until destroy()
+        superseded_.push_back(it->second);
+        it->second = p;
+        return;
+    }
+    vkDestroyPipeline(ctx_->device(), p, nullptr);  // (an equal pipeline exists: never handed out)
 }
 
 VkPipeline PipelineCache::build(const PipelineDesc& d) {

@@ -540,7 +540,7 @@ GamePipeline D3D12DeviceImpl::findPipeline(const PipelineDesc& desc) {
     return it == entryIndex_.end() ? GamePipeline::None : static_cast<GamePipeline>(it->second);
 }
 
-GamePipeline D3D12DeviceImpl::resolvePipeline(const PipelineDesc& desc, bool* created) {
+GamePipeline D3D12DeviceImpl::resolvePipeline(const PipelineDesc& desc, bool* created, bool) {
     if (created != nullptr) *created = false;
     if (desc.vs == ShaderModule::None) return GamePipeline::None;  // (no pixel shader is valid: the colour-less z passes, native.depth_z / S-6)
     {

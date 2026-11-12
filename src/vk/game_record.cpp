@@ -60,8 +60,8 @@ bool GameRecord::create(Context& ctx, VkPipelineLayout layout, const std::filesy
     return pipelines_.create(ctx, layout, cacheFile, libraries);
 }
 
-rhi::GamePipeline GameRecord::resolvePipeline(const PipelineDesc& desc, bool* created) {
-    return rhiPipeline(pipelines_.get(desc, created));
+rhi::GamePipeline GameRecord::resolvePipeline(const PipelineDesc& desc, bool* created, bool wait) {
+    return rhiPipeline(wait ? pipelines_.get(desc, created) : pipelines_.getNoWait(desc, created));
 }
 
 rhi::GamePipeline GameRecord::findPipeline(const PipelineDesc& desc) const {

@@ -39,7 +39,7 @@
     void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) override;
     TimestampResult timestampCollect(std::uint32_t slot) override;
     bool createPipelineCaches(const std::filesystem::path& cacheFile, bool libraries) override;
-    GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created) override;
+    GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created, bool wait = true) override;  // (PSOs are always built in the background)
     GamePipeline findPipeline(const PipelineDesc& desc) override;
     bool pipelineContains(const PipelineDesc& desc) override { return findPipeline(desc) != GamePipeline::None; }
     void prewarmPipeline(const PipelineDesc& desc) override { resolvePipeline(desc, nullptr); }

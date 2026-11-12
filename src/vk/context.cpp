@@ -1,4 +1,5 @@
 #include "vk/context.h"
+#include "vk/pipeline.h"
 
 #include <algorithm>
 #include <cstring>
@@ -833,8 +834,12 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
     set(Cap::ExtendedDynamicState3, report_.extendedDynamicState3, features_.extendedDynamicState3,
         report_.extendedDynamicState3 ? "the needed blend / write-mask subset is missing" : "");
     set(Cap::VertexInputDynamicState, report_.vertexInputDynamicState, features_.vertexInputDynamicState, "");
-    set(Cap::GraphicsPipelineLibrary, report_.graphicsPipelineLibrary, features_.graphicsPipelineLibrary && pipelineLibrariesInUse,
-        features_.graphicsPipelineLibrary ? "off: config.toml [vulkan] pipeline_libraries (AMD driver crash, docs/PLAN.md M5)" : "");
+    {
+        std::string why;
+        const bool allowed = PipelineCache::librariesAllowed(*this, &why);
+        set(Cap::GraphicsPipelineLibrary, report_.graphicsPipelineLibrary, features_.graphicsPipelineLibrary && pipelineLibrariesInUse && allowed,
+            !features_.graphicsPipelineLibrary ? "" : !pipelineLibrariesInUse ? "off: config.toml [vulkan] pipeline_libraries = false" : !allowed ? why : "");
+    }
     set(Cap::Robustness2, report_.robustness2, features_.robustness2NullDescriptor, report_.robustness2 ? "no nullDescriptor" : "");
     set(Cap::MemoryBudget, report_.memoryBudget, features_.memoryBudget, "");
     set(Cap::DeviceFault, report_.deviceFault, features_.deviceFault, "");

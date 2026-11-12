@@ -1528,8 +1528,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         pipeline = findPipeline(pd);
         if (pipeline == GamePipeline::None) {
             bool created = false;
-            pipeline = game_->resolvePipeline(pd, &created);
-            if (created && pipeline != GamePipeline::None) {
+            // (backgroundPipelines: never a compile here: a fast link, or queued and skipped until built; created = first request)
+            pipeline = game_->resolvePipeline(pd, &created, !options_.backgroundPipelines);
+            if (created) {
                 recordPipelineKey(pd);
             }
             if (pipeline != GamePipeline::None) {
@@ -1540,7 +1541,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
         lastPipelineDesc_ = pd;
         lastPipeline_ = pipeline;
-        lastPipelineValid_ = true;
+        lastPipelineValid_ = pipeline != GamePipeline::None;  // (a pending one is looked up again)
     }
     if (pipeline == GamePipeline::None) {
         ++stats_.drawsSkipped;

@@ -166,6 +166,22 @@ does not help there (it is now saved every 10 s anyway: the game is killed rathe
   link-time info, no pipeline cache, optimised = monolithic build; `RVK_GPL_RECIPE=lto` = the former): corpus libraries 3.6 s
   instead of 135 s, cold world entry 166 pipelines linked in 17 ms vs 163 built in 1940 ms without libraries; still off by
   default (`run.ps1 -PipelineLibraries`).
+* **No pipeline compile on the render thread** (2026-11-12, user goal "Vulkan smooth at all times"): libraries are **on by
+  default** where `PipelineCache::librariesAllowed` holds (GPL + EDS3 + dynamic vertex input, and not an AMD proprietary
+  driver older than 26.10.1 by `driverInfo`; `RVK_GPL_FORCE=1` overrides the version check; rvk.log `vulkan: pipeline
+  libraries not used (<reason>)` / `pipelines are linked from graphics pipeline libraries`, caps line). The game's draws
+  look pipelines up with `PipelineCache::getNoWait` (`DeviceOptions::backgroundPipelines`, set by the HAL; tests keep the
+  synchronous `get`): a known description is returned, a new one is fast-linked from libraries that already exist (never a
+  shader library compiled there), depth-only pipelines link through an empty fragment-shader library (stageCount 0), and
+  anything not linkable (no libraries, a shader library still compiling, a polygon mode without one) is queued for the
+  prewarm workers while its draw is skipped. A prewarm build replaces a fast link of the same description (the optimiser
+  then skips it); `get` no longer waits for a prewarm build in flight on the draw path. `run.ps1 -NoPipelineLibraries` =
+  off. Measured (rvkcompare, 7 spots, cold `pipelines.bin` / `.keys`, warm SPIR-V, RisenTest.exe, vsync off):
+  libraries on: render-thread pipeline time in the whole world phase 3.8 ms (108 links, 0.1 - 1.2 ms per 5 s), 2 draws
+  skipped; libraries off: 0 ms on the render thread, 128 pipelines (1.9 s) in the background, 40,480 draws skipped while
+  they built (pop-in); worst world intervals the same in both and with a warm cache (one spot's 270 - 290 ms frame and
+  66 - 116 ms after it: not pipelines, 0 built in that interval of the warm run; open, likely streaming after the teleport).
+  GPU-assisted validation of a testdemo run: 0 messages.
 
 ## 7. GPU
 

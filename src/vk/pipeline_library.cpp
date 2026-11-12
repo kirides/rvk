@@ -10,7 +10,7 @@
 // Used when the device has GPL plus EDS3 blend state and dynamic vertex input: then a pipeline depends only on the shaders,
 // the polygon mode, the topology class and the attachment formats, and everything else is dynamic state.
 //
-// OFF by default ([vulkan] pipeline_libraries): the AMD driver (Adrenalin, RX 7900 XTX, 2026-10) crashed with an access
+// ON by default since 2026-11-12 where librariesAllowed (not AMD drivers before 26.10.1). History: the AMD driver (Adrenalin, RX 7900 XTX, 2026-10) crashed with an access
 // violation inside its compiler on 2 of the game's 2561 shaders when they are compiled as fragment-shader libraries
 // (corpus ps30_7dd28aa4c2be47a5, ps30_72a979df27ac55e3; monolithic pipelines with the same SPIR-V are fine). Driver 26.10.1
 // (2026-11-05) passes all 2561 with either recipe. Check without the game: rvk_vktest --gpl-corpus <bin/rvk/cache/spirv>.
@@ -23,8 +23,10 @@
 
 #include <windows.h>
 
+#include <charconv>
 #include <chrono>
 #include <cstring>
+#include <format>
 
 #include <spdlog/spdlog.h>
 
@@ -91,6 +93,41 @@ bool PipelineCache::librariesSupported(const Context& ctx) {
     return f.graphicsPipelineLibrary && f.extendedDynamicState3 && f.vertexInputDynamicState;
 }
 
+bool PipelineCache::librariesAllowed(const Context& ctx, std::string* why) {
+    if (!librariesSupported(ctx)) {
+        if (why != nullptr) *why = "the device lacks graphics pipeline libraries + extended dynamic state 3 + dynamic vertex input";
+        return false;
+    }
+    char env[8]{};
+    if (GetEnvironmentVariableA("RVK_GPL_FORCE", env, sizeof(env)) > 0 && env[0] == '1') return true;
+    const DeviceReport& r = ctx.deviceReport();
+    if (r.driverId == VK_DRIVER_ID_AMD_PROPRIETARY) {
+        // the AMD compiler crashed on 2 of the game's fragment shader libraries before 26.10.1 (performance.md 6, dxvk.md 2);
+        // driverInfo is "26.10.1" (+ " (LLPC)" on some builds). An unparsable string is taken as new.
+        unsigned v[3]{};
+        int parts = 0;
+        const char* p = r.driverInfo.data();
+        const char* end = p + r.driverInfo.size();
+        while (parts < 3) {
+            const auto [next, ec] = std::from_chars(p, end, v[parts]);
+            if (ec != std::errc{}) break;
+            ++parts;
+            p = next;
+            if (p == end || *p != '.') break;
+            ++p;
+        }
+        const unsigned major = v[0], minor = v[1], patch = v[2];
+        if (parts >= 2 && major > 0) {
+            const bool old = major < 26 || (major == 26 && (minor < 10 || (minor == 10 && patch < 1)));
+            if (old) {
+                if (why != nullptr) *why = std::format("AMD driver {} is older than 26.10.1 (its compiler crashed on pipeline libraries; RVK_GPL_FORCE=1 = use them)", r.driverInfo);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, VkShaderModule module, VkPolygonMode polygonMode,
                                         VkPrimitiveTopology topology, const PipelineDesc* output) {
     const auto all = dynamicStates(*ctx_);
@@ -141,8 +178,9 @@ VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, 
         stage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         stage.module = module;
         stage.pName = "main";
-        ci.stageCount = 1;
-        ci.pStages = &stage;
+        // (no module: the empty fragment shader state of the depth-only pipelines, native.depth_z / S-6)
+        ci.stageCount = module != VK_NULL_HANDLE ? 1 : 0;
+        ci.pStages = module != VK_NULL_HANDLE ? &stage : nullptr;
         ci.pDepthStencilState = &ds;
         ci.pMultisampleState = retainLto_ ? &ms : nullptr;
         ci.layout = layout_;
@@ -202,10 +240,19 @@ void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBit
     }
 }
 
-VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
+VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize, bool compileMissing) {
     RVK_ZONE("vk::PipelineCache::link");
-    if (d.fs == rhi::ShaderModule::None) return VK_NULL_HANDLE;  // (no fragment shader: built whole)
     VkPipeline libs[4]{};
+    if (!compileMissing) {
+        // only shader libraries that exist (the draw path: no shader compile on the render thread)
+        const std::lock_guard lock(libMutex_);
+        const auto have = [&](LibKey k) {
+            const auto it = shaderLibs_.find(k);
+            return it != shaderLibs_.end() && it->second != VK_NULL_HANDLE;
+        };
+        if (!have(LibKey{reinterpret_cast<std::uint64_t>(vkModule(d.vs)), static_cast<std::uint32_t>(d.polygonMode)})) return VK_NULL_HANDLE;
+        if (d.fs != rhi::ShaderModule::None && !have(LibKey{reinterpret_cast<std::uint64_t>(vkModule(d.fs)), 0xFFFFFFFFu})) return VK_NULL_HANDLE;
+    }
     {
         // vertex input interface per topology class, fragment output per attachment formats (few of each)
         const std::lock_guard lock(libMutex_);
@@ -228,7 +275,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
         libs[3] = out;
     }
     libs[1] = shaderLibrary(vkModule(d.vs), true, d.polygonMode);
-    libs[2] = shaderLibrary(vkModule(d.fs), false, VK_POLYGON_MODE_FILL);
+    libs[2] = shaderLibrary(vkModule(d.fs), false, VK_POLYGON_MODE_FILL);  // (fs None: the empty fragment shader library)
     for (VkPipeline l : libs) {
         if (l == VK_NULL_HANDLE) {
             return VK_NULL_HANDLE;
@@ -257,9 +304,18 @@ void PipelineCache::optimizer() {
         if (optQuit_) {
             return;
         }
-        const PipelineDesc d = optQueue_.front();
+        const auto [d, fast] = optQueue_.front();
         optQueue_.pop_front();
         lock.unlock();
+        {
+            // (replaced meanwhile by a whole build of the prewarm workers: nothing to optimise)
+            const std::lock_guard pl(mutex_);
+            const auto it = pipelines_.find(d);
+            if (it == pipelines_.end() || it->second != fast) {
+                lock.lock();
+                continue;
+            }
+        }
         const auto t0 = std::chrono::steady_clock::now();
         VkPipeline p = retainLto_ ? link(d, true) : build(d);
         if (p != VK_NULL_HANDLE) {
@@ -267,8 +323,9 @@ void PipelineCache::optimizer() {
             optimizeNs_.fetch_add(elapsedNs(t0), std::memory_order_relaxed);
             const std::lock_guard pl(mutex_);
             auto it = pipelines_.find(d);
-            if (it != pipelines_.end()) {
+            if (it != pipelines_.end() && it->second == fast) {
                 // command buffers may still use the fast-linked pipeline: it is kept until destroy()
+                fastLinks_.erase(fast);
                 superseded_.push_back(it->second);
                 it->second = p;
             } else {

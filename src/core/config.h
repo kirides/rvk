@@ -43,7 +43,7 @@ struct Config {
     // overrides the player's for the session (developer runs: run.ps1 -Vsync / -MaxFps)
     double maxFps = 0.0;       // present-rate cap; 0 = the monitor's refresh rate with vsync, none without
     int vsync = -1;            // -1 = the engine's option, 0 = off, 1 = on ("engine" / false / true)
-    bool pipelineLibraries = false;  // link pipelines from VK_EXT_graphics_pipeline_library libraries (AMD crash: pipeline_library.cpp)
+    bool pipelineLibraries = true;  // link pipelines from VK_EXT_graphics_pipeline_library libraries where allowed (PipelineCache::librariesAllowed: not on AMD drivers before 26.10.1)
 
     // [overlay]
     bool overlay = true;       // enabled: the in-game settings overlay (src/overlay); false = never created

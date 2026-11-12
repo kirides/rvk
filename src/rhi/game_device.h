@@ -587,7 +587,9 @@ public:
     // The pipeline of `desc`, created on demand (`created`: this call made a new one) or null while a background build
     // is pending. The backend owns the cache, its prewarm threads, its pipeline libraries and the saved blob.
     virtual bool createPipelineCaches(const std::filesystem::path& cacheFile, bool libraries) = 0;
-    virtual GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created = nullptr) = 0;
+    // wait = false (the game's draws, DeviceOptions::backgroundPipelines): never compiles on the calling thread (Vulkan: a fast
+    // link from pipeline libraries, else queued for the background builds and null meanwhile; created = first request)
+    virtual GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created = nullptr, bool wait = true) = 0;
     // the pipeline of `desc` when the cache has one, else None (never builds)
     virtual GamePipeline findPipeline(const PipelineDesc& desc) = 0;
     // whether a pipeline of `desc` exists (built or prewarmed)

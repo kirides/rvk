@@ -13,7 +13,9 @@
 #include <map>
 #include <mutex>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,12 +53,23 @@ public:
     // thread-safe; VK_NULL_HANDLE on failure (logged once per description). With libraries a new description is linked
     // from precompiled libraries (fast, unoptimised) and replaced by its link-time-optimised build in the background.
     VkPipeline get(const PipelineDesc& desc, bool* created = nullptr);  // created: this call made a new pipeline
+    // the draw path's lookup: never compiles a shader on the calling thread. A known description is returned; with libraries a
+    // new one is fast-linked from libraries that already exist (~0.1 ms); otherwise it is queued for the prewarm workers and
+    // VK_NULL_HANDLE is returned (the draw is skipped until it exists). created: this call made / queued it for the first time
+    VkPipeline getNoWait(const PipelineDesc& desc, bool* created = nullptr);
+    // whether pipeline libraries may be used on this device: the features (librariesSupported) and no driver known to crash
+    // in their compiler (AMD proprietary before 26.10.1); `why` = the reason when not
+    static bool librariesAllowed(const Context& ctx, std::string* why);
+    // draw-time lookups that found no pipeline and queued it (getNoWait), cumulative
+    std::uint64_t deferred() const { return deferred_.load(std::memory_order_relaxed); }
+    std::uint64_t fastLinked() const { return fastLinkedCount_.load(std::memory_order_relaxed); }
     // builds `desc` on a background thread unless it exists: pipelines known from earlier runs, before their first draw
     // (urgent: a draw waits for it; served before the others)
     void prewarm(const PipelineDesc& desc, bool urgent = false);
     // the same for draw-time requests that repeat every frame until the pipeline exists (shader variants of enhancements): a
     // description is queued once
-    void prewarmOnce(const PipelineDesc& desc);
+    // returns true when it queued `desc` (first request)
+    bool prewarmOnce(const PipelineDesc& desc);
     // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
     // device teardown, before the shader modules are destroyed: the prewarm workers and the library optimiser joined (queues dropped, a build in flight
@@ -127,8 +140,12 @@ private:
     };
     VkPipeline createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, VkShaderModule module, VkPolygonMode polygonMode,
                              VkPrimitiveTopology topology, const PipelineDesc* output);
+    // module VK_NULL_HANDLE with !vertex = the empty fragment shader library (depth-only pipelines)
     VkPipeline shaderLibrary(VkShaderModule module, bool vertex, VkPolygonMode polygonMode);
-    VkPipeline link(const PipelineDesc& d, bool optimize);
+    // compileMissing = false: a shader library that does not exist yet is not compiled here (VK_NULL_HANDLE returned)
+    VkPipeline link(const PipelineDesc& d, bool optimize, bool compileMissing = true);
+    // a pipeline made by a get / prewarm build replaces a fast link of the same description or is destroyed (under mutex_)
+    void insertBuilt(const PipelineDesc& d, VkPipeline p);
     void optimizer();
     void startLibraries();
     void stopLibraries();
@@ -143,8 +160,11 @@ private:
     std::thread optThread_;
     std::mutex optMutex_;
     std::condition_variable optCv_;
-    std::deque<PipelineDesc> optQueue_;
+    std::deque<std::pair<PipelineDesc, VkPipeline>> optQueue_;  // a fast link and the description its optimised build replaces
     bool optQuit_ = false;
+    std::unordered_set<VkPipeline> fastLinks_;  // pipelines_ values that are unoptimised links (under mutex_)
+    std::atomic<std::uint64_t> deferred_{0};
+    std::atomic<std::uint64_t> fastLinkedCount_{0};
     std::atomic<std::uint64_t> libraries_{0};
     std::atomic<std::uint64_t> libraryNs_{0};
     std::atomic<std::uint64_t> optimized_{0};

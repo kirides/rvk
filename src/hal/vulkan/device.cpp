@@ -510,6 +510,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     o.perf = options.perf;
     o.pipelineLibraries = options.pipelineLibraries;
+    o.backgroundPipelines = true;  // the game: a draw never waits for a pipeline compile (stutter); tests keep the synchronous build
     o.perfFrame = options.perfFrame;
     o.depthFormat = static_cast<std::uint32_t>(p.depthFormat);
     o.validation = options.validation;
@@ -2239,7 +2240,7 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  static_cast<double>(p.bufferUploadBytes) / n / 1024.0, p.pipelinesBuilt, p.pipelineMs, p.shadersBuilt, p.shadersCompiled,
                  p.shaderMs);
     if (p.prewarmed > 0) {
-        spdlog::info("perf: {} pipelines of earlier runs built in the background ({:.1f} ms)", p.prewarmed, p.prewarmMs);
+        spdlog::info("perf: {} pipelines built in the background (earlier runs' keys, variants, draws skipped until built; {:.1f} ms)", p.prewarmed, p.prewarmMs);
     }
     if (p.libraries > 0 || p.optimized > 0) {
         spdlog::info("perf: pipeline libraries compiled {} ({:.1f} ms, mostly on loader threads), optimised pipelines {} ({:.1f} ms, "

@@ -130,6 +130,8 @@ public:
     const VkPhysicalDeviceProperties& properties() const { return props_; }
     const DeviceFeatures& features() const { return features_; }
     const std::string& deviceName() const { return deviceName_; }
+    // the probe of the chosen device (driver id / info: driver workarounds)
+    const DeviceReport& deviceReport() const { return report_; }
     // VK_EXT_debug_utils is enabled on the instance (object names, command buffer labels)
     bool debugUtilsAvailable() const { return debugUtils_; }
     // the capability report of this device (core/caps.h): GPU, driver, optional features available / enabled + reasons.
