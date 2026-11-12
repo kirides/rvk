@@ -198,7 +198,7 @@ void HalDevice::applyStaticOps() {
     engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
     // frame-ownership.md 7.47: native.clusters / cluster_cull / cluster_cull_shadows are RESTART settings: retained draws and op records keep the index buffers (the cluster arena's copies or
     // the engine's) they were made with, so a run-time toggle could not take effect (the stage line showed `armed, nothing owned`). The session runs with the start values
-    const auto onStart = [](const settings::Setting* s) { return s != nullptr && s->startValue() != 0.0; };
+    const auto onStart = [](const settings::Setting* s) { return s != nullptr && s->startValue() != 0.0 && settings::startedFull(); };  // (S-9: default on, Full sessions only: the clustered index copies would change Wrapper's draws)
     for (const settings::Setting* s : {rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows}) {
         if (s != nullptr && s->value() != s->startValue()) {
             static std::unordered_map<const settings::Setting*, double> told;
@@ -210,7 +210,7 @@ void HalDevice::applyStaticOps() {
             }
         }
     }
-    dev_.setClusters(onStart(rs.nativeClusters));  // F5-1: static meshes clustered (any mode: the draws are the D3D9 model's)
+    dev_.setClusters(onStart(rs.nativeClusters));  // F5-1: static meshes clustered (sessions started in Full; the composed draws read the copies too)
     dev_.setClusterCull(onStart(rs.nativeClusterCull) && onStart(rs.nativeClusters));  // F5-2: the GPU cull of the owned draws of clustered meshes
     dev_.setClusterCullShadows(onStart(rs.nativeClusterCullShadows) && onStart(rs.nativeClusterCull) && onStart(rs.nativeClusters) && on(rs.nativeOwnedShadows));  // F3-2: ... also in the sun cascades
     const bool takeOver = plan.staticTake;
@@ -468,6 +468,7 @@ HalDevice::~HalDevice() {
     // left alive they were leaked at vkDestroyDevice and the static ones' destructors at process exit retired them through the freed backend
     const auto enhT1 = std::chrono::steady_clock::now();
     gpuscene::releaseGpuObjects(dev_);
+    snapshots_.clear();  // (14.40's in-frame snapshot reads hold read-back buffers of the device: as members they outlived it, D3D12 `waitIdle after the queue / fence were released`)
     dev_.destroy();
     const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
     const auto shutdownT2 = std::chrono::steady_clock::now();
@@ -778,7 +779,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         applyObserve(*rs.nativeOwnedObserve);
     }
     // frame ownership F0 (gpuscene/mesh_parts.h): the part + layout tables, fed by the static composition's draws (restart setting)
-    gpuscene::meshparts().setActive(rs.nativeMeshParts != nullptr && rs.nativeMeshParts->asBool());
+    gpuscene::meshparts().setActive(rs.nativeMeshParts != nullptr && rs.nativeMeshParts->asBool() && settings::startedFull());  // (S-9: default on, Full sessions only)
     // N5.1 static ops (native/static_ops.h): driven by the frame tap
     staticOps_ = std::make_unique<native::StaticOps>(*this);
     frameTap_->setStaticOps(staticOps_.get());
@@ -927,7 +928,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         const auto applyMaterials = [this, dir = options.cacheDir]() {
             const auto& r = settings::renderer();
             const bool dump = r.materialSources->asBool();
-            const bool uber = r.ubershader->asBool();
+            const bool uber = r.ubershader->asBool() && renderMode() == RenderMode::Full;  // (S-9: default on, Full only: Wrapper keeps the translated shaders)
             // the requests are collected for the dump and for the GLSL material shaders; the file only for the dump
             engine::matsrc::setOutput(dump && !dir.empty() ? dir / "materials" / "sources.jsonl" : std::filesystem::path());
             engine::matsrc::setEnabled(dump || uber || gpuscene::materialtable().active());  // (the material table's graph ids)
@@ -935,7 +936,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             dev_.setUbershader(uber);
         };
         applyMaterials();
-        for (settings::Setting* s : {rs.materialSources, rs.ubershader, rs.ubershaderSkip}) {
+        for (settings::Setting* s : {rs.materialSources, rs.ubershader, rs.ubershaderSkip, rs.rendererMode}) {
             reg.onChange(*s, [applyMaterials](const settings::Setting&) { applyMaterials(); }, this);
         }
     }

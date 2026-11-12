@@ -85,7 +85,7 @@ int g_tripped = 0, g_lastSetting = 0;
 
 int settingMode() {
     const auto& rs = settings::renderer();
-    return rs.nativeOwnExtract != nullptr ? static_cast<int>(rs.nativeOwnExtract->asInt()) : 0;
+    return rs.nativeOwnExtract != nullptr && settings::fullNow() ? static_cast<int>(rs.nativeOwnExtract->asInt()) : 0;  // (S-9: default on, Full only)
 }
 
 // ---- the AddOccluder recorder (compare passes: the engine's descs / indices before its sort) ----

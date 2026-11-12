@@ -315,7 +315,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     // (F4-4: a sun cascade's z op too, while native.owned_shadows is on and the cascades' trees are not tripped)
     // (F3-4: the terrain map's / an atlas cell's z op too, while native.owned_shadow_views is on)
     const bool trOn = ownedTrees_ && tro_ != nullptr && hardware && ((viewKind_ == ViewKind::Main && !shadow) || (ownedShadowKind(viewKind_) && shadow)) &&
-                      tro_->viewKey == ownedKeyNow();
+                      tro_->viewKey == ownedKeyNow() &&
+                      tableLit_;  // (S-9: without table lighting the owned path is gated off; the templates' check against per-object-lit batches logged false DIFFERINGs)
     if (trOn && tro_->ramp != nullptr && g.streams[1].buffer != nullptr && g.streams[1].freq == 0x80000001u && g.streams[1].stride == 4u) {
         g.streams[1].buffer = tro_->ramp.get();
         g.streams[1].offset = 0;

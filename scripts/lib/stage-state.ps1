@@ -35,6 +35,31 @@ $script:StageOfSetting = [ordered]@{
     'native.owned_decals'          = 'owned_decals'
 }
 
+# S-9 (frame-ownership.md 14.41): the owned stages and their prerequisites, all ON by default in Full (Wrapper / Original never run them). Get-OwnedStageSettings
+# gives the 'key=value' list of the defaults (Assert-ArmStages -Settings (Get-OwnedStageSettings) = "every default stage acted") or, with -Off, the list that
+# turns them all off (run.ps1 -NoOwned = the Full of before S-9: composed everything, for bisecting; one stage off: -Setting 'native.owned_trees=false').
+$script:OwnedStageDefaults = [ordered]@{
+    'native.material_table' = 'true'; 'native.illum_table' = 'true'; 'native.lighting_images' = 'true'; 'native.mesh_parts' = 'true'
+    'native.owned_windows' = 'true'; 'native.owned_objects' = 'true'; 'native.owned_records' = 'true'; 'native.scene_draws' = 'true'
+    'native.owned_static' = 'true'; 'native.owned_persistent' = 'true'; 'native.owned_shadows' = 'true'; 'native.owned_shadow_views' = 'true'
+    'native.owned_trees' = 'true'; 'native.owned_billboards' = 'true'; 'native.owned_vegetation' = 'true'; 'native.owned_vegetation_ops' = 'true'
+    'native.owned_actors' = 'true'; 'native.owned_instances' = 'true'; 'native.owned_ordered' = 'true'
+    'native.clusters' = 'true'; 'native.cluster_cull' = 'true'; 'native.cluster_cull_shadows' = 'true'
+    'native.rt_records' = 'true'; 'rt.table_entries' = 'true'; 'native.vertex_pull' = 'true'; 'native.own_foliage' = 'true'
+    'native.bone_motion' = 'on'; 'native.rigid_motion' = 'true'; 'native.tree_wind' = 'on'; 'native.depth_z' = 'on'
+    'native.own_post' = 'on'; 'native.own_sky' = 'owned'; 'native.own_gui' = 'owned'; 'native.own_particles' = 'on'; 'native.owned_decals' = 'on'
+    'native.own_collection' = 'on'; 'native.own_extract' = 'on'; 'debug.ubershader' = 'true'
+}
+function Get-OwnedStageSettings([switch]$Off) {
+    $out = @()
+    foreach ($k in $script:OwnedStageDefaults.Keys) {
+        $v = $script:OwnedStageDefaults[$k]
+        if ($Off) { $v = if ($v -in @('true', 'false')) { 'false' } else { 'off' } }
+        $out += "$k=$v"
+    }
+    return , $out
+}
+
 # stages whose input can legitimately be absent from a whole run (frame-ownership.md 14.22): bone_motion acts only on skinned solid draws that move (a frozen
 # rvkcompare spot animates nothing), tree_wind only on animated SpeedTrees inside the RT range of a swaying-tree consumer. For these an arm claimed on also passes
 # when EVERY window says `inactive(armed, nothing owned in the window)` (armed, nothing to act on); `setting on, code off`, `gated` and `setting off` still fail.
@@ -145,7 +170,8 @@ function Assert-ArmStages([string]$Log, [string[]]$Settings, [string]$Arm = "", 
                     $before = if ($armedAt -gt 0) { @($considered[0..($armedAt - 1)]) } else { @() }
                     $after = if ($armedAt -ge 0) { @($considered[$armedAt..($considered.Count - 1)]) } else { @($considered) }
                     $bad = @($after | Where-Object { -not $_.Contains($stage) -or $_[$stage] -ne $script:ArmedIdle })
-                    $bad += @($before | Where-Object { -not $_.Contains($stage) -or $_[$stage] -notlike 'inactive(setting on, code off*' })
+                    # (S-9: or `armed, gated: ...` while the owned path's tables fill at the world's first seconds)
+                    $bad += @($before | Where-Object { -not $_.Contains($stage) -or ($_[$stage] -notlike 'inactive(setting on, code off*' -and $_[$stage] -notlike 'inactive(armed, gated:*') })
                     if ($bad.Count -gt 0) {
                         $badState = if ($bad[0].Contains($stage)) { $bad[0][$stage] } else { '(missing)' }
                         $failures += "arm claims $($kv[0])=on but no window says $stage active and a window says $badState"

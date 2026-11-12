@@ -20,9 +20,12 @@ namespace rvk::native {
 
 namespace {
 
-bool settingOn(const settings::Setting* s) { return s != nullptr && s->asBool(); }
+// (S-9, frame-ownership.md 14.41: the stages default on and act in Full only: outside Full a setting counts as off; the start-time ones (clusters) only
+// in a session started in Full)
+bool settingOn(const settings::Setting* s) { return s != nullptr && s->asBool() && settings::fullNow(); }
 // (restart settings: what the session started with is what runs)
-bool startOn(const settings::Setting* s) { return s != nullptr && s->startValue() != 0.0; }
+bool startOn(const settings::Setting* s) { return s != nullptr && s->startValue() != 0.0 && settings::startedFull(); }
+int settingInt(const settings::Setting* s) { return s != nullptr && settings::fullNow() ? static_cast<int>(s->asInt()) : 0; }
 
 // `needs` = the unmet prerequisites (setting keys) that keep the code off; `gate` = why an armed stage owned nothing (the owned path's gate of the window)
 std::string stage(const char* name, bool setting, bool armed, std::uint64_t acted, const std::string& detail, const std::string& needs = {}, const std::string& gate = {}) {
@@ -105,7 +108,7 @@ void StaticOps::stagesReport() {
     static std::uint64_t lastDepthZ = 0;
     const std::uint64_t dz = dev_.depthZActs() - lastDepthZ;
     lastDepthZ = dev_.depthZActs();
-    const bool dzSetting = rs.nativeDepthZ != nullptr && rs.nativeDepthZ->asInt() != 0;
+    const bool dzSetting = settingInt(rs.nativeDepthZ) != 0;
     line += stage("depth_z", dzSetting, dev_.depthZ() != d3d9::Device::DepthZ::Off, dz, std::format("{} z scopes / pixel shaders without colour output", dz));
     // S-4: vertex pulling (native.vertex_pull; acted = owned items drawn through the pulled vertex shaders in the window)
     static std::uint64_t lastPull = 0;
@@ -130,8 +133,9 @@ void StaticOps::stagesReport() {
         const std::uint64_t a = tw.jobs - lastJobs, o = tw.owned - lastOwned;
         lastJobs = tw.jobs;
         lastOwned = tw.owned;
-        const bool twSetting = rs.nativeTreeWind != nullptr && rs.nativeTreeWind->asInt() != 0;
-        line += stage("tree_wind", twSetting, tw.armed, a, std::format("{} tree instances by compute, {} of them from owned runs", a, o));
+        const bool twSetting = settingInt(rs.nativeTreeWind) != 0;
+        // (S-9: with no ray-traced consumer of the swaying trees (player defaults: no RT shadows / GI) the pipeline is never requested: armed, idle)
+        line += stage("tree_wind", twSetting, tw.armed || (twSetting && !tw.requested), a, std::format("{} tree instances by compute, {} of them from owned runs", a, o));
     }
     // F8-1: the RT scene from the owned record set (native.rt_records; acted = owned draws whose sightings were replayed from their scripts in the window)
     {
@@ -171,7 +175,7 @@ void StaticOps::stagesReport() {
         const std::uint64_t acted = b.chosen + b.records + b.compareDraws;
         const std::uint64_t a = acted - last;
         last = acted;
-        const bool boneSetting = rs.nativeBoneMotion != nullptr && rs.nativeBoneMotion->startValue() != 0.0;
+        const bool boneSetting = rs.nativeBoneMotion != nullptr && rs.nativeBoneMotion->startValue() != 0.0 && settings::fullNow();
         line += stage("bone_motion", boneSetting, dev_.boneMotion() != 0, a, std::format("{} skinned solid draws / records", a));
     }
     // S-7 .. S-7d: the post chain, the shadow mask / SSAO chain / PSSM pass and the terrain blur on our own shaders (native.own_post; acted = draws on the
@@ -181,7 +185,7 @@ void StaticOps::stagesReport() {
         const std::uint64_t acts = ownPostActs();
         const std::uint64_t a = acts >= last ? acts - last : acts;
         last = acts;
-        const int want = rs.nativeOwnPost != nullptr ? static_cast<int>(rs.nativeOwnPost->asInt()) : 0;
+        const int want = settingInt(rs.nativeOwnPost);
         const int have = ownPostMode();
         line += stage("own_post", want != 0, have != 0 && have == want, a,
                       std::format("{}: {} effect draws / kernel runs on our shaders", have == 2 ? "compare" : "on", a));
@@ -197,7 +201,7 @@ void StaticOps::stagesReport() {
         static constexpr const char* kStage[3] = {"own_sky", "own_gui", "own_particles"};
         static constexpr const char* kWhat[3] = {"sky dome draws", "sprite batch draws", "particle draws (F11: quads expanded on the GPU)"};
         settings::Setting* st = which == OwnPost::Scene::Sky ? rs.nativeOwnSky : which == OwnPost::Scene::Gui ? rs.nativeOwnGui : rs.nativeOwnParticles;
-        const int want = st != nullptr ? static_cast<int>(st->asInt()) : 0;
+        const int want = settingInt(st);
         const int have = ownSceneMode(which);
         // (14.34, owned: acted = units drawn from their records in the window: the sky dome's persistent record, sprite flushes from pulled records)
         static std::uint64_t lastOwned[3] = {};
@@ -213,7 +217,7 @@ void StaticOps::stagesReport() {
     }
     // row 13 (frame-ownership.md 14.26): native.owned_decals (acted = decal records drawn from their persistent buffers / content-checked in the window)
     {
-        const int want = rs.nativeOwnedDecals != nullptr ? static_cast<int>(rs.nativeOwnedDecals->asInt()) : 0;
+        const int want = settingInt(rs.nativeOwnedDecals);
         const std::uint64_t a = decalW_.hits + decalW_.checked;
         line += stage("owned_decals", want != 0, ownedDecals_ != 0 && ownedDecals_ == want, a,
                       std::format("{}: {} decal records from persistent buffers, {} checked", ownedDecals_ == 2 ? "compare" : "on", decalW_.hits, decalW_.checked));

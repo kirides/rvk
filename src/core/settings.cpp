@@ -876,8 +876,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Renderer",
         .tab = kTabSystem,
         .description = "Wrapper: the game's own rendering translated to Vulkan, with the enhancements (recommended). Full: the "
-                       "renderer draws the whole frame itself from the game's data (experimental; costs some processor time "
-                       "for now). Original: the game's own Direct3D 9 renderer, without Vulkan, enhancements or this menu; "
+                       "renderer draws the whole frame itself from the game's data (experimental); switching to it from Wrapper "
+                       "applies at once, its full effect needs a restart. Original: the game's own Direct3D 9 renderer, without Vulkan, enhancements or this menu; "
                        "it applies after a restart. To come back from Original, delete the [renderer] lines in "
                        "rvk\\settings.toml.",
         .type = Type::Enum,
@@ -885,6 +885,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"original", "wrapper", "full"},
         .optionLabels = {"Original (Direct3D 9)", "Wrapper (Vulkan)", "Full (Vulkan, experimental)"},
         .restartGroups = {0, 1, 1},
+        .restartInto = 2.0,  // (S-9: Full's owned stages need a session started in Full; a switch from Wrapper applies at once, without them)
         .page = "Display", .section = "Render mode", .order = -10,
     });
     r.toggleKey = &reg.add({
@@ -1150,10 +1151,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "Draws the game's material pixel shaders with the HLSL port of its material shader (built from the same "
                        "macros the game compiled them with) instead of the translated precompiled shaders. Shaders the port "
-                       "cannot build stay translated.",
+                       "cannot build stay translated. Full mode only (default on, S-9); Wrapper keeps the translated shaders.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Renderer internals",
     });
     r.materialSources = &reg.add({
@@ -1281,7 +1283,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "is no longer shown to the scene's observer (no query, no sighting), its instance stays in the TLAS. Every 32nd frame per entry the draw is observed "
                        "again (materials). rvk.log `rt: scene table (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"renderer.mode", "full", false, false}},
         .page = "Debug", .section = "Native frame",
@@ -2472,8 +2474,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "UpdateIllumination / SetLightSet / UpdateLightSets, and a check that composes every lit draw's lighting registers c14..c37 from the "
                        "records and compares them with what the native composition wrote. rvk.log `native: illum table (5 s)`, DIFFERING must stay 0.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeMeshParts = &reg.add({
@@ -2487,8 +2490,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "240th frame, fetches indices / positions / normals / uvs of random vertices on the GPU through the tables and compares them with "
                        "the CPU. rvk.log `native: mesh parts (5 s)`, DIFFERING must stay 0.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeLightingImages = &reg.add({
@@ -2502,7 +2506,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "images back and compares them with the CPU composition and with the registers the draws got. rvk.log `native: lighting images (5 s)`, "
                        "both DIFFERING counts must stay 0.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
         .needs = {{"native.illum_table", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2518,8 +2522,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "material registers / texture bindings from the record and compares them with what the composition set. rvk.log `native: material "
                        "table (5 s)`, DIFFERING must stay 0.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnedWindows = &reg.add({
@@ -2532,7 +2537,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "block instead of uploading them per draw (the other windows stay uploaded). debug.split_verify compares every served window with the "
                        "register file. rvk.log `native: owned windows (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.material_table", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2547,7 +2552,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "from the per-view block instead of uploading them per draw. debug.split_verify compares every served window with the register file. "
                        "rvk.log `native: owned objects (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_windows", "true", false, true}, {"native.material_table", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2562,7 +2567,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "with the composed ones (nothing derived is submitted), and the read log of each record is audited against the engine's memory. "
                        "rvk.log `native: owned records (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_objects", "true", false, true}, {"native.lighting_images", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2577,7 +2582,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "register window from the tables), when the z / solid pass begins; their side effects (resource touches, lightmap binds, stream 3) run for each. "
                        "native.owned_check frames run the old path and compare; a difference turns it off. rvk.log `native: owned static (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_records", "true", false, true}, {"native.scene_draws", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2592,7 +2597,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "argument block and queues ONE indirect draw per bucket. native.owned_check frames compare the persistent content with a fresh derivation (MISS must stay 0; a MISS "
                        "turns owned_static off) and a rolling scrub re-derives 16 draws per frame. rvk.log `native: owned persistent (5 s)`, `native: draw record table (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_static", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2607,8 +2612,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "the same triangles with the same vertex order, so the solid pass's depth EQUAL holds) which the draw uses, and one bounding sphere per cluster in a GPU table. "
                        "Nothing exists while off. rvk.log `native: clusters (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (7.47: retained draws / records keep the index buffers they were made with: a run-time toggle cannot take effect)
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeClusterCull = &reg.add({
@@ -2621,7 +2627,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "as at most 8 runs per draw (indirect arguments); the z pre-pass and the solid pass cull with the same inputs, so the solid pass's depth EQUAL holds. Check frames "
                        "read the GPU's result back and compare it with the exact CPU test (false negatives must be 0). rvk.log `native: owned compaction (5 s)` + `cluster cull`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (7.47: retained draws / records keep the index buffers they were made with: a run-time toggle cannot take effect)
         .needs = {{"native.clusters", "true", false, true}, {"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2636,7 +2642,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "are drawn as at most 8 runs per draw. Check frames read the GPU's result back and compare it with the exact CPU test (false negatives must be 0). Off = the cascades draw "
                        "whole ranges. rvk.log `native: cluster cull (5 s)` (the [cascades] triangle counts).",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (7.47: retained draws / records keep the index buffers they were made with: a run-time toggle cannot take effect)
         .needs = {{"native.cluster_cull", "true", false, true}, {"native.owned_shadows", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2679,7 +2685,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "view's beginning and the pass draws every instance from the engine's tree objects with one row + record per instance and a few indirect calls (needs table lighting; "
                        "trees stay composed while the RT scene takes tree draws). Off = nothing changes. rvk.log `native: owned trees (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2694,7 +2700,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "table) by one indirect draw per bucket, without a composition. native.owned_check frames compare with the composition (DIFFERING / MISS must stay 0). Respects "
                        "debug.shadow_stride (only cascades the engine renders are drawn). Off = nothing changes. rvk.log `native: owned shadows (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2710,7 +2716,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "native.owned_check frames compare with the composition (DIFFERING / MISS must stay 0: a difference turns the owned shadow views off with the cascades). "
                        "Off = nothing changes. rvk.log `native: owned shadows [terrain map|point-light atlas] (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_shadows", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2725,8 +2731,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "re-converts and compares); the grass draws then carry no CPU bytes and are replayed from the packet cache. Off = nothing changes. "
                        "rvk.log `native: owned vegetation (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnedVegetationOps = &reg.add({
@@ -2739,7 +2746,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "frames the ops leave the lists at the view's beginning and the pass draws every batch from the engine's grid nodes: one DrawRecord per batch (lighting entry), the retained "
                        "converted instance bytes of all ops in one ring block (stream 1), a few indirect calls. Needs table lighting. Off = nothing changes. rvk.log `native: owned vegetation draws (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}, {"native.owned_vegetation", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2756,7 +2763,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "overlay flag (the highlighted focus NPC), a fade < 1 or a changed morph target stay composed. native.owned_check frames compare with the composition "
                        "(DIFFERING / MISS must stay 0). Off = nothing changes. rvk.log `native: owned actors (5 s)`, `native: bone table (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}, {"native.owned_objects", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2772,7 +2779,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "image in the instance row table. native.owned_check frames compare with the composition (DIFFERING / MISS must stay 0). Off = nothing changes. rvk.log `native: owned instances (5 s)`, "
                        "`native: instance rows (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2788,7 +2795,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "equal draws, never regrouped by pipeline); the engine's slot is skipped, its side effects run. Water drawn by the enhanced water stays composed. "
                        "native.owned_check frames compose and compare (DIFFERING / MISS must stay 0). Off = nothing changes. rvk.log `native: owned ordered (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2803,7 +2810,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "from the record without composing them, every native.owned_check-th frame composes and compares (DIFFERING must stay 0). Off = nothing changes. "
                        "rvk.log `native: owned billboards (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_windows", "true", false, true}, {"native.lighting_images", "true", false, true}, {"native.scene_draws", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2818,8 +2825,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "buffers and state, through the scene form of their shaders (needs vertex input location 24 and indirect first instance). "
                        "rvk.log `native: scene draws (5 s)`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeSceneDrawsCheck = &reg.add({
@@ -2893,12 +2901,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "S-6 (docs/research/frame-ownership.md 14.10; Full): colour-less z passes (the sun cascades) draw opaque casters without a pixel shader (theirs only wrote colour that no "
                        "attachment takes), and the main view's z pre-pass loses its R32F colour attachment: the linear depth map (view depth / engine far, cleared to 1) is derived once from the "
                        "hardware depth at AfterDepthPrepass by a full-screen pass (needs reverse-z and a float depth buffer). Cut-out draws keep their texkill pixel shader. Compare = the engine "
-                       "still writes the depth map and a compute pass checks the derivation against it (rvk.log `native: depth_z compare`: differing pixels, the largest relative error). Off by default.",
+                       "still writes the depth map and a compute pass checks the derivation against it (rvk.log `native: depth_z compare`: differing pixels, the largest relative error). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the engine's depth map"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeVertexPull = &reg.add({
@@ -2909,9 +2918,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "S-4 (docs/research/frame-ownership.md 14.12; Full, needs the persistent owned draws): the owned static / skinned draws' vertex shaders read their inputs from the "
                        "mesh arena by reference (a VertexFetch block per record slot, the input assembler's conversions) instead of a vertex input, so the meshes of every vertex "
                        "layout and arena block share one indirect command per pipeline, state and index binding (rvk.log `native: vertex pull (5 s)`: items pulled, indirect "
-                       "commands per view before / after). The clip position stays the translated shader's, bit for bit. Off by default.",
+                       "commands per view before / after). The clip position stays the translated shader's, bit for bit. Default on (acts in Full only, S-9).",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2924,10 +2933,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "S-5 (docs/research/frame-ownership.md 14.14; Full): the grass's distance thinning tied to lod.view: beyond 35 % x lod.view of the grass range the share of "
                        "blades kept falls to 35 % at the range's end, each blade shrinking to nothing over a short band (no pop). Applied to our converted instance bytes on every "
                        "path (composed, composed late, owned), so the z pre-pass and the colour pass draw the same blades bit for bit. An intentional, small picture change. "
-                       "rvk.log `native: own foliage (5 s)`. Off by default.",
+                       "rvk.log `native: own foliage (5 s)`. Default on (acts in Full only, S-9).",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeTreeWind = &reg.add({
@@ -2938,12 +2948,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "F4-5 (docs/research/frame-ownership.md 14.17; Full): the ray tracing scene's animated SpeedTrees (RT shadows' wind, GI foliage) take their swaying "
                        "positions from a compute pass that runs the trees' vertex shader wind (wind matrices, leaf rock / rustle, leaf cards and meshes) over each instance's "
                        "vertex buffer instead of a vertex shader capture of the composed draw, so the trees stay owned (native.owned_trees) with ray tracing on. Compare = the "
-                       "captures of the composed draws too, both compared on the GPU (rvk.log `rt: tree wind (5 s)`: max error in world units). Off by default.",
+                       "captures of the composed draws too, both compared on the GPU (rvk.log `rt: tree wind (5 s)`: max error in world units). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the vertex captures"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeRtRecords = &reg.add({
@@ -2954,9 +2965,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "F8-1 (docs/research/frame-ownership.md 14.30; Full, needs native.owned_persistent): the ray tracing scene keeps, per owned persistent draw (static and "
                        "instanced meshes, main view and sun cascades), what its last full observation added to the scene (instances, transforms, flags, BLAS, material) and "
                        "replays that while the record, the rows its windows hold and the material are unchanged, instead of observing the draw again; every 10th frame "
-                       "everything is observed in full and compared (rvk.log `rt: scene records (5 s)`: DIFFERING must stay 0). Off by default.",
+                       "everything is observed in full and compared (rvk.log `rt: scene records (5 s)`: DIFFERING must stay 0). Default on (acts in Full only, S-9).",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
@@ -2971,12 +2982,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "touches (the engine's calls, in the same order) and the same op bytes; on owned frames their z / solid ops never enter the engine's lists "
                        "(merged at their exact positions at Execute, the owned ones drawn from their records). Check frames (native.owned_check) and Compare run the "
                        "engine's request and compare it with the native one run dry (op bytes per list, the resource LRU's head; rvk.log `native: own collection "
-                       "(5 s)`: DIFFERING must stay 0, a difference turns the stage off). Off by default.",
+                       "(5 s)`: DIFFERING must stay 0, a difference turns the stage off). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the engine's request"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnExtract = &reg.add({
@@ -2988,12 +3000,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "rooms seen from outside, the sector tree query) is done by the renderer on the engine's live data, in the engine's order: the element "
                        "list, the extract stamps and the final beam are written as the engine leaves them and the engine's function is not called. Check frames "
                        "(native.owned_check) and Compare run the engine's function and compare the element list (identities and order), the final beam and the "
-                       "occluders' silhouette polygons (rvk.log `native: own extract (5 s)`: DIFFERING must stay 0, a difference turns the stage off). Off by default.",
+                       "occluders' silhouette polygons (rvk.log `native: own extract (5 s)`: DIFFERING must stay 0, a difference turns the stage off). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the engine's extraction"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeBoneMotion = &reg.add({
@@ -3004,9 +3017,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "Debug, Full (docs/research/frame-ownership.md 14.13; needs native.owned_actors): the bone table keeps each actor part's previous-frame image, and the skinned "
                        "solid draws' vertex shader runs a second time on it for the previous world position the G-buffer's motion needs, so per-object motion (FSR, frame "
                        "generation) takes no vertex capture of the characters and their owned solid draws stay owned. The clip position is the translated shader's, bit for bit. "
-                       "Compare = the captures as before plus a GPU compare of both previous positions (rvk.log `native: bone motion compare (5 s)`, Vulkan). Restart. Off by default.",
+                       "Compare = the captures as before plus a GPU compare of both previous positions (rvk.log `native: bone motion compare (5 s)`, Vulkan). Restart. Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the vertex captures"},
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (the bone table's history doubles its buffer, made once)
@@ -3021,9 +3034,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "Debug, Full (docs/research/frame-ownership.md 14.15 b; needs native.bone_motion = on, acts with upscale.object_motion = all): the object table keeps each "
                        "record's previous-frame image, and the static meshes' main solid draws whose world rows come from the object table take the bone-motion vertex "
                        "forms (the second run reads the previous record), so moving rigid objects get their per-object motion without a vertex capture and their owned "
-                       "draws stay owned. Restart. Off by default.",
+                       "draws stay owned. Restart. Default on (acts in Full only, S-9).",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,  // (the history doubles the object table's buffer, made once)
         .needs = {{"native.bone_motion", "off", true, false}},
         .page = "Debug", .section = "Native frame",
@@ -3041,12 +3054,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "A8R8G8B8 images they write are RGBA8 storage images while On. S-7c (14.16): ToneMap, HDRI, DoFDown, DoF and the overlay effects on our "
                        "pixel shaders. S-7d (14.18): every other composed effect draw (the shadow mask chain, the SSAO chain, the PSSM pass, the terrain map's "
                        "blur, the rare image effects, every unit's vertex shader) on the ports in shaders/post/fx (rvk.log `native: own fx shaders`; compare = "
-                       "each unit drawn a second time with them into a scratch copy and compared, `image '<port>'` lines). Off by default.",
+                       "each unit drawn a second time with them into a scratch copy and compared, `image '<port>'` lines). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the engine's units"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnSky = &reg.add({
@@ -3061,12 +3075,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "copy of its target and the two images are compared (rvk.log `native: own sky`, `image 'sky_dome.frag'`: max 0 steps). Owned (14.34; needs native.lean) = "
                        "On + the dome drawn from a persistent record on the lean frames: its states, samplers and geometry kept, the parameter block (the live "
                        "registers: camera, sun, weather, time) read from the composed state and rewritten only on change; check frames compose it and compare "
-                       "(rvk.log `native: own sky: owned record`, DIFFERING must stay 0). Off by default.",
+                       "(rvk.log `native: own sky: owned record`, DIFFERING must stay 0). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 3,
         .options = {"off", "on", "compare", "owned"},
         .optionLabels = {"Off", "On", "Compare with the engine's shader", "Owned record"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnGui = &reg.add({
@@ -3081,12 +3096,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "'gui_main.frag'`: bit-identical, max 0 steps). Owned (14.34; needs native.lean) = On + every lean frame's flush drawn from pulled records "
                        "(the queued records in an instance stream, the corners built by shaders/post/fx/gui_main_pull.*, the batch's texture a per-record bindless "
                        "slot, one draw per run of equal blend states, the clip rect the flush's scissor) with the device state of a template derived from the "
-                       "composition; check frames compose and compare (DIFFERING, image 'gui_main.frag (owned records)'). Off by default.",
+                       "composition; check frames compose and compare (DIFFERING, image 'gui_main.frag (owned records)'). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 3,
         .options = {"off", "on", "compare", "owned"},
         .optionLabels = {"Off", "On", "Compare with the engine's shader", "Owned records"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnParticles = &reg.add({
@@ -3099,12 +3115,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "vertex shader builds (shaders/include/rvk_particle.hlsli: the orientation modes, rotations, pivots, pinned corners, facing, normal modes) "
                        "instead of CPU-built vertices; the engine's particle shaders run unchanged on the expanded corners. Compare = the GPU form is drawn into "
                        "a scratch copy of the target before the composed draw (image 'particles') and the C++ twin of the expansion is checked against the "
-                       "engine-rule vertices byte for byte (rvk.log `native: own particles (5 s)`). Off by default.",
+                       "engine-rule vertices byte for byte (rvk.log `native: own particles (5 s)`). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the CPU quads"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnedDecals = &reg.add({
@@ -3117,12 +3134,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "rewritten only when what they are made from changed (the decals' vertex / index pointers, counts, alpha, a dynamic decal's entity "
                        "matrix); an unchanged record is drawn from them without reading or transforming a vertex, a rolling content check every 30th frame. "
                        "Compare = the bytes are built every frame and checked against the persistent copy (MISS must stay 0; rvk.log `native: owned "
-                       "decals (5 s)`). Off by default.",
+                       "decals (5 s)`). Default on (acts in Full only, S-9).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "on", "compare"},
         .optionLabels = {"Off", "On", "Compare with the per-frame bytes"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
     r.nativeCoverage = &reg.add({
@@ -3186,6 +3204,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
 }
 
 const RendererSettings& renderer() { return g_renderer; }
+
+bool fullNow() {
+    const Setting* m = g_renderer.rendererMode;
+    return m != nullptr && static_cast<RenderMode>(m->asInt()) == RenderMode::Full;
+}
+
+bool startedFull() {
+    const Setting* m = g_renderer.rendererMode;
+    return m != nullptr && static_cast<RenderMode>(m->startValue()) == RenderMode::Full;
+}
 
 // ---- presets ----------------------------------------------------------------------------------------------------------
 
