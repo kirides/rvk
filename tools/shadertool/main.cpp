@@ -548,6 +548,10 @@ int main(int argc, char** argv) {
                 } else {
                     variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::d3d9::Device::boneVsOptions(sh, o); };
                 }
+            } else if (a == "--wind" || a == "--wind-compare") {
+                // 14.42 (native.tree_motion): the vertex shaders' wind-motion forms (with --scene2: SceneVsWind2; --wind-compare: + the compare text of a SpeedTree shader)
+                if (a == "--wind-compare") rvk::d3d9::Device::windCompareForce(true);
+                variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::d3d9::Device::windVsOptions(sh, o); };
             } else if (a == "--scene") {
                 options.sceneRecord = true;  // scene variants: the draw's data from a DrawRecord (frame-ownership.md 7.10)
             } else if (a == "--fillers") {

@@ -137,6 +137,16 @@ void StaticOps::stagesReport() {
         // (S-9: with no ray-traced consumer of the swaying trees (player defaults: no RT shadows / GI) the pipeline is never requested: armed, idle)
         line += stage("tree_wind", twSetting, tw.armed || (twSetting && !tw.requested), a, std::format("{} tree instances by compute, {} of them from owned runs", a, o));
     }
+    // 14.42: the swaying trees' / grass' wind motion (native.tree_motion; acted = composed / replayed draws + owned instances drawn with the wind-motion forms in the window)
+    {
+        static std::uint64_t last = 0;
+        const d3d9::Device::TreeMotionStats& w = dev_.windStats;
+        const std::uint64_t acted = w.perKind[0] + w.perKind[1];
+        const std::uint64_t a = acted - last;
+        last = acted;
+        const int want = settingInt(rs.nativeTreeMotion);
+        line += stage("tree_motion", want != 0 && settings::fullNow(), dev_.treeMotion() != 0, a, std::format("{} tree / grass draws or owned instances with their wind motion", a));
+    }
     // F8-1: the RT scene from the owned record set (native.rt_records; acted = owned draws whose sightings were replayed from their scripts in the window)
     {
         static std::uint64_t last = 0;

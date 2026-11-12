@@ -2957,6 +2957,25 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"renderer.mode", "full", false, false}},  // (S-9: default on, acts in Full only)
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeTreeMotion = &reg.add({
+        .key = "native.tree_motion",
+        .label = "Native frame: tree / grass wind motion",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "14.42 (docs/research/frame-ownership.md; Full): the swaying SpeedTrees (branches, fronds, leaf cards and meshes) and the grass get their own motion "
+                       "vectors for FSR / frame generation: their vertex shader runs a second time with the previous frame's wind constants (c12..c30) and writes the "
+                       "previous position into the G-buffer's motion target (composed draws, packet replays and the owned tree / grass flushes; the clip position stays "
+                       "the translated shader's, bit for bit). Off = the camera's motion only (swaying foliage smears in strong wind). Compare (Vulkan, at start) = the "
+                       "forms also evaluate the wind math of native.tree_wind's compute with the previous constants (rvk.log `native: tree motion compare (5 s)`). "
+                       "Acts only while the G-buffer has a motion target (FSR, frame generation, gbuffer.debug=motion). Default on (acts in Full only).",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare with the wind compute's math"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},  // (acts in Full only, like S-9's stages)
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeRtRecords = &reg.add({
         .key = "native.rt_records",
         .label = "Native frame: RT scene from the owned records",

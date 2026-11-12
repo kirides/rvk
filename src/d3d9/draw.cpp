@@ -1062,6 +1062,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     sceneBone_ = false;
     bonePushPrev_ = {};
     rigidPrev_ = {};
+    windPipe_ = GamePipeline::None;
+    windPipe2_ = GamePipeline::None;
     obsBone_ = false;
     obsBonePending_ = false;
     obsRigidStill_ = false;
@@ -1426,6 +1428,27 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             } else if (tryVariant(rhi::ShaderModule::None, fsVariant, false)) {
                 giDraw = true;
             }
+        }
+    }
+    // 14.42 (native.tree_motion): a main solid tree / grass draw that writes the G-buffer: its wind-motion push form (WindVs + the motion pixel variant, the same states).
+    // The packet keeps the plain pipeline (the retained draw replays it, the owned templates are made from it); submitPacket draws the wind form while the kind has
+    // a previous wind block this frame. (windTest_: rvk_d3d9test without a G-buffer: the plain pixel shader)
+    if (windMode_ != 0 && ((gbufWrite_ && gbuf_.motion != nullptr) || windTest_) && !captureDraw && !replaced && tint == 0 && windKindOf(kind) >= 0 &&
+        phase.view == scene::View::Main && phase.pass == scene::Pass::Solid && vsModule == vs_->module && geom.indexed && !geom.userPointer) {
+        windNote(windKindOf(kind), vsF_ + 12);
+        const rhi::ShaderModule wv = variant(vs_, VariantSlot::WindVs);
+        const rhi::ShaderModule wf = gbufWrite_ ? variant(ps_, gbufferSlot(true)) : pd.fs;
+        if (wv != rhi::ShaderModule::None && wf != rhi::ShaderModule::None) {
+            PipelineDesc wd = pd;
+            wd.vs = wv;
+            wd.fs = wf;
+            windPipe_ = findPipeline(wd);
+            if (windPipe_ == GamePipeline::None) {
+                game_->prewarmOncePipeline(wd);
+                ++windStats.pushPending;
+            }
+        } else if (vs_->variantState[static_cast<std::size_t>(VariantSlot::WindVs)].load() != 3) {
+            ++windStats.pushPending;
         }
     }
     // arming the G-buffer (Device::setGbuffer): this solid draw's pipeline with the attachments, built in the background
@@ -1797,6 +1820,8 @@ void Device::fillCapture(const DrawPacket& p) {
     c.scenePipelinePull = scenePipe2_ != GamePipeline::None ? scenePipePull_ : GamePipeline::None;
     c.ordered = orderedNow_ && !p.batchable && scenePipe2_ != GamePipeline::None;  // F9 / F14
     c.boneMotion = sceneBone_;
+    c.windPipeline = windPipe_;    // 14.42
+    c.windPipeline2 = windPipe2_;
     // (predicted but the scene decision still building its pipelines = pending, not declined: the replay asks again)
     c.boneObs = sceneBone_ ? 0 : obsBone_ ? (lastVariant_.scenePending ? 2 : 1) : obsBonePending_ ? 2 : obsRigidStill_ ? 3 : 0;
     c.pull = {};
@@ -1900,6 +1925,11 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
         gbufTaken = c.v.gbufStatic && scopeGbuf_ && gbufferLit();
         if (gbufTaken != c.v.gbufWanted) return fail(10);
         if (gbufTaken && variant(ps_, gbufferSlot(false)) != c.v.fsAsked) return fail(10);
+    }
+    // 14.42 (native.tree_motion): a tree / grass draw retained without its wind-motion form whose forms are built now: made again (with the form)
+    if (windStale(c, false) || (c.scenePipeline2 != GamePipeline::None && windStale(c, true))) {
+        ++windStats.staleRefused;
+        return fail(10);
     }
     if (c.v.gate && !gbufTaken) {
         const bool wanted = c.v.staticOk && ambientLit();
@@ -2197,6 +2227,18 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
         if (toScenePacket(p, c.scenePipeline)) ++sceneStats_.replayedSceneDraws;
         ++sceneStats_.candidates;
     }
+    if (c.windPipeline != GamePipeline::None && p.scene == 0 && windMode_ != 0 && gbuf_.motion != nullptr && scopeGbuf_) {
+        // 14.42: the wind-motion push form of a replayed tree / grass draw (the register file holds this frame's wind constants: uploadConstants above)
+        const int k = windKindOf(c.kind);
+        windNote(k, vsF_ + 12);
+        const rhi::GpuRef prev = windPrev(k);
+        if (!prev.null() && k >= 0) {
+            p.pipeline = c.windPipeline;
+            p.push.prevVsConsts = prev.bits;
+            ++windStats.replays;
+            ++windStats.perKind[k];
+        }
+    }
     submitInterned(p);
     return true;
 }
@@ -2403,6 +2445,18 @@ void Device::submitPacket(DrawPacket& p) {
         scenePipe_ = GamePipeline::None;
     }
     rigidPrev_ = {};  // (14.22: the previous block belongs to this draw only; the owned flushes / replays after it must not see it)
+    if (windPipe_ != GamePipeline::None && p.scene == 0) {
+        // 14.42: the wind-motion push form (after fillCapture: the retained packet stays the plain one)
+        const int k = windKindOf(lastKind_);
+        const rhi::GpuRef prev = windPrev(k);
+        if (!prev.null()) {
+            p.pipeline = windPipe_;
+            p.push.prevVsConsts = prev.bits;
+            ++windStats.pushDrawn;
+            ++windStats.perKind[k];
+        }
+        windPipe_ = GamePipeline::None;
+    }
     submitInterned(p);
     p.scene = 0;
 }

@@ -274,6 +274,31 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
             bonePipes_.insert(static_cast<std::uint64_t>(sp2));
             ++boneStats.chosen2;
         }
+        // 14.42 (native.tree_motion): the owned tree / grass flushes' wind-motion form of the same draw (SceneVsWind2 + the motion pixel variant's v2 form): retained
+        // with it (CachedDraw::windPipeline2); while it is built the draw is retried (scenePending), a failed form leaves the draw its plain v2 form
+        if (v2only && windMode_ != 0 && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid && gbufWrite_ && gbuf_.motion != nullptr && !psDropped_) {
+            const VariantSlot fsW = sceneView2Of(sceneSlotOf(gbufferSlot(true)));
+            const rhi::ShaderModule vw = variant(vs_, VariantSlot::SceneVsWind2);
+            const rhi::ShaderModule fw = variant(ps_, fsW);
+            if (vw != rhi::ShaderModule::None && fw != rhi::ShaderModule::None) {
+                PipelineDesc sdw = sd2;
+                sdw.vs = vw;
+                sdw.fs = fw;
+                const GamePipeline spw = findPipeline(sdw);
+                if (spw == GamePipeline::None) {
+                    game_->prewarmOncePipeline(sdw);
+                    recordBackgroundKey(sdw);
+                    ++windStats.v2Pending;
+                    pending();
+                } else {
+                    windPipe2_ = spw;
+                    ++windStats.v2Chosen;
+                }
+            } else if (vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVsWind2)].load() != 3 && ps_->variantState[static_cast<std::size_t>(fsW)].load() != 3) {
+                ++windStats.v2Pending;
+                pending();
+            }
+        }
         // S-4 (native.vertex_pull): the pulled form of the v2 pipeline: the same pixel shader + state, the SceneVsPull vertex shader, only the ref stream as vertex
         // input (one binding, per instance). Building = the draw is not retained yet (scenePending: retried, as the v2 form); a failed build = it keeps its vertex input
         if (vertexPull_ && pullFetch_.valid == shader::abi::kVertexFetchValid && !lodVs && !v2only) {  // (the trees' / grass' flushes keep their instance streams)

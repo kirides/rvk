@@ -184,6 +184,12 @@ static const uint RVK_DRAW_TINTED = 0x10000u;
 static uint2 rvk_vsw2Ov = uint2(0u, 0u);
 uint2 rvkVsWinBm(uint w) { return w == 2u && any(rvk_vsw2Ov != uint2(0u, 0u)) ? rvk_vsw2Ov : rvkVsWin(w); }
 #define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWinBm(RVK_VS_WIN(n))), uint(n) * 16u))
+#elif defined(RVK_WIND_PREV)
+// tree / grass wind motion (native.tree_motion, frame-ownership.md 14.42; the WindVs variants only): while rvk_vsw1Ov is set, VS window 1 (c12..c30: the SpeedTree wind matrices,
+// leaf angles, the vegetation clock) reads the previous frame's block instead, so a second run of the program gives the previous frame's swaying position
+static uint2 rvk_vsw1Ov = uint2(0u, 0u);
+uint2 rvkVsWinBm(uint w) { return w == 1u && any(rvk_vsw1Ov != uint2(0u, 0u)) ? rvk_vsw1Ov : rvkVsWin(w); }
+#define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWinBm(RVK_VS_WIN(n))), uint(n) * 16u))
 #else
 #define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWin(RVK_VS_WIN(n))), uint(n) * 16u))
 #endif

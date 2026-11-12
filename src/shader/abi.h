@@ -289,6 +289,7 @@ inline constexpr std::uint32_t kFrameParams = 16;
 inline constexpr std::uint32_t kFrameParamDebugView = 0;   // debug.inject_view: x mode, y strength, z grid spacing
 inline constexpr std::uint32_t kFrameParamMaterials = 2;   // materials.*: x quality (0 off .. 3), y specular strength, z environment strength, w debug view
 inline constexpr std::uint32_t kFrameParamLod = 1;         // lod.trees: x the billboard fade distance scale (Device::lodModule)
+inline constexpr std::uint32_t kFrameParamTreeMotion = 7;  // native.tree_motion=compare (frame-ownership.md 14.42): xy the compare buffer reference (uint bits), z 1 = on
 inline constexpr std::uint32_t kFrameParamBoneMotion = 6;  // native.bone_motion=compare (frame-ownership.md 14.13): xy the compare buffer's read-write reference (uint bits), z 1 = on
 inline constexpr std::uint32_t kFrameParamLights = 4;      // lighting.*: params[4].xy the light table buffer reference (enh/light_table), params[5] = enabled, style (0 original / 1 physical), debug view
 
