@@ -3806,11 +3806,70 @@ per 5 s (+55 - 70 %, ~+300 batches per frame, ~1 us each in the composed Full pa
 | jungle / harbour_docks / pub_interior | ok | ok (0.059 / 0.032 - 0.042 / 0.173 % against controls 0.059 / 0.034 - 0.044 / 0.172 %) |
 | torch_hero (night, no merged lit batch in view) | ok | ok 0.034 - 0.039 % |
 | `RVK_TREE_LIGHT_CUTS=1` arm, harbour_night + north | - | ok (0.043 - 0.068 % / 0.040 - 0.043 %) |
-| D3D12, jungle + harbour_night + north (after a warm-up run; two runs) | - | ok in every settled window but two single ones, neither trees: run 1 the first window at harbour_night's arrival FAILED 0.165 % vs 0.049 % with 2,076 depth pixels (geometry), run 2 the jungle window of its capture burst at the hold's end FAILED 12.97 % full-frame colour vs 0.05 % (116 views); not investigated |
+| D3D12, jungle + harbour_night + north (after a warm-up run; two runs) | - | ok in every settled window but two single ones, neither trees: run 1 the first window at harbour_night's arrival FAILED 0.165 % vs 0.049 % with 2,076 depth pixels (geometry), run 2 the jungle window of its capture burst at the hold's end FAILED 12.97 % full-frame colour vs 0.05 % (116 views); explained and fixed in 14.37 |
 
 Owned trees DIFFERING 0 (rows 0, lighting 0, counts 0, templates 0), MISS 0 in every run, every other stage's MISS / DIFFERING 0; owned trees draw 96 - 97 % of the main view's
 tree ops at the night spots. beach_night_storm is no picture-check spot (`freeze = false` + thunder: the clock runs, the sea and the lightning move; it FAILs with
 `native.owned_trees=false` too). `rvk_tests`, `rvk_rhitest --validation`, `rvk_d3d9test --validation` (Vulkan + D3D12) pass.
+
+### 14.37 The two D3D12 picture-check FAILs of 14.36: a post-capture transient judged against the wrong control, and real D3D12 glitches of pulled pixel-shader-less owned draws (2026-11-12; no new setting; `-Environment 'RVK_PULL_PSLESS=1'` = the old pulling, `RVK_PICTURE_DUMP=<n>` = picture dumps)
+
+Setup: private copy `risen-test-vk-dpc`, lock `rvk-dpc`, the 14.36 set (anm all-on + `native.picture_check=true`, upscaling and frame generation off, rvkcompare `freeze_wait` 1800;
+long holds at harbour_docks with 15,000 - 30,000); logs, scripts and dumps in `rvk-work/scratch/dpc/` (`run.ps1`, `pc2.ps1` = window / cycle digest, `dumpview.py` / `depthview.py`
+= dump pictures, `pairdiff.py`).
+
+**New diagnostics in the check (`src/enh/picture_check.*`).** Per-view lines for outliers (`native: owned picture check: owned|control view of frame F (reference frame R,
+age A): ...`; an outlier differs on > 0.05 % of the picture and > 3 x both the cycle's age-1 control and the last closing control, while the age-1 control says the scene stands
+still); `FAILED cycle of reference frame R: worst owned view ...` lines; `RVK_PICTURE_DUMP=<n>` writes the first n outlier views as `bin/rvk/dumps/picture_check_<kind>_<frame>_ref<R>.bin`
+(reference + current colour / linear depth, read back from the compare; `python tools/picture_check_dump.py <dump>` writes ref / current side by side + a diff mask; the
+check's compare then also copies the current frame: debug only).
+
+**Case 2 (the jungle window of the capture burst, 12.97 % colour): a scene transient, not ownership.** Every back-buffer capture (`rvk_screenshot`, `-Screenshots`) ends its frame
+with a submit + wait (`Device::flushFrameAndWait`), the frame value jumps by two, and the next ~20 frames are not steady: sunlit foliage patches get ~16 % brighter, then decay back
+(dumps: the composed control views show the same, e.g. Vulkan control 7.9 % at age 10, owned 12.7 % at age 7; the same on Vulkan and D3D12; the cause inside the passes was not
+identified: a consumer of "the previous frame" or a temporal history disturbed by the jump; open). The old verdict compared a window's worst owned view with the window's worst
+control: in d2 the cycle's closing control (the composed frame that compares with the same reference) fell into the next window, which the teleport made UNRELIABLE, so the
+owned spike stood against a quiet control. Note for refcompare: a burst's b1 / b2 are captured 10 / 20 frames after the previous capture, inside this transient.
+
+**Case 1 (harbour_night's first window, 2,076 depth pixels) and the rest: real owned-only glitches, D3D12 only.** Long holds at harbour_docks (~120 fps) made them frequent: 1 - 11
+FAILED cycles per 4-min hold, single owned frames with displaced geometry (a black sliver of 1,040 / 1,081 depth pixels along the ship's railing: the z pass wrote depth a few
+pixels off the real edge, the colour pass found no matching surface; once the hidden hero, once 55 % of the picture; at jungle cascade-like shadow patches). Never in a
+composed-only run (`native.owned_persistent=false`: every frame an age-1 control, 0 outliers), never on Vulkan (75 windows at 80 fps, 50 at an uncapped 120 fps: 0 FAILED).
+Bisected at harbour_docks (one 4-min hold per arm; baseline mean ~4 FAILED cycles):
+
+| arm | FAILED cycles |
+|---|---|
+| `native.owned_actors=false` / `own_extract` + `own_collection` off / `cluster_cull` off / `debug.record_threads=false` | 11 / 5 / 4 / 3 |
+| instances + ordered + billboards + decals off / trees + vegetation + cascades + shadow views off / own post + sky + gui + particles + `rt_records` off | 4 / 1 / 2 |
+| frames serialised (one frame in flight) / a GPU fence between the upload call and the frame's lists / CPU-written indirect arguments | 3 / 5 / 3 |
+| the base vertex in the pulled draws' arguments (D3D12's `SV_VertexID` excludes it; the shader result is unchanged) | 1 (not fixed) |
+| **`native.vertex_pull=false`** / **`native.depth_z=off`** / **the pixel shader kept for every draw while pulling** | **0 / 0 / 0** |
+
+So: pulled (S-4, 14.12) owned draws WITHOUT a pixel shader (S-6 `depth_z`: the colour-less main z and shadow passes), on D3D12. No ring wrapped (the UAV-table / transient-SRV rings got
+wrap warnings: none), no draw was skipped, the debug layer (`-Validation`, `RVK_NO_GBV=1`) reports nothing but the known DSV-format PSO warning; with one frame in flight, a fence
+between the calls and CPU arguments ruled out our synchronisation; what remains is the AMD D3D12 driver's path for pixel-shader-less pulled draws (not proven further: the
+mechanism inside the driver is unknown; passing the real base vertex, to give every mesh of an ExecuteIndirect distinct vertex indices, did not help).
+
+**Fix (`d3d9/draw.cpp` fillCapture).** On D3D12 a draw captured without a pixel shader gets no pulled pipeline: its owned z / shadow draw uses the input assembler (still
+pixel-shader-less), its solid draw stays pulled (pulled and IA positions are bit-identical: the z equality holds). `RVK_PULL_PSLESS=1` = pulled as before. Main z after the fix at
+harbour_docks: 4 of 88 items per flush pulled (the texkill ones that keep their pixel shader), solid 54 of 54. Harbour_docks holds after the fix (F2, F3): 32 + 32 settled windows, 0 FAILED cycles (before: 1 - 11 per hold, mean ~4).
+
+**Check robustness (`src/enh/picture_check.*`).**
+1. *Cycles*: an owned view is judged against the closing control of ITS reference (the first composed frame compared with the same reference); a cycle whose closing control never
+   comes (camera change, frame jump) against the window's worst control. A window is FAILED when a cycle failed; the line adds `cycles judged N by their closing control + M by the
+   window's, failed K (worst X % against its control Y %)`.
+2. *Frame-value jumps* (a capture's mid-frame submit, frames without a main view): the reference is dropped and nothing is compared or stored for 32 frames (`settling after a
+   frame jump N (J jumps)`).
+3. *Draw skips* (a shader still compiling, a D3D12 PSO still building, `drawSkips()` as in own_post): a compare whose count moved between the reference's frame and the
+   read-back is dropped (`draw skips N`).
+
+**Gates** (the 14.36 set, `freeze_wait` 1800; spots jungle / harbour_night / harbour_night_north / pub_interior / harbour_docks). D3D12 g1 - g5: PASS, 14 / 15 / 15 / 14 / 14 =
+72 settled windows ok, **0 FAILED windows**; FAILED cycles only in the new game's intro (frames 640 - 2969, owned 83 - 97 % against closing controls of 11 - 28 %, all in
+UNRELIABLE windows: the intro's owned frames differ more than its composed ones, already in the 14.36 runs; not investigated); MISS / DIFFERING 0, no error line. Vulkan
+(vk1, same spots): 18 ok, 0 FAILED, MISS / DIFFERING 0, the main z pass still pulled (383 of 383 items per flush). Screenshot pairs in one D3D12 session (jungle, `-Screenshots
+4205,4605,5005`, `set native.owned_persistent false` at 4400 = the stage line `inactive(setting off)` around 4605, `true` at 4800): owned vs composed 112 / 76 pixels > 6 / 255
+(0.008 / 0.005 %, max 26 / 32), owned vs owned 92 (0.006 %, max 17): the same noise. `rvk_tests` 352 / 0, `rvk_rhitest --validation` PASS (the picture check case binds the
+two new storage images), `rvk_d3d9test --validation` Vulkan + D3D12 PASS (0 validation errors), `rvk_shadertool dxil-check embedded` 182 / 182.
 
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
