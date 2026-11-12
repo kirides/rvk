@@ -1872,14 +1872,22 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {
         captures.request(options_.screenshotDir / std::format("frame_{}.png", frame), api::ImageFormat::Png, 0, nullptr);
     }
-    // rvk_screenshot: the finished back buffer (scene + post + GUI) before it is shown, as D3D9's Present hook / DoSnapshot see it
-    captures.onPresent(frame, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
-        return dev_.readBackBuffer(bgra, w, h);
-    }, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
+    // rvk_screenshot: the finished back buffer (scene + post + GUI) before it is shown, as D3D9's Present hook / DoSnapshot see it.
+    // The copy rides in the present's own submission and is read after it (frame-ownership.md 14.38): a read-back with its own mid-frame submit
+    // (readBackBuffer's flushFrameAndWait) made the frame value jump, and the frames after every capture were disturbed for ~20 frames.
+    // RVK_CAPTURE_FLUSH=1 = the old mid-frame read-back (A/B).
+    static const bool flushCapture = GetEnvironmentVariableA("RVK_CAPTURE_FLUSH", nullptr, 0) != 0;
+    const bool armed = !flushCapture && captures.dueNextPresent() && dev_.armBackBufferRead();
+    const auto readBack = [this, armed](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
+        return armed ? dev_.takeBackBufferRead(bgra, w, h) : dev_.readBackBuffer(bgra, w, h);
+    };
+    const auto readGenerated = [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
         return framegen_ && framegen_->readGenerated(bgra, w, h);  // the manual frame generation's frame_<n>_gen.png
-    });
+    };
+    if (!armed) captures.onPresent(frame, readBack, readGenerated);
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
+    if (armed) captures.onPresent(frame, readBack, readGenerated);
     const auto& s = dev_.stats();
     gpuscene::setVerifyFrame(s.frames);  // 7.27: the next frame's number (the owned path's check frames: frame % native.owned_check == 0)
     api::publishPresent(s.frames, api::FrameNumbers{

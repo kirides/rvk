@@ -885,6 +885,12 @@ public:
                         std::vector<std::uint8_t>& out);
     // read the back buffer as tightly packed BGRA8 (waits for the GPU)
     bool readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
+    // A capture of the present's back buffer without a mid-frame submit (frame-ownership.md 14.38): armBackBufferRead before present() records the copy into the
+    // frame's own list, takeBackBufferRead after present() waits for that submission and returns the pixels. The frame value does not jump (readBackBuffer's
+    // flushFrameAndWait makes it jump: the RT scene drops the previous frame's captured trees / characters for one frame, RtScene::rollDyn, and the RT
+    // shadows' temporal filter carried the missing shadows ~20 frames)
+    bool armBackBufferRead();
+    bool takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
 
     // frame
     void present();
@@ -2679,6 +2685,17 @@ private:
     bool overlayIntoBackBuffer_ = false;
     void invalidateRecordingState();
     LiveFrame live_;
+
+    // diagnostics RVK_CROP_LUMA=x,y,w,h (frame-ownership.md 14.38): the mean colour of a back-buffer crop of every presented frame (+ the engine's adapted
+    // luminance), read back once the frame completed: no wait, the frames are not disturbed
+    struct CropDiag;
+    std::unique_ptr<CropDiag> cropDiag_;
+    void diagCropLuma();
+
+    // the present's back-buffer capture (armBackBufferRead / takeBackBufferRead)
+    std::unique_ptr<rhi::Buffer> bbRead_;
+    std::uint64_t bbReadValue_ = 0;  // the frame value of the submission that copies (0 = nothing armed)
+    std::uint32_t bbReadWidth_ = 0, bbReadHeight_ = 0, bbReadPitch_ = 0, bbReadRowBytes_ = 0;
 };
 
 // RAII debug region (Device::regionBegin / regionEnd): no allocation, a few instructions when regions are off

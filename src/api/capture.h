@@ -76,6 +76,8 @@ public:
     // `generated` (optional): the manual frame generation's interpolated frame of this present; every capture that is due is also
     // written as "<name>_gen.<ext>" (no ticket of its own) when it returns true
     void onPresent(std::uint64_t frame, const ReadBack& read, const ReadBack& generated = {});
+    // whether the next onPresent captures (a request due at it): the renderer arms its read-back in the frame's own submission
+    bool dueNextPresent() const;
     // fails every request not captured yet (the renderer is gone)
     void failWaiting(std::string_view reason);
     std::uint32_t pending() const;
