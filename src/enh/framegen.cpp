@@ -702,10 +702,22 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
     cl->endRendering();
 }
 
+void FrameGeneration::armGeneratedRead(bool arm) {
+    genRead_.value = 0;
+    if (arm && generated_ != nullptr && generatedShown_ && rhi::formatBlock(generated_->desc().format).bytes == 4) dev_.armImageRead(genRead_, *generated_);
+}
+
 bool FrameGeneration::readGenerated(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
     if (generated_ == nullptr || !generatedShown_) return false;
     width = generatedWidth_;
     height = generatedHeight_;
+    if (genRead_.value != 0) {
+        // the copy recorded in the frame's own list (armGeneratedRead): no mid-frame submit
+        if (!dev_.takeImageRead(genRead_, bgra)) return false;
+        width = genRead_.width;
+        height = genRead_.height;
+        return true;
+    }
     const std::uint64_t size = static_cast<std::uint64_t>(width) * height * 4;
     return dev_.readImageLevel(*generated_, 0, 0, {width, height, 1}, size, bgra);
 }

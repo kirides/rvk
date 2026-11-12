@@ -1881,12 +1881,14 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     const auto readBack = [this, armed](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
         return armed ? dev_.takeBackBufferRead(bgra, w, h) : dev_.readBackBuffer(bgra, w, h);
     };
+    if (framegen_) framegen_->armGeneratedRead(armed);  // (its _gen.png: the same in-frame copy)
     const auto readGenerated = [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
         return framegen_ && framegen_->readGenerated(bgra, w, h);  // the manual frame generation's frame_<n>_gen.png
     };
     if (!armed) captures.onPresent(frame, readBack, readGenerated);
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
+    writeSnapshots();  // the engine's snapshots of this frame (SaveBackbufferToFile), read after the present's submission
     if (armed) captures.onPresent(frame, readBack, readGenerated);
     const auto& s = dev_.stats();
     gpuscene::setVerifyFrame(s.frames);  // 7.27: the next frame's number (the owned path's check frames: frame % native.owned_check == 0)
@@ -1993,6 +1995,20 @@ bEResult HalDevice::SaveBackbufferToFile(char* const a0) {
     if (dev_.renderTarget(0) != dev_.backBuffer()) {
         spdlog::warn("hal: SaveBackbufferToFile: render target 0 is not the back buffer; saving the back buffer");
     }
+    // The copy rides in the frame's own submission and the file is written after the present (writeSnapshots; DoSnapshot runs right before SwapScreen and
+    // only logs a failure): a read-back with its own mid-frame submit disturbed the frames after it (frame-ownership.md 14.38 / 14.39).
+    // RVK_CAPTURE_FLUSH=1 = the old mid-frame read-back (A/B).
+    static const bool flushCapture = GetEnvironmentVariableA("RVK_CAPTURE_FLUSH", nullptr, 0) != 0;
+    if (!flushCapture && dev_.backBuffer() != nullptr) {
+        auto p = std::make_unique<PendingSnapshot>();
+        p->enginePath = a0;
+        p->file = *file;
+        p->frame = dev_.stats().frames + 1;
+        if (dev_.armBackBufferReadInto(p->read)) {
+            snapshots_.push_back(std::move(p));
+            return bEResult_Ok;
+        }
+    }
     std::vector<std::uint8_t> bgra;
     std::uint32_t w = 0, h = 0;
     if (!dev_.readBackBuffer(bgra, w, h)) {
@@ -2006,6 +2022,27 @@ bEResult HalDevice::SaveBackbufferToFile(char* const a0) {
     }
     spdlog::info("hal: snapshot '{}' -> {} ({}x{}, frame {})", a0, api::utf8(*file), w, h, dev_.stats().frames + 1);
     return bEResult_Ok;
+}
+
+void HalDevice::writeSnapshots() {
+    if (snapshots_.empty()) return;
+    auto due = std::move(snapshots_);
+    snapshots_.clear();
+    for (auto& p : due) {
+        std::vector<std::uint8_t> bgra;
+        if (!dev_.takeImageRead(p->read, bgra)) {
+            spdlog::warn("hal: SaveBackbufferToFile('{}'): back-buffer read-back failed", p->enginePath);
+            continue;
+        }
+        const std::uint32_t w = p->read.width, h = p->read.height;
+        std::string error;
+        const std::vector<std::uint8_t> bmp = api::encodeBmpLikeD3DX(bgra, w, h);
+        if (bmp.empty() || !api::writeFileReplace(p->file, bmp, &error)) {
+            spdlog::warn("hal: SaveBackbufferToFile({}): {}", api::utf8(p->file), error.empty() ? "encoding failed" : error);
+            continue;
+        }
+        spdlog::info("hal: snapshot '{}' -> {} ({}x{}, frame {})", p->enginePath, api::utf8(p->file), w, h, p->frame);
+    }
 }
 
 void HalDevice::logFrameStats() {

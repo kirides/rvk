@@ -3918,7 +3918,7 @@ not used` (first 8).
 
 **Fix (`hal/vulkan/device.cpp` Present, `Device::armBackBufferRead / takeBackBufferRead`, `api::CaptureQueue::dueNextPresent`).** When a capture is due at a present, the
 back-buffer copy is recorded into the frame's own command list before `Device::present()`, and the pixels are read after the present's submission (a CPU wait for that frame
-value, no extra submit): the frame value no longer jumps, nothing downstream sees a capture. Same bytes as before (the raw BGRA8 back buffer). Still mid-frame (still a jump):
+value, no extra submit): the frame value no longer jumps, nothing downstream sees a capture. Same bytes as before (the raw BGRA8 back buffer). Still mid-frame (still a jump; fixed in 14.39):
 the engine's own `SaveBackbufferToFile` snapshot and `GetRenderTargetData`, the manual frame generation's `_gen.png`, the diagnostics read-backs (`RVK_EXPOSURE_LOG`,
 `RVK_NAN_BISECT`).
 
@@ -3938,6 +3938,67 @@ dropped 32 frames); no FAILED window, MISS / DIFFERING 0. Pictures are the same 
 
 Consequence for earlier A/B work: rvkcompare burst pictures b1 / b2 / b3 (10 / 20 / 30 presents after the previous capture) of runs with `shadows.rt` on were taken inside the
 transient (+3.6 % / +1.4 % / +0.6 % on the worst crop at jungle); single captures and b0 were not.
+
+### 14.39 Mid-frame submits no longer disturb the next frame: frame memory epochs, continuation flushes, in-frame reads for the remaining read-backs (2026-11-12; no new setting; `-Environment 'RVK_FLUSH_NEW_FRAME=1'` = the old flush (a new memory epoch), `RVK_CAPTURE_FLUSH=1` = the old flushing read-backs of the captures and the engine snapshot; overlay command `snapshot` = the engine's own snapshot at a present)
+
+Setup: private copy `risen-test-vk-fvj`, lock `rvk-fvj`, the 14.38 all-on set (Full + player defaults, upscaling / frame generation off unless stated), rvkcompare `jungle`, `RVK_CROP_LUMA` 4 x 3
+grid, `native.picture_check=true`; scripts and logs in `rvk-work/scratch/fvj/` (`run.ps1`, `batch1.ps1`, `ana.py` = crop luma around every capture / snapshot / exposure read /
+GetRenderTargetData, with the frame value steps; `bmpcmp.py`).
+
+**What was left after 14.38.** Every path that still flushed (`Device::flushFrameAndWait`: submit + wait + `beginFrame`) began a new frame slot, and the ring / vertex capture
+memory rotated per *submission* (`vk::Frames` chunk lists per value slot; D3D12 `rings_` / `capture_` per `frameSlot_`). Two submissions inside one frame therefore recycled
+the previous frame's memory, and `RtScene::rollDyn` (`dynFrame_ + 1 == frame`) had to drop the previous frame's captures (animated SpeedTrees, characters). The flushing
+callers: the engine's snapshot (`SaveBackbufferToFile`, the player's screenshot key), `GetRenderTargetData` into a CPU texture (the savegame thumbnail,
+`gCSaveGameManager::UpdateThumbnail`: rvk.log `hal: GetRenderTargetData 128x128 ...` at presents 2 / 3 of every run, i.e. at start-up, and at every quick save), texture
+restores (`Texture::restoreLevel`), CPU destinations of `loadSurfaceFromSurface` (loading), the manual frame generation's `_gen.png` (`readGenerated`), `RVK_EXPOSURE_LOG`,
+`RVK_NAN_BISECT`, frame generation's context drop. **And the manual frame generation itself**: its present makes two submissions per frame (generated + real), so with
+`framegen.manual=true` every frame jumped by 2 and the RT scene never kept a previous frame's capture.
+
+**Fix 1: memory epochs (all paths at once; `rhi/game_device.h`, `vk/frames.*`, `rhi/d3d12/d3d12_game_*.inc`, `d3d9/device.cpp`).** `GameDevice::beginFrame(bool
+continuation)`: the ring and the capture pool rotate per frame (a non-continuation begin = a new *memory epoch*, `GameDevice::memoryEpoch()`), command pools / descriptor
+rings / timestamps still per submission. A continuation (the flush's `beginFrame(true)`, the manual frame generation's first present) keeps the memory slot and its blocks (no
+reset, allocation continues); a new epoch waits for the last value that recorded with the slot it recycles (normally long done). So a block allocated in epoch E is valid
+through epoch E + 1 however many submissions either frame made (`GameDevice::memoryLive(E)`). D3D12's capture-pool states follow the memory slot (this epoch's UAV, the
+previous epoch's SRV). Consumers keyed on the epoch instead of the frame value: `RtScene::rollDyn` (the same epoch after a flush: the frame's captures so far stay;
+epoch + 1 and live: kept as the previous frame's; rvk.log `rt: scene: frame memory epoch jumped A -> B (frame value X -> Y) ...` only when they really are gone),
+the motion chain's `DynBlas::lastCaptureEpoch`, the tree wind jobs (`treeJobsEpoch_`), object motion's previous capture (`enh/object_motion`), the rigid list rows of the
+bone-history motion (`Device::rigidListPredict`), GI's light tallies, and the staged passes' same-frame checks (RT shadows trace -> temporal -> spatial, material RT trace
+-> filter -> composite, lamp shadows cluster -> trace). Left on the frame value on purpose: `rtSceneValid()` (the TLAS lives in a per-*submission* slot: a later
+submission of the same epoch could otherwise read a TLAS the next frame rebuilds), per-slot read-back buffers, noise seeds. Not affected (present counters):
+the owned check cadence (`stats().frames`), the bone / object tables (their own frame counter at the HAL present), `Device::captured_` / `capturedPrev_` (per present).
+
+**Fix 2: the remaining read-backs in the frame's own submission (`Device::armImageRead / takeImageRead / deferImageRead`, `InFrameRead`).** The 14.38 mechanism generalised:
+the copy of a whole level is recorded into the frame's list, the bytes are taken after the present's submission (a CPU wait for that value, no extra submit).
+* **Engine snapshot** (`HalDevice::SaveBackbufferToFile`): DoSnapshot runs right before SwapScreen and only logs a failure, so the copy is armed there and the BMP is written by
+  `HalDevice::writeSnapshots` right after `dev_.present()` (same `encodeBmpLikeD3DX`, same path checks; `RVK_CAPTURE_FLUSH=1` = the old read-back). A snapshot the HAL
+  never presents after (device teardown) is not written.
+* **Manual frame generation's `_gen.png`**: `FrameGeneration::armGeneratedRead` at the present when a capture is due, `readGenerated` takes it (else the old read).
+* **`RVK_EXPOSURE_LOG`**: the three reads are `deferImageRead`s, logged at a later present (`Device::serviceDeferredReads`).
+* **Kept synchronous** (their callers need the bytes at once; continuation flushes now, harmless by fix 1): `GetRenderTargetData` into a CPU texture (D3D9 semantics; the
+  thumbnail's save serialises it), texture restores, `loadSurfaceFromSurface` into CPU textures, `RVK_NAN_BISECT` (a read after every draw), frame generation's context drop.
+
+**Evidence** (worst crop deviation in the 40 presents after the event against the 30 before; same-state noise = the deviation of those 30 among themselves; events = 2 shots +
+3 overlay `snapshot`s + a 4-shot burst + RVK_EXPOSURE_LOG reads every 60 frames where on):
+
+| run | paths | frame value at the events | worst after an event | same-state noise | `rt: scene ... jumped` lines | picture check |
+|---|---|---|---|---|---|---|
+| r1 Vulkan, `RVK_CAPTURE_FLUSH=1` | flushing shots + snapshots (continuation) | +2 | 0.03 - 0.05 % | 0.03 - 0.04 % | 0 | all ok, no FAILED |
+| **r1b** Vulkan, + `RVK_FLUSH_NEW_FRAME=1` (control) | the old flush | +2 | **11.8 - 12.0 %** (+1 / +2, decaying through the burst: 10.1 / 8.0 / 6.0 %) | 0.03 - 0.05 % | 8 | - |
+| r2 D3D12, `RVK_CAPTURE_FLUSH=1` | flushing shots + snapshots (continuation) | +2 | 0.04 - 0.08 % | 0.03 - 0.06 % | 0 | 5 ok, 0 FAILED |
+| r3 Vulkan | in-frame shots + snapshots + exposure log (720 `diag: exposure` lines) | **+1 everywhere** | first 10 presents within 0.05 %; late slow drifts up to 0.12 - 0.16 % (+18 .. +39, crop 1 / 5, not at +1, not decaying) | 0.02 - 0.05 % | 0 | 0 FAILED |
+| r4 D3D12 | in-frame shots + snapshots + exposure log | +1 everywhere | 0.07 - 0.16 % | 0.02 - 0.05 % | 0 | 0 FAILED |
+| r5 Vulkan, `framegen.mode=fsr3`, `framegen.manual=true` | shots with `_gen.png`, snapshots | +2 every present (two submissions per frame) | 0.04 - 0.05 % (one +0.2 % step of crop 5 at +7 in the burst that stays: a scene event) | 0.03 - 0.19 % | 0 | - |
+
+The 14.38 reference without the fix: t1 Vulkan 9.8 %, s3 D3D12 12.2 %. First run of the new code: `-Validation` + GPU-AV (`av1`: flushing shots + a snapshot under GPU-assisted
+validation): 0 validation messages, 0 errors.
+
+**Snapshot bytes.** The BMP the new path writes has the header of the old path's (r1 `RVK_CAPTURE_FLUSH=1` vs r3: 54-byte header byte-identical, 5,760,056 bytes, the two
+D3DX pad bytes); `rvk_d3d9test` "in-frame read (14.39)" proves the pixel bytes of the in-frame read equal the flushing `readBackBuffer`'s for the same back buffer (both
+backends), so `encodeBmpLikeD3DX` writes the same file. In game (r6, `-Snapshots 3700,3900`: the engine snapshot and the tool API's captures of the same frame): the snapshot BMP's pixels are RGB-identical to the API's PNG of that frame (frames 3993 / 4193; the API capture 3 presents later differs in 143,044 pixels: the comparison is sensitive).
+
+Gates: `rvk_tests` 353 / 0; `rvk_d3d9test --validation`, `--sync-validation`, `--backend d3d12 --validation` PASS (0 validation errors) incl. the new cases "flush keeps frame
+memory (14.39)" (a flush keeps the epoch, ring / capture blocks of the frame are not handed out again by the continuation or the next frame (48 MiB churned each), the GPU
+reads the bytes written before the flush in the next frame, two frames later the epoch is not live) and "in-frame read (14.39)"; `rvk_rhitest --validation` PASS.
 
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 

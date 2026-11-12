@@ -2897,23 +2897,32 @@ void RtScene::setDynamic(const void* consumer, bool on) {
 }
 
 // the capture requests of a new frame: the list of the frame before is kept (a character the cascades did not draw this frame
-// is built from its main-view capture of the previous frame)
+// is built from its main-view capture of the previous frame). Keyed on the memory epoch, not the frame value (frame-ownership.md 14.39): a mid-frame submit
+// (a read-back's flush, the manual frame generation's first present) advances the frame value but not the epoch, and the ring / capture memory of the
+// previous epoch stays valid through this one (GameDevice::memoryLive). Before, every such flush dropped the previous frame's trees / characters from the
+// next TLAS (the RT shadows' temporal filter showed it for ~20 frames: 14.38).
 void RtScene::rollDyn(std::uint64_t frame) {
     if (dynFrame_ == frame) return;
-    if (dynFrame_ + 1 == frame) {
+    const rhi::GameDevice& g = dev_.game();
+    const std::uint64_t epoch = g.memoryEpoch();
+    if (dynFrame_ != 0 && dynEpoch_ == epoch) {
+        dynFrame_ = frame;  // the same frame after a mid-frame submit: its captures so far stay this frame's
+        return;
+    }
+    if (dynEpoch_ + 1 == epoch && g.memoryLive(dynEpoch_)) {
         dynPrev_ = std::move(dyn_);
     } else {
-        // a frame value jump (a mid-frame submit: Device::flushFrameAndWait): the previous frame's capture memory is reused, its trees / characters
-        // are missing from this frame's TLAS (the RT shadows' temporal filter showed that for ~20 frames: frame-ownership.md 14.38)
+        // a frame without RT observations in between, or the memory is gone: the previous captures cannot be used
         if (!dyn_.empty() && dynFrame_ != 0 && ++dynJumpDrops_ <= 8) {
-            spdlog::info("rt: scene: frame value jumped {} -> {}: the previous frame's {} captured draws are not used{}", dynFrame_, frame, dyn_.size(),
-                         dynJumpDrops_ == 8 ? " (last such line)" : "");
+            spdlog::info("rt: scene: frame memory epoch jumped {} -> {} (frame value {} -> {}): the previous frame's {} captured draws are not used{}", dynEpoch_, epoch,
+                         dynFrame_, frame, dyn_.size(), dynJumpDrops_ == 8 ? " (last such line)" : "");
         }
         dynPrev_.clear();
     }
     dyn_.clear();
     skinJobs_.clear();
     dynFrame_ = frame;
+    dynEpoch_ = epoch;
     dynTrees_ = 0;
 }
 
@@ -3001,9 +3010,9 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
             ++tw_.ringFull;
             if (!capture) return;
         } else {
-            if (treeJobsFrame_ != frame) {
+            if (const std::uint64_t epoch = dev.game().memoryEpoch(); treeJobsEpoch_ != epoch) {  // (epoch: a mid-frame flush keeps the frame's jobs)
                 treeJobs_.clear();
-                treeJobsFrame_ = frame;
+                treeJobsEpoch_ = epoch;
             }
             const std::uint32_t header[4] = {slots, 0, 0, 0};
             std::memcpy(out.ptr, header, 16);
@@ -3248,7 +3257,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         header[0] |= bit;
         if (bit != 0) ++dev.boneStats.compareDraws;
     }
-    if (mainView && !useSkin && !b.lastCapture.null() && b.lastCaptureFrame + 1 == frame) {
+    if (mainView && !useSkin && !b.lastCapture.null() && b.lastCaptureEpoch + 1 == dev.game().memoryEpoch() && dev.game().memoryLive(b.lastCaptureEpoch)) {
         header[1] = b.lastCapture.low();
         header[2] = b.lastCapture.high();
         header[3] = b.lastSlots;
@@ -3350,17 +3359,17 @@ void RtScene::buildDynamic(rhi::CommandList& cl, std::uint64_t frame) {
             DynBlas& b = dynBlas_[d.key];
             b.lastCapture = d.capture.ref;
             b.lastSlots = d.slots;
-            b.lastCaptureFrame = frame;
+            b.lastCaptureEpoch = dynEpoch_;
         }
         for (const DynDraw& d : dynPrev_) {
             if (!d.main || d.tree) continue;
             DynBlas& b = dynBlas_[d.key];
-            if (b.lastCaptureFrame >= frame - 1 && !b.lastCapture.null()) continue;
+            if (b.lastCaptureEpoch + 1 >= dynEpoch_ && !b.lastCapture.null()) continue;
             const rhi::GpuRef asked = !d.requested.null() ? d.requested : d.capture.ref;
             if (!dev_.vertexCapturedPrev(asked)) continue;
             b.lastCapture = d.capture.ref;
             b.lastSlots = d.slots;
-            b.lastCaptureFrame = frame - 1;
+            b.lastCaptureEpoch = dynEpoch_ - 1;
         }
     }
     if (dynUse_.empty()) return;
@@ -3706,8 +3715,7 @@ const RtScene::TreeLayoutEntry& RtScene::treeLayout(const d3d9::ReplaceQuery& q)
 // capture would have run in, so the next frame's refit (buildDynamic: the previous frame's captures) takes the outputs unchanged
 void RtScene::recordTreeWind(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || treeJobs_.empty()) return;
-    const std::uint64_t frame = dev_.frameValue();
-    if (treeJobsFrame_ != frame || treeWind_ == 0 || !treeWindReady()) {
+    if (treeJobsEpoch_ != dev_.game().memoryEpoch() || treeWind_ == 0 || !treeWindReady()) {
         tw_.dropped += treeJobs_.size();
         treeJobs_.clear();
         return;

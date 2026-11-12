@@ -8,6 +8,10 @@
 // The ring hands out persistently mapped, device-addressable memory that lives until the frame that allocated it has completed
 // (shader constants, D3D9 DISCARD/NOOVERWRITE dynamic buffers, DrawUP data, staging of render-thread uploads). It belongs to the
 // render thread; uploads from loader threads use their own staging buffers (Frames::retire keeps them alive).
+//
+// Ring memory rotates per *frame* (a present), not per submission (frame-ownership.md 14.39): a mid-frame submit (a read-back's flush, the manual
+// frame generation's first present) begins a continuation (begin(true)): a new command slot and timeline value, but the ring keeps its memory slot and
+// its blocks. So what a frame allocated (vertex captures, constants) stays valid through the whole next frame however many values the frames took.
 
 #include <cstdint>
 #include <functional>
@@ -32,8 +36,9 @@ public:
     bool create(Context& ctx);
     void destroy();
 
-    // starts frame recording: waits for the slot, runs due deletions, recycles ring chunks, begins the command buffers
-    void begin();
+    // starts frame recording: waits for the slot, runs due deletions, recycles ring chunks, begins the command buffers.
+    // continuation: the same frame goes on after a mid-frame submit: the ring is not recycled (its blocks stay valid), the memory epoch stays.
+    void begin(bool continuation = false);
     // ends and submits the frame's upload + main command buffers. waitAcquire / signalRendered may be VK_NULL_HANDLE.
     bool submit(VkSemaphore waitAcquire, VkSemaphore signalRendered);
 
@@ -43,6 +48,8 @@ public:
     bool recording() const { return recording_; }
 
     std::uint64_t currentValue() const { return frameValue_; }  // value the frame being recorded will signal
+    // counts the non-continuation begins: ring memory allocated in epoch E is valid through epoch E + kInFlight - 1
+    std::uint64_t memoryEpoch() const { return memoryEpoch_; }
     std::uint32_t currentSlot() const { return slot(); }
     bool uploadBegun() const { return slots_[slot()].uploadBegun; }
     // statistics: ms the last begin() waited for its slot (the CPU ran a full slot ahead of the GPU); ring bytes handed out
@@ -74,7 +81,11 @@ private:
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkCommandBuffer upload = VK_NULL_HANDLE;
         bool uploadBegun = false;
-        std::vector<std::size_t> chunks;  // indices into chunks_ used by this slot
+    };
+    // the ring's memory slots (rotated by non-continuation begins): chunks used, the last timeline value that recorded with the slot
+    struct MemSlot {
+        std::vector<std::size_t> chunks;  // indices into chunks_
+        std::uint64_t lastValue = 0;
     };
     static rhi::RingAlloc makeAlloc(const Chunk& c, VkDeviceSize offset);
     std::uint32_t slot() const { return static_cast<std::uint32_t>(frameValue_ % kInFlight); }
@@ -84,6 +95,9 @@ private:
     Context* ctx_ = nullptr;
     VkSemaphore timeline_ = VK_NULL_HANDLE;
     Slot slots_[kInFlight];
+    MemSlot mem_[kInFlight];
+    std::uint32_t memSlot_ = 0;
+    std::uint64_t memoryEpoch_ = 0;
     std::uint64_t frameValue_ = 1;  // value of the frame being recorded / next to record
     bool recording_ = false;
     double lastSlotWaitMs_ = 0.0;

@@ -129,7 +129,9 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         q.indexBuffer->ringCopied() || q.vertexBuffer->ringCopied()) {
         return;
     }
-    const std::uint64_t frame = dev.frameValue();
+    // the memory epoch (GameDevice::memoryEpoch), not the frame value: the previous frame's capture stays usable across a mid-frame read-back flush (its ring
+    // memory lives through the next epoch; frame-ownership.md 14.39)
+    const std::uint64_t frame = dev.game().memoryEpoch();
     if (frame != frame_) {
         frame_ = frame;
         perFrame_ = 0;

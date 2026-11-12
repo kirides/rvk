@@ -27,6 +27,7 @@
 #include "api/capture.h"
 #include "engine/image_effects.h"
 #include "engine/menu_state.h"
+#include "engine/vfs.h"
 #include "overlay/keys.h"
 #include "engine/window_mode.h"
 
@@ -483,6 +484,11 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         std::string reason;
         const std::uint32_t ticket = api::captures().request(file, api::ImageFormat::Png, 0, &reason);
         return ticket != 0 ? ok(std::format("screenshot #{} -> {}", ticket, file.string())) : fail(reason);
+    }
+    if (w[0] == "snapshot" && w.size() == 1) {
+        // "snapshot": the engine's own snapshot (eCApplication::Snapshot: DoSnapshot -> HAL SaveBackbufferToFile in the next eCApplication::Draw, a BMP in
+        // <localappdata>\Risen\ScreenShots; frame-ownership.md 14.39); the same as the debug key's, anchored at a present ("freeze+N: snapshot")
+        return engine::requestEngineSnapshot() ? ok("engine snapshot requested (written by the next frame's SaveBackbufferToFile)") : fail("eCApplication::Snapshot not bound");
     }
     if (w[0] == "post" && w.size() >= 2) {
         // "post effect <name>" / "post default" / "post overlay <name> [dur [in [out]]]" / "post overlay stop [fade]": the engine's image effects

@@ -593,6 +593,15 @@ private:
     std::uint64_t halDraws_ = 0;
     std::uint32_t cameraFrames_ = 0;       // frames with a main-view camera since the last camera report
     std::uint32_t cameraMovedFrames_ = 0;  // of those, frames whose camera position differs from the previous frame's
+    // SaveBackbufferToFile: the back buffer's copy rides in the frame's own submission, the BMP is written after the present (frame-ownership.md 14.39)
+    struct PendingSnapshot {
+        std::string enginePath;
+        std::filesystem::path file;
+        d3d9::Device::InFrameRead read;
+        std::uint64_t frame = 0;
+    };
+    std::vector<std::unique_ptr<PendingSnapshot>> snapshots_;
+    void writeSnapshots();
     void updateLogFrame();
     // the menu frame rate limit and the unpaced loading screen (engine/menu_state.h), each present
     void updateMenuPacing();

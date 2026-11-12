@@ -65,7 +65,7 @@
     std::unique_ptr<Upscaler> createUpscaler() override;
     std::unique_ptr<FrameGenerator> createFrameGenerator() override;
     std::unique_ptr<ImGuiBackend> createImGuiBackend() override;
-    void beginFrame() override;
+    void beginFrame(bool continuation) override;
     double lastSlotWaitMs() const override { return lastSlotWaitMs_; }
     void submitFrame(const char* finalMark) override;
     bool namesEnabled() const override { return debugNamesEnabled(); }

@@ -891,6 +891,21 @@ public:
     // shadows' temporal filter carried the missing shadows ~20 frames)
     bool armBackBufferRead();
     bool takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
+    // The same for any image (frame-ownership.md 14.39): armImageRead records the copy of one whole level / layer into the frame's own list (no submit),
+    // takeImageRead (after that list's submission: false before it) waits for it and returns the level tightly packed in storage layout (as readImageLevel).
+    // The engine's snapshot (SaveBackbufferToFile), the manual frame generation's generated frame and the RVK_EXPOSURE_LOG diagnostics read this way.
+    struct InFrameRead {
+        std::unique_ptr<rhi::Buffer> buf;
+        std::uint64_t value = 0;  // the frame value of the submission that copies (0 = nothing armed)
+        std::uint64_t capacity = 0;
+        std::uint32_t width = 0, height = 0, pitch = 0, rowBytes = 0, blockRows = 0;
+    };
+    bool armImageRead(InFrameRead& read, rhi::Texture& tex, std::uint32_t level = 0, std::uint32_t layer = 0);
+    bool takeImageRead(InFrameRead& read, std::vector<std::uint8_t>& out);
+    // armImageRead + `done(bytes)` once the submission completed (serviced at the next present; diagnostics)
+    void deferImageRead(rhi::Texture& tex, std::function<void(const std::vector<std::uint8_t>&)> done);
+    // the back buffer (BGRA8 formats only, as readBackBuffer) into a caller's read (the engine's snapshot); takeImageRead returns its pixels
+    bool armBackBufferReadInto(InFrameRead& read);
 
     // frame
     void present();
@@ -1931,7 +1946,7 @@ private:
         std::size_t operator()(const SamplerKey& k) const;
     };
 
-    void beginFrame();
+    void beginFrame(bool continuation = false);  // continuation: the same frame after a mid-frame submit (GameDevice::beginFrame)
     // ends the open scope and submits the frame's work; `presenting`: the frame ends in a present blit (the GPU timestamp label)
     void submitFrame(bool presenting);
     void processReleases();
@@ -2693,9 +2708,10 @@ private:
     void diagCropLuma();
 
     // the present's back-buffer capture (armBackBufferRead / takeBackBufferRead)
-    std::unique_ptr<rhi::Buffer> bbRead_;
-    std::uint64_t bbReadValue_ = 0;  // the frame value of the submission that copies (0 = nothing armed)
-    std::uint32_t bbReadWidth_ = 0, bbReadHeight_ = 0, bbReadPitch_ = 0, bbReadRowBytes_ = 0;
+    InFrameRead bbRead_;
+    // deferImageRead: armed reads and what to do with their bytes
+    std::vector<std::pair<std::unique_ptr<InFrameRead>, std::function<void(const std::vector<std::uint8_t>&)>>> deferredReads_;
+    void serviceDeferredReads();
 };
 
 // RAII debug region (Device::regionBegin / regionEnd): no allocation, a few instructions when regions are off

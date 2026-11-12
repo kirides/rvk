@@ -598,7 +598,10 @@ void Device::flushFrameAndWait() {
     endRendering();
     submitFrame(false);
     game_->waitFrame(game_->frameValue() - 1);
-    beginFrame();
+    // the same frame goes on: its ring / capture memory stays (GameDevice::memoryEpoch, frame-ownership.md 14.39); RVK_FLUSH_NEW_FRAME=1 = the old behaviour
+    // (a flush begins a new memory epoch: the previous frame's captures are gone; A/B)
+    static const bool newFrame = GetEnvironmentVariableA("RVK_FLUSH_NEW_FRAME", nullptr, 0) != 0;
+    beginFrame(!newFrame);
 }
 
 bool Device::waitFrameGenPresent() { return pres().waitFrameGenPresent(); }
@@ -843,9 +846,9 @@ void Device::destroy() {
 
 // ---- frames ---------------------------------------------------------------------------------------------------------
 
-void Device::beginFrame() {
+void Device::beginFrame(bool continuation) {
     RVK_ZONE("Device::beginFrame");
-    game_->beginFrame();
+    game_->beginFrame(continuation);
     viArena_.clear();  // every chunk of the last submission has been recorded and executed
     dynArena_.clear();
     lastVi_ = nullptr;
@@ -1339,38 +1342,41 @@ void Device::present() {
             d.presentEnd_ = now;
         }
     } presentEnd{*this};
+    serviceDeferredReads();  // (the reads of earlier frames: RVK_EXPOSURE_LOG)
     if (static bool exposureLog = GetEnvironmentVariableA("RVK_EXPOSURE_LOG", nullptr, 0) != 0; exposureLog && stats_.frames % 60 == 59) {
-        // diagnostics: the engine's adapted luminance (the 1x1 R32F output of the AvgLuminance filter) as the GPU holds it
+        // diagnostics: the engine's adapted luminance (the 1x1 R32F output of the AvgLuminance filter) as the GPU holds it. Read in the frame's own submission
+        // and logged at a later present (deferImageRead): a mid-frame read-back flush would disturb the frames after it (frame-ownership.md 14.38 / 14.39)
+        const std::uint64_t frame = stats_.frames;
         if (const void* api = engine::exposure::adaptedLuminanceApi()) {
-            if (Texture* t = engineTexture(api)) {
-                std::vector<std::uint8_t> v;
-                if (readImageLevel(t->rhi(), 0, 0, {1, 1, 1}, 4, v) && v.size() >= 4) {
+            if (Texture* t = engineTexture(api); t != nullptr && !t->isNull()) {
+                deferImageRead(t->rhi(), [frame](const std::vector<std::uint8_t>& v) {
+                    if (v.size() < 4) return;
                     float f;
                     std::memcpy(&f, v.data(), 4);
-                    spdlog::info("diag: exposure: frame {} adapted luminance {:.5f}", stats_.frames, f);
-                }
+                    spdlog::info("diag: exposure: frame {} adapted luminance {:.5f}", frame, f);
+                });
             }
         }
         for (int i = 6; i >= 0; --i) {
             Texture* t = g_diagLum[i];
-            if (t == nullptr) continue;
+            if (t == nullptr || t->isNull()) continue;
             const std::uint32_t w = 1u << i;
-            std::vector<std::uint8_t> v;
-            if (!readImageLevel(t->rhi(), 0, 0, {w, w, 1}, static_cast<std::uint64_t>(w) * w * 4, v)) continue;
-            double sum = 0, mn = 1e30, mx = -1e30;
-            std::uint32_t bad = 0;
-            for (std::size_t k = 0; k + 4 <= v.size(); k += 4) {
-                float f;
-                std::memcpy(&f, v.data() + k, 4);
-                if (!std::isfinite(f)) { ++bad; continue; }
-                sum += f; mn = std::min<double>(mn, f); mx = std::max<double>(mx, f);
-            }
-            spdlog::info("diag: exposure: lum chain {}x{}: mean {:.5f} min {:.5f} max {:.5f} non-finite {}", w, w, sum / std::max<std::size_t>(1, v.size() / 4 - bad), mn, mx, bad);
+            if (t->desc().width != w || t->desc().height != w) continue;
+            deferImageRead(t->rhi(), [w](const std::vector<std::uint8_t>& v) {
+                double sum = 0, mn = 1e30, mx = -1e30;
+                std::uint32_t bad = 0;
+                for (std::size_t k = 0; k + 4 <= v.size(); k += 4) {
+                    float f;
+                    std::memcpy(&f, v.data() + k, 4);
+                    if (!std::isfinite(f)) { ++bad; continue; }
+                    sum += f; mn = std::min<double>(mn, f); mx = std::max<double>(mx, f);
+                }
+                spdlog::info("diag: exposure: lum chain {}x{}: mean {:.5f} min {:.5f} max {:.5f} non-finite {}", w, w, sum / std::max<std::size_t>(1, v.size() / 4 - bad), mn, mx, bad);
+            });
         }
-        if (Texture* t = g_diagScene; t != nullptr && t->desc().width * t->desc().height <= 4000000) {
-            std::vector<std::uint8_t> v;
+        if (Texture* t = g_diagScene; t != nullptr && !t->isNull() && t->desc().width * t->desc().height <= 4000000) {
             const std::uint32_t w = t->desc().width, h = t->desc().height;
-            if (readImageLevel(t->rhi(), 0, 0, {w, h, 1}, static_cast<std::uint64_t>(w) * h * 8, v)) {
+            deferImageRead(t->rhi(), [w, h](const std::vector<std::uint8_t>& v) {
                 double sum = 0;
                 std::uint32_t nan = 0, inf = 0;
                 float mx = 0;
@@ -1384,7 +1390,7 @@ void Device::present() {
                     }
                 }
                 spdlog::info("diag: exposure: scene {}x{}: mean rgb {:.5f} max {:.2f} nan {} inf {}", w, h, sum / (3.0 * w * h), mx, nan, inf);
-            }
+            });
         }
     }
     endRendering();
@@ -1523,7 +1529,7 @@ void Device::present() {
         game_->savePipelineCache();
         savePipelineKeys();
     }
-    beginFrame();
+    beginFrame(twoFrames && stage == 0);  // (the generated frame's present: the real frame's memory stays for the next frame)
     }  // for (stage)
 }
 
@@ -3308,53 +3314,92 @@ bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& widt
     return true;
 }
 
-bool Device::armBackBufferRead() {
-    bbReadValue_ = 0;
-    if (!backBuffer_ || backBuffer_->isNull()) return false;
-    rhi::Texture& tex = backBuffer_->rhi();
+bool Device::armImageRead(InFrameRead& r, rhi::Texture& tex, std::uint32_t level, std::uint32_t layer) {
+    r.value = 0;
     const rhi::TextureDesc& td = tex.desc();
+    const VkExtent3D full = rhi::mipExtent(td, level);
     const rhi::FormatBlock fb = rhi::formatBlock(td.format);
-    if (fb.bytes != 4 || fb.width != 1 || fb.height != 1) return false;  // A8R8G8B8 / X8R8G8B8 (BGRA in memory), as readBackBuffer's copy
+    if (fb.bytes == 0 || full.depth != 1 || full.width == 0 || full.height == 0) return false;
     endRendering();
-    if (!bbRead_ || bbReadWidth_ != td.extent.width || bbReadHeight_ != td.extent.height) {
-        bbRead_.reset();
+    const std::uint64_t need = rhi::copyBytes(td, level);
+    if (!r.buf || r.capacity < need) {
+        r.buf.reset();
         rhi::BufferDesc bd;
-        bd.size = rhi::copyBytes(td, 0);
+        bd.size = need;
         bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         bd.memory = rhi::Memory::Readback;
-        bd.name = "rvk back-buffer capture";
-        bbRead_ = game_->createBuffer(bd);
-        if (!bbRead_) return false;
-        bbReadWidth_ = td.extent.width;
-        bbReadHeight_ = td.extent.height;
-        bbReadPitch_ = rhi::bufferRowPitch(td.format, td.extent.width);
-        bbReadRowBytes_ = td.extent.width * 4;
+        bd.name = "rvk in-frame read-back";
+        r.buf = game_->createBuffer(bd);
+        if (!r.buf) return false;
+        r.capacity = need;
     }
+    r.width = full.width;
+    r.height = full.height;
+    r.pitch = rhi::bufferRowPitch(td.format, full.width);
+    r.rowBytes = ((full.width + fb.width - 1) / fb.width) * fb.bytes;
+    r.blockRows = (full.height + fb.height - 1) / fb.height;
     rhi::CommandList& cl = game_->frameCommands();
     if (tex.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    cl.copyTextureToBuffer(*bbRead_, 0, tex, {0, 0});
-    bbReadValue_ = game_->frameValue();  // the value present()'s submission signals
+    cl.copyTextureToBuffer(*r.buf, 0, tex, {level, layer});
+    r.value = game_->frameValue();  // the value the submission of this list signals
     return true;
 }
 
-bool Device::takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
-    const std::uint64_t value = bbReadValue_;
-    bbReadValue_ = 0;
-    if (value == 0 || !bbRead_) return false;
-    if (game_->frameValue() <= value) return false;  // not submitted (present() did not run): never wait for an unsubmitted value
+bool Device::takeImageRead(InFrameRead& r, std::vector<std::uint8_t>& out) {
+    const std::uint64_t value = r.value;
+    r.value = 0;
+    if (value == 0 || !r.buf) return false;
+    if (game_->frameValue() <= value) return false;  // not submitted yet: never wait for an unsubmitted value
     const auto t0 = std::chrono::steady_clock::now();
     game_->waitFrame(value);
-    bbRead_->invalidate();
-    const auto* p = static_cast<const std::uint8_t*>(bbRead_->map());
+    r.buf->invalidate();
+    const auto* p = static_cast<const std::uint8_t*>(r.buf->map());
     if (p == nullptr) return false;
-    width = bbReadWidth_;
-    height = bbReadHeight_;
-    bgra.resize(static_cast<std::size_t>(bbReadRowBytes_) * height);
-    for (std::uint32_t y = 0; y < height; ++y) {
-        std::memcpy(bgra.data() + static_cast<std::size_t>(y) * bbReadRowBytes_, p + static_cast<std::size_t>(y) * bbReadPitch_, bbReadRowBytes_);
+    out.resize(static_cast<std::size_t>(r.rowBytes) * r.blockRows);
+    for (std::uint32_t y = 0; y < r.blockRows; ++y) {
+        std::memcpy(out.data() + static_cast<std::size_t>(y) * r.rowBytes, p + static_cast<std::size_t>(y) * r.pitch, r.rowBytes);
     }
     ++perf_.readbacks;
     perf_.readbackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return true;
+}
+
+void Device::deferImageRead(rhi::Texture& tex, std::function<void(const std::vector<std::uint8_t>&)> done) {
+    auto r = std::make_unique<InFrameRead>();
+    if (!armImageRead(*r, tex)) return;
+    deferredReads_.emplace_back(std::move(r), std::move(done));
+}
+
+// the deferred reads whose submission went out: their bytes to their consumers (waits for the GPU only when it is behind)
+void Device::serviceDeferredReads() {
+    if (deferredReads_.empty()) return;
+    auto due = std::move(deferredReads_);
+    deferredReads_.clear();
+    std::vector<std::uint8_t> bytes;
+    for (auto& [r, done] : due) {
+        if (game_->frameValue() <= r->value) {
+            deferredReads_.push_back({std::move(r), std::move(done)});  // (not submitted yet)
+            continue;
+        }
+        if (takeImageRead(*r, bytes)) done(bytes);
+    }
+}
+
+bool Device::armBackBufferReadInto(InFrameRead& read) {
+    read.value = 0;
+    if (!backBuffer_ || backBuffer_->isNull()) return false;
+    rhi::Texture& tex = backBuffer_->rhi();
+    const rhi::FormatBlock fb = rhi::formatBlock(tex.desc().format);
+    if (fb.bytes != 4 || fb.width != 1 || fb.height != 1) return false;  // A8R8G8B8 / X8R8G8B8 (BGRA in memory), as readBackBuffer's copy
+    return armImageRead(read, tex);
+}
+
+bool Device::armBackBufferRead() { return armBackBufferReadInto(bbRead_); }
+
+bool Device::takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
+    if (!takeImageRead(bbRead_, bgra)) return false;
+    width = bbRead_.width;
+    height = bbRead_.height;
     return true;
 }
 

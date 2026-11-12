@@ -191,6 +191,9 @@ public:
         std::size_t next = 0;
     };
     SlotRing rings_[rhi::kFramesInFlight];
+    // the ring's / capture pool's slot: rotated per frame (memory epoch), not per submission; the last fence value that recorded with each
+    std::uint32_t memSlot_ = 0;
+    std::uint64_t memLastValue_[rhi::kFramesInFlight] = {};
     std::unique_ptr<D3DBuffer> nullVertex_;
 
     // mesh arena

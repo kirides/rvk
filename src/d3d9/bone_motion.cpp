@@ -299,7 +299,8 @@ bool Device::rigidRowWindow() const {
 // a new key, a list whose instances changed, a jump, or a shader that reads c36 itself: camera motion only (no capture either: a capture of an aliased key would be
 // another instance's)
 bool Device::rigidListPredict(const DrawGeom& geom) {
-    const std::uint64_t frame = frameValue();
+    // (the memory epoch, not the frame value: a mid-frame read-back flush moves the value, and "last frame's rows" must stay last frame's: 14.39)
+    const std::uint64_t frame = game_->memoryEpoch();
     std::uint64_t key = 1469598103934665603ull;
     const auto mixk = [&](std::uint64_t v) {
         key ^= v;

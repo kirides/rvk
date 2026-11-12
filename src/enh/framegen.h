@@ -131,6 +131,9 @@ public:
     void setGameState(bool gameplay, bool paused) { gameplay_ = gameplay; paused_ = paused; }
     // the frame generated this frame as tightly packed BGRA8 (after the BeforePresent pass ran); false when there is none
     bool readGenerated(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
+    // before the present's submission, each present: `arm` = a capture is due: the generated frame's copy rides in the frame's own list (readGenerated then
+    // reads it after the submission instead of flushing mid-frame: frame-ownership.md 14.39); else any earlier armed copy is forgotten
+    void armGeneratedRead(bool arm);
 
 private:
     void recordDepth(d3d9::PassContext& ctx);
@@ -170,6 +173,7 @@ private:
     bool hudlessFrame_ = false;         // a hudless copy of this frame exists
     rhi::Texture* generated_ = nullptr;    // the interpolated frame of this frame (null: none), valid until the next BeforePresent
     bool generatedShown_ = false;       // ... a usable one
+    d3d9::Device::InFrameRead genRead_;  // armGeneratedRead
     std::uint32_t generatedWidth_ = 0, generatedHeight_ = 0;
     // the previous frame's camera (cut detection)
     FrameGenPose lastPose_;

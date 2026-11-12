@@ -468,7 +468,7 @@ private:
     const TreeLayoutEntry& treeLayout(const d3d9::ReplaceQuery& q);
     std::unordered_map<std::uint64_t, TreeLayoutEntry> treeLayouts_;
     std::vector<TreeJob> treeJobs_;
-    std::uint64_t treeJobsFrame_ = ~0ull;
+    std::uint64_t treeJobsEpoch_ = ~0ull;  // the memory epoch (GameDevice::memoryEpoch) of treeJobs_
     int treeWind_ = 0;
     bool treeWindReady_ = false, treeWindFailed_ = false, treeWindStarted_ = false;
     std::future<std::unique_ptr<rhi::Pipeline>> treeWindBuild_;
@@ -510,7 +510,7 @@ private:
         bool scanned = false;
         rhi::GpuRef lastCapture;  // the last capture that ran (the next frame's vertex shader reads it: motion)
         std::uint32_t lastSlots = 0;
-        std::uint64_t lastCaptureFrame = 0;
+        std::uint64_t lastCaptureEpoch = 0;  // its memory epoch (GameDevice::memoryEpoch: valid while memoryLive)
         // the counts the structure was created for (it is sized by them and the index type only: created again when they change)
         std::uint32_t sizeTriangles = 0, sizeSlots = 0;
         bool sizeIndex32 = false;
@@ -537,6 +537,7 @@ private:
     void treeSetNote(const d3d9::Device& dev, const rt::Registry::Instance& in);
     void treeSetClose(const d3d9::Device& dev);
     std::uint64_t dynFrame_ = 0;
+    std::uint64_t dynEpoch_ = 0;      // the memory epoch of dyn_ (frame-ownership.md 14.39: a mid-frame submit moves the frame value, not the epoch)
     std::uint64_t dynJumpDrops_ = 0;  // frames whose previous-frame captures a frame value jump dropped (rollDyn)
     std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
     std::uint32_t nextDynId_ = 1u << 30;

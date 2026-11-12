@@ -295,25 +295,31 @@ CommandList& D3D12DeviceImpl::uploadCommands() {
     return *uploadList_;
 }
 
-void D3D12DeviceImpl::beginFrame() {
+void D3D12DeviceImpl::beginFrame(bool continuation) {
     if (device_->GetDeviceRemovedReason() != S_OK) reportRemoved("beginFrame");
     const auto t0 = std::chrono::steady_clock::now();
     if (frameValue_ > rhi::kFramesInFlight) waitFrame(frameValue_ - rhi::kFramesInFlight);
-    lastSlotWaitMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     frameSlot_ = static_cast<std::uint32_t>((frameValue_ - 1) % rhi::kFramesInFlight);
+    // the ring and the capture pool rotate per frame, not per submission (GameDevice::memoryEpoch; a continuation after a mid-frame submit keeps them)
+    if (!continuation || memoryEpoch_ == 0) {
+        memSlot_ = (memSlot_ + 1) % rhi::kFramesInFlight;
+        ++memoryEpoch_;
+        if (memLastValue_[memSlot_] != 0) waitFrame(memLastValue_[memSlot_]);  // (normally long done: two frames back)
+        rings_[memSlot_].next = 0;
+        for (auto& c : capture_[memSlot_].chunks) c.used = 0;
+        capture_[memSlot_].cur = 0;
+        ring_.ptr = nullptr;
+        ring_.size = ring_.used = 0;
+    }
+    lastSlotWaitMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     runRetired();
     resetPool(mainPool_, frameSlot_);
     resetPool(uploadPool_, frameSlot_);
     resetPool(labelPool_, frameSlot_);
     for (auto& t : recordThreads_) resetPool(t->pool, frameSlot_);
     if (recordSelf_) resetPool(recordSelf_->pool, frameSlot_);
-    rings_[frameSlot_].next = 0;
-    for (auto& c : capture_[frameSlot_].chunks) c.used = 0;
-    capture_[frameSlot_].cur = 0;
     captureHold_ = false;
     captureAllRead_ = false;
-    ring_.ptr = nullptr;
-    ring_.size = ring_.used = 0;
     uavTable_ = 0;
     viewNext_ = 0;
     uploadOpen_ = false;
@@ -339,6 +345,7 @@ void D3D12DeviceImpl::submitFrame(const char* finalMark) {
     if (!frameLists_.empty()) queue_->ExecuteCommandLists(static_cast<UINT>(frameLists_.size()), frameLists_.data());
     queue_->Signal(frameFence_.Get(), frameValue_);
     lastSubmitted_ = frameValue_;
+    memLastValue_[memSlot_] = frameValue_;
     ++frameValue_;
     frameSlot_ = static_cast<std::uint32_t>((frameValue_ - 1) % rhi::kFramesInFlight);
 }
@@ -346,7 +353,7 @@ void D3D12DeviceImpl::submitFrame(const char* finalMark) {
 // ---- the ring (upload heap chunks) -------------------------------------------------------------------------------------------
 
 RingAlloc D3D12DeviceImpl::allocRingSlow(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) {
-    SlotRing& sr = rings_[frameSlot_];
+    SlotRing& sr = rings_[memSlot_];
     const std::uint64_t need = ((minOffset + alignment - 1) & ~(alignment - 1)) + size + alignment;
     RingChunk* use = nullptr;
     while (sr.next < sr.chunks.size()) {
@@ -796,8 +803,8 @@ void D3D12DeviceImpl::clearAttachments(const ClearOp& op) { clearIn(curMain_, sc
 void D3D12DeviceImpl::beginScope(const RenderingInfo& info, bool secondary) {
     // the capture pool: this frame's slot is written by the scope's vertex shaders, the previous frame's is read by them
     if (gameCaps_.vertexStores) {
-        setCaptureState(curMain_, frameSlot_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        setCaptureState(curMain_, (frameSlot_ + 1) % rhi::kFramesInFlight, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        setCaptureState(curMain_, memSlot_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        setCaptureState(curMain_, (memSlot_ + 1) % rhi::kFramesInFlight, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         captureHold_ = false;
         captureAllRead_ = false;
     }
@@ -1464,7 +1471,7 @@ void D3D12DeviceImpl::setCaptureState(ID3D12GraphicsCommandList* list, std::uint
 
 RingAlloc D3D12DeviceImpl::allocCapture(std::uint64_t size, std::uint64_t alignment) {
     if (!gameCaps_.vertexStores) return {};
-    CapturePool& p = capture_[frameSlot_];
+    CapturePool& p = capture_[memSlot_];
     size = std::max<std::uint64_t>(size, 16);
     for (;;) {
         if (p.cur < p.chunks.size()) {
@@ -1509,7 +1516,7 @@ void D3D12DeviceImpl::captureAccess(CommandList& list, bool write) {
     if (!gameCaps_.vertexStores) return;
     auto* l = static_cast<D3DCommandList&>(list).raw();
     if (write) {
-        setCaptureState(l, frameSlot_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        setCaptureState(l, memSlot_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         captureHold_ = true;
         captureAllRead_ = false;
     } else {
