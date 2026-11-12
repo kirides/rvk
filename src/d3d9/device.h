@@ -897,6 +897,7 @@ public:
     struct InFrameRead {
         std::unique_ptr<rhi::Buffer> buf;
         std::uint64_t value = 0;  // the frame value of the submission that copies (0 = nothing armed)
+        std::uint64_t copyValue = 0;  // the submission of the buffer's last copy (taken or not)
         std::uint64_t capacity = 0;
         std::uint32_t width = 0, height = 0, pitch = 0, rowBytes = 0, blockRows = 0;
     };

@@ -3322,6 +3322,12 @@ bool Device::armImageRead(InFrameRead& r, rhi::Texture& tex, std::uint32_t level
     if (fb.bytes == 0 || full.depth != 1 || full.width == 0 || full.height == 0) return false;
     endRendering();
     const std::uint64_t need = rhi::copyBytes(td, level);
+    // armed again inside the submission that already copies into the buffer: a fresh buffer (two copies into one buffer without a barrier = a write-after-write hazard)
+    if (r.buf && r.copyValue == game_->frameValue()) {
+        // (the open list still copies into it: destroyed once this frame completed)
+        game_->retire([b = std::shared_ptr<rhi::Buffer>(std::move(r.buf))]() {});
+        r.capacity = 0;
+    }
     if (!r.buf || r.capacity < need) {
         r.buf.reset();
         rhi::BufferDesc bd;
@@ -3342,6 +3348,7 @@ bool Device::armImageRead(InFrameRead& r, rhi::Texture& tex, std::uint32_t level
     if (tex.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     cl.copyTextureToBuffer(*r.buf, 0, tex, {level, layer});
     r.value = game_->frameValue();  // the value the submission of this list signals
+    r.copyValue = r.value;
     return true;
 }
 
