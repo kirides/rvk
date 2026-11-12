@@ -542,7 +542,7 @@ public:
     // the frame being recorded: the value it signals (counts up), its slot (0 .. in flight - 1), the last completed value; waiting for a value blocks
     std::uint64_t frameValue() const { return frameValue_; }
     std::uint32_t frameSlot() const { return frameSlot_; }
-    // The frame's memory epoch (frame-ownership.md 14.39): counts the frames (beginFrame without `continuation`), not the submissions. The ring and the vertex
+    // The frame's memory epoch (frame-ownership.md 14.40): counts the frames (beginFrame without `continuation`), not the submissions. The ring and the vertex
     // capture pool rotate per epoch: a block allocated in epoch E stays valid through epoch E + kFramesInFlight - 1 however many submissions (mid-frame
     // read-back flushes, the manual frame generation's first present) the frames made. Per-frame history keyed on frameValue() + 1 breaks at such a flush; key
     // it on the epoch instead (memoryLive).

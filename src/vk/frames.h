@@ -9,7 +9,7 @@
 // (shader constants, D3D9 DISCARD/NOOVERWRITE dynamic buffers, DrawUP data, staging of render-thread uploads). It belongs to the
 // render thread; uploads from loader threads use their own staging buffers (Frames::retire keeps them alive).
 //
-// Ring memory rotates per *frame* (a present), not per submission (frame-ownership.md 14.39): a mid-frame submit (a read-back's flush, the manual
+// Ring memory rotates per *frame* (a present), not per submission (frame-ownership.md 14.40): a mid-frame submit (a read-back's flush, the manual
 // frame generation's first present) begins a continuation (begin(true)): a new command slot and timeline value, but the ring keeps its memory slot and
 // its blocks. So what a frame allocated (vertex captures, constants) stays valid through the whole next frame however many values the frames took.
 

@@ -125,7 +125,7 @@ bool RtShadows::pipelinesReady() {
 void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     if (ctx.mainView != 1 || settings_.mode == 0) return;
     const std::uint64_t frame = dev_.frameValue();
-    const std::uint64_t epoch = dev_.game().memoryEpoch();  // (the frame's identity: a mid-frame flush moves the value, not the epoch; 14.39)
+    const std::uint64_t epoch = dev_.game().memoryEpoch();  // (the frame's identity: a mid-frame flush moves the value, not the epoch; 14.40)
     if (stage > 0) {
         // the temporal and spatial passes of a frame the trace pass prepared
         if (pending_.frame != epoch || pending_.next != stage) return;

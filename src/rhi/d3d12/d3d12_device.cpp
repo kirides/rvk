@@ -891,14 +891,15 @@ public:
     }
 
     std::unique_ptr<Pipeline> createGraphicsPipeline(const GraphicsPipelineDesc& desc) override {
-        if (desc.vs.dxil.empty() || desc.ps.dxil.empty()) {
+        // (no pixel shader = a depth-only pipeline: an empty ps in both forms)
+        if (desc.vs.dxil.empty() || (desc.ps.dxil.empty() && !desc.ps.spirv.empty())) {
             spdlog::error("d3d12: graphics pipeline '{}' has no DXIL", desc.name != nullptr ? desc.name : "");
             return nullptr;
         }
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = rootSignature_.Get();
         pd.VS = {desc.vs.dxil.data(), desc.vs.dxil.size()};
-        pd.PS = {desc.ps.dxil.data(), desc.ps.dxil.size()};
+        if (!desc.ps.dxil.empty()) pd.PS = {desc.ps.dxil.data(), desc.ps.dxil.size()};
         pd.SampleMask = 0xFFFFFFFFu;
         pd.SampleDesc = {1, 0};
         pd.PrimitiveTopologyType = toTopologyType(desc.topology);

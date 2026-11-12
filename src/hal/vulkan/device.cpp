@@ -1996,7 +1996,7 @@ bEResult HalDevice::SaveBackbufferToFile(char* const a0) {
         spdlog::warn("hal: SaveBackbufferToFile: render target 0 is not the back buffer; saving the back buffer");
     }
     // The copy rides in the frame's own submission and the file is written after the present (writeSnapshots; DoSnapshot runs right before SwapScreen and
-    // only logs a failure): a read-back with its own mid-frame submit disturbed the frames after it (frame-ownership.md 14.38 / 14.39).
+    // only logs a failure): a read-back with its own mid-frame submit disturbed the frames after it (frame-ownership.md 14.38 / 14.40).
     // RVK_CAPTURE_FLUSH=1 = the old mid-frame read-back (A/B).
     static const bool flushCapture = GetEnvironmentVariableA("RVK_CAPTURE_FLUSH", nullptr, 0) != 0;
     if (!flushCapture && dev_.backBuffer() != nullptr) {

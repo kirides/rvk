@@ -84,6 +84,7 @@ private:
     void collectSlot(Slot& s);
     void judge(const Cycle& c, double controlShare, bool closed);
     std::uint64_t drawSkips() const;
+    std::uint64_t lightStamp() const;  // the global lighting of the frame (the hemisphere light: weather, lightning); 0 = unknown
     void report();
     bool ensure(rhi::Device& rdev);
 
@@ -102,14 +103,20 @@ private:
     std::vector<Cycle> cycles_;     // open cycles (owned views compared, closing control not yet read back)
     int dumpLeft_ = 0;              // RVK_PICTURE_DUMP=<n>: at most n outlier views are written to bin/rvk/dumps
     bool dumpEver_ = false;         // RVK_PICTURE_DUMP was set (the images keep the copy usage once the dumps ran out: no re-creation)
+    std::uint64_t dumpFrom_ = 0, dumpTo_ = 0;  // RVK_PICTURE_DUMP_RANGE=<from>-<to>: the compared views of these frames are dumped (any window; at most 48)
+    double dumpMin_ = 0.0;                     // RVK_PICTURE_DUMP_MIN=<share>: ... those differing on at least this share of the picture
+    int rangeLeft_ = 48;
+    std::uint32_t fakeOwned_ = 0;   // RVK_PICTURE_FAKE_OWNED=<n>: frames whose value % n >= 2 count as owned (a control of the check itself: run it with nothing owned)
     std::uint32_t detailLines_ = 0;  // per-view lines this window
     double stillShare_ = 1.0;         // the last age-1 control view's share (warm-up vs check frame): the scene stands still now when it is small
     double closingShare_ = 1.0;       // the last control view older than one frame (a cycle's closing control)
     std::uint32_t failLines_ = 0;     // failed-cycle lines this window
     std::uint32_t refW_ = 0, refH_ = 0;
     float refCamera_[16] = {};
+    std::uint64_t refLight_ = 0;  // lightStamp() of the reference
+    bool ignoreLight_ = false;    // RVK_PICTURE_IGNORE_LIGHT=1: the old pairing (camera only)
     Window owned_, control_;
-    std::uint64_t skippedNoRef_ = 0, skippedCamera_ = 0, skippedOther_ = 0, skippedSettle_ = 0, droppedSkips_ = 0, composedFrames_ = 0, ownedFrames_ = 0;
+    std::uint64_t skippedNoRef_ = 0, skippedCamera_ = 0, skippedLight_ = 0, skippedOther_ = 0, skippedSettle_ = 0, droppedSkips_ = 0, composedFrames_ = 0, ownedFrames_ = 0;
     std::uint64_t jumps_ = 0;                                       // frame-value jumps this window
     std::uint64_t cyclesJudged_ = 0, cyclesFailed_ = 0, cyclesOpenJudged_ = 0;  // this window
     double failWorst_ = 0.0, failControl_ = 0.0;                    // the worst failed cycle: its owned share and its control's

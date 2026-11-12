@@ -891,7 +891,7 @@ public:
     // shadows' temporal filter carried the missing shadows ~20 frames)
     bool armBackBufferRead();
     bool takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
-    // The same for any image (frame-ownership.md 14.39): armImageRead records the copy of one whole level / layer into the frame's own list (no submit),
+    // The same for any image (frame-ownership.md 14.40): armImageRead records the copy of one whole level / layer into the frame's own list (no submit),
     // takeImageRead (after that list's submission: false before it) waits for it and returns the level tightly packed in storage layout (as readImageLevel).
     // The engine's snapshot (SaveBackbufferToFile), the manual frame generation's generated frame and the RVK_EXPOSURE_LOG diagnostics read this way.
     struct InFrameRead {

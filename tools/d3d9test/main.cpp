@@ -6271,7 +6271,7 @@ void testTeardownWithCaptures(Fixture& f) {
     if (got == 0) std::printf("  (this backend has no capture pool: nothing to tear down)\n");
 }
 
-// frame-ownership.md 14.39: a mid-frame flush (a read-back) is a continuation of the frame: the frame value moves, the memory epoch does not, and the ring /
+// frame-ownership.md 14.40: a mid-frame flush (a read-back) is a continuation of the frame: the frame value moves, the memory epoch does not, and the ring /
 // capture blocks of the frame stay valid through the next frame (their memory is not handed out again, neither to the continuation nor to the next frame);
 // the GPU sees the bytes the CPU wrote before the flush. Two frames later the epoch is no longer live.
 void testFlushKeepsFrameMemory(Fixture& f) {
@@ -6354,7 +6354,7 @@ void testFlushKeepsFrameMemory(Fixture& f) {
     // (rb: its copy completed in the flush above)
 }
 
-// 14.39: the in-frame read (the engine snapshot's / the captures' path: the copy recorded into the frame's list, read after its submission) returns the same
+// 14.40: the in-frame read (the engine snapshot's / the captures' path: the copy recorded into the frame's list, read after its submission) returns the same
 // bytes as the flushing read-back (readBackBuffer), and an image read (armImageRead) the same as readImageLevel
 void testInFrameRead(Fixture& f) {
     Device& dev = f.dev;
@@ -6459,7 +6459,7 @@ int main(int argc, char** argv) {
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
         {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
-        {"flush keeps frame memory (14.39)", testFlushKeepsFrameMemory}, {"in-frame read (14.39)", testInFrameRead},
+        {"flush keeps frame memory (14.40)", testFlushKeepsFrameMemory}, {"in-frame read (14.40)", testInFrameRead},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)
     };
     for (const auto& [name, fn] : cases) {

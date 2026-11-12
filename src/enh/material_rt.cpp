@@ -298,7 +298,7 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
 
 // the gather + temporal filter into this frame's history
 void MaterialRt::recordFilter(d3d9::PassContext& ctx) {
-    if (ctx.mainView != 1 || stage_.frame != dev_.game().memoryEpoch()) return;  // (stage_.frame: the memory epoch, 14.39)
+    if (ctx.mainView != 1 || stage_.frame != dev_.game().memoryEpoch()) return;  // (stage_.frame: the memory epoch, 14.40)
     RhiScope rs(dev_, ctx.cmd);
     if (!rs) return;
     rhi::CommandList& cl = rs.cl();

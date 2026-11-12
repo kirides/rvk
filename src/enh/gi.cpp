@@ -224,7 +224,7 @@ bool Gi::observes(Kind kind, d3d9::scene::Phase phase) const {
 void Gi::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const d3d9::Shader* ps = q.enginePs;
     if (ps == nullptr) return;
-    const std::uint64_t frame = dev.game().memoryEpoch();  // (the frame's identity: a mid-frame flush moves the value, not the epoch; 14.39)
+    const std::uint64_t frame = dev.game().memoryEpoch();  // (the frame's identity: a mid-frame flush moves the value, not the epoch; 14.40)
     if (tallyFrame_ != frame) {
         tallyFrame_ = frame;
         ambient_.clear();

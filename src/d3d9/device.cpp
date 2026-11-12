@@ -598,7 +598,7 @@ void Device::flushFrameAndWait() {
     endRendering();
     submitFrame(false);
     game_->waitFrame(game_->frameValue() - 1);
-    // the same frame goes on: its ring / capture memory stays (GameDevice::memoryEpoch, frame-ownership.md 14.39); RVK_FLUSH_NEW_FRAME=1 = the old behaviour
+    // the same frame goes on: its ring / capture memory stays (GameDevice::memoryEpoch, frame-ownership.md 14.40); RVK_FLUSH_NEW_FRAME=1 = the old behaviour
     // (a flush begins a new memory epoch: the previous frame's captures are gone; A/B)
     static const bool newFrame = GetEnvironmentVariableA("RVK_FLUSH_NEW_FRAME", nullptr, 0) != 0;
     beginFrame(!newFrame);
@@ -1345,7 +1345,7 @@ void Device::present() {
     serviceDeferredReads();  // (the reads of earlier frames: RVK_EXPOSURE_LOG)
     if (static bool exposureLog = GetEnvironmentVariableA("RVK_EXPOSURE_LOG", nullptr, 0) != 0; exposureLog && stats_.frames % 60 == 59) {
         // diagnostics: the engine's adapted luminance (the 1x1 R32F output of the AvgLuminance filter) as the GPU holds it. Read in the frame's own submission
-        // and logged at a later present (deferImageRead): a mid-frame read-back flush would disturb the frames after it (frame-ownership.md 14.38 / 14.39)
+        // and logged at a later present (deferImageRead): a mid-frame read-back flush would disturb the frames after it (frame-ownership.md 14.38 / 14.40)
         const std::uint64_t frame = stats_.frames;
         if (const void* api = engine::exposure::adaptedLuminanceApi()) {
             if (Texture* t = engineTexture(api); t != nullptr && !t->isNull()) {

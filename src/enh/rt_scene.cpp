@@ -2897,7 +2897,7 @@ void RtScene::setDynamic(const void* consumer, bool on) {
 }
 
 // the capture requests of a new frame: the list of the frame before is kept (a character the cascades did not draw this frame
-// is built from its main-view capture of the previous frame). Keyed on the memory epoch, not the frame value (frame-ownership.md 14.39): a mid-frame submit
+// is built from its main-view capture of the previous frame). Keyed on the memory epoch, not the frame value (frame-ownership.md 14.40): a mid-frame submit
 // (a read-back's flush, the manual frame generation's first present) advances the frame value but not the epoch, and the ring / capture memory of the
 // previous epoch stays valid through this one (GameDevice::memoryLive). Before, every such flush dropped the previous frame's trees / characters from the
 // next TLAS (the RT shadows' temporal filter showed it for ~20 frames: 14.38).
