@@ -272,7 +272,9 @@ void HalDevice::applyStaticOps() {
     staticOps_->setMirrorMode(frozen::kMirrorMode);
     // O2a / O2b: the engine's slot code skipped for the composed ops (per op: only where the group takes over; default on). A compare
     // needs the engine's code: without native.lean_check (its check frames) a compare run keeps lean off
-    const int leanCheck = rs.nativeLeanCheck != nullptr ? rs.nativeLeanCheck->asInt() : 0;
+    // native.owned_check = 0 is the one switch for every periodic check (the lean check frames included)
+    const bool checksOff = rs.nativeOwnedCheck != nullptr && rs.nativeOwnedCheck->asInt() <= 0;
+    const int leanCheck = rs.nativeLeanCheck != nullptr && !checksOff ? rs.nativeLeanCheck->asInt() : 0;
     const bool leanWanted = on(rs.nativeLean);
     const bool leanOn = leanWanted && !((compare || sceneCompare) && leanCheck <= 0);
     if (leanWanted && !leanOn) spdlog::info("native: lean ops off: a compare is on and native.lean_check is 0 (the compare needs the engine's code)");
@@ -308,7 +310,7 @@ void HalDevice::applyStaticOps() {
     {
         // frame-ownership.md 7.11: F2b-1 scene draws (Full only, needs the static ops to issue the draws)
         const bool scene = on(rs.nativeSceneDraws) && renderMode() == RenderMode::Full && staticOps_->active();
-        dev_.setSceneDraws(scene, rs.nativeSceneDrawsCheck != nullptr ? static_cast<std::uint32_t>(std::max(0, rs.nativeSceneDrawsCheck->asInt())) : 0u);
+        dev_.setSceneDraws(scene, rs.nativeSceneDrawsCheck != nullptr && !checksOff ? static_cast<std::uint32_t>(std::max(0, rs.nativeSceneDrawsCheck->asInt())) : 0u);
         staticOps_->setSceneDraws(scene && dev_.sceneDrawsActive());
         // frame-ownership.md 7.16: F2c-3 owned static draws (needs the op records, scene draws and table lighting; Full)
         const bool ownedStatic = on(rs.nativeOwnedStatic) && renderMode() == RenderMode::Full && scene && dev_.sceneDrawsActive();
@@ -322,6 +324,16 @@ void HalDevice::applyStaticOps() {
         dev_.setSceneViews(ownedStatic && !forceV1);
         staticOps_->setOwnedStatic(ownedStatic, rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);
         gpuscene::setVerifyInterval(rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);  // 7.27: the tables' per-draw verification runs on the check frames
+        {
+            static bool checksLogged = false;
+            if (checksOff && !checksLogged) {
+                checksLogged = true;
+                spdlog::info("native: check frames off (native.owned_check = 0): composed/owned check frames and their warm-up frames, tables' per-draw verification + 240-frame read-backs "
+                             "(material / illumination / mesh parts / draw records / bone / object / row / view / window / instance / cluster), lighting jobs compare, owned compaction read-back, "
+                             "rolling scrubs (persistent draws, ordered, trees, vegetation, events, non-op records, F10 collection), vegetation stream re-conversion, packet cache verify_10, "
+                             "scene draws check, lean check, RT scene record + table checks (F8-1), billboard check frames");
+            }
+        }
         // frame-ownership.md 7.21: F2c-4a persistent owned draws (scene ABI v2 + the view table)
         staticOps_->setOwnedPersistent(ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent));
         {

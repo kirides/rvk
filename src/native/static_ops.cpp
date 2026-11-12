@@ -2697,7 +2697,7 @@ void StaticOps::issue() {
                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
     const std::uint64_t viewKey = packetViewKey();
     const std::size_t cacheGroup = g_ == &groups_[static_cast<std::size_t>(Group::Trees)] || g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)] ? 1 : g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] ? 2 : 0;
-    const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
+    const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || gpuscene::periodic(dev_.stats().frames, 10));  // (verify_10 follows native.owned_check = 0; verify_all is its own explicit mode)
     bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
     const auto setRegs = [&](const sc::DrawDesc& dd) {
         sc::forEachRun(dd.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, dd.vsF[r], n); });

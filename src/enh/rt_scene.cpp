@@ -1,4 +1,5 @@
 #include "enh/rt_scene.h"
+#include "gpuscene/verify.h"
 
 #include <windows.h>
 
@@ -1263,7 +1264,7 @@ bool RtScene::f81Cover(const d3d9::CoverQuery& d) {
     f8s_.composedAsked += k.composed ? 1 : 0;
     F81Script& s = f81Script(k);
     const std::uint64_t frame = dev_.frameValue();
-    const bool check = frame % kRecordCheck == 0;
+    const bool check = gpuscene::periodic(frame, kRecordCheck);
     const std::uint64_t state = f81State(k.imm != nullptr ? *k.imm : static_cast<const d3d9::Device::CachedDraw*>(k.cd)->query);
     const bool same = s.valid && s.cd == k.cd && s.sig == k.sig && s.epoch == k.epoch && s.entity == d.tag->entity && s.opDesc == d.tag->opDesc &&
                       s.tagMaterial == d.tag->material && s.cls == cls && s.exclEpoch == exclEpoch_ && s.state == state;
@@ -1485,7 +1486,7 @@ void RtScene::f81Finish(d3d9::Device& dev) {
 // (transform, mask, flags, BLAS address, record words); only while the camera stood still (else instances legitimately age / appear)
 void RtScene::f81TlasDigest(std::vector<F81Digest>& digest, const float camera[3]) {
     const std::uint64_t frame = dev_.frameValue();
-    if (frame % kRecordCheck == 0 && f81PrevFrame_ + 1 == frame && !f81PrevDigest_.empty()) {
+    if (gpuscene::periodic(frame, kRecordCheck) && f81PrevFrame_ + 1 == frame && !f81PrevDigest_.empty()) {
         if (std::memcmp(camera, f81PrevCamera_, sizeof(f81PrevCamera_)) != 0) {
             ++f8s_.tlasSkipped;
         } else if (sceneEvents_ != f81PrevEvents_) {
@@ -1584,7 +1585,7 @@ bool RtScene::treeRunFast(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     ++tts_.runs;
     const std::uint64_t frame = dev.frameValue();
     TreeTpl& t = treeTpl_[cd];
-    const bool check = frame % kRecordCheck == 0;
+    const bool check = gpuscene::periodic(frame, kRecordCheck);
     const rt::BlasKey key = keyOf(q);
     Blas* b = nullptr;
     Blas::MaterialSlot* slot = nullptr;
@@ -4008,7 +4009,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         return;
     }
     fieldsMemo_.clear();
-    const bool digestFrame = (f81On_ || f81TlasAlways_) && (frame % kRecordCheck == 0 || (frame + 1) % kRecordCheck == 0);
+    const bool digestFrame = (f81On_ || f81TlasAlways_) && (gpuscene::periodic(frame, kRecordCheck) || gpuscene::periodic(frame + 1, kRecordCheck));
     digestSrc_.clear();
     auto* insts = static_cast<VkAccelerationStructureInstanceKHR*>(ia.ptr);
     auto* recs = static_cast<abi::RtGeometryRecord*>(ra.ptr);

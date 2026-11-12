@@ -119,7 +119,7 @@ private:
     std::unique_ptr<Pipeline> pipeline_;
     SlotState slots_[rhi::kFramesInFlight];
     bool forceCpu_ = false;
-    bool envRead_ = false, cpuOnly_ = false, failed_ = false, checkEverySet_ = false;
+    bool envRead_ = false, cpuOnly_ = false, failed_ = false, checkEverySet_ = false, checkEnv_ = false;
     std::uint32_t checkEvery_ = 30;
     Stats stats_{}, last_{};
     double lastReport_ = 0.0;

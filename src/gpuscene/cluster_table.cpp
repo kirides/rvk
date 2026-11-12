@@ -1,4 +1,5 @@
 #include "gpuscene/cluster_table.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -380,7 +381,7 @@ void ClusterStore::flush(d3d9::Device& dev) {
         c.expect.clear();
     }
     if (table_ && table_->ready()) {
-        table_->flush(dev, frame_ % 240 == 0, std::max(rowsHigh_, 1u));
+        table_->flush(dev, periodic(frame_, 240), std::max(rowsHigh_, 1u));
         table_->collect(game, "cluster table");
     }
     report();

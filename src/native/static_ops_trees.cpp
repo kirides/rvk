@@ -887,7 +887,7 @@ StaticOps::VegRet* StaticOps::vegRetain(const Op& op, std::uint32_t total, bool 
         }
     };
     bool same = r.buf != nullptr && r.raw.size() == n && r.wind == wind && r.lift == lift && r.thin == thin && std::memcmp(r.raw.data(), vegRaw_.data(), n) == 0;
-    if (same && frame % 10 == 0) {
+    if (same && gpuscene::periodic(frame, 10)) {
         // check frame: the converted bytes of this source must be the retained ones (the stream's content is a pure function of the source + the flags)
         ++vegStat_.checks;
         std::vector<std::uint8_t> fresh;

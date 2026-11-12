@@ -14,6 +14,7 @@
 // The view: the solid list's ops read view slot 1 (the solid pass's, the same registers), the refracted / alpha ops slots 16 / 17 (set once per view and frame).
 
 #include <windows.h>
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -94,7 +95,7 @@ int StaticOps::orderedValid(const Op& op, const orec::OpRecord& rec) {
     if (events) fast = depFast(op, rec);
     if (fast >= 0) return kOwStamp;
     static std::uint32_t scrubTick = 0;
-    const bool scrub = events && fast == -1 && (++scrubTick & 15u) == 0;
+    const bool scrub = events && fast == -1 && (++scrubTick & 15u) == 0 && !gpuscene::checksOff();
     if (events && fast == -1 && !scrub) {
         ++depW_.fast;
     } else {
@@ -274,7 +275,7 @@ bool StaticOps::orderedPlace(const Op& op) {
     const std::size_t before = ordItems_.size();
     ownedItems_.swap(ordItems_);  // (ownedDrawOpPersistent appends to ownedItems_: here the run's list)
     lap(ordW_.prepNs, tl);
-    bool done = ownedDrawOpPersistent(op, rec, ordPass_.viewWin[vw], ordRun_.slot, ordRun_.epoch, 16, scrubPhase, why);
+    bool done = ownedDrawOpPersistent(op, rec, ordPass_.viewWin[vw], ordRun_.slot, ordRun_.epoch, gpuscene::checksOff() ? 0u : 16u, scrubPhase, why);
     lap(ordW_.drawNs, tl);
     ownedItems_.swap(ordItems_);
     persistEnvIndex_ = -1;

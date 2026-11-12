@@ -1,4 +1,5 @@
 #include "gpuscene/draw_record_table.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -156,7 +157,7 @@ void DrawRecordTable::flush(d3d9::Device& dev) {
     if (!active_) return;
     if (!ready()) ensure(dev);
     if (ready()) {
-        const bool verify = frame_ % kVerifyEvery == 0;
+        const bool verify = periodic(frame_, kVerifyEvery);
         records_->flush(dev, verify, std::max(used_, 1u));
         blocks_->flush(dev, verify, std::max(used_, 1u));
         zero_->flush(dev, false, 1);

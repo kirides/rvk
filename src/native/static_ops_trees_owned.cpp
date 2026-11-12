@@ -9,6 +9,7 @@
 //                  right there (the engine's slot never runs for a taken op)
 
 #include <windows.h>
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <bit>
@@ -899,7 +900,7 @@ void StaticOps::treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid) {
     (void)rec;
     const orec::DrawRec& r = t.r;
     orec::Persist& P = r.persist;
-    if (!P.valid || !P.handle.has()) return;
+    if (!P.valid || !P.handle.has() || gpuscene::checksOff()) return;
     if ((++tro_->scrubTick & 7u) != 0) return;  // (one template in eight per composed frame: each check is a full derivation)
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     gpuscene::ViewTable& vt = gpuscene::viewtable();
@@ -1056,8 +1057,8 @@ std::uint32_t StaticOps::treePass(bool solid) {
         while (memo[at].gen == memoGen && memo[at].key != k) at = (at + 1) & (memo.size() - 1);
         return memo[at];
     };
-    const std::uint32_t scrubStride = 64;
-    const std::uint32_t scrubPhase = static_cast<std::uint32_t>((++T.scrubTick * 7919u) % scrubStride);
+    const std::uint32_t scrubStride = gpuscene::checksOff() ? 0u : 64u;  // (native.owned_check = 0: no rolling scrub)
+    const std::uint32_t scrubPhase = scrubStride != 0 ? static_cast<std::uint32_t>((++T.scrubTick * 7919u) % scrubStride) : 0u;
     std::vector<std::uint8_t>& queueBytes = scr_.treeQueue;
     for (std::size_t oi = 0; oi < ops.size(); ++oi) {
         Op& op = ops[oi];

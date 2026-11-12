@@ -1,4 +1,5 @@
 #include "gpuscene/mesh_parts.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -335,7 +336,7 @@ void MeshPartTable::flush(d3d9::Device& dev, bool verify) {
         }
     }
     if (!gpuFailed_) {
-        const bool verifyNow = verify && frame_ % kVerifyEvery == 0;
+        const bool verifyNow = verify && periodic(frame_, kVerifyEvery);
         layouts_.flush(dev, verifyNow, nLayouts);
         parts_.flush(dev, verifyNow, used_);
         layouts_.collect(dev.game(), "mesh layouts");

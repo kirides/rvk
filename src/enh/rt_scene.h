@@ -42,6 +42,7 @@
 #include "enh/material_pack.h"
 #include "enh/rt_material.h"
 #include "enh/rt_lod.h"
+#include "gpuscene/verify.h"
 #include "enh/rt_registry.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
@@ -701,7 +702,7 @@ private:
     void tableInstanceRemoved(std::uint64_t instKey);
     void tableClear();
     void logTable(double frames);
-    bool tableCompareFrame(std::uint64_t frame) const { return tableCompare_ && frame % kTableCompare == 0; }
+    bool tableCompareFrame(std::uint64_t frame) const { return tableCompare_ && frame % kTableCompare == 0 && !gpuscene::checksOff(); }
     static constexpr std::uint64_t kTableRelearn = 32;  // frames: a covered draw is observed again (<= half of the materials' refresh period)
     static constexpr std::uint64_t kTableCompare = 10;  // frames between check frames
     bool tableOn_ = false, tableCompare_ = false, tableTripped_ = false, tableNoTrip_ = false;

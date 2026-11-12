@@ -1,4 +1,5 @@
 #include "gpuscene/owned_compact.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <array>
@@ -87,7 +88,10 @@ bool OwnedCompact::usable(d3d9::Device& dev) {
     if (!checkEverySet_) {
         checkEverySet_ = true;
         char c[16] = {};
-        if (GetEnvironmentVariableA("RVK_F2C4C_CHECK", c, sizeof(c)) != 0) checkEvery_ = static_cast<std::uint32_t>(std::strtoul(c, nullptr, 10));
+        if (GetEnvironmentVariableA("RVK_F2C4C_CHECK", c, sizeof(c)) != 0) {
+            checkEvery_ = static_cast<std::uint32_t>(std::strtoul(c, nullptr, 10));
+            checkEnv_ = true;  // (the env knob overrides native.owned_check = 0)
+        }
     }
     if (cpuOnly_ || forceCpu_) return false;
     rhi::Device* rd = dev.rhi();
@@ -129,7 +133,7 @@ bool OwnedCompact::usable(d3d9::Device& dev) {
 }
 
 bool OwnedCompact::checkThisFrame(d3d9::Device& dev) {
-    if (checkEvery_ == 0) return false;
+    if (checkEvery_ == 0 || (checksOff() && !checkEnv_)) return false;
     SlotState& s = slotFor(dev);
     return s.checks.empty() && dev.game().frameValue() % checkEvery_ == 0;
 }
