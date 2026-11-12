@@ -74,7 +74,8 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, treeWind, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact, skin, treeWind, picture, dzVs, dzPsOld, dzPsNone, dzFs, dzDerive, pullVs;
+    Blobs pzPos, pzFull, pzIa, pzKill, pzColor;  // 14.38: pulled depth-only draws  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -1284,6 +1285,288 @@ void testDepthZ(rhi::Device& dev, const Shaders& sh) {
         }
         std::printf("  depth_z: %u of %zu pixels differ by more than 1e-4 between the two backends\n", offBy, derived.size());
         check(offBy * 200 < derived.size(), std::format("{} pixels differ between the backends (want < 0.5 %)", offBy));
+    }
+    report(dev, name, before);
+}
+
+// frame-ownership.md 14.38: vertex-pulled draws WITHOUT a pixel shader (native.depth_z's colour-less z passes) in one ExecuteIndirect with a count buffer, against the
+// same meshes through the input assembler: the minimal form of the D3D12 glitch of 14.37 (displaced triangles in pulled pixel-shader-less owned z draws). 1,024 grid
+// meshes (16 x 16 vertices, local indices) in 8 vertex buffers with two streams each (positions; normal + uv), placed by their slot blocks (shaders/test/rhi_pullz.vert.hlsl;
+// the ref stream, instance rate, firstInstance = the slot, names the slot), back faces culled, a strong perspective (folds), tiny meshes, meshes off the target. Forms:
+// pulled + no pixel shader (SV_Position only / four varyings), pulled + a texkill pixel shader without colour, pulled buckets alternating with / without a pixel shader,
+// pulled direct draws, pulled + a colour pixel shader, the input assembler without a pixel shader (one call per vertex buffer); 16- and 32-bit indices. Every depth image
+// must equal the input assembler's bit for bit in every iteration (RVK_PULLZ_ITERS, default 4; RVK_PULLZ_ONLY = this test alone).
+void testPullDepthOnly(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "pulled depth-only draws vs the input assembler (14.38)";
+    if (!sh.pzPos.ok || !sh.pzFull.ok || !sh.pzIa.ok || !sh.pzKill.ok || !sh.pzColor.ok) {
+        check(false, "pullz shaders did not compile");
+        report(dev, name, before);
+        return;
+    }
+    if (!dev.caps().drawIndirectFirstInstance || !dev.caps().drawIndirectCount) {
+        skip(dev, name, "no drawIndirectFirstInstance / drawIndirectCount");
+        return;
+    }
+    int iters = 4;
+    if (const char* e = std::getenv("RVK_PULLZ_ITERS")) iters = std::max(1, std::atoi(e));
+    // 1,024 meshes of 16 x 16 vertices in 8 vertex buffers (mesh m in buffer m % 8 at base vertex (m / 8) x 256), two streams: positions (12 bytes), normal + uv (20)
+    constexpr std::uint32_t kMeshes = 1024, kBuffers = 8, kGrid = 16, kVerts = kGrid * kGrid, kIdx = (kGrid - 1) * (kGrid - 1) * 6, kTarget = 512;
+    constexpr std::uint32_t kStride0 = 12, kStride1 = 20, kPerBuffer = kMeshes / kBuffers;
+    std::vector<float> pos[kBuffers], attr[kBuffers];
+    for (std::uint32_t b = 0; b < kBuffers; ++b) {
+        pos[b].resize(static_cast<std::size_t>(kPerBuffer) * kVerts * 3);
+        attr[b].resize(static_cast<std::size_t>(kPerBuffer) * kVerts * 5);
+    }
+    std::vector<std::uint32_t> idx32(static_cast<std::size_t>(kMeshes) * kIdx);
+    std::vector<std::uint16_t> idx16(idx32.size());
+    std::vector<std::uint8_t> table(static_cast<std::size_t>(kMeshes) * 128, 0);
+    std::uint32_t seed = 12345;
+    const auto rnd = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f;
+    };
+    for (std::uint32_t m = 0; m < kMeshes; ++m) {
+        const std::uint32_t buf = m % kBuffers, base = (m / kBuffers) * kVerts;
+        const float fa = 1.0f + 6.0f * rnd(), fb = 1.0f + 6.0f * rnd(), ph = 6.28f * rnd();
+        for (std::uint32_t y = 0; y < kGrid; ++y) {
+            for (std::uint32_t x = 0; x < kGrid; ++x) {
+                const std::size_t v = base + y * kGrid + x;
+                const float u = static_cast<float>(x) / (kGrid - 1) * 2.0f - 1.0f, w = static_cast<float>(y) / (kGrid - 1) * 2.0f - 1.0f;
+                const float p3[3] = {u, w, 0.5f * std::sin(fa * u + ph) * std::cos(fb * w)};
+                const float a5[5] = {rnd(), rnd(), rnd(), u, w};
+                std::memcpy(&pos[buf][v * 3], p3, 12);
+                std::memcpy(&attr[buf][v * 5], a5, 20);
+            }
+        }
+        std::uint32_t k = m * kIdx;
+        for (std::uint32_t y = 0; y + 1 < kGrid; ++y) {
+            for (std::uint32_t x = 0; x + 1 < kGrid; ++x) {
+                const std::uint32_t a = y * kGrid + x, b = a + 1, c = a + kGrid, d = c + 1;
+                for (std::uint32_t i : {a, b, c, c, b, d}) idx32[k++] = i;
+            }
+        }
+        const float ang = 6.28f * rnd();
+        // 32 x 32 tiles of 1/16 NDC, meshes up to 1.6 x a tile (neighbours overlap, edges everywhere), some tiny (sub-pixel triangles), every fourth mirrored (back
+        // faces: culled), a strong perspective (w 1 +- 0.9: folds, triangles turn their backs inside one mesh), a ring of meshes partly outside the target
+        const float mirror = (m & 3) == 3 ? -1.0f : 1.0f;
+        const float scale = (m % 7 == 0 ? 0.004f : 0.05f + 0.06f * rnd()) * mirror;
+        const float tx = (static_cast<float>(m & 31) + 0.5f) / 16.0f - 1.0f + ((m & 31) == 0 ? -0.05f : 0.0f);
+        const float ty = (static_cast<float>(m >> 5) + 0.5f) / 16.0f - 1.0f;
+        const float blk[8] = {std::cos(ang), std::sin(ang), scale, 0.2f + 0.6f * rnd(), tx, ty, 0.1f, 1.8f * rnd()};
+        std::uint8_t* t = table.data() + static_cast<std::size_t>(m) * 128;
+        const std::uint32_t h1[4] = {kStride0, kStride1, base, 0};  // the stream refs (h0) are filled once the buffers exist
+        std::memcpy(t + 16, h1, 16);
+        std::memcpy(t + 32, blk, 32);
+    }
+    for (std::size_t i = 0; i < idx32.size(); ++i) idx16[i] = static_cast<std::uint16_t>(idx32[i]);
+    struct Cmd {
+        std::uint32_t indexCount, instanceCount, firstIndex;
+        std::int32_t vertexOffset;
+        std::uint32_t firstInstance;
+    };
+    static_assert(sizeof(Cmd) == 20);
+    // two argument sets: pulled (vertexOffset 0, every mesh in one call) and the input assembler's (vertexOffset = the base vertex), grouped by vertex buffer
+    std::vector<Cmd> cmds(2 * kMeshes);
+    for (std::uint32_t m = 0; m < kMeshes; ++m) {
+        cmds[m] = {kIdx, 1, m * kIdx, 0, m};
+        const std::uint32_t buf = m % kBuffers, j = m / kBuffers;
+        cmds[kMeshes + buf * kPerBuffer + j] = {kIdx, 1, m * kIdx, static_cast<std::int32_t>(j * kVerts), m};
+    }
+    std::vector<std::uint32_t> refs(2 * kMeshes);
+    for (std::uint32_t m = 0; m < kMeshes; ++m) refs[2 * m] = m;
+    constexpr VkBufferUsageFlags kVb = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    std::unique_ptr<rhi::Buffer> vb0[kBuffers], vb1[kBuffers];
+    bool vbOk = true;
+    for (std::uint32_t b = 0; b < kBuffers; ++b) {
+        vb0[b] = dev.createBuffer({pos[b].size() * 4, kVb, rhi::Memory::Upload, "rhi pullz positions"});
+        vb1[b] = dev.createBuffer({attr[b].size() * 4, kVb, rhi::Memory::Upload, "rhi pullz attributes"});
+        vbOk = vbOk && vb0[b] && vb1[b];
+    }
+    auto ib32 = dev.createBuffer({idx32.size() * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi pullz indices 32"});
+    auto ib16 = dev.createBuffer({idx16.size() * 2, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi pullz indices 16"});
+    auto tbl = dev.createBuffer({table.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi pullz table"});
+    auto refBuf = dev.createBuffer({refs.size() * 4, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi pullz refs"});
+    constexpr VkBufferUsageFlags kInd = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    auto args = dev.createBuffer({cmds.size() * sizeof(Cmd), kInd, rhi::Memory::Device, "rhi pullz args"});
+    auto count = dev.createBuffer({16, kInd, rhi::Memory::Device, "rhi pullz count"});
+    auto staging = dev.createBuffer({cmds.size() * sizeof(Cmd) + 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi pullz staging"});
+    auto depth = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_D32_SFLOAT, {kTarget, kTarget, 1}, 1, 1,
+                                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, "rhi pullz depth"});
+    auto colour = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {kTarget, kTarget, 1}, 1, 1, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, "rhi pullz colour"});
+    const std::uint32_t pitch = rhi::bufferRowPitch(VK_FORMAT_D32_SFLOAT, kTarget);
+    const std::uint64_t imageBytes = static_cast<std::uint64_t>(pitch) * kTarget;
+    auto readback = dev.createBuffer({imageBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi pullz readback"});
+    if (!vbOk || !ib32 || !ib16 || !tbl || !refBuf || !args || !count || !staging || !depth || !colour || !readback) {
+        check(false, "pullz resource creation");
+        report(dev, name, before);
+        return;
+    }
+    for (std::uint32_t b = 0; b < kBuffers; ++b) {
+        std::memcpy(vb0[b]->map(), pos[b].data(), pos[b].size() * 4);
+        std::memcpy(vb1[b]->map(), attr[b].data(), attr[b].size() * 4);
+    }
+    for (std::uint32_t m = 0; m < kMeshes; ++m) {
+        const auto r0 = vb0[m % kBuffers]->shaderRef(0), r1 = vb1[m % kBuffers]->shaderRef(0);
+        const std::uint32_t h0[4] = {r0[0], r0[1], r1[0], r1[1]};
+        std::memcpy(table.data() + static_cast<std::size_t>(m) * 128, h0, 16);
+    }
+    std::memcpy(ib32->map(), idx32.data(), idx32.size() * 4);
+    std::memcpy(ib16->map(), idx16.data(), idx16.size() * 2);
+    std::memcpy(tbl->map(), table.data(), table.size());
+    std::memcpy(refBuf->map(), refs.data(), refs.size() * 4);
+    std::memcpy(staging->map(), cmds.data(), cmds.size() * sizeof(Cmd));
+    const std::uint32_t countValue = kMeshes;
+    std::memcpy(static_cast<std::uint8_t*>(staging->map()) + cmds.size() * sizeof(Cmd), &countValue, 4);
+
+    const VkVertexInputBindingDescription pullBinding{0, 8, VK_VERTEX_INPUT_RATE_INSTANCE};
+    const VkVertexInputAttributeDescription pullAttr{0, 0, VK_FORMAT_R32G32_UINT, 0};
+    const VkVertexInputBindingDescription iaBindings[3] = {
+        {0, 8, VK_VERTEX_INPUT_RATE_INSTANCE}, {1, kStride0, VK_VERTEX_INPUT_RATE_VERTEX}, {2, kStride1, VK_VERTEX_INPUT_RATE_VERTEX}};
+    const VkVertexInputAttributeDescription iaAttrs[4] = {
+        {0, 0, VK_FORMAT_R32G32_UINT, 0}, {1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0}, {2, 2, VK_FORMAT_R32G32B32_SFLOAT, 0}, {3, 2, VK_FORMAT_R32G32_SFLOAT, 12}};
+    const auto make = [&](const Blobs& vs, const Blobs* ps, bool ia, bool withColour, const char* n) {
+        rhi::GraphicsPipelineDesc g;
+        g.vs = vs.shader();
+        if (ps != nullptr) g.ps = ps->shader();
+        g.depthFormat = VK_FORMAT_D32_SFLOAT;
+        g.depthTest = true;
+        g.depthWrite = true;
+        g.depthOp = VK_COMPARE_OP_LESS;
+        g.cull = VK_CULL_MODE_BACK_BIT;  // (the engine's; AMD's primitive culling of back faces and small triangles works on the vertex stage's positions)
+        if (withColour) g.colorFormats[0] = VK_FORMAT_R32_SFLOAT;
+        if (ia) {
+            g.vertexBindings = iaBindings;
+            g.vertexAttributes = iaAttrs;
+        } else {
+            g.vertexBindings = {&pullBinding, 1};
+            g.vertexAttributes = {&pullAttr, 1};
+        }
+        g.name = n;
+        return dev.createGraphicsPipeline(g);
+    };
+    auto pPos = make(sh.pzPos, nullptr, false, false, "rhi pullz pulled pos, no ps");
+    auto pFull = make(sh.pzFull, nullptr, false, false, "rhi pullz pulled full, no ps");
+    auto pKill = make(sh.pzFull, &sh.pzKill, false, false, "rhi pullz pulled, texkill ps");
+    auto pColor = make(sh.pzFull, &sh.pzColor, false, true, "rhi pullz pulled, colour ps");
+    auto pIa = make(sh.pzIa, nullptr, true, false, "rhi pullz ia, no ps");
+    if (!pPos || !pFull || !pKill || !pColor || !pIa) {
+        check(false, "pullz pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    enum class Form { PulledPos, PulledFull, PulledKill, Alternating, Direct, PulledColour, Ia };
+    struct Arm {
+        const char* name;
+        Form form;
+    };
+    const Arm arms[] = {{"input assembler, no pixel shader (reference)", Form::Ia},   {"pulled, no pixel shader, SV_Position only", Form::PulledPos},
+                        {"pulled, no pixel shader, 4 varyings", Form::PulledFull}, {"pulled, texkill pixel shader", Form::PulledKill},
+                        {"pulled, buckets alternating with / without a pixel shader", Form::Alternating},
+                        {"pulled direct draws, no pixel shader", Form::Direct},       {"pulled, colour pixel shader", Form::PulledColour}};
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.copyBuffer(*args, 0, *staging, 0, cmds.size() * sizeof(Cmd));
+        cl.copyBuffer(*count, 0, *staging, cmds.size() * sizeof(Cmd), 16);
+        cl.bufferBarrier(*args, rhi::BufferAccess::IndirectRead);
+        cl.bufferBarrier(*count, rhi::BufferAccess::IndirectRead);
+    });
+    std::vector<std::uint8_t> reference;
+    for (const bool use16 : {true, false}) {
+        rhi::Buffer& ib = use16 ? *ib16 : *ib32;
+        const VkIndexType it = use16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+        for (const Arm& arm : arms) {
+            std::uint32_t badIters = 0, badPixels = 0;
+            for (int iter = 0; iter < iters; ++iter) {
+                dev.submitAndWait([&](rhi::CommandList& cl) {
+                    cl.transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                    rhi::RenderingInfo ri;
+                    ri.depth.texture = depth.get();
+                    ri.depth.load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                    ri.depth.store = VK_ATTACHMENT_STORE_OP_STORE;
+                    ri.depthClear = {1.0f, 0};
+                    ri.stencil = false;
+                    if (arm.form == Form::PulledColour) {
+                        cl.transition(*colour, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                        ri.color[0].texture = colour.get();
+                        ri.color[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                        ri.colorCount = 1;
+                    }
+                    ri.width = ri.height = kTarget;
+                    cl.beginRendering(ri);
+                    struct {
+                        std::uint32_t table[2], pad[2];
+                    } push{};
+                    const auto tr = tbl->shaderRef(0);
+                    push.table[0] = tr[0];
+                    push.table[1] = tr[1];
+                    cl.setIndexBuffer(ib, 0, it);
+                    const bool ia = arm.form == Form::Ia;
+                    rhi::Buffer* refs1[1] = {refBuf.get()};
+                    const std::uint64_t offs1[1] = {0};
+                    const std::uint32_t strides1[1] = {8};
+                    if (ia) {
+                        cl.bindPipeline(*pIa);
+                    } else {
+                        rhi::Pipeline& p = arm.form == Form::PulledPos ? *pPos : arm.form == Form::PulledKill ? *pKill : arm.form == Form::PulledColour ? *pColor : *pFull;
+                        cl.bindPipeline(p);
+                    }
+                    cl.setVertexBuffers(0, refs1, offs1, strides1);
+                    cl.setPushConstants(&push, sizeof(push));
+                    if (ia) {
+                        // one call per vertex buffer (the input assembler binds one buffer per stream)
+                        for (std::uint32_t b = 0; b < kBuffers; ++b) {
+                            rhi::Buffer* bufs[2] = {vb0[b].get(), vb1[b].get()};
+                            const std::uint64_t offs[2] = {0, 0};
+                            const std::uint32_t strides[2] = {kStride0, kStride1};
+                            cl.setVertexBuffers(1, bufs, offs, strides);
+                            cl.drawIndexedIndirect(*args, (kMeshes + b * kPerBuffer) * sizeof(Cmd), kPerBuffer, sizeof(Cmd));
+                        }
+                    } else if (arm.form == Form::Direct) {
+                        for (std::uint32_t m = 0; m < kMeshes; ++m) cl.drawIndexed(kIdx, 1, m * kIdx, 0, m);
+                    } else if (arm.form == Form::Alternating) {
+                        // buckets of 64 draws (the max count of each = 64, the count buffer says 1024: min applies)
+                        for (std::uint32_t b = 0; b < kMeshes / 64; ++b) {
+                            cl.bindPipeline((b & 1) != 0 ? *pKill : *pFull);
+                            cl.setPushConstants(&push, sizeof(push));
+                            cl.drawIndexedIndirectCount(*args, b * 64 * sizeof(Cmd), *count, 0, 64, sizeof(Cmd));
+                        }
+                    } else {
+                        cl.drawIndexedIndirectCount(*args, 0, *count, 0, kMeshes, sizeof(Cmd));
+                    }
+                    cl.endRendering();
+                    cl.transition(*depth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                    cl.copyTextureToBuffer(*readback, 0, *depth);
+                });
+                readback->invalidate();
+                const auto* px = static_cast<const std::uint8_t*>(readback->map());
+                if (reference.empty()) {
+                    reference.assign(px, px + imageBytes);
+                    std::uint32_t covered = 0;
+                    for (std::uint32_t y = 0; y < kTarget; ++y) {
+                        for (std::uint32_t x = 0; x < kTarget; ++x) {
+                            float d;
+                            std::memcpy(&d, px + static_cast<std::size_t>(y) * pitch + x * 4, 4);
+                            covered += d < 1.0f ? 1 : 0;
+                        }
+                    }
+                    check(covered > kTarget * kTarget / 2, std::format("the meshes cover {} of {} pixels", covered, kTarget * kTarget));
+                    continue;
+                }
+                std::uint32_t diff = 0;
+                for (std::uint32_t y = 0; y < kTarget; ++y) {
+                    const std::uint8_t* row = px + static_cast<std::size_t>(y) * pitch;
+                    const std::uint8_t* want = reference.data() + static_cast<std::size_t>(y) * pitch;
+                    if (std::memcmp(row, want, kTarget * 4) == 0) continue;
+                    for (std::uint32_t x = 0; x < kTarget; ++x) diff += std::memcmp(row + x * 4, want + x * 4, 4) != 0 ? 1u : 0u;
+                }
+                if (diff != 0) {
+                    ++badIters;
+                    badPixels += diff;
+                }
+            }
+            std::printf("  pullz %s indices, %s: %d iterations, %u differing from the reference (%u pixels)\n", use16 ? "16-bit" : "32-bit", arm.name, iters, badIters, badPixels);
+            check(badIters == 0, std::format("{} indices, {}: {} of {} iterations differ from the input assembler ({} pixels)", use16 ? "16-bit" : "32-bit", arm.name, badIters, iters, badPixels));
+        }
     }
     report(dev, name, before);
 }
@@ -2585,6 +2868,12 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
         std::printf("[%s] %s (RVK_ABI_ONLY)\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
         return failures == before;
     }
+    if (std::getenv("RVK_PULLZ_ONLY") != nullptr) {  // only the pulled depth-only check (the driver hunt: RVK_PULLZ_ITERS)
+        testPullDepthOnly(*dev, sh);
+        check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
+        std::printf("[%s] %s (RVK_PULLZ_ONLY)\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
+        return failures == before;
+    }
     if (std::getenv("RVK_PICTURE_ONLY") != nullptr) {  // only the picture check's compute pass (a run under the D3D12 GPU-based validation)
         testPictureCheck(*dev, sh);
         check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
@@ -2599,6 +2888,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testOwnedCompact(*dev, sh);
     testPictureCheck(*dev, sh);
     testDepthZ(*dev, sh);
+    testPullDepthOnly(*dev, sh);
     testOwnedCull(*dev, sh);
     testSkin(*dev, sh);
     testTreeWind(*dev, sh);
@@ -2717,6 +3007,11 @@ int main(int argc, char** argv) {
     compileBoth("test/depth_z_scene.frag.hlsl", "PSDepthOnly", "ps_6_6", sh.dzPsNone);
     compileBoth("debug/fullscreen_rhi.vert.hlsl", "VSMain", "vs_6_6", sh.dzFs);
     compileBoth("depth/depth_z.frag.hlsl", "PSMain", "ps_6_6", sh.dzDerive);
+    compileBoth("test/rhi_pullz.vert.hlsl", "VSPulledPos", "vs_6_6", sh.pzPos);
+    compileBoth("test/rhi_pullz.vert.hlsl", "VSPulledFull", "vs_6_6", sh.pzFull);
+    compileBoth("test/rhi_pullz.vert.hlsl", "VSIaFull", "vs_6_6", sh.pzIa);
+    compileBoth("test/rhi_pullz.vert.hlsl", "PSKill", "ps_6_6", sh.pzKill);
+    compileBoth("test/rhi_pullz.vert.hlsl", "PSColor", "ps_6_6", sh.pzColor);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
     compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);

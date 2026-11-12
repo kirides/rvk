@@ -145,7 +145,8 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
     const VkShaderModule vs = module(ctx, desc.vs);
     const VkShaderModule fs = module(ctx, desc.fs);
     VkPipeline p = VK_NULL_HANDLE;
-    if (vs != VK_NULL_HANDLE && fs != VK_NULL_HANDLE) {
+    // (no fragment shader = a depth-only pipeline: the vertex stage alone, no colour attachment)
+    if (vs != VK_NULL_HANDLE && (fs != VK_NULL_HANDLE || desc.fs.empty())) {
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr};
         stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr};
@@ -209,7 +210,7 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         ri.depthAttachmentFormat = desc.depth;
         ri.stencilAttachmentFormat = desc.stencil;
         VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
-        ci.stageCount = 2;
+        ci.stageCount = fs != VK_NULL_HANDLE ? 2u : 1u;
         ci.pStages = stages;
         ci.pVertexInputState = &vi;
         ci.pInputAssemblyState = &ia;

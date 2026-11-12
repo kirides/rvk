@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/paths.h"
+#include "engine/hemisphere.h"
 #include "shader/embedded.h"
 
 namespace rvk::enh {
@@ -42,7 +43,16 @@ PictureCheck::PictureCheck(d3d9::Device& device) : dev_(device) {
     // (the Win32 environment: run.ps1 -Environment sets it from DllMain, after the CRT copied its own)
     char buf[16] = {};
     if (GetEnvironmentVariableA("RVK_PICTURE_DUMP", buf, sizeof(buf)) != 0) dumpLeft_ = std::max(0, std::atoi(buf));
-    dumpEver_ = dumpLeft_ > 0;
+    char range[64] = {};
+    if (GetEnvironmentVariableA("RVK_PICTURE_DUMP_RANGE", range, sizeof(range)) != 0) {
+        char* end = nullptr;
+        dumpFrom_ = std::strtoull(range, &end, 10);
+        dumpTo_ = (end != nullptr && *end == '-') ? std::strtoull(end + 1, nullptr, 10) : dumpFrom_;
+    }
+    if (GetEnvironmentVariableA("RVK_PICTURE_DUMP_MIN", buf, sizeof(buf)) != 0) dumpMin_ = std::atof(buf);
+    ignoreLight_ = GetEnvironmentVariableA("RVK_PICTURE_IGNORE_LIGHT", nullptr, 0) != 0;
+    if (GetEnvironmentVariableA("RVK_PICTURE_FAKE_OWNED", buf, sizeof(buf)) != 0) fakeOwned_ = static_cast<std::uint32_t>(std::max(0, std::atoi(buf)));
+    dumpEver_ = dumpLeft_ > 0 || dumpTo_ != 0;
 }
 
 PictureCheck::~PictureCheck() { setEnabled(false); }
@@ -113,7 +123,7 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
         return;
     }
     const std::uint64_t frame = dev_.game().frameValue();
-    const bool owned = dev_.mainViewOwned();
+    const bool owned = fakeOwned_ >= 3 ? frame % fakeOwned_ >= 2 : dev_.mainViewOwned();
     // draws skipped while their shader / pipeline was built (a D3D12 PSO of a new dynamic-state combination, a Vulkan shader still compiling): the picture of such a
     // frame lacks them; the count before this frame's main view goes with a stored reference, a compare whose count moved by its read-back is dropped (collectSlot)
     const std::uint64_t skipsBefore = lastSkips_;
@@ -135,12 +145,17 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
     const auto& cam = dev_.camera().viewProjection.m;
     static_assert(sizeof(cam) == sizeof(refCamera_));
     const bool sameCamera = refValid_ && refW_ == w && refH_ == h && std::memcmp(cam.data(), refCamera_, sizeof(refCamera_)) == 0;
+    // the global lighting (frame-ownership.md 14.38): the weather's sky light (the hemisphere's SH, intensity, indoor colour) moves while the weather changes and with
+    // every lightning flash; two frames of one camera under different global light are no pair (the whole picture changes, owned or composed)
+    const std::uint64_t light = lightStamp();
+    const bool sameLight = light == refLight_;
 
     bool compare = false, control = false;
     if (owned) {
         ++ownedFrames_;
         if (!refValid_ || !refComposed_) ++skippedNoRef_;
         else if (!sameCamera) ++skippedCamera_;
+        else if (!sameLight) ++skippedLight_;
         else if (frame - refFrame_ > kMaxAge) ++skippedNoRef_;
         else compare = true;
     } else {
@@ -148,8 +163,12 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
         // (the control is as old as the owned compares: the first composed frame of a cycle is compared with the reference of the cycle before, up to kMaxAge frames old, so
         // anything that moves with time on its own (torch flicker, sea sparkle) is in the noise floor the same way)
         if (refValid_ && sameCamera && refComposed_ && frame - refFrame_ <= kMaxAge) {
-            compare = true;
-            control = true;
+            if (sameLight) {
+                compare = true;
+                control = true;
+            } else {
+                ++skippedLight_;
+            }
         }
     }
     const bool store = !owned;
@@ -162,7 +181,8 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
     if (refColor == nullptr || refDepth == nullptr) return;
     if (store && !compare && (refW_ != w || refH_ != h)) refValid_ = false;
     rhi::CommandList& cl = ctx.cmd;
-    const bool dump = compare && dumpLeft_ > 0;
+    const bool inRange = dumpTo_ != 0 && frame >= dumpFrom_ && frame <= dumpTo_;
+    const bool dump = compare && (dumpLeft_ > 0 || inRange);
     rhi::Texture* curColor = dump ? dev_.transient("picture_check.cur_color", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}, usage}) : nullptr;
     rhi::Texture* curDepth = dump ? dev_.transient("picture_check.cur_depth", {VK_FORMAT_R32_SFLOAT, {w, h}, usage}) : nullptr;
     const bool dumping = dump && curColor != nullptr && curDepth != nullptr;
@@ -256,7 +276,25 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
         refW_ = w;
         refH_ = h;
         std::memcpy(refCamera_, cam.data(), sizeof(refCamera_));
+        refLight_ = light;
     }
+}
+
+std::uint64_t PictureCheck::lightStamp() const {
+    if (ignoreLight_) return 0;
+    engine::hemisphere::Light l;
+    if (!engine::hemisphere::latest(l)) return 0;
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&](const void* p, std::size_t n) {
+        for (std::size_t i = 0; i < n; ++i) {
+            h ^= static_cast<const std::uint8_t*>(p)[i];
+            h *= 1099511628211ull;
+        }
+    };
+    mix(l.regs, sizeof(l.regs));
+    mix(l.indoor, sizeof(l.indoor));
+    mix(&l.intensity, sizeof(l.intensity));
+    return h;
 }
 
 std::uint64_t PictureCheck::drawSkips() const {
@@ -361,8 +399,10 @@ void PictureCheck::collectSlot(Slot& s) {
                      0xFFFFu - got[8], got[5], got[6]);
     }
     // (not the views of a scene that moves: a camera cut / the unfreeze differ on most of the picture)
-    if (dumped && s.dump && dumpLeft_ > 0 && outlier && share < 0.2 && okWindows_ > 0) {
-        --dumpLeft_;
+    const bool inRange = dumpTo_ != 0 && frame >= dumpFrom_ && frame <= dumpTo_ && share >= dumpMin_ && rangeLeft_ > 0;
+    if (dumped && s.dump && (inRange || (dumpLeft_ > 0 && outlier && share < 0.2 && okWindows_ > 0))) {
+        if (inRange) --rangeLeft_;
+        else --dumpLeft_;
         s.dump->invalidate();
         const auto* bytes = static_cast<const char*>(s.dump->map());
         const std::uint32_t cp = rhi::bufferRowPitch(VK_FORMAT_R16G16B16A16_SFLOAT, s.w), dp = rhi::bufferRowPitch(VK_FORMAT_R32_SFLOAT, s.w);
@@ -405,7 +445,7 @@ void PictureCheck::report() {
     // (a window where the scene moved is no verdict: the camera changed during it, or two composed frames of one camera already differ by > 1 % of the picture)
     // FAILED = a cycle whose worst owned view differs by more than kShareTol of the picture AND 3 x its own closing control (frame-ownership.md 14.37: the window's
     // control was the wrong yardstick when the scene changed during a cycle whose closing control fell into the next window)
-    const bool moving = skippedCamera_ != 0 || controlShare > kMovingShare;
+    const bool moving = skippedCamera_ != 0 || skippedLight_ != 0 || controlShare > kMovingShare;
     const std::uint64_t judged = cyclesJudged_ + cyclesOpenJudged_;
     const char* verdict = owned_.views == 0 && judged == 0 ? "NO DATA" : moving ? "UNRELIABLE (the scene moves)" : cyclesFailed_ != 0 ? "FAILED" : "ok";
     if (verdict[0] == 'F') ++failedWindows_;
@@ -414,19 +454,19 @@ void PictureCheck::report() {
     const auto box = [](const Window& w) {
         return w.worstPixels == 0 ? std::string("-") : std::format("[{},{}..{},{}]", w.box[0], w.box[1], w.box[2], w.box[3]);
     };
-    spdlog::info("native: owned picture check (5 s): {}: owned views {} compared ({} differing; skipped: camera moved {}, no reference {}, other {}, settling after a frame jump {} "
+    spdlog::info("native: owned picture check (5 s): {}: owned views {} compared ({} differing; skipped: camera moved {}, global light changed {}, no reference {}, other {}, settling after a frame jump {} "
                  "({} jumps), draw skips {}), differing pixels {} (colour {}, depth {}), "
                  "worst view {} of {} = {:.4f} %, max colour {:.3f}, max depth {:.4f}, box {}; control (composed vs composed) views {}, differing {}, worst {} pixels = {:.4f} %, max colour {:.3f}, "
                  "max depth {:.4f}; cycles judged {} by their closing control + {} by the window's, failed {}{}; frames: {} owned, {} composed; windows ok {}, FAILED {} of {}; "
                  "total owned views {} ({} differing)",
-                 verdict, owned_.views, owned_.differingViews, skippedCamera_, skippedNoRef_, skippedOther_, skippedSettle_, jumps_, droppedSkips_, owned_.pixels, owned_.colorPixels,
+                 verdict, owned_.views, owned_.differingViews, skippedCamera_, skippedLight_, skippedNoRef_, skippedOther_, skippedSettle_, jumps_, droppedSkips_, owned_.pixels, owned_.colorPixels,
                  owned_.depthPixels, owned_.worstPixels, owned_.worstFrom, 100.0 * ownedShare, owned_.maxColor, owned_.maxDepth, box(owned_), control_.views, control_.differingViews,
                  control_.worstPixels, 100.0 * controlShare, control_.maxColor, control_.maxDepth, cyclesJudged_, cyclesOpenJudged_, cyclesFailed_,
                  cyclesFailed_ != 0 ? std::format(" (worst {:.4f} % against its control {:.4f} %)", 100.0 * failWorst_, 100.0 * failControl_) : std::string(), ownedFrames_,
                  composedFrames_, okWindows_, failedWindows_, windows_, ownedTotal_, ownedTotalDiffering_);
     owned_ = {};
     control_ = {};
-    skippedNoRef_ = skippedCamera_ = skippedOther_ = skippedSettle_ = droppedSkips_ = jumps_ = ownedFrames_ = composedFrames_ = 0;
+    skippedNoRef_ = skippedCamera_ = skippedLight_ = skippedOther_ = skippedSettle_ = droppedSkips_ = jumps_ = ownedFrames_ = composedFrames_ = 0;
     cyclesJudged_ = cyclesOpenJudged_ = cyclesFailed_ = 0;
     failWorst_ = failControl_ = 0.0;
 }
