@@ -1,4 +1,5 @@
 #include "gpuscene/view_table.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -165,7 +166,7 @@ void ViewTable::flush(d3d9::Device& dev) {
     if (!active_) return;
     if (!table_.ready()) ensure(dev);
     if (table_.ready()) {
-        table_.flush(dev, frame_ % kVerifyEvery == 0, kCapacity);
+        table_.flush(dev, periodic(frame_, kVerifyEvery), kCapacity);
         table_.collect(dev.game(), "view table");
     }
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();

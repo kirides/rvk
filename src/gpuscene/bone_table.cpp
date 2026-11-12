@@ -1,4 +1,5 @@
 #include "gpuscene/bone_table.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -247,7 +248,7 @@ void BoneTable::flush(d3d9::Device& dev) {
                 ++i;
             }
         }
-        table_.flush(dev, frame_ % kVerifyEvery == 0, history_ ? kCapacity + used_ : used_);
+        table_.flush(dev, periodic(frame_, kVerifyEvery), history_ ? kCapacity + used_ : used_);
         table_.collect(dev.game(), "bone table");
     }
     report(dev);

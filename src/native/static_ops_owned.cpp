@@ -391,7 +391,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         ++W.leftStamp[static_cast<std::size_t>(fast)];
         return false;
     }
-    const bool scrub = events && fast == -1 && (W.seen & 15u) == 0;
+    const bool scrub = events && fast == -1 && (W.seen & 15u) == 0 && !gpuscene::checksOff();
     if (events && fast == -1 && !scrub) {
         ++depW_.fast;
     } else {
@@ -776,8 +776,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                     persistBound = bound;
                     viewSlotP = viewWin.viewSlot;
                     const std::uint64_t perFrame = 16;  // (the rolling scrub: draws re-derived and compared with their slot per frame)
-                    scrubStride = static_cast<std::uint32_t>(std::max<std::uint64_t>(16, (bound + perFrame / 2 - 1) / (perFrame / 2)));  // (at most one draw in 16, 8 per pass in the big ones)
-                    scrubPhase = static_cast<std::uint32_t>((++persistScrubTick_ * 7919u) % scrubStride);
+                    scrubStride = gpuscene::checksOff() ? 0u : static_cast<std::uint32_t>(std::max<std::uint64_t>(16, (bound + perFrame / 2 - 1) / (perFrame / 2)));  // (at most one draw in 16, 8 per pass in the big ones; native.owned_check = 0: none)
+                    scrubPhase = scrubStride != 0 ? static_cast<std::uint32_t>((++persistScrubTick_ * 7919u) % scrubStride) : 0u;
                     ++PS.passes;
                     persistPassDraw_ = 0;
                     dev_.ownedBulkBegin(solid, mainView);  // F2c-4b: the bulk observers' list of this pass (a cascade's pass: the per-draw observers' loop)

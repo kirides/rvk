@@ -8,6 +8,7 @@
 // static_ops.cpp. Part of StaticOps (static_ops.h).
 
 #include <windows.h>
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -342,7 +343,7 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
         ++decalW_.records;
         auto it = decalCache_.find(r.key);
         DecalEntry* e = it != decalCache_.end() ? &it->second : nullptr;
-        const bool scrub = e != nullptr && (frame + r.key) % 30 == 0;  // (On: a rolling content check, every 30th frame per record)
+        const bool scrub = e != nullptr && !gpuscene::checksOff() && (frame + r.key) % 30 == 0;  // (On: a rolling content check, every 30th frame per record)
         const bool hit = e != nullptr && e->vertices == r.vertexCount && e->indices == r.indexCount;
         if (hit && ownMode == 1 && !scrub) {
             e->lastFrame = frame;

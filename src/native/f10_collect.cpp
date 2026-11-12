@@ -1,4 +1,5 @@
 #include "native/f10_collect.h"
+#include "gpuscene/verify.h"
 
 #include <windows.h>
 
@@ -719,7 +720,7 @@ void compareView(void* db) {
         c.nodeKnown = false;
         c.volatileUntil = (c.flags & 0x20000u) != 0 ? g_frameNo + 90 : 0;  // a new dynamic entity: its first frames are re-read every view
     }
-    std::uint32_t scrub = std::max<std::uint32_t>(16, cap / 32);
+    std::uint32_t scrub = gpuscene::checksOff() ? 0u : std::max<std::uint32_t>(16, cap / 32);  // (native.owned_check = 0: no rolling scrub)
     for (std::uint32_t k = 0; k < scrub && cap != 0; ++k) {
         const std::uint32_t i = (g_scrubPos++) % cap;
         Cache& c = g_scene[i];

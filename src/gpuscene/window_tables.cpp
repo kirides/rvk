@@ -1,4 +1,5 @@
 #include "gpuscene/window_tables.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -132,7 +133,7 @@ void WindowTables::flush(d3d9::Device& dev) {
         }
     }
     if (views_.ready()) {
-        views_.flush(dev, frame_ % kVerifyEvery == 0, kViewCapacity);
+        views_.flush(dev, periodic(frame_, kVerifyEvery), kViewCapacity);
         views_.collect(dev.game(), "view blocks");
     }
     report(dev);

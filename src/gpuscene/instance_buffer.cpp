@@ -1,4 +1,5 @@
 #include "gpuscene/instance_buffer.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -133,7 +134,7 @@ void InstanceBuffer::flush(d3d9::Device& dev, int mode) {
         stats_.bytes += bytes;
         ++stats_.flushes;
     }
-    if (mode >= 2 && frame_ % kVerifyEvery == 0) {
+    if (mode >= 2 && periodic(frame_, kVerifyEvery)) {
         if (list == nullptr) list = &dev.uploadList();
         verify(dev);
     } else if (list != nullptr) {

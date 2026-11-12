@@ -14,6 +14,7 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA
 namespace detail {
 inline bool g_verifyFrame = true;       // the frame being composed is a check frame (true until the first present: the start-up frames verify)
 inline std::uint32_t g_verifyInterval = 10;
+inline bool g_checksOff = false;         // native.owned_check = 0: no periodic verification anywhere (perf runs measure the owned frame alone)
 // (the Win32 environment: `-Environment` variables are set by the proxy's DllMain with SetEnvironmentVariable, which the CRT's getenv does not see; read at the first present)
 inline bool verifyAllEnv() {
     static const bool all = [] {
@@ -34,10 +35,21 @@ inline void setWindowMasksWanted(bool on) { detail::g_windowMasks = on; }
 // true while a check frame is composed (engine thread; set by setVerifyFrame at the present)
 inline bool verifyFrame() { return detail::g_verifyFrame; }
 
-// interval = native.owned_check (0: the default 10)
-inline void setVerifyInterval(int interval) { detail::g_verifyInterval = interval > 0 ? static_cast<std::uint32_t>(interval) : 10u; }
+// interval = native.owned_check (0 = every periodic check off, see checksOff())
+inline void setVerifyInterval(int interval) {
+    detail::g_checksOff = interval <= 0;
+    detail::g_verifyInterval = interval > 0 ? static_cast<std::uint32_t>(interval) : 10u;
+    if (detail::g_checksOff) detail::g_verifyFrame = false;
+}
+
+// native.owned_check = 0: every periodic verification / read-back / rolling scrub of the owned path is off (the ONE source; env knobs such as
+// RVK_TABLE_VERIFY_ALL, RVK_F2C4C_CHECK, RVK_BB_CHECK still override their own stage). Never "every frame", never a division by zero.
+inline bool checksOff() { return detail::g_checksOff; }
+
+// the stages' own cadences (240 / 60 / 30 / 10 frames ...) keep their period while checks are on; off = never
+inline bool periodic(std::uint64_t frame, std::uint64_t every) { return !detail::g_checksOff && every != 0 && frame % every == 0; }
 
 // called once per present for the NEXT frame's number (the owned path's check kind uses the same frame number: sc::leanFrameKind(frame, interval))
-inline void setVerifyFrame(std::uint64_t nextFrame) { detail::g_verifyFrame = detail::verifyAllEnv() || nextFrame % detail::g_verifyInterval == 0; }
+inline void setVerifyFrame(std::uint64_t nextFrame) { detail::g_verifyFrame = detail::verifyAllEnv() || (!detail::g_checksOff && nextFrame % detail::g_verifyInterval == 0); }
 
 }  // namespace rvk::gpuscene

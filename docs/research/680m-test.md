@@ -28,6 +28,13 @@ F15-2 (removing the fallbacks and the check frames). Background: frame-ownership
   `_dx12` DLLs from a developer build into `rvk\`. A D3D12 first start compiles
   its own cache (DXIL) again.
 
+* **Check frames: off for performance captures, default for correctness captures.** Every 10th frame (and the frame before it) of Full runs the engine's old path and
+  compares it with the owned one, and the tables read back / re-derive their content now and then (a "check frame" is slower and not what a player sees). For the RGP
+  captures and every fps / ms number use **`native.owned_check = 0`** (F11 -> Debug page -> "Native frame: owned static check interval" = 0, needs debug mode; or the
+  line `native.owned_check = 0` in `<Risen>\bin\rvk\settings.toml`; one `-Setting 'native.owned_check=0'` for test runs). It is one switch for every periodic
+  verification (rvk.log, once at the start: `native: check frames off (native.owned_check = 0): ...` lists them; every `(5 s)` line then shows 0 compared). A run that is
+  meant to prove correctness (DIFFERING / MISS must stay 0) keeps the default 10. Details: frame-ownership.md 7.48.
+
 ## 3. What to capture with RGP
 
 Setup (once): run RDP, "Enable" developer mode if asked, tab **Profiling**: enable it for the next started application; leave "Enable instruction tracing" off for

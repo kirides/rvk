@@ -9,6 +9,7 @@
 //                  cannot be drawn this way is composed right there (the engine's slot never runs for a taken op)
 
 #include <windows.h>
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <bit>
@@ -734,8 +735,8 @@ std::uint32_t StaticOps::vegPass(bool solid) {
     gpuscene::IllumTable& illum = gpuscene::illumtable();
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     const std::uint64_t pollFrame = dev_.stats().frames + 1;
-    const std::uint32_t scrubStride = 64;
-    const std::uint32_t scrubPhase = static_cast<std::uint32_t>((++V.scrubTick * 7919u) % scrubStride);
+    const std::uint32_t scrubStride = gpuscene::checksOff() ? 0u : 64u;  // (native.owned_check = 0: no rolling scrub)
+    const std::uint32_t scrubPhase = scrubStride != 0 ? static_cast<std::uint32_t>((++V.scrubTick * 7919u) % scrubStride) : 0u;
     const std::uint64_t frame = dev_.stats().frames;
 
     // phase 1: each taken op planned from the engine's grid nodes, its templates made ready

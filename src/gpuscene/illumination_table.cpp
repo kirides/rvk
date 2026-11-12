@@ -1,4 +1,5 @@
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/verify.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/bone_table.h"
@@ -546,7 +547,7 @@ void IllumTable::flush(d3d9::Device& dev, bool verify) {
         }
     }
     if (!gpuFailed_) {
-        const bool verifyNow = verify && frame_ % kVerifyEvery == 0;
+        const bool verifyNow = verify && periodic(frame_, kVerifyEvery);
         sets_.flush(dev, verifyNow, setUsed_);
         illums_.flush(dev, verifyNow, illumUsed_);
         sets_.collect(dev.game(), "light set");

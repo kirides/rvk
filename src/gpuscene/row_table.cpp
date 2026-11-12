@@ -1,4 +1,5 @@
 #include "gpuscene/row_table.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -115,7 +116,7 @@ void RowTable::flush(d3d9::Device& dev) {
                 ++i;
             }
         }
-        table_.flush(dev, frame_ % kVerifyEvery == 0, top_);
+        table_.flush(dev, periodic(frame_, kVerifyEvery), top_);
         table_.collect(dev.game(), "instance rows");
     }
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();

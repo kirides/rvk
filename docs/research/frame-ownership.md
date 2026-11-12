@@ -2213,6 +2213,44 @@ Gates: `rvk_tests` 320 / 0; `rvk_d3d9test` PASS 0 failures / 0 validation errors
 
 **Open / known limits.** (1) The check compares the opaque scene at `AfterOpaque` (z / solid passes, decals, sky): the cascades' own pictures are covered only through the shadow mask they produce there, and the alpha / refracted passes (translucent effects, water) are not compared. (2) It needs a still scene; with FSR jitter or a moving camera the window is `UNRELIABLE`. (3) Colour noise of 0.15 - 0.2 % of the pixels between two composed frames of one still scene exists at every spot (the control sees it: box `[297,165..1599,899]`, max 0.42; not investigated: eye adaptation does not enter the HDR scene; looks like the sky's clouds / the sun's flare moving with real time). (4) D3D12 has the pass (RHI) and the compute test; no game run on D3D12 was made for it.
 
+### 7.48 One switch for every check: `native.owned_check = 0` (2026-11-12; no new setting, default 10 = unchanged)
+
+User question: "can we toggle off the check frames for perf testing?". Before, `native.owned_check = 0` only stopped the owned path's own check frames (`leanFrameKind` returns Lean) and the
+billboard check; `gpuscene::setVerifyInterval(0)` fell back to 10, and the stages kept their own cadences. Now ONE source, `gpuscene::checksOff()` / `gpuscene::periodic(frame, every)`
+(`src/gpuscene/verify.h`, set from `native.owned_check` by `setVerifyInterval`): 0 = never (not "every frame", no modulo by zero: the rolling-scrub strides become 0 = no scrub,
+the phases are not computed); while checks are on every cadence keeps its old period. rvk.log, once: `native: check frames off (native.owned_check = 0): ...`.
+
+| guard | what it guards | cadence (checks on) | with 0 |
+|---|---|---|---|
+| owned path check + warm-up frames (`leanFrameKind(frame, ownedCheck_)`: static, trees, vegetation, actors, shadows, sky / GUI / particles, F10 request) | the composed draws equal the record-derived ones (DIFFERING / MISS) | every 10th frame + the one before | none (was already) |
+| billboard check (`bbCheckFrame`) | scene-draw billboards vs owned replays | every 10th (`RVK_BB_CHECK` overrides) | none (was already) |
+| `verifyFrame()` users: material / illumination / lighting compare, op-record derivation + compare, object matrix check, window fill compare, persistent-draw derive compare | table content vs the engine's registers | every 10th (`RVK_TABLE_VERIFY_ALL=1` = every frame) | none (before: fell back to 10) |
+| table read-backs `flush(dev, verify, ...)`: material, illumination, mesh parts, draw records, bone, object, row, view, window tables, instance buffer, cluster table | GPU copy equals the CPU shadow | every 240th | none |
+| lighting jobs compare | jobs vs drawn registers | `verifyFrame()` + every 6th | none |
+| owned compaction read-back (`OwnedCompact::checkThisFrame`) | GPU-made arguments vs the CPU's | every 30th (`RVK_F2C4C_CHECK=n` overrides, also 0 off) | none unless the env knob is set |
+| rolling scrubs: persistent draws (1 in 16 / pass), ordered draws (1 in 16), owned trees / vegetation templates (1 in 64) + `treeMissCheck`, event scrub (1 in 16, F2e-1), decal records (1 in 30), F10 collection scene scrub | silent staleness of retained derivations | per frame | none |
+| vegetation stream re-conversion (`static_ops_trees.cpp`) | retained converted instance bytes | every 10th | none |
+| packet cache `verify_10` | retained packet vs a fresh one | every 10th (`verify_all` is its own explicit mode, unchanged) | none |
+| `native.scene_draws_check`, `native.lean_check` | scene draw record / argument read-back; lean compare frames | settings (default 0) | forced 0 (a compare setting without lean check keeps lean off, as before) |
+| RT scene F8-1 record check + table compare + digest frames | scripts / entries vs a full observation | every 10th | none |
+
+Cost of the check frames (RX 7900 XTX, Full, player defaults, `scripts/perf-ab.ps1 -Key native.owned_check -A 10 -B 0`, in-run A/B, 240-frame windows, `-Pairs 3-4`):
+
+| scene | CPU engine+HAL per frame (10 -> 0) | GPU frame | interval p50 |
+|---|---|---|---|
+| savegame hold (4 pairs, z -61) | 9.31 -> 7.21 ms (-2.10, -22.5 %) | 4.23 -> 3.82 ms (-0.40, -9.5 %) | - |
+| jungle (3 pairs, z -54) | 10.77 -> 8.55 ms (-2.22, -20.6 %) | 6.08 -> 5.32 ms (-0.76, -12.5 %) | 9.73 -> 9.20 ms |
+
+Two frames in ten (check + warm-up) run the engine's path and the compares, so a check frame costs about 10 ms CPU more than an owned one; they also set the p95 of the
+frame interval with checks on (every 5th frame is slow). A per-window p95 is not logged (the 5 s `perf:` lines straddle the arms); the mean saving above is the measure.
+A first `hold` run (3 pairs, lead 600) was too noisy (sd 8 ms: streaming) and was repeated with lead 1800. Gate runs (savegame, 200 s, Full): with 0 every `(5 s)` line
+after the first 45 s shows 0 check frames / 0 compared / 0 scrub draws / compaction checks 0; the only compares left are the trees' and vegetation's first-sight template
+compares of the world's start-up ramp (10 lines, 12:04:26 - 12:04:51 of a session started 12:04:10), which belong to composing a new template, not to a cadence; with the default
+10 the counters are as before (54 check frames, 60,372 persistent compares, 26 compaction checks per run, DIFFERING / MISS 0).
+
+Not touched: maintenance cadences (idle sweeps every 60 / 300 frames, relearn every `kRecordRelearn`, LOD proxy rebuilds), explicit developer modes (`native.picture_check`, bone / depth
+compare settings, `native.*_compare`), the 5 s log lines. A missed dirty signal is no longer caught while the checks are off: use the default for correctness runs.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

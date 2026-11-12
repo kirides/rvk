@@ -266,7 +266,7 @@ TEST(material_table_graph_ids_ignore_indices_and_split_on_structure) {
     CHECK(a.first != 0 && a.second != 0);
 }
 
-// frame-ownership.md 7.27: the tables' per-draw verification runs on the check frames only (frame % interval == 0; the interval is native.owned_check, 0 = 10)
+// frame-ownership.md 7.27: the tables' per-draw verification runs on the check frames only (frame % interval == 0; the interval is native.owned_check, 0 = all checks off)
 TEST(table_verify_frames_follow_the_check_interval) {
     setVerifyInterval(10);
     int n = 0;
@@ -278,14 +278,19 @@ TEST(table_verify_frames_follow_the_check_interval) {
         }
     }
     CHECK(n == 10);
-    setVerifyInterval(0);  // (0 = the default 10)
-    setVerifyFrame(20);
-    CHECK(verifyFrame());
-    setVerifyFrame(21);
-    CHECK(!verifyFrame());
+    setVerifyInterval(0);  // (0 = every periodic check off: never a check frame, never "every frame", no division by zero)
+    CHECK(checksOff());
+    for (std::uint64_t f = 0; f < 50; ++f) {
+        setVerifyFrame(f);
+        CHECK(!verifyFrame());
+        CHECK(!periodic(f, 10));
+        CHECK(!periodic(f, 0));
+    }
     setVerifyInterval(1);
+    CHECK(!checksOff());
     setVerifyFrame(7);
     CHECK(verifyFrame());
+    CHECK(periodic(240, 240) && !periodic(241, 240) && !periodic(7, 0));
     setVerifyInterval(10);
     detail::g_verifyFrame = true;  // (the start-up state: the frames before the first present verify)
 }

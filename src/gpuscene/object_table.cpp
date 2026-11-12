@@ -1,4 +1,5 @@
 #include "gpuscene/object_table.h"
+#include "gpuscene/verify.h"
 
 #include <algorithm>
 #include <chrono>
@@ -184,7 +185,7 @@ void ObjectTable::flush(d3d9::Device& dev) {
             });
         }
         if (history_) rollHistory();
-        table_.flush(dev, frame_ % kVerifyEvery == 0, used_);
+        table_.flush(dev, periodic(frame_, kVerifyEvery), used_);
         table_.collect(dev.game(), "object table");
     }
     report(dev);

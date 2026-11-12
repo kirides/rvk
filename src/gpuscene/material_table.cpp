@@ -430,7 +430,7 @@ void MaterialTable::flush(d3d9::Device& dev, bool verify) {
         }
     }
     if (!gpuFailed_) {
-        table_.flush(dev, verify && frame_ % kVerifyEvery == 0, used_);
+        table_.flush(dev, verify && periodic(frame_, kVerifyEvery), used_);
         table_.collect(dev.game(), "material table");
     }
     report();
