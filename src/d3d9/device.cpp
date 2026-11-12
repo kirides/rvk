@@ -755,6 +755,7 @@ void Device::destroy() {
         spdlog::info("d3d9: device teardown: worker pools joined (shader variants {:.0f} ms, shader compiles {:.0f} ms, pipeline builds {:.0f} ms)", ms(w0, w1), ms(w1, w2), ms(w2, w3));
     }
     game_->waitIdle();
+    cropDiag_.reset();
     // the pipeline cache and its threads are the backend's (the backend's GameRecord), destroyed with the device
     processReleases();
     backBuffer_.reset();
@@ -1183,6 +1184,128 @@ void diagAfterDraw(Device& d, const char* what) {
     }
 }
 
+struct Device::CropDiag {
+    struct Slot {
+        std::unique_ptr<rhi::Buffer> image;
+        std::unique_ptr<rhi::Buffer> lum;
+        std::uint64_t value = 0;      // the frame value of the submission that copied (completed: read)
+        std::uint64_t presented = 0;  // stats_.frames + 1 of that present
+        std::uint32_t width = 0, height = 0, pitch = 0;
+        bool busy = false, lumValid = false;
+    };
+    std::array<Slot, 8> slots;
+};
+
+void Device::diagCropLuma() {
+    // "x,y,w,h[;x,y,w,h ...]"
+    static const std::vector<std::array<long, 4>> crops = [] {
+        std::vector<std::array<long, 4>> out;
+        char e[512];
+        const DWORD n = GetEnvironmentVariableA("RVK_CROP_LUMA", e, sizeof e);
+        if (n == 0 || n >= sizeof e) return out;
+        char* p = e;
+        while (*p != 0) {
+            std::array<long, 4> r{};
+            for (long& v : r) {
+                v = std::strtol(p, &p, 10);
+                if (*p == ',') ++p;
+            }
+            if (r[2] > 0 && r[3] > 0) out.push_back(r);
+            while (*p != 0 && *p != ';') ++p;
+            if (*p == ';') ++p;
+        }
+        return out;
+    }();
+    if (crops.empty() || !backBuffer_) return;
+    if (!cropDiag_) cropDiag_ = std::make_unique<CropDiag>();
+    CropDiag& d = *cropDiag_;
+    // the completed copies, oldest first
+    const std::uint64_t done = game_->completedFrame();
+    for (;;) {
+        CropDiag::Slot* s = nullptr;
+        for (CropDiag::Slot& c : d.slots) {
+            if (c.busy && c.value <= done && (s == nullptr || c.presented < s->presented)) s = &c;
+        }
+        if (s == nullptr) break;
+        s->busy = false;
+        s->image->invalidate();
+        const auto* px = static_cast<const std::uint8_t*>(s->image->map());
+        std::string lumas;
+        for (const std::array<long, 4>& crop : crops) {
+            const long wl = static_cast<long>(s->width), hl = static_cast<long>(s->height);
+            const std::uint32_t x0 = static_cast<std::uint32_t>(std::clamp<long>(crop[0], 0, wl - 1));
+            const std::uint32_t y0 = static_cast<std::uint32_t>(std::clamp<long>(crop[1], 0, hl - 1));
+            const std::uint32_t x1 = static_cast<std::uint32_t>(std::clamp<long>(crop[0] + crop[2], x0 + 1, wl));
+            const std::uint32_t y1 = static_cast<std::uint32_t>(std::clamp<long>(crop[1] + crop[3], y0 + 1, hl));
+            double sum[3] = {};
+            for (std::uint32_t y = y0; y < y1; ++y) {
+                const std::uint8_t* row = px + static_cast<std::size_t>(y) * s->pitch;
+                for (std::uint32_t x = x0; x < x1; ++x) {
+                    for (int c = 0; c < 3; ++c) sum[c] += row[x * 4 + c];  // B, G, R
+                }
+            }
+            const double n = static_cast<double>(x1 - x0) * (y1 - y0);
+            lumas += std::format(" {:.3f}", (0.2126 * sum[2] + 0.7152 * sum[1] + 0.0722 * sum[0]) / n);
+        }
+        float lum = -1.0f;
+        if (s->lumValid) {
+            s->lum->invalidate();
+            std::memcpy(&lum, s->lum->map(), 4);
+        }
+        spdlog::info("diag: crop: present {} (frame value {}): adapted luminance {:.5f}, luma{}", s->presented, s->value, lum, lumas);
+    }
+    CropDiag::Slot* free = nullptr;
+    for (CropDiag::Slot& c : d.slots) {
+        if (!c.busy) {
+            free = &c;
+            break;
+        }
+    }
+    if (free == nullptr) return;
+    rhi::Texture& tex = backBuffer_->rhi();
+    const rhi::TextureDesc& td = tex.desc();
+    if (rhi::formatBlock(td.format).bytes != 4) return;
+    if (!free->image || free->width != td.extent.width || free->height != td.extent.height) {
+        rhi::BufferDesc bd;
+        bd.size = rhi::copyBytes(td, 0);
+        bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bd.memory = rhi::Memory::Readback;
+        bd.name = "rvk crop diag";
+        free->image = game_->createBuffer(bd);
+        if (!free->image) return;
+        free->width = td.extent.width;
+        free->height = td.extent.height;
+        free->pitch = rhi::bufferRowPitch(td.format, td.extent.width);
+    }
+    rhi::CommandList& cl = game_->frameCommands();
+    if (tex.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    cl.copyTextureToBuffer(*free->image, 0, tex, {0, 0});
+    free->lumValid = false;
+    if (const void* api = engine::exposure::adaptedLuminanceApi()) {
+        if (Texture* t = engineTexture(api); t != nullptr && t->desc().width == 1 && t->desc().height == 1) {
+            rhi::Texture& lt = t->rhi();
+            if (!free->lum) {
+                rhi::BufferDesc bd;
+                bd.size = rhi::copyBytes(lt.desc(), 0);
+                bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bd.memory = rhi::Memory::Readback;
+                bd.name = "rvk crop diag luminance";
+                free->lum = game_->createBuffer(bd);
+            }
+            if (free->lum) {
+                const VkImageLayout was = lt.layout();
+                if (was != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(lt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                cl.copyTextureToBuffer(*free->lum, 0, lt, {0, 0});
+                if (was != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && was != VK_IMAGE_LAYOUT_UNDEFINED) cl.transition(lt, was);
+                free->lumValid = true;
+            }
+        }
+    }
+    free->value = game_->frameValue();
+    free->presented = stats_.frames + 1;
+    free->busy = true;
+}
+
 void Device::present() {
     RVK_ZONE("Device::present");
     presentStart_ = std::chrono::steady_clock::now();
@@ -1265,6 +1388,7 @@ void Device::present() {
         }
     }
     endRendering();
+    diagCropLuma();
     ++stats_.frames;
     if (wp0_.on && stats_.frames % 600 == 0) wp0Log();
     phases_.endFrame();
@@ -3181,6 +3305,56 @@ bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& widt
     height = d.height;
     bgra.assign(static_cast<const std::uint8_t*>(lk.bits), static_cast<const std::uint8_t*>(lk.bits) + lk.rowPitch * height);
     release(std::move(tmp));
+    return true;
+}
+
+bool Device::armBackBufferRead() {
+    bbReadValue_ = 0;
+    if (!backBuffer_ || backBuffer_->isNull()) return false;
+    rhi::Texture& tex = backBuffer_->rhi();
+    const rhi::TextureDesc& td = tex.desc();
+    const rhi::FormatBlock fb = rhi::formatBlock(td.format);
+    if (fb.bytes != 4 || fb.width != 1 || fb.height != 1) return false;  // A8R8G8B8 / X8R8G8B8 (BGRA in memory), as readBackBuffer's copy
+    endRendering();
+    if (!bbRead_ || bbReadWidth_ != td.extent.width || bbReadHeight_ != td.extent.height) {
+        bbRead_.reset();
+        rhi::BufferDesc bd;
+        bd.size = rhi::copyBytes(td, 0);
+        bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bd.memory = rhi::Memory::Readback;
+        bd.name = "rvk back-buffer capture";
+        bbRead_ = game_->createBuffer(bd);
+        if (!bbRead_) return false;
+        bbReadWidth_ = td.extent.width;
+        bbReadHeight_ = td.extent.height;
+        bbReadPitch_ = rhi::bufferRowPitch(td.format, td.extent.width);
+        bbReadRowBytes_ = td.extent.width * 4;
+    }
+    rhi::CommandList& cl = game_->frameCommands();
+    if (tex.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    cl.copyTextureToBuffer(*bbRead_, 0, tex, {0, 0});
+    bbReadValue_ = game_->frameValue();  // the value present()'s submission signals
+    return true;
+}
+
+bool Device::takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
+    const std::uint64_t value = bbReadValue_;
+    bbReadValue_ = 0;
+    if (value == 0 || !bbRead_) return false;
+    if (game_->frameValue() <= value) return false;  // not submitted (present() did not run): never wait for an unsubmitted value
+    const auto t0 = std::chrono::steady_clock::now();
+    game_->waitFrame(value);
+    bbRead_->invalidate();
+    const auto* p = static_cast<const std::uint8_t*>(bbRead_->map());
+    if (p == nullptr) return false;
+    width = bbReadWidth_;
+    height = bbReadHeight_;
+    bgra.resize(static_cast<std::size_t>(bbReadRowBytes_) * height);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        std::memcpy(bgra.data() + static_cast<std::size_t>(y) * bbReadRowBytes_, p + static_cast<std::size_t>(y) * bbReadPitch_, bbReadRowBytes_);
+    }
+    ++perf_.readbacks;
+    perf_.readbackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
 

@@ -537,6 +537,7 @@ private:
     void treeSetNote(const d3d9::Device& dev, const rt::Registry::Instance& in);
     void treeSetClose(const d3d9::Device& dev);
     std::uint64_t dynFrame_ = 0;
+    std::uint64_t dynJumpDrops_ = 0;  // frames whose previous-frame captures a frame value jump dropped (rollDyn)
     std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
     std::uint32_t nextDynId_ = 1u << 30;
     std::uint64_t dynBuilt_ = 0, dynRefit_ = 0;  // interval counters

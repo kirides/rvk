@@ -58,7 +58,7 @@ Render modes (docs/research/overlay.md 2.7; player setting `renderer.mode`, Syst
 (`-Commands '2000: set renderer.mode full'`, `-Setting 'renderer.mode=full'`, A/B F10). rvk.log `renderer: mode ...`.
 Vulkan-mode debugging (`run.ps1` switches -> `bin/rvk/config.toml` `[debug]`): `-Screenshots '450,500'` (back buffer ->
 `bin/rvk/screenshots/frame_<n>.png`, view them with Read; the world appears ~frame 450 of `testdemo`, loading screens run
-at ~0.1 fps), `-LogDraws N` (first N draws in detail: shaders, textures, targets, states), `-LogFrame N` (every key HAL call
+at ~0.1 fps; captures ride in the present's own submission and do not disturb the following frames, `RVK_CAPTURE_FLUSH=1` = the old mid-frame read-back whose frame value jump lightened the RT shadows for ~20 frames; `-Environment 'RVK_CROP_LUMA=x,y,w,h;...'` logs every present's crop luma without a wait: frame-ownership.md 14.38), `-LogDraws N` (first N draws in detail: shaders, textures, targets, states), `-LogFrame N` (every key HAL call
 of frame N), `-Snapshots N,M` (at those `eCApplication::Draw` calls: the engine snapshot (slot 159 -> BMP in the copy's
 `localappdata\Local\Risen\ScreenShots`) + a self-test of the `rvk_screenshot` exports), `-Validation`, `-DumpSavedTextures` (the engine's refused `SaveTextureToFile` writes -> `bin/rvk/dumps/*.png`), `-AllowFocus` (test runs
 stay in the background by default). rvk.log prints fps / draw counts every 5 s and every unimplemented HAL slot once, plus the
