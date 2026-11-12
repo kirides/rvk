@@ -125,9 +125,10 @@ bool RtShadows::pipelinesReady() {
 void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     if (ctx.mainView != 1 || settings_.mode == 0) return;
     const std::uint64_t frame = dev_.frameValue();
+    const std::uint64_t epoch = dev_.game().memoryEpoch();  // (the frame's identity: a mid-frame flush moves the value, not the epoch; 14.40)
     if (stage > 0) {
         // the temporal and spatial passes of a frame the trace pass prepared
-        if (pending_.frame != frame || pending_.next != stage) return;
+        if (pending_.frame != epoch || pending_.next != stage) return;
         rhi::CommandList& c = ctx.cmd;
         d3d9::RegionScope r(dev_, kNames[stage]);
         rhi::Texture* out = stage == 1 ? pending_.hist : pending_.fin;
@@ -241,7 +242,7 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
         cl.dispatch(gx, gy, 1);
         cl.transition(*rawT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
-    pending_ = {frame, 1, push, gx, gy, hist[cur], fin, cur, w, h, p.range[0]};
+    pending_ = {epoch, 1, push, gx, gy, hist[cur], fin, cur, w, h, p.range[0]};
     lastWidth_ = w;
     lastHeight_ = h;
     if (passes_++ == 0) {

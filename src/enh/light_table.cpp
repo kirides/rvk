@@ -557,7 +557,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
             sp.cfg[3] = shadow_.quality >= 3 ? 2.0f : 1.0f;
             sp.misc[0] = static_cast<std::uint32_t>(dev_.frameValue());
             sp.misc[1] = shadow_.quality <= 1 ? 1u : 0u;  // RVK_RT_TRACE_OPAQUE at low
-            pendingShadow_ = {dev_.frameValue(), sp, raw, fin, (w + 7) / 8, (h + 7) / 8};
+            pendingShadow_ = {dev_.game().memoryEpoch(), sp, raw, fin, (w + 7) / 8, (h + 7) / 8};  // (the memory epoch: 14.40)
             push.shadow[0] = fin->heapSampled();
             push.shadow[1] = w;
             push.shadow[2] = h;
@@ -579,7 +579,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
 
 // pass 2 of the lamp shadows: the trace and the filter (a frame the cluster build prepared)
 void LightTable::recordShadow(d3d9::PassContext& ctx) {
-    if (ctx.mainView != 1 || pendingShadow_.frame != dev_.frameValue()) return;
+    if (ctx.mainView != 1 || pendingShadow_.frame != dev_.game().memoryEpoch()) return;
     PendingShadow p = pendingShadow_;
     pendingShadow_ = {};
     d3d9::RegionScope region(dev_, "light.shadow");

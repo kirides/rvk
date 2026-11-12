@@ -292,13 +292,13 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     cl.setPushConstants(&push, sizeof(push));
     cl.dispatch((tw + 7) / 8, (th + 7) / 8, 1);
 
-    stage_ = {dev_.frameValue(), scene, rawT, histRead, histWrite, push, w, h, tw, th, cur, hist[cur]->heapSampled(), false,
+    stage_ = {dev_.game().memoryEpoch(), scene, rawT, histRead, histWrite, push, w, h, tw, th, cur, hist[cur]->heapSampled(), false,
               halfOut ? scale : 0u, static_cast<std::uint32_t>(ctx.depthMap->bindlessSlot()), halfOut};
 }
 
 // the gather + temporal filter into this frame's history
 void MaterialRt::recordFilter(d3d9::PassContext& ctx) {
-    if (ctx.mainView != 1 || stage_.frame != dev_.frameValue()) return;
+    if (ctx.mainView != 1 || stage_.frame != dev_.game().memoryEpoch()) return;  // (stage_.frame: the memory epoch, 14.40)
     RhiScope rs(dev_, ctx.cmd);
     if (!rs) return;
     rhi::CommandList& cl = rs.cl();
@@ -317,7 +317,7 @@ void MaterialRt::recordFilter(d3d9::PassContext& ctx) {
 
 // onto the scene
 void MaterialRt::recordComposite(d3d9::PassContext& ctx) {
-    if (ctx.mainView != 1 || stage_.frame != dev_.frameValue() || !stage_.filtered) return;
+    if (ctx.mainView != 1 || stage_.frame != dev_.game().memoryEpoch() || !stage_.filtered) return;
     RhiScope rs(dev_, ctx.cmd);
     if (!rs) return;
     rhi::CommandList& cl = rs.cl();

@@ -6271,6 +6271,130 @@ void testTeardownWithCaptures(Fixture& f) {
     if (got == 0) std::printf("  (this backend has no capture pool: nothing to tear down)\n");
 }
 
+// frame-ownership.md 14.40: a mid-frame flush (a read-back) is a continuation of the frame: the frame value moves, the memory epoch does not, and the ring /
+// capture blocks of the frame stay valid through the next frame (their memory is not handed out again, neither to the continuation nor to the next frame);
+// the GPU sees the bytes the CPU wrote before the flush. Two frames later the epoch is no longer live.
+void testFlushKeepsFrameMemory(Fixture& f) {
+    Device& dev = f.dev;
+    rhi::GameDevice& g = dev.game();
+    const auto check = [&](bool ok, const char* what) {
+        if (!ok) {
+            std::printf("  FAIL flush keeps frame memory: %s\n", what);
+            ++g_failures;
+        }
+    };
+    f.reset();
+    dev.present();
+    const std::uint64_t e0 = g.memoryEpoch(), v0 = g.frameValue();
+    constexpr std::uint32_t kBytes = 4096;
+    const auto pattern = [](std::uint32_t i) { return static_cast<std::uint8_t>((i * 2654435761u) >> 13); };
+    const rhi::RingAlloc a = g.allocRing(kBytes, 256);
+    const rhi::RingAlloc c = g.allocCapture(kBytes, 16);
+    check(a.ptr != nullptr, "ring block");
+    if (a.ptr == nullptr) return;
+    for (std::uint32_t i = 0; i < kBytes; ++i) static_cast<std::uint8_t*>(a.ptr)[i] = pattern(i);
+    const bool cpuCapture = c.ptr != nullptr;
+    if (cpuCapture) {
+        for (std::uint32_t i = 0; i < kBytes; ++i) static_cast<std::uint8_t*>(c.ptr)[i] = pattern(i + 7);
+    }
+    const auto overlaps = [](const rhi::RingAlloc& x, std::uint64_t xBytes, const rhi::RingAlloc& y, std::uint64_t yBytes) {
+        return x.gpuVa != 0 && y.gpuVa != 0 && x.gpuVa < y.gpuVa + yBytes && y.gpuVa < x.gpuVa + xBytes;
+    };
+    std::uint32_t overlapsSeen = 0;
+    // allocations of the rest of the frame (after the flush) and of the next frame, beyond a ring chunk: none may reuse the block's memory
+    const auto churn = [&](std::uint8_t fill) {
+        for (int i = 0; i < 48; ++i) {
+            const rhi::RingAlloc b = g.allocRing(1u << 20, 256);
+            if (b.ptr != nullptr) std::memset(b.ptr, fill, 1u << 20);
+            if (overlaps(a, kBytes, b, 1u << 20)) ++overlapsSeen;
+            const rhi::RingAlloc k = g.allocCapture(1u << 20, 16);
+            if (k.ptr != nullptr) std::memset(k.ptr, fill, 1u << 20);
+            if (overlaps(c, kBytes, k, 1u << 20)) ++overlapsSeen;
+        }
+    };
+    dev.flushFrameAndWait();
+    check(g.frameValue() > v0, "the flush submitted (frame value moved)");
+    check(g.memoryEpoch() == e0, "the flush kept the memory epoch");
+    churn(0xEE);
+    dev.present();
+    check(g.memoryEpoch() == e0 + 1 && g.memoryLive(e0), "the next frame: the previous epoch is live");
+    churn(0xDD);
+    check(overlapsSeen == 0, "a later block reused the frame's ring / capture memory");
+    bool same = true;
+    for (std::uint32_t i = 0; i < kBytes && same; ++i) same = static_cast<const std::uint8_t*>(a.ptr)[i] == pattern(i);
+    check(same, "the ring block's bytes changed (CPU view)");
+    if (cpuCapture) {
+        same = true;
+        for (std::uint32_t i = 0; i < kBytes && same; ++i) same = static_cast<const std::uint8_t*>(c.ptr)[i] == pattern(i + 7);
+        check(same, "the capture block's bytes changed (CPU view)");
+    }
+    // the GPU's view of the ring block in the next frame
+    rhi::BufferDesc bd;
+    bd.size = kBytes;
+    bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bd.memory = rhi::Memory::Readback;
+    bd.name = "d3d9test flush memory";
+    const std::unique_ptr<rhi::Buffer> rb = g.createBuffer(bd);
+    check(rb != nullptr, "read-back buffer");
+    if (rb != nullptr) {
+        dev.frameList().copyBuffer(*rb, 0, g.ringBuffer(a), a.offset, kBytes);
+        dev.flushFrameAndWait();
+        rb->invalidate();
+        const auto* p = static_cast<const std::uint8_t*>(rb->map());
+        same = p != nullptr;
+        for (std::uint32_t i = 0; i < kBytes && same; ++i) same = p[i] == pattern(i);
+        check(same, "the GPU read other bytes of the previous frame's ring block");
+    }
+    dev.present();
+    check(!g.memoryLive(e0), "two frames later the epoch is not live");
+    dev.present();
+    std::printf("  flush keeps frame memory: epoch %llu -> %llu, frame value %llu -> %llu, capture pool CPU view %s\n", static_cast<unsigned long long>(e0),
+                static_cast<unsigned long long>(g.memoryEpoch()), static_cast<unsigned long long>(v0), static_cast<unsigned long long>(g.frameValue()),
+                cpuCapture ? "checked" : "none");
+    // (rb: its copy completed in the flush above)
+}
+
+// 14.40: the in-frame read (the engine snapshot's / the captures' path: the copy recorded into the frame's list, read after its submission) returns the same
+// bytes as the flushing read-back (readBackBuffer), and an image read (armImageRead) the same as readImageLevel
+void testInFrameRead(Fixture& f) {
+    Device& dev = f.dev;
+    f.reset();
+    dev.clear(CLEAR_TARGET | CLEAR_ZBUFFER, 0xFF102030, 1.0f, 0);
+    const auto q1 = quad(-1, -1, 0.2f, 0.6f, 0.5f, 0xFFE04010);
+    const auto q2 = quad(-0.3f, -0.8f, 1, 1, 0.4f, 0x8010C0F0);
+    dev.drawPrimitiveUP(PT_TRIANGLELIST, 2, q1.data(), sizeof(Vertex));
+    dev.setRenderState(RS_ALPHABLENDENABLE, 1);
+    dev.setRenderState(RS_SRCBLEND, BLEND_SRCALPHA);
+    dev.setRenderState(RS_DESTBLEND, BLEND_INVSRCALPHA);
+    dev.drawPrimitiveUP(PT_TRIANGLELIST, 2, q2.data(), sizeof(Vertex));
+    Device::InFrameRead r;
+    const bool armed = dev.armBackBufferReadInto(r);
+    std::vector<std::uint8_t> early;
+    const bool tooEarly = dev.takeImageRead(r, early);  // (not submitted yet: refused, and the read is gone)
+    const bool armed2 = dev.armBackBufferReadInto(r);
+    dev.present();
+    std::vector<std::uint8_t> inFrame;
+    const bool took = dev.takeImageRead(r, inFrame);
+    std::vector<std::uint8_t> flushed;
+    std::uint32_t w = 0, h = 0;
+    const bool read = dev.readBackBuffer(flushed, w, h);
+    const bool ok = armed && !tooEarly && armed2 && took && read && r.width == w && r.height == h && inFrame == flushed && !inFrame.empty();
+    std::printf("  in-frame read: %ux%u, %zu bytes, %s the flushed read-back\n", r.width, r.height, inFrame.size(), inFrame == flushed ? "equal to" : "DIFFERENT from");
+    if (!ok) {
+        std::printf("  FAIL in-frame read (armed %d, refused before the submission %d, taken %d, read-back %d)\n", armed, !tooEarly, took, read);
+        ++g_failures;
+    }
+    // deferImageRead: serviced at the next present
+    std::vector<std::uint8_t> deferred;
+    dev.deferImageRead(dev.backBuffer()->texture()->rhi(), [&](const std::vector<std::uint8_t>& v) { deferred = v; });
+    dev.present();
+    dev.present();
+    if (deferred != flushed) {
+        std::printf("  FAIL deferred image read: %zu bytes, %s\n", deferred.size(), deferred.empty() ? "never serviced" : "other bytes");
+        ++g_failures;
+    }
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool validation = true, syncValidation = false;
@@ -6335,6 +6459,7 @@ int main(int argc, char** argv) {
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
         {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"flush keeps frame memory (14.40)", testFlushKeepsFrameMemory}, {"in-frame read (14.40)", testInFrameRead},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)
     };
     for (const auto& [name, fn] : cases) {

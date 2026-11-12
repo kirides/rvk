@@ -740,8 +740,9 @@ public:
     vk::MeshArena* arena() { return arena_; }
 
     // ---- the frame loop ----
-    void beginFrame() override {
-        frames_.begin();
+    void beginFrame(bool continuation) override {
+        frames_.begin(continuation);
+        memoryEpoch_ = frames_.memoryEpoch();
         if (!bindlessInit_) {
             bindless_.recordInit(frames_.cmd());
             bindlessInit_ = true;

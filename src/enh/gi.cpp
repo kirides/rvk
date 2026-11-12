@@ -224,7 +224,7 @@ bool Gi::observes(Kind kind, d3d9::scene::Phase phase) const {
 void Gi::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const d3d9::Shader* ps = q.enginePs;
     if (ps == nullptr) return;
-    const std::uint64_t frame = dev.frameValue();
+    const std::uint64_t frame = dev.game().memoryEpoch();  // (the frame's identity: a mid-frame flush moves the value, not the epoch; 14.40)
     if (tallyFrame_ != frame) {
         tallyFrame_ = frame;
         ambient_.clear();
@@ -300,7 +300,7 @@ void Gi::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
 // the light of the frame from the tallies: the most frequent ambient set (the outdoor one when it covers a good share of
 // the draws; indoors the previous outdoor sky stays), the most frequent sun, the point lights nearest the camera
 void Gi::pickLight() {
-    if (tallyFrame_ != dev_.frameValue()) return;
+    if (tallyFrame_ != dev_.game().memoryEpoch()) return;
     const auto best = std::max_element(ambient_.begin(), ambient_.end(), [](const auto& a, const auto& b) { return a.count < b.count; });
     if (best != ambient_.end() && (!haveSky_ || best->count * 10 >= ambientDraws_ * 3)) {
         std::memcpy(drawSky_, best->regs[1], sizeof(drawSky_));

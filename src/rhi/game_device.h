@@ -542,6 +542,12 @@ public:
     // the frame being recorded: the value it signals (counts up), its slot (0 .. in flight - 1), the last completed value; waiting for a value blocks
     std::uint64_t frameValue() const { return frameValue_; }
     std::uint32_t frameSlot() const { return frameSlot_; }
+    // The frame's memory epoch (frame-ownership.md 14.40): counts the frames (beginFrame without `continuation`), not the submissions. The ring and the vertex
+    // capture pool rotate per epoch: a block allocated in epoch E stays valid through epoch E + kFramesInFlight - 1 however many submissions (mid-frame
+    // read-back flushes, the manual frame generation's first present) the frames made. Per-frame history keyed on frameValue() + 1 breaks at such a flush; key
+    // it on the epoch instead (memoryLive).
+    std::uint64_t memoryEpoch() const { return memoryEpoch_; }
+    bool memoryLive(std::uint64_t epoch) const { return epoch != 0 && epoch <= memoryEpoch_ && memoryEpoch_ - epoch < kFramesInFlight; }
     virtual std::uint64_t completedFrame() const = 0;
     virtual void waitFrame(std::uint64_t value) = 0;
     // runs `fn` when the frame being recorded (or, between frames, the last submitted one) has completed (any thread): destruction of what the GPU may still use
@@ -642,7 +648,9 @@ public:
     // ---- the frame loop (render thread) ----
     // starts the next frame: waits for its slot (the GPU may be a full slot behind: lastSlotWaitMs), runs the retirements that came due, begins the
     // command lists (a new frame slot resets the recording state: invalidateRecordingState + resetRecordPools are part of it)
-    virtual void beginFrame() = 0;
+    // `continuation`: the same frame goes on after a mid-frame submit (a read-back flush): new command lists and a new frame value, but the ring / capture
+    // memory is not recycled and the memory epoch stays
+    virtual void beginFrame(bool continuation = false) = 0;
     virtual double lastSlotWaitMs() const = 0;
     // ends and submits the frame's upload and main lists (the presenter's acquire / rendered semaphores ride along when an image is acquired).
     // `finalMark` labels the last GPU timestamp segment ("present blit ..." / "copies ... (flush)")
@@ -680,6 +688,7 @@ protected:
     std::uint64_t nullVertexBuffer_ = 0;  // the handle of nullVertexBuffer()
     std::uint64_t frameValue_ = 1;  // the value the frame being recorded signals
     std::uint32_t frameSlot_ = 0;
+    std::uint64_t memoryEpoch_ = 0;
     // a block that did not fit the current chunk: the backend switches chunks (ring_ is updated) and allocates
     virtual RingAlloc allocRingSlow(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) = 0;
 };

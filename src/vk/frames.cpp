@@ -115,21 +115,28 @@ void Frames::waitIdle() {
     }
 }
 
-void Frames::begin() {
+void Frames::begin(bool continuation) {
     Slot& s = slots_[slot()];
     lastSlotWaitMs_ = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
     if (frameValue_ > kInFlight && completedValue() < frameValue_ - kInFlight) {
-        const auto t0 = std::chrono::steady_clock::now();
         waitFor(frameValue_ - kInFlight);
-        lastSlotWaitMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
+    if (!continuation || memoryEpoch_ == 0) {
+        // a new frame: the next memory slot; whatever recorded with it last must have completed (normally long done: it is two frames back)
+        memSlot_ = (memSlot_ + 1) % kInFlight;
+        ++memoryEpoch_;
+        MemSlot& m = mem_[memSlot_];
+        if (m.lastValue != 0 && completedValue() < m.lastValue) waitFor(m.lastValue);
+        for (std::size_t c : m.chunks) {
+            freeChunks_.push_back(c);
+        }
+        m.chunks.clear();
+        currentChunk_ = SIZE_MAX;
+        ring_->ptr = nullptr;  // (the next allocation takes a chunk)
+    }
+    lastSlotWaitMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     runRetired(completedValue());
-    for (std::size_t c : s.chunks) {
-        freeChunks_.push_back(c);
-    }
-    s.chunks.clear();
-    currentChunk_ = SIZE_MAX;
-    ring_->ptr = nullptr;  // (the next allocation takes a chunk)
     vkResetCommandPool(ctx_->device(), s.pool, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -177,6 +184,7 @@ bool Frames::submit(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
     si.signalSemaphoreInfoCount = nsignal;
     si.pSignalSemaphoreInfos = signal;
     const VkResult r = ctx_->queueSubmit(si);
+    mem_[memSlot_].lastValue = frameValue_;
     recording_ = false;
     ++frameValue_;
     if (r != VK_SUCCESS) {
@@ -213,7 +221,7 @@ bool Frames::newChunk(VkDeviceSize minSize) {
             if (chunks_[*it].size >= minSize && recording_) {
                 currentChunk_ = *it;
                 freeChunks_.erase(it);
-                slots_[slot()].chunks.push_back(currentChunk_);
+                mem_[memSlot_].chunks.push_back(currentChunk_);
                 return true;
             }
         }
@@ -247,7 +255,7 @@ bool Frames::newChunk(VkDeviceSize minSize) {
     chunks_.push_back(c);
     if (recording_) {
         currentChunk_ = chunks_.size() - 1;
-        slots_[slot()].chunks.push_back(currentChunk_);
+        mem_[memSlot_].chunks.push_back(currentChunk_);
     } else {
         freeChunks_.push_back(chunks_.size() - 1);
     }

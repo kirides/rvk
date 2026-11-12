@@ -137,6 +137,14 @@ bEResult HalTexture::GetRenderTargetData(eCAPITexture* a0, int a1) {
         dev_.dev().stretchRect(src, nullptr, dst->tex()->surface(0, 0), nullptr, false);
         return bEResult_Ok;
     }
+    // A CPU destination needs the texels synchronously (D3D9's GetRenderTargetData; the savegame thumbnail: gCSaveGameManager::UpdateThumbnail -> the save
+    // serialises it): a mid-frame submit + wait. Its frame continues as a continuation (GameDevice::beginFrame): the frame's ring / capture memory and the
+    // per-frame histories keyed on the memory epoch are not disturbed (frame-ownership.md 14.40)
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 16) {
+        spdlog::info("hal: GetRenderTargetData {}x{} level {} into a CPU texture at present {} (frame value {}): synchronous read-back", src != nullptr ? src->width() : 0,
+                     src != nullptr ? src->height() : 0, a1, dev_.dev().stats().frames + 1, dev_.dev().frameValue());
+    }
     return dev_.dev().readRenderTarget(src, dst->tex(), 0) ? bEResult_Ok : bEResult_False;
 }
 
