@@ -1800,6 +1800,13 @@ void Device::fillCapture(const DrawPacket& p) {
     // (predicted but the scene decision still building its pipelines = pending, not declined: the replay asks again)
     c.boneObs = sceneBone_ ? 0 : obsBone_ ? (lastVariant_.scenePending ? 2 : 1) : obsBonePending_ ? 2 : obsRigidStill_ ? 3 : 0;
     c.pull = {};
+    // D3D12: a draw without a pixel shader (native.depth_z's colour-less z / shadow passes) is not pulled. Pulled + pixel-shader-less owned draws in one ExecuteIndirect
+    // rasterised displaced fragments of other meshes in sporadic frames on the AMD D3D12 driver (~1 owned frame in 100 at harbour_docks; never on Vulkan, also at the
+    // same frame rate; not a race of ours: one frame in flight, a fence between the upload and the frame's lists, CPU-written arguments and the base vertex in the
+    // arguments all kept it; the pixel shader kept, vertex pulling off or depth_z off each removed it): frame-ownership.md 14.37. Such a draw keeps the input
+    // assembler (its z pass stays pixel-shader-less); `-Environment 'RVK_PULL_PSLESS=1'` = pulled as before (A/B)
+    static const bool pullPsLess = GetEnvironmentVariableA("RVK_PULL_PSLESS", nullptr, 0) != 0;
+    if (psDropped_ && options_.backend == rhi::Backend::D3D12 && !pullPsLess) c.scenePipelinePull = GamePipeline::None;
     if (c.scenePipelinePull != GamePipeline::None && pullFetch_.valid == shader::abi::kVertexFetchValid) {
         c.pull = pullFetch_;
         c.pull.baseVertex = p.vertexOffset - c.vi.vertexShift;  // (the D3D9 base vertex: the packet's vertexOffset holds it + the arena binding's shift)

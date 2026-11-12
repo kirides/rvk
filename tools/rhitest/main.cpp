@@ -1061,7 +1061,8 @@ void testPictureCheck(rhi::Device& dev, const Shaders& sh) {
             cl.transition(*refColor, VK_IMAGE_LAYOUT_GENERAL);
             cl.transition(*refDepth, VK_IMAGE_LAYOUT_GENERAL);
             cl.bindPipeline(*pipeline);
-            rhi::Texture* storage[] = {refColor.get(), refDepth.get()};
+            // (u2 / u3 = the dump images of mode 2: the reference images stand in for them, as in enh/picture_check.cpp without RVK_PICTURE_DUMP)
+            rhi::Texture* storage[] = {refColor.get(), refDepth.get(), refColor.get(), refDepth.get()};
             cl.setStorageTextures(storage);
             cl.setPushConstants(&push, sizeof(push));
             cl.dispatch((kW + 7) / 8, (kH + 7) / 8, 1);

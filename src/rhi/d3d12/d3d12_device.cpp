@@ -1035,12 +1035,19 @@ public:
     // a table of kStorageImages UAV descriptors in the ring at the end of the heap: its first index
     std::uint32_t nextUavTable() {
         const std::uint32_t perSlot = kUavRingPerSlot / rhi::kStorageImages;
+        if (gameMode_ && uavTable_ >= perSlot && (uavWraps_++ % 1000u) == 0u) {
+            spdlog::warn("d3d12: the UAV table ring wrapped inside a frame ({} tables of {} per frame slot; {} wraps so far): an earlier pass's tables were overwritten", uavTable_ + 1,
+                         perSlot, uavWraps_);
+        }
         const std::uint32_t t = uavTable_++ % perSlot;
         return kHeapSize - kUavRing + (gameMode_ ? frameSlot_ : 0) * kUavRingPerSlot + t * rhi::kStorageImages;
     }
     // one transient SRV slot of this frame slot's share of the view ring
     std::uint32_t nextViewSlot() {
         const std::uint32_t perSlot = kViewRing / rhi::kFramesInFlight;
+        if (gameMode_ && viewNext_ >= perSlot && (viewWraps_++ % 1000u) == 0u) {
+            spdlog::warn("d3d12: the transient SRV ring wrapped inside a frame ({} views of {} per frame slot; {} wraps so far)", viewNext_ + 1, perSlot, viewWraps_);
+        }
         const std::uint32_t t = viewNext_++ % perSlot;
         return kHeapSize - kUavRing - kViewRing + (gameMode_ ? frameSlot_ : 0) * perSlot + t;
     }
@@ -1365,6 +1372,7 @@ private:
     UINT srvInc_ = 0, samplerInc_ = 0, rtvInc_ = 0, dsvInc_ = 0;
     HeapAllocator srvAlloc_, samplerAlloc_;
     std::uint32_t rtvNext_ = 0, dsvNext_ = 0, uavTable_ = 0, viewNext_ = 0;
+    std::uint64_t uavWraps_ = 0, viewWraps_ = 0;  // nextUavTable / nextViewSlot past the frame slot's share (the ring overwrote this frame's earlier entries)
     DeviceCaps caps_;
     std::atomic<std::uint32_t> errors_{0};
     std::atomic<bool> removed_{false};  // the device was removed (markRemoved ran)

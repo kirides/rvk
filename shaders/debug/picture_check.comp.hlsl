@@ -5,6 +5,9 @@
 
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> refColor : register(u0, space1);
 [[vk::image_format("r32f")]] RWTexture2D<float> refDepth : register(u1, space1);
+// mode 2 (RVK_PICTURE_DUMP diagnostics): the compare of mode 1 + the current frame's colour / depth into these (read back and written to bin/rvk/dumps)
+[[vk::image_format("rgba16f")]] RWTexture2D<float4> curColor : register(u2, space1);
+[[vk::image_format("r32f")]] RWTexture2D<float> curDepth : register(u3, space1);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -16,6 +19,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         refColor[p] = float4(c, 1.0);
         refDepth[p] = d;
         return;
+    }
+    if (pc.mode == 2u) {
+        curColor[p] = float4(c, 1.0);
+        curDepth[p] = d;
     }
     float3 rc = refColor[p].rgb;
     float rd = refDepth[p];

@@ -10,7 +10,7 @@ struct PictureCheckPush {
     uint depthTex;     // bindless t2D slot of the engine's linear depth map (R32F)
     uint width;
     uint height;
-    uint mode;         // 0 = store the reference, 1 = compare with it
+    uint mode;         // 0 = store the reference, 1 = compare with it, 2 = compare + copy the current frame (dump diagnostics)
     float colorTol;    // a pixel differs in colour when max |a - b| / (0.05 + max(a, b)) exceeds this
     float depthTol;    // ... in depth when |a - b| / max(min(a, b), 1e-4) exceeds this
     uint pad;
