@@ -301,6 +301,8 @@ the body / coast / falls / mapping caches are built once per vertex buffer. Ray-
 1080p): medium +1.0 ms (harbour_docks) .. +1.6 ms (lake_jungle) GPU per frame, low +0.5 .. +0.95, high +1.35 .. +2.5
 (rt-reflections.md 3.3).
 
+Start-up latency of the replacement (2026-11-14, frame-ownership.md 14.45): the engine draws its own water until the wave grid / mesh pipelines exist; they are requested on the urgent prewarm queue (`prebuildReplacement` -> `prewarmOncePipeline`), not behind the pipelines known from earlier runs (Full: 17 s .. minutes before, ~0.2 s now).
+
 ## 8. Verification
 
 * **Side by side** (`scripts\water-compare.ps1 -EngineDir out\water\20261022-011203 -Mask`, left engine, right enhanced,

@@ -3782,7 +3782,9 @@ void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Sha
 bool Device::prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural) {
     PipelineDesc pd{};
     if (!replacementDesc(vs, ps, procedural, pd)) return false;
-    if (!game_->pipelineContains(pd)) game_->prewarmPipeline(pd);
+    // urgent (prewarmOnce): the engine draws its own water until this pipeline exists, so it goes ahead of the pipelines known from earlier runs
+    // (Full queues thousands of those at the start; on the plain queue the water waited behind them for 17 s and more, frame-ownership.md 14.45)
+    if (!game_->pipelineContains(pd)) game_->prewarmOncePipeline(pd);
     return true;
 }
 
