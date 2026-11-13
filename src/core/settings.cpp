@@ -2665,9 +2665,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "With native.owned_static: every N-th frame (and the frame before it) no op leaves the lists: the old path composes and draws them and the record-derived "
-                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never.",
+                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never "
+                       "(the player default: the check frames cost ~2 ms CPU + ~1 ms GPU per frame; scripts/run.ps1's test baseline pins 10).",
         .type = Type::Int,
-        .defaultValue = 10,
+        .defaultValue = 0,
         .min = 0,
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,

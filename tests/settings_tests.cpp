@@ -517,8 +517,8 @@ TEST(settings_owned_stages_default_on_in_full) {
         CHECK_MSG(Registry::formatValue(s->spec(), s->spec().defaultValue) == value, key);
         CHECK_MSG((s->spec().flags & Flag::Debug) != 0, key);  // (a bisect override: players get the default)
     }
-    // the check frames stay the safety net; the compares stay off
-    CHECK(reg.find("native.owned_check")->asInt() == 10);
+    // the periodic check frames are off for players (WS1: ~2 ms CPU / ~1 ms GPU per frame); the test baseline (run.ps1) pins 10; the compares stay off
+    CHECK(reg.find("native.owned_check")->asInt() == 0);
     for (const char* key : {"native.picture_check", "native.owned_observe", "native.coverage", "native.frame_tap", "native.static_ops_compare", "native.scene_ops_compare"})
         CHECK_MSG(!reg.find(key)->asBool(), key);
     // the roots name the mode: in Wrapper the overlay greys them with the reason
