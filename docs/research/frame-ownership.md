@@ -4223,7 +4223,7 @@ User decision 2026-11-12: S-9 first (all owned stages on in Full, check frames a
 
 **water.rt at hold is not wasteful for waterfalls.** Waterfall draws are not bodies (no plane within 150 units, no RT); the 4 bodies are the sea and lakes, `water_rt.comp` already rejects non-water pixels per pixel (plane + box test) before any ray. No clean reduction found that stays picture-neutral (a coverage-tile pre-pass would cost about what the cheap pixel test does); not changed.
 
-### 14.46 WS1: `native.owned_check` defaults to 0 for players (2026-11-14, branch `worktree-agent-a1d6b144182af1180` on main 3eb4a0b-ish; no new setting)
+### 14.46 WS1: `native.owned_check` defaults to 0 for players (2026-11-14, branch `worktree-agent-a1d6b144182af1180` on main 2db2189; no new setting)
 
 **Why.** The periodic check frames (1 check + 1 warm-up frame of every 10, composed and compared) cost Full -2.1 to -2.3 ms CPU and -0.85 to -1.3 ms GPU per frame (measured on main 300494f with `-Setting 'native.owned_check=0'`, hold / jungle); with 0, Full is at or below Wrapper's CPU at hold (6.56 vs 6.84 ms). Roadmap row 19 (15.4, F15-2) planned exactly this end state.
 
