@@ -144,6 +144,7 @@ public:
 private:
     void record(d3d9::PassContext& ctx);
     void recordShadow(d3d9::PassContext& ctx);
+    void recordShadowFilter(d3d9::PassContext& ctx);
     bool pipelineReady();
     bool shadowPipelinesReady();
     void applyShadowHold();
@@ -178,12 +179,24 @@ private:
         LightShadowPush push{};
         rhi::Texture* raw = nullptr;
         rhi::Texture* fin = nullptr;
-        std::uint32_t gx = 0, gy = 0;
-    } pendingShadow_;
+        std::uint32_t gx = 0, gy = 0;    // the filter's dispatch (full resolution)
+        std::uint32_t gxT = 0, gyT = 0;  // the trace's dispatch (the raw image: half resolution when the experiment bit is on)
+    } pendingShadow_, pendingFilter_;
     std::uint64_t shadowPasses_ = 0, shadowSkipped_ = 0;
     std::uint64_t passes_ = 0, skipped_ = 0, changedTotal_ = 0;
     std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0, lastNear_ = 0, lastNearStatic_ = 0, lastNearAny_ = 0;
     double lastLog_ = -1e9;
+    std::uint64_t knownGridHash_ = 0;
+    std::vector<std::uint32_t> shadowIdScratch_;
+    std::vector<std::pair<float, std::uint32_t>> nearLightsScratch_;
+    struct ReachKey {
+        float reach;
+        std::uint32_t index;
+    };
+    std::vector<ReachKey> reachKeys_;
+    std::vector<engine::lights::WorldLight> truncated_;
+    double cpuMs_[6]{};  // record()'s CPU per section, summed over cpuN_ builds (logged every 5 s)
+    std::uint64_t cpuN_ = 0;
 };
 
 }  // namespace rvk::enh

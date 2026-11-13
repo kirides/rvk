@@ -4,7 +4,9 @@
 
 #include <atomic>
 #include <cmath>
+#include <algorithm>
 #include <cstring>
+#include <mutex>
 
 #include <spdlog/spdlog.h>
 
@@ -79,20 +81,37 @@ float staticScale() {
 
 }  // namespace
 
-bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
-    out.clear();
-    stats = {};
-    char* admin = static_cast<char*>(g_admin.load(std::memory_order_relaxed));
-    if (admin == nullptr) return false;
-    stats.adminSeen = true;
+namespace {
+
+// The static lights change only when the engine caches a cell in or out: the walk of the sphere tree (a few thousand SEH-guarded node reads, 0.1 - 0.35 ms
+// in a town) is kept between calls and re-run when the tree's own header changes (root / node array / node count words at +0x20, +0x30, +0x38), the query
+// leaves the walked sphere, or every kRewalkCalls calls (a safety net for an in-place change); each call filters the kept list by its own centre and
+// radius (same lights, same order as a walk with that radius: the walk visits in tree order and only prunes).
+struct StaticCache {
+    std::vector<WorldLight> lights;  // every static light within `radius` of `center` at walk time (as the walk admitted them)
+    float center[3]{};
+    float radius = 0.0f;             // the walk's radius (query radius + margin)
+    std::uint64_t sig[3]{};
+    std::uint32_t calls = 0;         // calls served since the walk
+    std::uint64_t walks = 0;
+    Stats walkStats;                 // nodes / staticTotal / unknown of the walk
+    bool valid = false;
+};
+StaticCache g_cache;
+std::mutex g_cacheMutex;
+constexpr std::uint32_t kRewalkCalls = 150;
+constexpr float kWalkMargin = 4000.0f;
+
+void walkStatics(const char* admin, const float center[3], float radius, StaticCache& c) {
+    c.lights.clear();
+    c.walkStats = {};
+    Stats& stats = c.walkStats;
     const auto& s = sym();
     const auto reaches = [&](const float p[3], float r) {
         const float dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
         const float reach = radius + r;
         return dx * dx + dy * dy + dz * dz <= reach * reach;
     };
-
-    // static lights: the sphere tree
     const void* ptfv = s.staticPointLightVftable;
     const void* ambfv = s.staticAmbientLightVftable;
     const float scale = staticScale();
@@ -134,13 +153,12 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
                             // the draws' constants carry half of rgb x intensity x scale (measured: ratio 0.49-0.50, rtgi.md 19)
                             const float k = intensity * scale * kDrawShare;
                             if (range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k) && reaches(pos, range)) {
-                                ++stats.staticNear;
                                 WorldLight l;
                                 std::memcpy(l.pos, pos, sizeof(pos));
                                 l.range = range;
                                 l.ambient = vt == ambfv;
-                                for (int c = 0; c < 3; ++c) l.col[c] = rgb[c] * k;
-                                out.push_back(l);
+                                for (int ch = 0; ch < 3; ++ch) l.col[ch] = rgb[ch] * k;
+                                c.lights.push_back(l);
                             }
                         } else {
                             ++stats.unknown;
@@ -152,6 +170,58 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
                 if (descend && firstChild != -1) stack.push_back(child);
                 child = next;
             }
+        }
+    }
+}
+
+}  // namespace
+
+bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
+    out.clear();
+    stats = {};
+    char* admin = static_cast<char*>(g_admin.load(std::memory_order_relaxed));
+    if (admin == nullptr) return false;
+    stats.adminSeen = true;
+    const auto& s = sym();
+    const auto reaches = [&](const float p[3], float r) {
+        const float dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
+        const float reach = radius + r;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    };
+
+    // static lights: the sphere tree (walked only when it changed, see StaticCache)
+    {
+        const std::lock_guard lock(g_cacheMutex);
+        StaticCache& c = g_cache;
+        const char* tree = admin + kAdminTree;
+        std::uint64_t sig[3]{};
+        readAt(tree, kTreeRoot, sig[0]);
+        readAt(tree, kTreeNodes, sig[1]);
+        readAt(tree, 0x38, sig[2]);
+        const float dx = center[0] - c.center[0], dy = center[1] - c.center[1], dz = center[2] - c.center[2];
+        const bool inside = c.valid && std::sqrt(dx * dx + dy * dy + dz * dz) + radius <= c.radius;
+        const bool reuse = inside && std::memcmp(sig, c.sig, sizeof(sig)) == 0 && c.calls < kRewalkCalls;
+        if (!reuse) {
+            // the walk's radius never shrinks (the GI asks for 16,000, the light table for 96,000: one walk serves both)
+            const float want = radius + kWalkMargin;
+            const float walkRadius = c.valid ? std::max(want, c.radius) : want;
+            walkStatics(admin, center, walkRadius, c);
+            std::memcpy(c.center, center, sizeof(c.center));
+            c.radius = walkRadius;
+            std::memcpy(c.sig, sig, sizeof(sig));
+            c.calls = 0;
+            c.valid = true;
+            ++c.walks;
+        }
+        ++c.calls;
+        stats.nodes = c.walkStats.nodes;
+        stats.staticTotal = c.walkStats.staticTotal;
+        stats.unknown = c.walkStats.unknown;
+        out.reserve(c.lights.size());
+        for (const WorldLight& l : c.lights) {
+            if (!reaches(l.pos, l.range)) continue;
+            ++stats.staticNear;
+            out.push_back(l);
         }
     }
 
