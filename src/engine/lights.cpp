@@ -88,7 +88,7 @@ namespace {
 // leaves the walked sphere, or every kRewalkCalls calls (a safety net for an in-place change); each call filters the kept list by its own centre and
 // radius (same lights, same order as a walk with that radius: the walk visits in tree order and only prunes).
 struct StaticCache {
-    std::vector<WorldLight> lights;  // every static light within `radius` of `center` at walk time (as the walk admitted them)
+    std::vector<const char*> lights;  // the payload of every static light within `radius` of `center` at walk time; its values are re-read on every call
     float center[3]{};
     float radius = 0.0f;             // the walk's radius (query radius + margin)
     std::uint64_t sig[3]{};
@@ -101,6 +101,30 @@ StaticCache g_cache;
 std::mutex g_cacheMutex;
 constexpr std::uint32_t kRewalkCalls = 150;
 constexpr float kWalkMargin = 4000.0f;
+
+// One static light's current values (one guarded read of the object's first 0x78 bytes: vtable, colour, intensity, range, both position slots).
+// 0 = not a readable static light, 1 = readable but not usable (range / intensity), 2 = usable
+int readStaticLight(const void* payload, const void* ptfv, const void* ambfv, float scale, WorldLight& l) {
+    alignas(8) std::uint8_t b[0x78];
+    if (payload == nullptr || !safeReadN<sizeof(b)>(payload, b)) return 0;
+    const void* vt;
+    std::memcpy(&vt, b, sizeof(vt));
+    if (vt != ptfv && vt != ambfv) return 0;
+    float rgb[3], intensity, range, pos[3];
+    std::memcpy(rgb, b + kLightRgb, sizeof(rgb));
+    std::memcpy(&intensity, b + kLightIntensity, sizeof(intensity));
+    std::memcpy(&range, b + kLightRange, sizeof(range));
+    std::memcpy(pos, b + (vt == ptfv ? kPointPos : kAmbientPos), sizeof(pos));
+    // the draws' constants carry half of rgb x intensity x scale (measured: ratio 0.49-0.50, rtgi.md 19)
+    const float k = intensity * scale * kDrawShare;
+    if (!(range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k))) return 1;
+    l = WorldLight{};
+    std::memcpy(l.pos, pos, sizeof(pos));
+    l.range = range;
+    l.ambient = vt == ambfv;
+    for (int c = 0; c < 3; ++c) l.col[c] = rgb[c] * k;
+    return 2;
+}
 
 void walkStatics(const char* admin, const float center[3], float radius, StaticCache& c) {
     c.lights.clear();
@@ -144,24 +168,13 @@ void walkStatics(const char* admin, const float center[3], float radius, StaticC
                 bool descend = true;
                 if ((flags & 4) != 0) {
                     if (payload != nullptr) {
-                        const void* vt = nullptr;
-                        float pos[3]{}, rgb[3]{}, intensity = 0.0f, range = 0.0f;
-                        if (readAt(payload, 0, vt) && (vt == ptfv || vt == ambfv) && readAt(payload, kLightRgb, rgb) &&
-                            readAt(payload, kLightIntensity, intensity) && readAt(payload, kLightRange, range) &&
-                            readAt(payload, vt == ptfv ? kPointPos : kAmbientPos, pos)) {
-                            ++stats.staticTotal;
-                            // the draws' constants carry half of rgb x intensity x scale (measured: ratio 0.49-0.50, rtgi.md 19)
-                            const float k = intensity * scale * kDrawShare;
-                            if (range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k) && reaches(pos, range)) {
-                                WorldLight l;
-                                std::memcpy(l.pos, pos, sizeof(pos));
-                                l.range = range;
-                                l.ambient = vt == ambfv;
-                                for (int ch = 0; ch < 3; ++ch) l.col[ch] = rgb[ch] * k;
-                                c.lights.push_back(l);
-                            }
-                        } else {
+                        WorldLight l;
+                        const int r = readStaticLight(payload, ptfv, ambfv, scale, l);
+                        if (r == 0) {
                             ++stats.unknown;
+                        } else {
+                            ++stats.staticTotal;
+                            if (r == 2 && reaches(l.pos, l.range)) c.lights.push_back(static_cast<const char*>(payload));
                         }
                     }
                 } else if (std::isfinite(sphere[0]) && std::isfinite(sphere[3])) {
@@ -218,8 +231,12 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
         stats.staticTotal = c.walkStats.staticTotal;
         stats.unknown = c.walkStats.unknown;
         out.reserve(c.lights.size());
-        for (const WorldLight& l : c.lights) {
-            if (!reaches(l.pos, l.range)) continue;
+        const float scale = staticScale();
+        const void* ptfv = s.staticPointLightVftable;
+        const void* ambfv = s.staticAmbientLightVftable;
+        for (const char* payload : c.lights) {
+            WorldLight l;
+            if (readStaticLight(payload, ptfv, ambfv, scale, l) != 2 || !reaches(l.pos, l.range)) continue;
             ++stats.staticNear;
             out.push_back(l);
         }
@@ -259,6 +276,84 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
             out.push_back(l);
         }
     }
+    return true;
+}
+
+// The pre-cache static walk, verbatim (RVK_LIGHTS_VERIFY compares the cached path against it)
+bool collectStaticsReference(const float center[3], float radius, std::vector<WorldLight>& out) {
+    out.clear();
+    Stats stats;
+    char* admin = static_cast<char*>(g_admin.load(std::memory_order_relaxed));
+    if (admin == nullptr) return false;
+    const auto& s = sym();
+    const auto reaches = [&](const float p[3], float r) {
+        const float dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
+        const float reach = radius + r;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    };
+    // static lights: the sphere tree
+    const void* ptfv = s.staticPointLightVftable;
+    const void* ambfv = s.staticAmbientLightVftable;
+    const float scale = staticScale();
+    const char* tree = admin + kAdminTree;
+    std::int64_t root = -1;
+    const char* nodes = nullptr;
+    if (readAt(tree, kTreeRoot, root) && readAt(tree, kTreeNodes, nodes) && nodes != nullptr && root >= 0) {
+        std::vector<std::int64_t> stack;
+        stack.reserve(256);
+        stack.push_back(root);
+        while (!stack.empty() && stats.nodes < kMaxNodes) {
+            const std::int64_t idx = stack.back();
+            stack.pop_back();
+            std::int64_t child = -1;
+            if (!readAt(nodes + idx * kNodeSize, kNodeChild, child)) continue;
+            while (child != -1 && stats.nodes < kMaxNodes) {
+                ++stats.nodes;
+                const char* n = nodes + child * kNodeSize;
+                // the node's 80 bytes in one guarded copy (one element of the node array: always whole)
+                alignas(8) std::uint8_t nb[kNodeSize];
+                if (!safeReadN<kNodeSize>(n, nb)) break;
+                const std::uint8_t flags = nb[kNodeFlags];
+                float sphere[4];
+                std::int64_t next, firstChild;
+                const void* payload;
+                std::memcpy(sphere, nb + kNodeSphere, sizeof(sphere));
+                std::memcpy(&next, nb + kNodeSibling, sizeof(next));
+                std::memcpy(&firstChild, nb + kNodeChild, sizeof(firstChild));
+                std::memcpy(&payload, nb + kNodePayload, sizeof(payload));
+                bool descend = true;
+                if ((flags & 4) != 0) {
+                    if (payload != nullptr) {
+                        const void* vt = nullptr;
+                        float pos[3]{}, rgb[3]{}, intensity = 0.0f, range = 0.0f;
+                        if (readAt(payload, 0, vt) && (vt == ptfv || vt == ambfv) && readAt(payload, kLightRgb, rgb) &&
+                            readAt(payload, kLightIntensity, intensity) && readAt(payload, kLightRange, range) &&
+                            readAt(payload, vt == ptfv ? kPointPos : kAmbientPos, pos)) {
+                            ++stats.staticTotal;
+                            // the draws' constants carry half of rgb x intensity x scale (measured: ratio 0.49-0.50, rtgi.md 19)
+                            const float k = intensity * scale * kDrawShare;
+                            if (range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k) && reaches(pos, range)) {
+                                ++stats.staticNear;
+                                WorldLight l;
+                                std::memcpy(l.pos, pos, sizeof(pos));
+                                l.range = range;
+                                l.ambient = vt == ambfv;
+                                for (int c = 0; c < 3; ++c) l.col[c] = rgb[c] * k;
+                                out.push_back(l);
+                            }
+                        } else {
+                            ++stats.unknown;
+                        }
+                    }
+                } else if (std::isfinite(sphere[0]) && std::isfinite(sphere[3])) {
+                    descend = reaches(sphere, sphere[3]);
+                }
+                if (descend && firstChild != -1) stack.push_back(child);
+                child = next;
+            }
+        }
+    }
+
     return true;
 }
 

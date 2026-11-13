@@ -165,6 +165,11 @@ float lightPhysicalRatio(float d2, float rcpSqrRange) {
 }
 
 LightTable::LightTable(d3d9::Device& device) : dev_(device) {
+    {
+        char v[8]{};
+        verify_ = GetEnvironmentVariableA("RVK_LIGHTS_VERIFY", v, sizeof(v)) != 0 && v[0] == '1';
+        if (verify_) spdlog::info("enh: lights: RVK_LIGHTS_VERIFY: every 8th build is compared with the uncached reference");
+    }
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr) {
         failed_ = true;
@@ -315,6 +320,142 @@ double nowMs() {
 }
 }  // namespace
 
+// RVK_LIGHTS_VERIFY=1: every 8th build also runs the code as it was before the registry cache (uncached static walk, the cell index rebuilt and searched for
+// every drawn light, the sqrt-comparator truncation, the table build, the known grid built from scratch) on the same inputs (this build's dynamic lights, a
+// snapshot of the drawn lights) and compares the resulting table bytes and known grid with the cached path's. Logged every 5 s.
+void LightTable::verifyReference(const float cam[3]) {
+    using engine::lights::WorldLight;
+    std::vector<WorldLight> ref;
+    if (!engine::lights::collectStaticsReference(cam, collectRadius_, ref)) return;
+    ref.insert(ref.end(), verifyDyn_.begin(), verifyDyn_.end());
+    {
+        // the merge of the drawn lights, as it was
+        const std::size_t registry = ref.size();
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> cells;
+        for (std::uint32_t i = 0; i < registry; ++i) {
+            const auto& w = ref[i];
+            cells.emplace_back(knownKey(static_cast<std::int32_t>(std::floor(w.pos[0] / 16.0f)), static_cast<std::int32_t>(std::floor(w.pos[1] / 16.0f)),
+                                        static_cast<std::int32_t>(std::floor(w.pos[2] / 16.0f))),
+                               i);
+        }
+        std::sort(cells.begin(), cells.end());
+        for (const auto& d : verifyDrawn_) {
+            const std::int32_t cx = static_cast<std::int32_t>(std::floor(d.pos[0] / 16.0f)), cy = static_cast<std::int32_t>(std::floor(d.pos[1] / 16.0f)),
+                               cz = static_cast<std::int32_t>(std::floor(d.pos[2] / 16.0f));
+            bool known = false;
+            for (std::int32_t dx = -1; dx <= 1 && !known; ++dx) {
+                for (std::int32_t dy = -1; dy <= 1 && !known; ++dy) {
+                    for (std::int32_t dz = -1; dz <= 1 && !known; ++dz) {
+                        const std::uint64_t cellKey = knownKey(cx + dx, cy + dy, cz + dz);
+                        auto it = std::lower_bound(cells.begin(), cells.end(), std::pair<std::uint64_t, std::uint32_t>{cellKey, 0u});
+                        for (; it != cells.end() && it->first == cellKey && !known; ++it) {
+                            auto& w = ref[it->second];
+                            if (!(std::abs(w.pos[0] - d.pos[0]) < 8.0f && std::abs(w.pos[1] - d.pos[1]) < 8.0f && std::abs(w.pos[2] - d.pos[2]) < 8.0f)) continue;
+                            known = true;
+                            if (!w.dynamic && w.col[0] > 1e-4f && w.col[1] > 1e-4f && w.col[2] > 1e-4f && d.col[0] + d.col[1] + d.col[2] > 1e-4f)
+                                std::memcpy(w.col, d.col, sizeof(w.col));
+                        }
+                    }
+                }
+            }
+            if (!known) ref.push_back(d);
+        }
+    }
+    const auto reach = [&](const WorldLight& l) {
+        const float dx = l.pos[0] - cam[0], dy = l.pos[1] - cam[1], dz = l.pos[2] - cam[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz) - l.range;
+    };
+    if (ref.size() > kLightMax) {
+        const auto mid = std::stable_partition(ref.begin(), ref.end(), [&](const auto& l) { return reach(l) <= kLightFar; });
+        const std::size_t nearCount = static_cast<std::size_t>(mid - ref.begin());
+        const auto byReach = [&](const auto& a, const auto& b) { return reach(a) < reach(b); };
+        if (nearCount >= kLightMax) {
+            std::nth_element(ref.begin(), ref.begin() + kLightMax, mid, byReach);
+        } else {
+            std::nth_element(mid, ref.begin() + kLightMax, ref.end(), byReach);
+        }
+        ref.resize(kLightMax);
+    }
+    const std::uint32_t count = static_cast<std::uint32_t>(ref.size());
+    std::vector<std::uint32_t> shadowId(count, 0);
+    if (shadowHeld_ && shadow_.mode > 0) {
+        const std::uint32_t maxLights = shadow_.mode == 2 ? kLightShadowMax : 12u;
+        const float limit = shadow_.mode == 2 ? 6000.0f : 2500.0f;
+        std::vector<std::pair<float, std::uint32_t>> nearLights;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto& w = ref[i];
+            const float dx = w.pos[0] - cam[0], dy = w.pos[1] - cam[1], dz = w.pos[2] - cam[2];
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist < limit && w.range < 3000.0f) nearLights.emplace_back(dist, i);
+        }
+        std::sort(nearLights.begin(), nearLights.end());
+        for (std::uint32_t k = 0; k < nearLights.size() && k < maxLights; ++k) shadowId[nearLights[k].second] = k + 1;
+    }
+    std::vector<GpuLight> table(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto& w = ref[i];
+        GpuLight& g = table[i];
+        g.posRcp[0] = w.pos[0];
+        g.posRcp[1] = w.pos[1];
+        g.posRcp[2] = w.pos[2];
+        g.posRcp[3] = 1.0f / (w.range * w.range);
+        for (int c = 0; c < 3; ++c) {
+            g.colRange[c] = w.col[c];
+            g.specFlags[c] = w.col[c] * kSpecularShare;
+        }
+        g.colRange[3] = w.range;
+        const std::uint32_t flags = w.dynamic ? 1u : 0u;
+        std::memcpy(&g.specFlags[3], &flags, 4);
+        std::uint32_t id = 2166136261u;
+        for (int c = 0; c < 3; ++c) {
+            const std::int32_t q = static_cast<std::int32_t>(std::lround(w.pos[c]));
+            id = (id ^ static_cast<std::uint32_t>(q)) * 16777619u;
+        }
+        g.misc[0] = 0;
+        std::memcpy(&g.misc[0], &id, 4);
+        g.misc[1] = g.misc[2] = g.misc[3] = 0.0f;
+        std::memcpy(&g.misc[1], &shadowId[i], 4);
+    }
+    ++verifyBuilds_;
+    bool differ = false;
+    std::string what;
+    if (table.size() != prev_.size()) {
+        differ = true;
+        what = "table size " + std::to_string(prev_.size()) + " (cached) vs " + std::to_string(table.size()) + " (reference)";
+    } else {
+        for (std::size_t i = 0; i < table.size(); ++i) {
+            if (std::memcmp(&table[i], &prev_[i], sizeof(GpuLight)) != 0) {
+                differ = true;
+                what = "light " + std::to_string(i) + " differs: cached pos " + std::to_string(prev_[i].posRcp[0]) + "," + std::to_string(prev_[i].posRcp[1]) + "," +
+                       std::to_string(prev_[i].posRcp[2]) + " col " + std::to_string(prev_[i].colRange[0]) + " range " + std::to_string(prev_[i].colRange[3]) +
+                       " shadow id " + std::to_string(*reinterpret_cast<const std::uint32_t*>(&prev_[i].misc[1])) + "; reference pos " + std::to_string(table[i].posRcp[0]) + "," +
+                       std::to_string(table[i].posRcp[1]) + "," + std::to_string(table[i].posRcp[2]) + " col " + std::to_string(table[i].colRange[0]) + " range " +
+                       std::to_string(table[i].colRange[3]) + " shadow id " + std::to_string(*reinterpret_cast<const std::uint32_t*>(&table[i].misc[1]));
+                break;
+            }
+        }
+    }
+    if (!differ) {
+        // the known grid: the same multiset of (key, position)
+        std::vector<std::pair<std::uint64_t, std::array<float, 3>>> a, b;
+        for (const auto& g : table)
+            a.emplace_back(knownKey(static_cast<std::int32_t>(std::floor(g.posRcp[0] / 16.0f)), static_cast<std::int32_t>(std::floor(g.posRcp[1] / 16.0f)),
+                                    static_cast<std::int32_t>(std::floor(g.posRcp[2] / 16.0f))),
+                           std::array<float, 3>{g.posRcp[0], g.posRcp[1], g.posRcp[2]});
+        if (const auto kg = g_known.load()) b = kg->cells;
+        std::sort(a.begin(), a.end());
+        std::sort(b.begin(), b.end());
+        if (a != b) {
+            differ = true;
+            what = "known grid differs (" + std::to_string(b.size()) + " cached cells vs " + std::to_string(a.size()) + ")";
+        }
+    }
+    if (differ) {
+        ++verifyDiffering_;
+        if (verifyFirst_.empty()) verifyFirst_ = "build " + std::to_string(passes_) + ": " + what;
+    }
+}
+
 void LightTable::record(d3d9::PassContext& ctx) {
     double tm0 = nowMs();
     if (ctx.mainView != 1 || !enabled_ || !pipelineReady()) {
@@ -334,6 +475,8 @@ void LightTable::record(d3d9::PassContext& ctx) {
         ++skipped_;
         return;
     }
+    const bool doVerify = verify_ && (passes_ % 8) == 0;
+    if (doVerify) verifyDyn_.assign(scratch_.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(stats_.staticNear, scratch_.size())), scratch_.end());
     const double tm1 = nowMs();
     // "the registry holds lights" means lights that reach the NEAR level (the old collection range, kLightFar): the far lights of the whole island (the far level,
     // up to kLightFar1) are in the tree even where nothing is cached in around the camera, and must not hide the objects' own lights (a teleport into the
@@ -361,6 +504,10 @@ void LightTable::record(d3d9::PassContext& ctx) {
         const std::size_t nStatic = std::min<std::size_t>(stats_.staticNear, registry);
         ++g_buildCounter;
         std::erase_if(g_drawn, [](const DrawnLight& d) { return g_buildCounter - d.stamp > kDrawnKeep; });
+        if (doVerify) {
+            verifyDrawn_.clear();
+            for (const auto& dl : g_drawn) verifyDrawn_.push_back(dl.l);
+        }
         // The static lights of the registry in 16-unit cells: a drawn light is "the same" within 8 units. The static lights carry the colour the engine's
         // DRAWS give them: the registry's rgb x intensity x scale x 0.5 is a guess, the draws' register colour differs per light by 0.2 .. 2.0 (measured:
         // gpu-scene.md 9.10; the engine weights each static light), so a matched light takes the colour of the draw that was seen last.
@@ -576,6 +723,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         registryNoteKnown(posHash);  // (the generation: a build whose light positions equal the last build's leaves it alone)
     }
 
+    if (doVerify) verifyReference(cam.position.data());
     const double tm5 = nowMs();
     rhi::Buffer& up = *upload_[dev_.frameValue() % rhi::kFramesInFlight];
     if (count > 0) std::memcpy(up.map(), prev_.data(), std::size_t{count} * kLightBytes);
@@ -715,6 +863,9 @@ void LightTable::logStats() {
                  "debug {}, table lighting {}",
                  stats_.nodes, stats_.staticTotal, lastNear_, lastNearStatic_, lastNearAny_, lastCount_, lastChanged_, lastDropped_, kLightMax, lastDrawnAdded_, passes_, skipped_, style_ == 1 ? "physical" : "original", debug_,
                  fullLitActive() ? "on" : "off");
+    if (verify_ && verifyBuilds_ > 0) {
+        spdlog::info("enh: lights: verify (5 s): {} builds compared, DIFFERING {}{}{}", verifyBuilds_, verifyDiffering_, verifyFirst_.empty() ? "" : "; first: ", verifyFirst_);
+    }
     if (cpuN_ > 0) {
         spdlog::info("enh: lights: CPU per build (ms, mean of {}): collect {:.3f}, near + drawn merge {:.3f}, truncate {:.3f}, shadow ids {:.3f}, table + known grid {:.3f}, upload + record {:.3f}",
                      cpuN_, cpuMs_[0] / cpuN_, cpuMs_[1] / cpuN_, cpuMs_[2] / cpuN_, cpuMs_[3] / cpuN_, cpuMs_[4] / cpuN_, cpuMs_[5] / cpuN_);

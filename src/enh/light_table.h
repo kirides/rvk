@@ -186,6 +186,11 @@ private:
     std::uint64_t passes_ = 0, skipped_ = 0, changedTotal_ = 0;
     std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0, lastNear_ = 0, lastNearStatic_ = 0, lastNearAny_ = 0;
     double lastLog_ = -1e9;
+    void verifyReference(const float cam[3]);
+    bool verify_ = false;  // RVK_LIGHTS_VERIFY=1
+    std::vector<engine::lights::WorldLight> verifyDyn_, verifyDrawn_;
+    std::uint64_t verifyBuilds_ = 0, verifyDiffering_ = 0;
+    std::string verifyFirst_;
     std::uint64_t knownGridHash_ = 0;
     std::vector<std::uint32_t> shadowIdScratch_;
     std::vector<std::pair<float, std::uint32_t>> nearLightsScratch_;

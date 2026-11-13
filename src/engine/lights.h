@@ -35,6 +35,9 @@ struct Stats {
 // not known yet. Cheap enough per frame (the tree walk is pruned by the spheres)
 bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats);
 
+// The uncached static walk (the version before the cache), for RVK_LIGHTS_VERIFY: appends the static lights within `radius` of `center` to `out` (cleared first)
+bool collectStaticsReference(const float center[3], float radius, std::vector<WorldLight>& out);
+
 // Creates the detours that find the admin; false when the symbols are missing
 bool install();
 
