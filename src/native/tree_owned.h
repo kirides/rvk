@@ -108,6 +108,9 @@ struct OpRec {
     // F3-4 (frame-ownership.md 14.29): a shadow view's fronds op that draws nothing by the engine's rule (RenderFrondsZPass 0x6f0cc0: the leaf cards' vertex count rb +0x3c >
     // the fronds' rb +0x3a): no templates; the owned pass checks the rule again and only runs the slot's side effect (the queue sort)
     bool empty = false;
+    // WS17 (frame-ownership.md 14.59): the composition drew nothing and the plan said so (no instance with a LOD, or fronds of strip 0 only): the record keeps the stamp and the slot's side
+    // effects; the pass plans the op again and composes it late when it now has instances
+    bool noDraw = false;
 };
 
 // one planned instance (queue order, leaves: LOD-major as the composition draws them)
@@ -119,6 +122,7 @@ struct Inst {
     std::uint64_t key = 0;
     float row[16] = {};                 // c32 + 4 p .. c35 + 4 p
     bool sun = false;
+    bool staticSh = false;              // WS17: the instance's illumination has static SH (+0x90): the composition cuts a batch of its own around it (planTreeBatches)
     std::uint16_t strip = 0;            // branches / fronds: the LOD's strip length (a fronds instance with 0 is not drawn)
 };
 
@@ -126,6 +130,7 @@ struct Stats {
     std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, instances = 0, items = 0, records = 0, observed = 0, flushes = 0, compBatches = 0, compViews = 0, packets = 0;
     // why an op taken from the list was composed late
     std::uint64_t lateNoRec = 0, lateStamp = 0, lateView = 0, lateMaterial = 0, latePlan = 0, lateSpecial = 0, lateNoTemplate = 0, lateTemplate = 0, lateFlush = 0, lateRows = 0;
+    std::uint64_t specBy[8] = {};  // WS17: special lighting by reason: no list / static SH, dynamic lights, lights unknown, template not table lit, holds all, no entry, other
     std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0, emptyOps = 0, matMoved = 0;  // (matMoved: templates dropped because their material record was re-allocated)  // (emptyOps: F3-4 shadow fronds ops that draw nothing, taken on their empty record)
     std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, no draws, other
     std::uint64_t derived = 0, reused = 0, refused = 0, tableFull = 0;
@@ -164,6 +169,7 @@ struct State {
     std::vector<Inst> composed;         // check frames: the composed instances in order
     std::vector<Inst> plan;             // check frames: the plan made at the op's entry
     bool checkOp = false;
+    bool planOk = false;                // the plan made at the op's entry succeeded
     std::uint32_t logged = 0;
     std::string gate;                   // the last view's unmet condition of the trees' own readiness ("" = none; the stage line names it)
     std::uint64_t lastFrameChecked = ~0ull;
