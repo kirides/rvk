@@ -28,13 +28,16 @@
 namespace rvk::d3d9 {
 void diagAfterDraw(Device& d, const char* what);  // device.cpp (RVK_NAN_BISECT)
 
+// RVK_PERF_NO_DRAWTIMER=1 (WS22, frame-ownership.md 16.1: the per-draw clock reads cost Wrapper more than Full): [debug] perf without the per-draw CPU timers (drawMs / drawRecordMs read 0)
+static const bool g_noDrawTimers = [] { char v[8]; return GetEnvironmentVariableA("RVK_PERF_NO_DRAWTIMER", v, sizeof(v)) != 0 && v[0] == '1'; }();
+
 // [debug] perf: CPU time inside a draw call
 struct Device::DrawTimer {
     Device& d;
     std::chrono::steady_clock::time_point t0;
-    explicit DrawTimer(Device& device) : d(device), t0(device.options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    explicit DrawTimer(Device& device) : d(device), t0(device.options_.perf && !g_noDrawTimers ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     ~DrawTimer() {
-        if (d.options_.perf) {
+        if (d.options_.perf && !g_noDrawTimers) {
             d.perf_.drawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
     }
@@ -1737,7 +1740,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     ++stats_.totalDraws;
     ++passDraws_;
     phases_.countDraw();
-    const auto recordStart = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto recordStart = options_.perf && !g_noDrawTimers ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     draws_.count(kind, phase.view);
     if (f5::enabled()) f5Note(primitiveType, geom, kind, phase);
     if (tint != 0) draws_.countTinted();
@@ -1786,7 +1789,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             if (tex_[slot] != nullptr) r->textures[slot] = tex_[slot]->ref().id;
         }
     }
-    if (options_.perf) {
+    if (options_.perf && !g_noDrawTimers) {
         perf_.drawRecordMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - recordStart).count();
     }
     // the camera cross-check: the main view's camera constants as the first solid material draw sees them

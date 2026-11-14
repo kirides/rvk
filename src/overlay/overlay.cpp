@@ -4,6 +4,7 @@
 
 #include "gpuscene/owned_compact.h"
 #include "overlay/overlay.h"
+#include "core/log.h"
 #include "enh/light_table.h"
 #include "enh/material_pack.h"
 
@@ -472,6 +473,12 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         enh::lightBuildSkip().store(w[2] == "1");
         return ok(std::format("light table build skip {}", w[2] == "1" ? "on" : "off"));
     }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "lightworker") {
+        // frame-ownership.md 16.8 (WS22): the light table's static collection on a worker thread: 0 off, 1 on, 2 auto (on except on integrated GPUs)
+        if (w[2] != "0" && w[2] != "1" && w[2] != "2") return fail("debug lightworker 0|1|2");
+        enh::setLightCollectWorker(w[2][0] - '0');
+        return ok(std::format("light collect worker mode {}", w[2]));
+    }
     if (w[0] == "debug" && w.size() == 3 && w[1] == "lightsfast") {
         // frame-ownership.md 14.57 (WS15): lights::collect's one-region re-read of the kept static lights on / off inside one run
         if (w[2] != "0" && w[2] != "1") return fail("debug lightsfast 0|1");
@@ -482,6 +489,7 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs
         spdlog::info("overlay: [debug] command quit: terminating the process");
         spdlog::default_logger()->flush();
+        log::flushSync();
         TerminateProcess(GetCurrentProcess(), 0);
         return ok("quit");
     }
