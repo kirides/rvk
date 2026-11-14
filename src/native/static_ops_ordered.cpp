@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <utility>
 #include <format>
 
 #include <spdlog/spdlog.h>
@@ -200,6 +201,21 @@ bool StaticOps::orderedPlace(const Op& op) {
     }
     if (!ownedView_.active) return false;  // (a check / warm-up frame, or the owned path is not ready: composed, and compared)
     const std::size_t li = solid ? 0 : op.list == List::Refracted ? 1 : 2;
+    {  // (diagnostics, 16.10: RVK_ORD_LISTS=<mask> keeps only the lists whose bit is set owned (1 solid, 2 refracted, 4 alpha, 8 actors; default 15), RVK_ORD_SORT=<hex> only the ops
+       // whose sort id & 0xffff equals it (a leading '-' = all but those); the others stay composed: bisecting an owned ordered op against the composed frame)
+        static const unsigned mask = [] {
+            char b[16] = {};
+            return GetEnvironmentVariableA("RVK_ORD_LISTS", b, sizeof(b)) != 0 ? static_cast<unsigned>(std::atoi(b)) : 15u;
+        }();
+        static const std::pair<int, unsigned> sortSel = [] {
+            char b[32] = {};
+            if (GetEnvironmentVariableA("RVK_ORD_SORT", b, sizeof(b)) == 0) return std::make_pair(0, 0u);
+            const bool neg = b[0] == '-';
+            return std::make_pair(neg ? -1 : 1, static_cast<unsigned>(std::strtoul(b + (neg ? 1 : 0), nullptr, 16)));
+        }();
+        if (((mask >> (actor ? 3u : static_cast<unsigned>(li))) & 1u) == 0) return false;
+        if (sortSel.first != 0 && ((op.raw.sortId & 0xffffu) == sortSel.second) != (sortSel.first > 0)) return false;
+    }
     const auto it = recs_->map.find(orec::Key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0});
     if (it == recs_->map.end()) {
         if (!solid && !actor) {

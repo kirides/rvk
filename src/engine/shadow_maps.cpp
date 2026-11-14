@@ -53,6 +53,7 @@ std::atomic<void (*)()> g_sdsmPoll{nullptr};
 std::atomic<bool> g_sdsmReset{false};  // setOverrides (any thread) asks the render thread to start the state afresh
 std::atomic<float> g_playerRange{0.0f};   // the shadow range before the visible-depth clamp (the bins' zMax)
 constexpr int kSdsmCalmFrames = 90;       // an extent shrinks after this many frames below its grid value
+constexpr int kSdsmMotionHold = 20;       // cascade updates (~1/3 s) the sphere is kept after a motion fallback: a fast turn would toggle sdsm / sphere every other update
 constexpr float kSdsmMaxAge = 3.0f;       // cascade updates a reduction may be old (counter difference)
 constexpr double kSdsmMaxSeconds = 0.25;
 
@@ -74,6 +75,9 @@ struct SdsmState {
     float pos[3]{}, axes[9]{}, tan[2]{};
     bool camValid = false;
     // statistics (5 s window)
+    int motionHold[4]{};              // updates left that the sphere is kept after a fast-motion fallback (no sdsm <-> sphere toggling during a fast turn)
+    float lastSun[4]{};               // light-axis turn (rad) between the reduction and the last fit, for the debug line
+    int lastFail[4]{-1, -1, -1, -1};  // reason of this update's fallback (-1 = sdsm used), for the debug line
     std::uint64_t fits[4]{}, fallback[4][5]{};  // reasons: 0 no data, 1 old, 2 sun / fov changed, 3 motion / cut, 4 empty slice
     std::uint64_t ageSum = 0, ageCount = 0, cuts = 0;
     double lastReport = 0.0;
@@ -244,8 +248,14 @@ bool sdsmFit(int idx, float n, float f, const Mat& invL, int size, float nb[6], 
     SdsmReason why = kNoData;
     const auto fail = [&](SdsmReason r) {
         ++g.fallback[idx][r];
+        g.lastFail[idx] = r;
         return false;
     };
+    g.lastFail[idx] = -1;
+    if (g.motionHold[idx] > 0) {
+        --g.motionHold[idx];
+        return fail(kMotion);
+    }
     if (!sdsmDataUsable(g_counter.load(std::memory_order_relaxed), why)) return fail(why);
     if (!g.camValid) return fail(kNoData);
     sdsm::FitIn in;
@@ -268,7 +278,10 @@ bool sdsmFit(int idx, float n, float f, const Mat& invL, int size, float nb[6], 
     in.driftCm = throttled ? kSdsmMoveLimit : 0.0f;
     in.driftRad = throttled ? kSdsmTurnLimit : 0.0f;
     sdsm::FitOut out;
-    if (!sdsm::fit(in, g.ext[idx], kSdsmCalmFrames, out)) {
+    const bool fitted = sdsm::fit(in, g.ext[idx], kSdsmCalmFrames, out);
+    g.lastSun[idx] = out.sun;
+    if (!fitted) {
+        if (out.fail == sdsm::FitFail::Motion) g.motionHold[idx] = kSdsmMotionHold;
         return fail(out.fail == sdsm::FitFail::Empty ? kEmpty : out.fail == sdsm::FitFail::Motion ? kMotion : kChanged);
     }
     nb[0] = out.lo[0];
@@ -341,6 +354,12 @@ bool detourUpdateCamera(void* self, int face) {
                                 g.tan[1] = 1.0f / std::fabs(proj[5]);
                             }
                             sdsmUsed = sdsmFit(idx, n, f, invL, size, nb, sideY);
+                            if (spdlog::should_log(spdlog::level::debug)) {
+                                static const char* const kWhy[] = {"no-data", "old", "sun-fov", "motion", "empty"};
+                                const int lf = g_sdsm.lastFail[idx];
+                                spdlog::debug("enh: shadows: sdsm update {} c{}: {} box {:.1f} x {:.1f} cm (sun {:.4f} rad)", g_counter.load(std::memory_order_relaxed), idx,
+                                              sdsmUsed ? "sdsm" : (lf >= 0 && lf < 5 ? kWhy[lf] : "sphere"), nb[3] - nb[0], nb[4] - nb[1], g_sdsm.lastSun[idx]);
+                            }
                         }
                         std::memcpy(me + 0xe0, nb, sizeof nb);
                         done = true;
@@ -735,8 +754,13 @@ bool fit(const FitIn& in, Axis ext[2], int calmFrames, FitOut& out) {
         return false;
     };
     out = FitOut{};
-    for (int k = 0; k < 9; ++k)
-        if (std::fabs(d.lightA[k] - in.lightA[k]) > 2e-4f) return fail(FitFail::Sun);  // the sun turned since the reduction
+    // the sun turned since the reduction: the bounds are in the old light axes. A small turn widens the margin (a point at distance r from the camera moves by
+    // at most turn * r across the box), a large one falls back to the sphere (shadows.md 8.10: a sun sweep no longer drops to the sphere every ~0.5 degree)
+    for (int i = 0; i < 3; ++i) {
+        const float ex = d.lightA[3 * i] - in.lightA[3 * i], ey = d.lightA[3 * i + 1] - in.lightA[3 * i + 1], ez = d.lightA[3 * i + 2] - in.lightA[3 * i + 2];
+        out.sun = std::max(out.sun, std::sqrt(ex * ex + ey * ey + ez * ez));
+    }
+    if (out.sun > kMaxSunAngle) return fail(FitFail::Sun);
     if (std::fabs(d.tanX - in.tanX) > 0.01f * in.tanX || std::fabs(d.tanY - in.tanY) > 0.01f * in.tanY) return fail(FitFail::Fov);
     const float dx = in.pos[0] - d.pos[0], dy = in.pos[1] - d.pos[1], dz = in.pos[2] - d.pos[2];
     out.dp = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -746,7 +770,7 @@ bool fit(const FitIn& in, Axis ext[2], int calmFrames, FitOut& out) {
     if (!b.any) return fail(FitFail::Empty);
     // the light space of the reduction -> this frame's (the origin moved with the camera)
     const float shift[2] = {in.lightT[0] - d.lightT[0], in.lightT[1] - d.lightT[1]};
-    out.margin = margin(out.dp, out.angle, in.f, 30.0f + in.driftCm + in.driftRad * in.f, 0.01f);
+    out.margin = margin(out.dp, out.angle, in.f, 30.0f + in.driftCm + in.driftRad * in.f, 0.01f) + out.sun * kSunReach * in.f;
     const float lo[2] = {b.minX + shift[0] - out.margin, b.minY + shift[1] - out.margin};
     const float hi[2] = {b.maxX + shift[0] + out.margin, b.maxY + shift[1] + out.margin};
     const float need[2] = {hi[0] - lo[0], hi[1] - lo[1]};

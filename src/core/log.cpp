@@ -51,14 +51,37 @@ public:
     void set_formatter(std::unique_ptr<spdlog::formatter> f) override {
         for (auto& s : real_) s->set_formatter(f->clone());
     }
-    // every item queued so far is written and a flush after the last one done, at most `timeoutMs`
+    // every item queued so far is written and a flush after the last one done, at most `timeoutMs`. Never waits on a dead writer (the exit path kills it): then the caller writes.
     void drain(int timeoutMs) {
-        std::unique_lock lock(m_);
+        if (inline_.load(std::memory_order_acquire)) {
+            writeQueuedInline();
+            return;
+        }
+        std::unique_lock lock(m_, std::defer_lock);
+        if (!lockBounded(lock, 50)) {  // (the writer died holding m_, or this thread crashed inside push())
+            if (!writerAlive()) inline_.store(true, std::memory_order_release);
+            return;
+        }
         queue_.push_back(Item{spdlog::level::off, {}, 0, {}, {}, true});
         const std::uint64_t target = ++submitted_;
         cv_.notify_one();
-        doneCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return processed_ >= target || quit_; });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (!(processed_ >= target || quit_)) {
+            if (doneCv_.wait_for(lock, std::chrono::milliseconds(20), [&] { return processed_ >= target || quit_; })) break;
+            if (!writerAlive()) {
+                lock.unlock();
+                enterInline();
+                return;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) break;
+        }
     }
+    // the process is ending (ExitProcess / NtTerminateProcess hooks, crash): from now on the caller writes every line itself (the writer thread is killed by the exit path)
+    void enterInline() {
+        inline_.store(true, std::memory_order_release);
+        writeQueuedInline();
+    }
+    bool writerAlive() const { return worker_.joinable() && WaitForSingleObject(const_cast<std::thread&>(worker_).native_handle(), 0) == WAIT_TIMEOUT; }
 
 private:
     struct Item {
@@ -68,7 +91,42 @@ private:
         std::string name, payload;
         bool flush;
     };
+    static bool lockBounded(std::unique_lock<std::mutex>& lock, int ms) {
+        for (int i = 0; i <= ms; ++i) {
+            if (lock.try_lock()) return true;
+            Sleep(1);
+        }
+        return false;
+    }
+    void writeItem(const Item& it) {
+        if (it.flush) {
+            for (auto& s : real_) s->flush();
+        } else {
+            spdlog::details::log_msg m(it.time, spdlog::source_loc{}, it.name, it.level, it.payload);
+            m.thread_id = it.thread;
+            for (auto& s : real_) {
+                if (s->should_log(m.level)) s->log(m);
+            }
+        }
+    }
+    // the queued lines written on the calling thread; the queue is taken with a bounded wait (without the lock the lines are lost: reading the queue unlocked could tear)
+    void writeQueuedInline() {
+        std::deque<Item> batch;
+        {
+            std::unique_lock lock(m_, std::defer_lock);
+            if (lockBounded(lock, 50)) batch.swap(queue_);
+        }
+        for (const Item& it : batch) writeItem(it);
+        if (!batch.empty()) {
+            for (auto& s : real_) s->flush();
+        }
+    }
     void push(Item&& it) {
+        if (inline_.load(std::memory_order_acquire)) {
+            writeQueuedInline();  // (older lines first)
+            writeItem(it);
+            return;
+        }
         {
             const std::lock_guard lock(m_);
             if (queue_.size() >= 200000) return;  // (a stalled disk: lines are dropped rather than the game blocked)
@@ -90,17 +148,7 @@ private:
                 if (queue_.empty() && quit_) return;
                 batch.swap(queue_);
             }
-            for (const Item& it : batch) {
-                if (it.flush) {
-                    for (auto& s : real_) s->flush();
-                } else {
-                    spdlog::details::log_msg m(it.time, spdlog::source_loc{}, it.name, it.level, it.payload);
-                    m.thread_id = it.thread;
-                    for (auto& s : real_) {
-                        if (s->should_log(m.level)) s->log(m);
-                    }
-                }
-            }
+            for (const Item& it : batch) writeItem(it);
             {
                 const std::lock_guard lock(m_);
                 processed_ += batch.size();
@@ -115,6 +163,7 @@ private:
     std::deque<Item> queue_;
     std::uint64_t submitted_ = 0, processed_ = 0;
     bool quit_ = false;
+    std::atomic<bool> inline_{false};  // exit mode: the caller thread writes (see enterInline)
     std::thread worker_;
 };
 
@@ -172,9 +221,14 @@ void flushSync() {
     g_queueSink->drain(2000);
 }
 
+void enterExitMode() {
+    if (g_async.load(std::memory_order_acquire) && g_queueSink) g_queueSink->enterInline();
+}
+
 void shutdown(bool processTerminating) {
     // (a terminating process has already lost the logger thread: the ExitProcess / NtTerminateProcess hooks drained the queue before that)
     if (!processTerminating) flushSync();
+    else enterExitMode();  // (idempotent; lines of DllMain's detach are written on this thread)
     if (auto l = spdlog::default_logger()) {
         if (!processTerminating || !g_async.load()) l->flush();
     }

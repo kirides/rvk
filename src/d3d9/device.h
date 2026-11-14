@@ -1477,6 +1477,7 @@ public:
     // (every n-th first sighting is remembered without the observation: the rolling check / the check frames must find it)
     static constexpr std::uint8_t kObsOpaque = 1, kObsMotion = 2;
     void setEventObservers(bool on);
+    void syncObsMemoMode();  // forgets the memo when the bone motion mode / observer set / replacer set changed (once per frame)
     bool eventObservers() const { return eventObs_; }
     // may the observer skip the record (an unchanged one whose memory holds `bit`)? false = observe it in full, then eventObsDone; `recheck` = observed only to compare
     bool eventObsSkip(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, bool entered, bool changed, const float* rows, bool& recheck);
@@ -2216,6 +2217,7 @@ private:
         std::uint8_t bits = 0;
     };
     std::vector<ObsMemo> obsMemo_;
+    std::uint64_t obsModeKey_ = 0, obsModeFrame_ = ~std::uint64_t{0};
     bool eventObs_ = true;
     // per kind: 0 z, 1 solid (the plain static passes), 2 + list - 1 the ordered list segments (14.44: solid, refracted, alpha)
     static constexpr std::size_t kBulkKinds = 5;

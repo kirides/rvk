@@ -190,7 +190,10 @@ TEST(sdsm_fit_whole_cascade) {
     // fallbacks: a turned sun, another field of view, a camera that jumped, an empty slice
     in.pos[0] = 0.0f;
     sm::sdsm::FitIn sun = in;
-    sun.lightA[1] = 0.01f;
+    sun.lightA[1] = 0.01f;  // a small turn: still an sdsm fit, the margin grows by turn * 1.5 * f
+    sm::sdsm::FitOut turned;
+    CHECK(sm::sdsm::fit(sun, ext, 90, turned) && turned.sun > 0.0099f && turned.margin > again.margin + 0.01f * 1.5f * 1347.0f * 0.99f);
+    sun.lightA[1] = 0.1f;
     CHECK(!sm::sdsm::fit(sun, ext, 90, out) && out.fail == sm::sdsm::FitFail::Sun);
     sm::sdsm::FitIn fov = in;
     fov.tanX = 1.2f;

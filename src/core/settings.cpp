@@ -1532,7 +1532,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "surfaces actually in view each frame (a small GPU pass; sharper still, most where little of the view is "
                        "near). Game: the game's own fit.",
         .type = Type::Enum,
-        .defaultValue = 1,
+        .defaultValue = 2,  // sdsm (shadows.md 8.10: x1.2 - 2.7 texel density at +0.03 - 0.10 ms GPU, fast turns / sun sweeps / cuts checked)
         .options = {"engine", "sphere", "sdsm"},
         .optionLabels = {"Game", "Tight", "Adaptive"},
         .flags = Flag::Advanced,
