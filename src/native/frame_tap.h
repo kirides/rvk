@@ -84,6 +84,7 @@ private:
     void resolve(Op& op, bool deferHeavy = false);
     static void resolveLate(void* self, Op& op);  // (StaticOps' hook: the deferred part of resolve, for a taken op composed late)
     void logOps() const;
+    std::uint32_t passBeginImpl(bool solid);
 
     void update();
     d3d9::Device& dev_;

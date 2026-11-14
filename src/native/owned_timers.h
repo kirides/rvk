@@ -22,4 +22,9 @@ inline bool ownedTimersOn() {
 // steady_clock::now() while the timers are on, else the epoch (both ends of an interval are then equal: ns() = 0)
 inline std::chrono::steady_clock::time_point tnow() { return ownedTimersOn() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; }
 
+// WS15: ownedPass' phases (ns, summed over the passes of a 5 s window; printed with the pass profile): 0 view (composeView), 1 view table + windows, 2 register save + state,
+// 3 record lookups + scope + reserve + bulk begin, 4 the op loop (incl. the flushes inside), 5 end (bulk flush, restore), 6 passes counted
+inline std::uint64_t g_passPhaseNs[8] = {};
+inline std::uint64_t g_passPhaseCount[3] = {};  // [0] owned passes, [1] with persistent, [2] ops
+
 }  // namespace rvk::native

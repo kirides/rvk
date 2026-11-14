@@ -810,7 +810,69 @@ bool FrameTap::compactOwned(void* db, List list, const std::uint8_t*& data, std:
     return true;
 }
 
+// WS15 diagnostics (RVK_OWNED_TIMERS=1): passBegin's cost per pass kind and owned-op count class, to split the per-pass fixed cost from the per-op cost
+namespace {
+struct PassProf {
+    static constexpr int kClasses = 6;  // owned ops: 0, 1, 2-4, 5-16, 17-64, 65+
+    struct Cell {
+        std::uint64_t passes = 0, ops = 0, draws = 0, ns = 0;
+    };
+    Cell cell[4][2][kClasses];  // [kind: main / cascade / terrain / other][solid]
+    std::chrono::steady_clock::time_point last{};
+    std::uint64_t frames0 = 0;
+};
+PassProf g_passProf;
+int opClass(std::size_t n) { return n == 0 ? 0 : n == 1 ? 1 : n <= 4 ? 2 : n <= 16 ? 3 : n <= 64 ? 4 : 5; }
+}  // namespace
+
 std::uint32_t FrameTap::passBegin(bool solid) {
+    if (!ownedTimersOn() || !executing_ || statics_ == nullptr || !staticsWanted_) return passBeginImpl(solid);
+    const std::size_t pending = statics_->ownedPending(solid);
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::uint32_t r = passBeginImpl(solid);
+    const auto t1 = std::chrono::steady_clock::now();
+    const int k = desc_.kind == ViewKind::Main ? 0 : desc_.kind == ViewKind::Cascade ? 1 : desc_.kind == ViewKind::Terrain ? 2 : 3;
+    PassProf::Cell& c = g_passProf.cell[k][solid ? 1 : 0][opClass(pending)];
+    ++c.passes;
+    c.ops += pending;
+    c.draws += r;
+    c.ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    if (t1 - g_passProf.last > std::chrono::seconds(5)) {
+        const bool first = g_passProf.last.time_since_epoch().count() == 0;
+        g_passProf.last = t1;
+        if (!first) {
+            static const char* kn[4] = {"main", "cascade", "terrain", "other"};
+            static const char* cn[PassProf::kClasses] = {"0", "1", "2-4", "5-16", "17-64", "65+"};
+            const std::uint64_t frames = std::max<std::uint64_t>(1, dev_.stats().frames - g_passProf.frames0);
+            for (int a = 0; a < 4; ++a) {
+                for (int b = 0; b < 2; ++b) {
+                    for (int d = 0; d < PassProf::kClasses; ++d) {
+                        PassProf::Cell& x = g_passProf.cell[a][b][d];
+                        if (x.passes == 0) continue;
+                        spdlog::info("native: pass profile {} {} owned ops {}: {} passes ({:.2f}/frame), {:.1f} ops, {:.1f} draws per pass, {:.2f} us per pass, {:.3f} ms/frame", kn[a], b ? "solid" : "z", cn[d], x.passes,
+                                     static_cast<double>(x.passes) / static_cast<double>(frames), static_cast<double>(x.ops) / static_cast<double>(x.passes), static_cast<double>(x.draws) / static_cast<double>(x.passes),
+                                     static_cast<double>(x.ns) / static_cast<double>(x.passes) / 1000.0, static_cast<double>(x.ns) / static_cast<double>(frames) / 1.0e6);
+                        x = {};
+                    }
+                }
+            }
+        }
+        if (!first) {
+            const double np =static_cast<double>(std::max<std::uint64_t>(1, g_passPhaseCount[0]));
+            const double nf = static_cast<double>(std::max<std::uint64_t>(1, dev_.stats().frames - g_passProf.frames0));
+            const auto us = [&](int i) { return static_cast<double>(g_passPhaseNs[i]) / np / 1000.0; };
+            spdlog::info("native: owned pass phases: {} passes ({:.2f}/frame, {} persistent, {:.1f} ops per pass), us per pass: view {:.2f}, view table {:.2f}, save {:.2f}, lookup+scope+reserve {:.2f}, ops {:.2f}, end {:.2f}; ms/frame {:.3f}", g_passPhaseCount[0],
+                         np / nf, g_passPhaseCount[1], static_cast<double>(g_passPhaseCount[2]) / np, us(0), us(1), us(2), us(3), us(4), us(5),
+                         static_cast<double>(g_passPhaseNs[0] + g_passPhaseNs[1] + g_passPhaseNs[2] + g_passPhaseNs[3] + g_passPhaseNs[4] + g_passPhaseNs[5]) / nf / 1.0e6);
+            for (std::uint64_t& v : g_passPhaseNs) v = 0;
+            for (std::uint64_t& v : g_passPhaseCount) v = 0;
+        }
+        g_passProf.frames0 = dev_.stats().frames;
+    }
+    return r;
+}
+
+std::uint32_t FrameTap::passBeginImpl(bool solid) {
     if (!executing_ || desc_.kind == ViewKind::OtherShadow || statics_ == nullptr || !staticsWanted_) return 0;
     const std::uint32_t n = statics_->ownedPass(solid);
     if (desc_.kind != ViewKind::Main) {  // (F3-1 cascades; F3-4 the terrain map / atlas cells: their ops left the list only while they are owned shadow views)

@@ -38,6 +38,9 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
 // The uncached static walk (the version before the cache), for RVK_LIGHTS_VERIFY: appends the static lights within `radius` of `center` to `out` (cleared first)
 bool collectStaticsReference(const float center[3], float radius, std::vector<WorldLight>& out);
 
+// WS15 (frame-ownership.md 14.57): the kept static lights re-read in one guarded region (default on); `debug lightsfast 0|1` (overlay command) switches it inside one run
+void setFastStatic(bool on);
+
 // Creates the detours that find the admin; false when the symbols are missing
 bool install();
 

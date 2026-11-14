@@ -27,6 +27,7 @@
 #include "core/settings.h"
 #include "api/capture.h"
 #include "engine/image_effects.h"
+#include "engine/lights.h"
 #include "engine/menu_state.h"
 #include "engine/vfs.h"
 #include "overlay/keys.h"
@@ -462,6 +463,12 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         if (w[2] != "0" && w[2] != "1") return fail("debug lightskip 0|1");
         enh::lightBuildSkip().store(w[2] == "1");
         return ok(std::format("light table build skip {}", w[2] == "1" ? "on" : "off"));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "lightsfast") {
+        // frame-ownership.md 14.57 (WS15): lights::collect's one-region re-read of the kept static lights on / off inside one run
+        if (w[2] != "0" && w[2] != "1") return fail("debug lightsfast 0|1");
+        engine::lights::setFastStatic(w[2] == "1");
+        return ok(std::format("light collect fast re-read {}", w[2] == "1" ? "on" : "off"));
     }
     if (w[0] == "quit" && w.size() == 1) {
         // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs
