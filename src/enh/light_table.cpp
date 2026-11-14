@@ -720,7 +720,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         static std::vector<std::pair<std::uint64_t, std::uint32_t>> cells;  // under g_drawnMutex; equal keys stay in index order
         static std::uint64_t cellsHash = 0, cellsGen = 0;
         static std::size_t cellsCount = ~std::size_t{0};
-        std::uint64_t h = 0;
+        std::uint64_t h = 0xcbf29ce484222325ull;
         for (std::size_t i = 0; i < nStatic; ++i) {
             std::uint32_t b[3];
             std::memcpy(b, scratch_[i].pos, 12);
@@ -729,7 +729,8 @@ void LightTable::record(d3d9::PassContext& ctx) {
                 m = (m ^ wd) * 0xC2B2AE3D27D4EB4Full;
                 m ^= m >> 29;
             }
-            h += m;
+            h = (h ^ m) * 0x100000001b3ull;  // (a chain: the cells / matches hold indices into scratch_, so the same positions in another order must rebuild)
+            h ^= h >> 31;
         }
         if (h != cellsHash || nStatic != cellsCount) {
             cellsHash = h;
