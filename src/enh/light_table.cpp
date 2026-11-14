@@ -1147,11 +1147,17 @@ void LightTable::logStats() {
         const auto c = engine::lights::asyncCountersTake();
         if (c.kicks + workerBuilds_ + workerCompared_ > 0 || engine::lights::asyncActive()) {
             spdlog::info("enh: lights: collect worker (5 s): {} kicks, {} taken ({} builds), worker {:.1f} us per taken job, take waited {} x ({:.1f} us total, max {:.1f}), "
-                         "inline fallbacks: {} not started, {} timed out, {} other inputs, {} no kick, {} busy, {} discarded, {} refiltered; checks {} DIFFERING {}{}{}",
+                         "inline fallbacks: {} not started, {} timed out, {} other inputs, {} no kick, {} busy, {} discarded, {} refiltered, {} private walks (cache locked by the worker), {} stale-payload rewalks; checks {} DIFFERING {}{}{}",
                          c.kicks, c.hits, workerBuilds_, c.hits != 0 ? c.workerUs / static_cast<double>(c.hits) : 0.0, c.waits, c.waitUs, c.waitMaxUs, c.notStarted, c.timedOut,
-                         c.mismatch, c.noKick, c.kickBusy, c.discarded, c.refiltered, workerCompared_, workerDiffering_, workerFirst_.empty() ? "" : "; first: ", workerFirst_);
+                         c.mismatch, c.noKick, c.kickBusy, c.discarded, c.refiltered, c.cacheBusy, c.staleRewalks, workerCompared_, workerDiffering_, workerFirst_.empty() ? "" : "; first: ", workerFirst_);
             workerBuilds_ = 0;
         }
+    }
+    if (backstopChecks_ > 0) {
+        spdlog::info("enh: lights: backstop (5 s): {} fresh-walk comparisons (every 64th build), {:.0f} us per comparison, mismatches {} (total {})", backstopChecks_,
+                     backstopUs_ / static_cast<double>(backstopChecks_), backstopWindowMismatch(), backstopMismatch_);
+        backstopChecks_ = 0;
+        backstopUs_ = 0.0;
     }
     if (skipHits_ + skipChecks_ > 0) {
         spdlog::info("enh: lights: unchanged builds (5 s): skipped {}, uploads skipped {}, full builds with an unchanged signature compared {} DIFFERING {}{}{}", skipHits_, uploadsSkipped_, skipChecks_,

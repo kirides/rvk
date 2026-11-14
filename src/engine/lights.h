@@ -49,7 +49,7 @@ void asyncKick(const float center[3], std::uint64_t frame);
 // true: `out` / `stats` hold collectStatics' result and `hash` the StaticsHashFn's value; false: nothing taken, run collect()
 bool asyncTake(const float center[3], float radius, std::uint64_t frame, std::vector<WorldLight>& out, Stats& stats, std::uint64_t& hash);
 struct AsyncCounters {
-    std::uint64_t kicks = 0, hits = 0, waits = 0, timedOut = 0, notStarted = 0, noKick = 0, mismatch = 0, discarded = 0, kickBusy = 0, refiltered = 0;
+    std::uint64_t kicks = 0, hits = 0, waits = 0, timedOut = 0, notStarted = 0, noKick = 0, mismatch = 0, discarded = 0, kickBusy = 0, refiltered = 0, cacheBusy = 0, staleRewalks = 0;  // cacheBusy: collects that found the static cache locked by the worker and walked privately (never waited)
     double waitUs = 0.0, waitMaxUs = 0.0, workerUs = 0.0;  // the take's waits for a running job; the worker's time of the taken jobs
 };
 AsyncCounters asyncCountersTake();  // reads and resets (engine thread)
@@ -60,6 +60,8 @@ bool collectStaticsReference(const float center[3], float radius, std::vector<Wo
 
 // WS15 (frame-ownership.md 14.57): the kept static lights re-read in one guarded region (default on); `debug lightsfast 0|1` (overlay command) switches it inside one run
 void setFastStatic(bool on);
+// The next collectStatics (any thread) rewalks the shared static cache (the light table's rolling backstop found it differing from a fresh walk).
+void invalidateStaticCache();
 
 // Creates the detours that find the admin; false when the symbols are missing
 bool install();
