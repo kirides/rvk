@@ -134,7 +134,8 @@ public:
     // F2c-1: a counter bumped whenever what `lightKnown` / `registryComplete` depend on changes (the "registry complete" flag flips, or the set of the last build's
     // light positions differs from the previous build's): a retained record that took its `holdsAll` decision from them stays valid while the value is the same
     static std::uint64_t registryGeneration();
-    static void noteDrawnLight(const float pr[4], const float col[4]);
+    // authoritative = the note comes from a fully composed frame (no owned view): only those update the colour a static registry light takes (frame-ownership.md 16.10)
+    static void noteDrawnLight(const float pr[4], const float col[4], bool authoritative = true);
 
     explicit LightTable(d3d9::Device& device);
     ~LightTable();
