@@ -5036,3 +5036,264 @@ located on wind-swayed foliage, the torch flame and particles (two sessions diff
 Also `scripts/perf-ab.ps1 -Key env:<name> -Restart -EnvironmentA / -EnvironmentB` (a start-time env knob as the A/B arm).
 
 **Gates of the merged fixes** (`ws19-small`): `rvk_tests` 356 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors; test baseline (`owned_check=10`, `picture_check`, private copy `risen-test-vk-ws19`) at harbour_docks / pub_interior / jungle: `[error]` 0, DIFFERING 0, MISS 0, picture check FAILED 0 (ok 1 / 0 / 2 windows, the rest UNRELIABLE / NO DATA as in 14.55; WS20's shader change had made the copy's variant cache cold, so the runs include the warm-up). **perf-ab** (`-Key env:RVK_WS19S_OFF -A off -B on -Restart -EnvironmentA RVK_WS19S_OFF=1 -PlayerDefaults -Pairs 5`, shared copy + lock, CPU engine+HAL, A = fixes off): harbour_docks 2.228 +- 0.040 -> **2.182 +- 0.044 ms (-0.046, z -1.1)**, interval p50 +0.06 (z +1.4), GPU +0.01 (a second batch whose sessions still compiled the variants after WS20 was discarded); pub_interior 1.202 +- 0.031 -> 1.224 +- 0.077 (+0.022, z +0.4: no water, no pack-word draws to speak of). The branch's earlier Full-vs-Wrapper table (with the memo, `RVK_WS19_BASELINE=1` = everything off) put WS19's harbour share at ~-0.05 ms as well: the fixes carry it, not the memo.
+
+## 16. Owning the per-frame bookkeeping (evaluation)
+
+(2026-11-14, evaluation only: no production code, nothing merged; branch `eval-bookkeeping` on main 7622f4e, docs only; logs, scripts, RE dumps in `rvk-work/scratch/eval16/`.) The question: Full is below Wrapper at hold (-1.30 ms), jungle (-0.98), torch_hero (-0.52), walk (-1.2), but above it in the two small scenes (harbour_docks +0.06, pub_interior +0.21: 14.61's perf-ab). What per-frame work does Full still do in those scenes, what would owning each item (or moving it off the engine thread) mean, and can Full get below Wrapper in small scenes at all?
+
+### 16.1 Method and limits
+
+* Build: main 7622f4e, unchanged (`eval-bookkeeping` worktree). Shared copy and default lock, `RisenTest.exe`, vsync off, `-PlayerDefaults`, `-Perf -CpuProfile`. pub_interior and harbour_docks are frozen rvkcompare spots (profile windows from freeze+5,000 frames on), and hold is the savegame. pub_interior and harbour_docks had 2 sessions per mode (alternating, after one warm-up session), hold and jungle 1 per mode. Each scene also had one Full session with `RVK_OWNED_TIMERS=1` and no profiler, for the owned phase split. Scripts: `rvk-work/scratch/eval16/sess.ps1`, `all.ps1`, `all2.ps1`. Summary: `prof.py`, which scales each 5 s profile block so that `eCApplication::OnRun` equals the busy engine thread (engine+HAL + present - slot wait), because the sampler only counts running samples. It reports the last 2-3 steady windows per log.
+* The machine was shared. Other agents' games ran during the batch. Full's GPU time was 1.3 - 1.6 ms at pub_interior against 1.15 on a quiet machine, and jungle Full was GPU-bound at 10 ms. So absolute CPU times are about 10 - 20 % above 14.61's, and the profiler adds about 10 %. The structure (which item costs what, Full against Wrapper) is stable between sessions: engine+HAL pub_interior Full 1.225 / 1.220 against Wrapper 1.050 / 1.085 (+0.155), harbour_docks Full 2.280 / 2.303 against Wrapper 2.073 / 2.163 (+0.17), hold 5.94 against 7.14, jungle 6.62 against 7.59.
+* **`-Perf` costs Wrapper more than Full.** The per-draw timer (`steady_clock::now` in the profile) costs Wrapper 0.023 / 0.084 / 0.38 / 0.43 ms per frame at pub / harbour / hold / jungle, and Full 0 / 0.037 / 0.13 / 0.16. perf-ab always runs `-Perf`. **So the status deltas overstate Full's lead at hold / jungle by about 0.25 ms and understate the small-scene gap by about 0.02 - 0.05 ms** (pub_interior about +0.23, harbour_docks about +0.1 without the timer, inferred).
+* RE: headless Ghidra on Engine.dll / Game.dll / FileSystem2 (read-only), dumps in `rvk-work/scratch/eval16/re/`. [C] = confirmed in the decompile, [I] = inferred.
+
+### 16.2 Inventory: what the engine thread runs per frame, Full against Wrapper
+
+ms per frame, inclusive, profile means of the sessions above. Rows overlap: a parent row contains its children. Timer rows are per main view from the `RVK_OWNED_TIMERS` sessions, with ~25 ns per clock pair included. "W counterpart" is what Wrapper spends on the same work.
+
+| item | pub F | pub W | harbour F | harbour W | hold F / W | jungle F / W | notes |
+|---|---|---|---|---|---|---|---|
+| **engine+HAL CPU** (perf line) | 1.22 | 1.07 | 2.29 | 2.12 | 5.94 / 7.14 | 6.62 / 7.59 | |
+| modules: d3d9 (ours) / Engine / amdvlk64 / sharedbase / ntdll / vcruntime | .73 / .15 / .21 / .10 / .09 / .08 | .51 / .26 / .20 / .13 / .11 / .03 | 1.45 / .22 / .32 / .12 / .17 / .14 | 1.06 / .48 / .29 / .16 / .23 / .08 | Engine .95 / 1.82 | Engine .70 / 1.93 | Full moves the engine's render code into our DLL. vcruntime is Full +0.05 / +0.07 / +0.11: small copies / compares spread over many sites (`crt` lines: no single owner) |
+| **owned hand-over** `FrameTap::passBegin` (= `ownedPass` + `treePass` + `vegPass`) | .113 | - | .438 (.301 + .044 + .092) | - | 1.70 / - | 2.01 / - | W counterpart: the engine's z / solid / vegetation slots incl. HAL draws: `contextSlot<0>` + `<3>` + `<11>` + `<12>` = pub .22, harbour .84, hold 2.95, jungle 2.86 |
+| - per-op derivation `ownedDrawOpPersistent` | .045 | | .162 | | .66 | .63 | windows, signature, object serve, ambient, slot reuse (WS19's memo would take ~2 % of it: 14.61) |
+| - observers `Device::ownedObserve` (+ bulk / ordered deliveries inside) | .021 | `RtScene::observe` .050 | .089 | .175 | .27 + `RtScene::observeOwned` .15 + `coversDraw` .13 / .75 | .27 + .16 + .13 / .89 | timers: bulk observers 8 / 19 / 57 / 79 us per main view; ordered observers 5 / 32 / 135 / 132 us; the water's sea-floor learning sees every ordered draw per draw ("for a replacer") |
+| - flush `Device::ownedFlush` | .029 | | .073 | | .22 | .29 | timers 18 / 30 / 76 / 87 us per main view: bucketing, ring ref list, indirect args |
+| - material polls + structure stamps | timers 12.8 us | | 27.6 us | | 79 us | 88 us | `MaterialTable::pollOwned`: one `refresh` per slot and frame (engine pool bytes) |
+| - side effects (`ownedSideEffects`: CacheResource touches, BindLightmaps, stream 3, instance sort) | timers 8.3 us | (inside the engine slots) | 28.8 us | | 77 us | 93 us | per frame: touches 153 / 572 / ~2,850 / ~1,700, lightmap binds 27 / 88 / ~190 / ~180, stream 3 20 / 85 / ~480 / ~270 |
+| selection: `FrameTap::beginView` (`compactOwned` + `ownedSelect` + `depFast` / stamps) | .032 (select .015) | - | .070 (.035) | - | .34 (.18) | .44 (.22) | timers: compaction 22 / 71 / 239 / 273 us per main view, of it stamps / record checks 16 / 46 / 132 / 156 |
+| composed leftovers: `StaticOps::issue`, `orderedPlace`, decals, `composeFx` / `composeParticle` (inside `opSlot<0>`), the alpha / refracted slots | issue .076, fx .042, particles .042 | particles .057 | issue .224, ordered .079, decals .104, fx .062, particles .060 | particles .060 | issue .33, ordered .48 | issue .71, ordered .50, fx .22, particles .22 / .35 | composition, not bookkeeping (F11 - F13) |
+| **effect units** `detourExecuteEffect` (`EffectOps::effectBegin`: `composeEffect`, `issueLean`, `drawComposed`, `OwnPost::runGroup`, `applyDevice`) + the mask units inside `UpdateShadowMask` | .387 + .176 | .308 + .143 | .452 + .232 | .296 + .134 | .35 + .18 / .28 + 0 | .29 + .14 / .20 + 0 | **Full +0.11 at pub_interior, +0.25 at harbour_docks**: the largest single Full-only surplus of the small scenes (14.55 - 14.58: no per-unit fix > 0.04) |
+| **injected passes** `Device::inject` | .289 | .214 | .438 | .315 | .55 / .46 | .51 / .40 | Full +0.075 / +0.12 |
+| - `RtScene::record` (TLAS input, BLAS rows, table maintenance) | .123 | .142 | .148 | .114 | .25 / .26 | .21 / .17 | both modes |
+| - `LightTable::record` (Full only, table lighting) | .047 (collect .027; timers .045 / build) | - | .062 (timers collect .045) | - | collect .042 | collect .048 | `collect` re-reads 2,526 static lights per frame (14.57) |
+| - water / ocean record | | | .050 + .037 | .033 + .014 | | | |
+| engine collection, main view: `ExtractFromFrustum` (ours since F10-2) | .019 (timers 21.5 us) | engine ~.03 | .058 (50 us) | `OnQueryNodes` .050 | .21 / .28 | .33 / .36 | port 15 - 35 % cheaper (14.33) |
+| engine request: `eCFrustumElementItem::Request` (ours for plain meshes since F10-1) + `RequestRenderOps` | ~.005 | ~.005 | .037 + .060 | .072 + .075 | .23 + .35 / .26 + .32 | .29 + .44 / .30 + .36 | per-element side effects that must run (14.31) |
+| shadow views: `RenderShadowMaps` (fit, extract, our cascade passes) | (no cascade in the frozen interior) | | .160 | .208 | .69 / .84 | .66 / .85 | `ExtractShadowMap` .006 / .14 / .13 |
+| `eCProcessor::Process` (game logic) | .073 | .096 | .083 | .071 | .76 / .96 | | the same work in both modes (noise between sessions) |
+| `CacheEntities` (stride 4) | .053 | .064 | .052 | .023 | .10 | | engine streaming, stays |
+| `CopyCurrentRTToImage` | .068 | .043 | .145 | .136 | .18 / .14 | .15 | refraction copy |
+| `operator new` | .027 | .033 | .058 | .056 | .11 / .17 | .10 / .22 | Full at or below Wrapper |
+| 5 s statistics (formatting + flush) | `vformat` .022 | .017 | .035 | .008 + spdlog .011 | | | one burst per 5 s, averaged. Full's `vformat` at harbour is `-Perf`'s inject labels (14.57) |
+| `-Perf` per-draw timer (`steady_clock::now`) | 0 | .023 | .037 | .084 | .13 / .38 | .16 / .43 | test artefact, see 16.1 |
+
+**Reading.** In the small scenes the per-op bookkeeping of the owned path is small:
+
+| owned per-op bookkeeping | pub_interior | harbour_docks | of the frame |
+|---|---|---|---|
+| hand-over + selection | 0.15 ms | 0.51 ms | 12 % / 22 % |
+| its Wrapper counterpart (the engine's slots + HAL draws) | 0.22 ms | 0.84 ms | |
+
+**The owned path is already cheaper than Wrapper's engine path in every scene.** Full loses in the small scenes because of fixed per-frame items that Wrapper does not have or does more cheaply:
+
+| fixed Full surplus | pub_interior | harbour_docks |
+|---|---|---|
+| effect units | +0.11 | +0.25 |
+| injected passes (light table, RT rows, water) | +0.075 | +0.12 |
+| composed leftovers (issue, ordered, decals, fx) | ~+0.1 | ~+0.35 |
+| vcruntime copies | +0.05 | +0.07 |
+
+The two side-by-side 2 x 2 session means are pub_interior +0.155 ms and harbour_docks +0.17 ms with the profiler.
+
+### 16.3 Engine facts that decide what can be owned or threaded (RE this stage, Engine.dll RVAs)
+
+* **No engine call on the frame path takes a lock [C]:**
+  * `eCResourceCache2::CacheResource` 0x6843e0 unlinks the resource and relinks it at the LRU head `cache+0x18`, and stamps `res+0x20 = cache+0x28`.
+  * `QueueData` 0x6852d0 sets state 2 and `cache+0x34 +=`. In mode 1 it hands an async read to FileSystem2. In mode 0 it loads synchronously.
+  * `LoadData` 0x684e90 runs `FlushBytes` 0x684250, which walks the LRU tail and stops at the first resource stamped with the current `cache+0x28`. So the touches are load-bearing, but only as "touched this frame". It also writes state 3.
+  * `PrefetchData` 0x6879d0 appends to an unlocked array at `cache+0x420`.
+  * `eCIlluminated_PS::UpdateIllumination` 0x595300 runs `QueryLightSet` 0x575b90, which mutates the admin's light-set cache and refcounts.
+  * `eCRenderContextMesh::UpdateLoD` 0x5c74b0 writes `ctx+0x28` and calls `PrefetchData`.
+  * `eCMeshResource2::BindLightmaps` 0x764220 runs QueueData + CacheResource + `eCShaderMaterialAdmin::SetLightmap`, which writes the global material admin slots.
+  * `RequestRenderOps` 0x5c75e0 writes the op arrays and `AddRenderInstance`.
+  * Several functions have non-atomic first-use guards.
+
+  **All of these are engine-thread-only.** A worker may compute what to touch, but the calls stay on the engine thread.
+* **The engine's own threads [C]:**
+  * The FileSystem2 file thread ("FileAccessEvent", `CFFThread`) only reads files. Its completions go through `eCResourceCache2::OnAsyncLoad` 0x684630 into a queue at `cache+0x400`, under the only lock of the resource path (`bCCriticalSection` at `cache+0x3d8`). `LoadQueuedData` 0x6848d0 drains that queue on the engine thread inside `Process` 0x6885c0.
+  * One CreateThread site in Engine.dll (0x34665a, a generic runnable in the statically linked 0x2f0000 - 0x350000 range) is probably PhysX [I].
+  * **Consequence: during `DoRender` no other thread writes the engine data we read** (resource states, entity / context words, lights, material pools). Those change only on the engine thread itself: in `Process`, in the request (`UpdateIllumination`, `UpdateLoD`, stamps), in the side effects we call (`CacheResource`, `SetLightmap`, `QueueData` mode 0) and in the effect units' parameter setters. Worker reads of engine memory are race-free in any window in which the engine thread does not write the fields read.
+* **The visible stamp `eCFrustumElementItem+0xc` is game state [C]:**
+  * Its only reader is `eCFrustumElementItem::WasVisibleLastFrame` 0x6715e0 (`return item+0xc == db+8`: a tiny getter, never detour).
+  * It is called from 5 Game.dll sites: `gCCameraAdmin::SetCameraTargets` 0x7a9280 and `CalculateTargetPositionOffset` 0x7aa9c0 (not visible last frame → forced `UpdateTransformations` before reading the head bone for the camera target), FUN_1807c7530 (head position: bone vs entity matrix), and `gCScriptProcessingUnit::UpdateChannel` 0x96b310 (the same for a script channel).
+  * Decals use another stamp (`entity+0xe4`). So every element the engine's Request would stamp must still be stamped exactly, actors included. Any takeover of the request keeps the one store per element.
+* **Process does not read render results, with one exception [C]:**
+  * `eCAnimation2Admin::Process` 0x4cfdf0 builds its own frustum from the camera matrices (`bCFrustum::Intersects` → `eCAnimation_PS::Process(dt, visible)`).
+  * Particles are gated by `eCPrefetchAdmin::OnTestProcessingRange` 0x696450 (a sphere).
+  * **The particle render slot calls `OnProcess` for emitters with `PS+0x390 == 0` and `DepthSortParticles`** (render-to-simulation feedback, `opt-side-effects-anim.md` 5). A particle takeover must keep calling those.
+* **`eCFrustumDatabase::Execute` 0x66e990 [C]:**
+  * Besides the list walks, it sets up the camera / fog (`ExecuteGfxCamera(db+0x14c0)`, `eCGfxFog::Execute(db+0x14c8)`: `ms_pActiveCamera`, the material admin's camera / fog pools).
+  * It releases the material admin's `+0x290` (depth holder) and `+0x268` (refraction image) and calls `SetRefractmap` (`+0x248`).
+  * It calls Begin/EndZPass and Begin/EndMaterial, `UpdateShadowMask`, `eCDecalAdmin::RenderDecals` and `eCBillboardAdmin::RenderBillboards` (which resets `+0x28`), and writes profile counters (`FUN_180095630`).
+  * It does **not** write `db+8` and does not call `UpdateFrameDependencies`: the frame counter moves in `eCCameraBase::Update` 0x4f7270 and `ExtractShadowMap` 0x66f470.
+* Inputs without a writer event stay polled (unchanged from 7.29 / 14.61):
+  * the LOD pick (`UpdateLoD` per view and frame)
+  * the entity overlay flags `+0x28` (Game.dll inline writers, the folded getter 0x852a0)
+  * the illumination + light words (updated about every frame for shared lists)
+  * the switch value, the fade
+  * the material pool bytes (no writer choke point; `SetLightmap` from our own side effects writes the admin's slots during the passes)
+  * the static lights' colour / range (in-place property writes; no choke point found)
+
+### 16.4 Per item: what owning it would mean, multithreading, exactness, risk, effort, gain
+
+Gains are engine-thread ms per frame at pub_interior / harbour_docks (hold / jungle), from 16.2's numbers. [I] marks an estimate.
+
+Multithreading column (16.5):
+* (a) parallel with engine work
+* (b) split across views / passes / op ranges
+* (c) pipelined one frame behind
+* (d) on the GPU
+
+| item | owning it concretely | multithreading | correctness obligations / gate | risk | effort | expected gain |
+|---|---|---|---|---|---|---|
+| **1. Observers**: RT scene (bulk owned + ordered, per-draw for other kinds), object motion (bulk ordered + per-draw captures), GI / material RT (per draw when on), mesh parts (empty observe), the water's sea-floor learning (per ordered draw) | **Event-driven**: call observers only for records that entered / changed / left a pass. The bulk views already carry `entered` / `changed`, and the RT scene skips unchanged records in `observeOwned`. What remains per draw is building the `OwnedRecordView`, the observer loop (`observes()` / `bulkOwned()` per draw) and the per-pass seen bookkeeping. Replace the RT registry's "seen this frame" ageing by the pass membership delta. Water: learn the floor from the static set once per change, not per ordered draw. | (a) partly. The bulk views are our memory and could run on a worker joined at AfterOpaque (`RtScene::record`), but the per-draw path (`OwnedDrawScope`) mutates the Device (`owned_`, `tag_`, shaders, register load) and object motion's captures record GPU work, so those stay. (c) RT membership one frame late is acceptable (RT is already temporal), the draws are not. (d) F8: TLAS instances from the GPU scene tables (section 12). | Rolling full walk (1 in 16 passes, like WS19's heal) compares the RT registry instance set + TLAS input rows. No check frames. | low (our data; a stale RT entry = a wrong reflection for N frames, no device loss with guarded refs) | M | pub -0.02, harbour -0.06 .. -0.08, hold / jungle -0.2 .. -0.3 [I: 60 - 80 % of `ownedObserve` + bulk / ordered] |
+| **2. Selection** (`compactOwned`, `ownedSelect`, `depFast`, stamps) | The engine creates no ops for owned elements: F10-1 extended to render instances (F10-1c), vegetation (F10-1b), SpeedTree LOD (F10-1d). Selection keyed per context (record pointer in a side table) instead of map lookups + list compaction. The remaining polls (LOD pick, flags, illumination words) become our own values: the LOD pick is already ported exactly (7.31). | (b) yes: a parallel-for over op ranges is race-free at `beginView` (the reads are engine words nobody writes until the pass's side effects). It pays only for lists of hundreds of ops: a worker wake costs 5 - 20 us. | `native.own_collection=compare` (ops + LRU heads) on every class; the M3 side-effect digest (stamp 100 %, touches 100 %); 0 DIFFERING over the soak spots | low-medium (game state through the request's side effects) | L | pub ~0, harbour -0.03 .. -0.05, hold / jungle -0.2 .. -0.3 [I] |
+| **3. Per-op derivation + flush of unchanged passes** (`ownedDrawOpPersistent`, `ownedFlush`) | **Pass-level reuse**: a pass whose op set, order, records and env epoch are unchanged replays last frame's flush output. That needs the ref list + indirect args in a persistent, frame-in-flight-safe buffer per pass (today they are in the per-frame ring), plus WS19's generation counters (parked: watched textures / buffers / modules) as the change detector. Per op only the side effects and material polls remain. | (b) yes for big passes. Worker ranges produce draw items + a side-effect list; the engine thread replays the side effects in op order and merges the ranges. The ring belongs to the render thread (`vk/frames.h`), so give ranges pre-reserved blocks. Kick the main z / solid work at the end of the main Request, overlapping the cascades (`PreExecute`). One order hazard: `bindLightmaps` (our copy of the admin's lightmap slots, written in side-effect order) must be read per op from the record, not from the live copy. (d) The GPU compaction exists (F2c-4c). | Whole-pass reuse compared byte for byte (ref list + args) against a full derivation on a rolling 1 in N passes; WS19's fault injection on the generations; GPU-AV first run (a stale ref list = GPU reads of freed slots: **device-loss class**; slot generations in the pass signature + CPU guards) | medium (GPU addresses) | L | pub -0.05 .. -0.07, harbour -0.12 .. -0.18 [I: op loop 54 / 81 us per pass x passes - side effects - material polls]; hold / jungle -0.5 .. -0.7 [I] with the parallel split |
+| **4. Side effects** (CacheResource touches, BindLightmaps, stream 3, render-instance sort) | Calls stay engine calls on the engine thread (no locks, 16.3). **Exact dedupe**: touch each resource once, in the order of its *last* touch: the LRU relinks at the head per touch, so the final order equals the order of last touches. Pub_interior touches 153 per frame for 47 ops. Stream 3 is our HAL object: it could be a per-record state bit. | (a) no for the calls. A worker may build the deduped list. (c) / (d) A lagged / GPU-derived touch set (GD3D11 model) is not exact (the LRU heads differ by a frame; the M3 digest flags it) and is pointless where the soft limit is never reached (7.29). | M3 LRU-head digest = 0 differing (14.31's compare) | low | S | pub ~-0.004, harbour -0.01 .. -0.015, hold -0.05 [I: ~60 ns per saved call] |
+| **5. Visible stamp / UpdateIllumination / UpdateLoD + PrefetchData** (inside the request) | Keep them: game state (16.3: Game.dll camera + script channel read the stamp). Under F10-1 they become our own calls per element (already so for ported contexts). | No: engine-thread-only, part of the request. | (as 2) | - | - | 0 (must run) |
+| **6. Material polls** (`pollOwned`: pool bytes per slot and frame) | No writer event (the pool is engine memory; `SetLightmap` writes during the passes come from our own side effects). | (a) Refresh last frame's slots on a worker between the main Request and the first owned pass (after `Process`, the only frame-level writer [I]), and keep `SetLightmap`'s slots polled on the engine thread. | Rolling engine-thread poll of 1 in N slots compared (DIFFERING) | low | S-M | pub -0.01, harbour -0.02, hold -0.06 [I] |
+| **7. Light table `collect`** (2,526 static lights re-read; the build is already skipped when unchanged, 14.55) | No exact event (in-place colour / range writes, no choke point). A spatial grid of the static lights (they do not move) would read only the ~335 near ones, but a far light whose range grows in place is missed until a rolling full read: not exact without the heal. | **(a) yes, exact.** The static lights are written in `Process` / scripts, not during `DoRender` [I: no writer seen on the render path]. Start `collect` on a worker after `eCCameraBase::Update` (camera position known: the detour `detourSceneUpdate`) and join it at EndZPass (`LightTable::record`). The overlap window (extract, request, cascades, z pass) is 0.3+ ms. The drawn-light merge already uses a lagged set (`g_drawn`, `kDrawnKeep`) and stays on the engine thread. | `RVK_LIGHTS_VERIFY=1`'s uncached reference against the worker's result; a debug counter of light writes inside the window must stay 0 | low | S | **pub / harbour -0.04 .. -0.05** (all scenes alike) |
+| **8. Effect units** (composition, lean issue, own-post groups) | F13 (own post at graph level): skip the engine's `ExecuteJobs` walk for owned groups and read the parameter objects once per group. 14.56 / 14.58 measured the per-unit levers at 0.01 - 0.04. | (a) no: the engine sets each unit's parameters (`OnSetParams`) right before calling it. The post chain's packet recording could go to a record thread (not a secondary scope today) [I: -0.03 .. -0.05]. | `native.own_post=compare` per group, lean check counters | medium | L (F13) | pub -0.1, harbour -0.2 [I: brings the units to Wrapper's level] |
+| **9. RT scene record** (TLAS input rows, BLAS rows, table maintenance; both modes) | F8 (GPU tables) removes it. | (a) the CPU rows on a worker kicked when the main solid pass's observations end, joined at AfterOpaque (small window). (c) one-frame-lag TLAS membership with this frame's transforms: Full only (picture may change, a moving actor's reflection one frame late). Record it into its own command buffer outside rendering scopes (allowed for secondaries / a separate primary in submit order). | compare mode: TLAS input bytes of the worker against a synchronous build | low (lag) / medium (GPU addresses) | M | -0.1 .. -0.15 in every scene, Wrapper too [I] |
+| **10. Main-view collection** (`ExtractFromFrustum` port, request) | The persistent visible set: **never for exactness** (14.33: element lists change in 15 - 70 % of the views with equal inputs). F10-4 (skip Execute's list walk) only after every class is owned; it must keep 16.3's camera / fog / material admin / decal / billboard calls. | (a) only with care: the main extract runs before `PreExecute`, and the shadow extracts share the dedupe counter (`entity+0xe0` == `DAT_180c628c0`) [I: race risk] → no. (d) GPU cull + read-back for the side effects (F10-2's later form): not exact (lag). | `native.own_extract=compare` | - | - | small scenes: nothing to take (extract 21 / 50 us) |
+| **11. 5 s statistics** | Format + flush on a logger thread (spdlog async sink) | (a) yes, trivially | none (diagnostics) | none | S | ~-0.01 .. -0.02 averaged + the 5 s spike |
+| **12. Copies / allocations** (vcruntime +0.05 / +0.07, `operator new`) | Engineering: per-frame arenas, fewer 250-byte copies | - | exact by construction | none | S-M | -0.02 .. -0.04 [I] |
+
+### 16.5 Multithreading the owned frame
+
+**The engine thread's frame in Full today (in order, 16.2's numbers at harbour_docks):**
+
+| step | what runs | ms |
+|---|---|---|
+| 1 | `eCProcessor::Process`: game logic, animation, particles' simulation, streaming completions (`LoadQueuedData`), light sets | 0.08 |
+| 2 | `DoRender` → `OnPreRender` = `CacheEntities` (every 4th frame's walks) | 0.05 |
+| 3 | `eCImageEffect::Execute` → scene job: `eCCameraBase::Update` (frame++, our `ExtractFromFrustum`, the request: ours for plain meshes + the engine's: illumination, LOD, stamps, touches) | 0.22 incl. |
+| 4 | `PreExecute` = the cascades: our owned shadow passes, the engine's extract + request per cascade | 0.16 |
+| 5 | main `Execute` | |
+| 5a | BeginZPass: BeforeDepthPrepass inject, the owned z pass (select, derive, observe, flush, side effects) | |
+| 5b | EndZPass: AfterDepthPrepass inject (light table, RT shadows, G-buffer) | 0.30 |
+| 5c | `UpdateShadowMask` (the mask effect units) | 0.23 |
+| 5d | solid: owned solid pass + composed ops, decals, billboards, sky | |
+| 5e | AfterOpaque inject: RT scene record, material RT, water, GI | |
+| 5f | refraction copy, refracted / alpha (ordered owned ops, fx, particles) | |
+| 6 | the post chain (effect units / own-post kernels) | 0.45 |
+| 7 | GUI, present | |
+
+What runs elsewhere today:
+* 2 record threads (`kRecordThreads = 2`, Vulkan `vk/game_record.cpp`, D3D12 likewise; they take the main z / solid / cascade scopes' DrawChunks and record secondaries; off below 4 hardware threads)
+* the presenter thread (`vk/presenter.cpp`)
+* the shader compile pool (hardware threads - 2) and the variant workers (hardware threads - 4, 3..12, below normal), only busy while cold
+* the pipeline prewarm workers (hardware / 4, 1..4) and the library optimiser
+* the cluster build worker (`gpuscene/cluster_table.cpp`)
+* the material pack loader, the screenshot writer, the pipeline key saver
+* the async pipeline builds of the enhancement passes (`std::async`)
+* FSR / FG threads, the stall sampler / profiler
+
+In the steady state about 11 of the 16 logical cores of this machine (Ryzen 7 5700X3D, 8C / 16T) are idle.
+
+**Constraints:**
+* The engine calls of 16.3 are engine-thread-only (no locks).
+* The d3d9 model's `Device` state (`owned_`, `tag_`, the register file, current shaders, the per-frame ring "belongs to the render thread") is single-threaded. Workers may only produce plain data (draw items, args, ref lists, side-effect lists, TLAS rows) into pre-reserved memory, and the engine thread or the record threads consume it.
+* Command recording is already threaded where packets exist (secondaries per scope). The owned draws leave as a few indirect packets, so recording is not where the owned path's CPU goes.
+* Pipelining one frame behind (c) is only acceptable where a frame of lag is invisible or not game state: RT membership, statistics. It is not acceptable for the draws (this frame's object rows / LOD / visibility), the request's side effects or the LRU (game state, exact against the engine).
+
+**Per item** (16.4's multithreading column, condensed):
+
+| verdict | items |
+|---|---|
+| (a) parallel with engine-thread work, exact | light `collect` (7); the material poll refresh (6); the bulk RT observation (1, bulk part); the RT CPU rows (9); statistics (11) |
+| (b) split over op ranges | selection (2) and derivation + flush (3) for big passes |
+| must stay on the engine thread | side-effect calls (4), the request (5), the effect units' composition (8), the per-draw observers with Device state or captures (1) |
+| (c) pipelined | RT membership only (9) |
+| (d) GPU | F8 TLAS, F2c-4c compaction (exists), F10-2's GPU cull (not exact for side effects) |
+
+The main and cascade passes run at different engine moments (cascades in `PreExecute` before the main z pass, z before solid). Their op lists are complete at the end of their Requests, so the main view's select / derive can start on workers while the engine thread renders the cascades. Only the side effects and the flush hand-over wait for the pass's position.
+
+**Cost of the split.**
+* A worker wake through a condition variable is 5 - 20 us on Windows [I; `NtAlertThreadByThreadId` / `RtlWakeConditionVariable` already show 0.012 ms per frame at pub_interior for the record threads].
+* A pass of 20 - 60 ops (pub_interior 22.5 ops per pass, harbour_docks 57) costs 50 - 80 us in total, so a split saves at most ~30 - 50 us minus the wakes: **multithreading does not close the small scenes' gap except for the independent fixed items** (light collect -0.045, statistics, RT rows ~-0.1 if the window allows).
+* At hold / jungle (passes of 300 - 500 ops, `ownedDrawOpPersistent` + flush + select + observers ≈ 1.3 - 1.4 ms) a 2 - 3 worker split is the largest remaining CPU lever: **-0.5 .. -0.8 ms [I]**, for ~1 - 1.5 ms of extra CPU on other cores.
+
+**The 680M-class laptop** (Ryzen 6000 H: 8C / 16T, the 6600H 6C / 12T; docs/research/680m-test.md):
+* The cores are there.
+* The package power is shared with the iGPU, so busy workers cost the engine thread boost clocks and the GPU watts [I].
+* The variant workers already compete during warm-up.
+
+A threaded stage there needs a cap (e.g. at most 2 workers, none while the variant queue is non-zero), no spinning workers, and a gate that measures fps on that device (680m-test.md recipe), not only engine+HAL.
+
+### 16.6 Ceiling: how far below Wrapper can Full go in small scenes?
+
+pub_interior, profiled and busy-normalised (Full 1.42 / Wrapper 1.31 ms incl. present). Work both modes share and nobody can own:
+
+| shared item | ms |
+|---|---|
+| Engine.dll self (`Process` 0.07 - 0.10, `CacheEntities` 0.05, the camera / image-effect graph walk, the Execute skeleton) | ~0.15 |
+| sharedbase (engine math / containers) | ~0.10 |
+| game / fmod / gui2 / win32u / ucrt / sentry | ~0.06 |
+| driver (amdvlk64 recording + submit, equal in both modes) | ~0.20 |
+| ntdll (heap, QPC, waits) | ~0.09 |
+| **total** | **~0.60** |
+
+Full's own minimum, if everything above were done:
+
+| Full minimum | ms |
+|---|---|
+| injected passes (RT record ~0.1 or less with item 9, GI / G-buffer / water dispatches ~0.05) | ~0.15 - 0.2 |
+| the post chain at the graph level (kernels' recording) | ~0.15 |
+| owned passes with pass reuse (side effects + material polls + 2 flush hand-overs) | ~0.03 |
+| the composed leftovers once F11 / F12 own particles / decals / fx | ~0.05 |
+| **total** | **~0.40** |
+
+Floor ~1.0 ms against Wrapper's 1.31 (profiled), i.e. **Full could reach ~0.2 - 0.3 ms below Wrapper at pub_interior [I]**. Most of that comes from items 8 (effect units at the graph level) and F11 - F13 (composed leftovers), not from owning bookkeeping: the owned path's per-op bookkeeping is already below Wrapper's engine slots.
+
+harbour_docks: Wrapper's engine slots + HAL draws (0.84 ms + particles / fx) against Full's owned path (0.51) leave room for ~-0.3 .. -0.4 below Wrapper with items 3, 8 and F11 - F13 [I].
+
+**And the GPU:**
+
+| scene | Full GPU | Full CPU | Wrapper GPU | Wrapper CPU |
+|---|---|---|---|---|
+| harbour_docks (14.61, quiet) | 2.45 | 2.13 | 2.20 | 2.07 |
+| pub_interior | 1.15 | 1.17 | 0.50 | |
+
+harbour_docks is GPU-bound in both modes; pub_interior's GPU equals its CPU. **So in both small scenes the CPU gap does not set the frame rate today**; the table lighting's GPU cost does (14.60).
+
+### 16.7 Recommendation
+
+Ranked by gain / risk. Each stage behind a Debug setting or env knob with its compare until its gates pass; perf-ab Full vs Wrapper on a quiet machine (and once without `-Perf`'s per-draw timer for the small scenes, 16.1).
+
+1. **Light `collect` on a worker** (16.4 item 7).
+   * Exact, S, -0.04 .. -0.05 in every scene.
+   * Gates: `RVK_LIGHTS_VERIFY` 0 DIFFERING, a zero count of light writes inside the window, perf-ab.
+2. **Event-driven observers** (item 1).
+   * M, low risk: -0.02 / -0.07 small, -0.2 .. -0.3 big.
+   * The water's per-ordered-draw learning first: it is per draw for no reason in an interior.
+   * Gate: rolling registry / TLAS-input compare, RT picture check.
+3. **Effect units at the graph level (F13)** (item 8).
+   * L, but the largest single small-scene item (+0.11 / +0.25 today).
+   * Gate: `own_post=compare` per group, lean check.
+   * This is what decides the small scenes; it is not bookkeeping.
+4. **Parallel select / derive / flush for passes of more than ~64 ops** (items 2 + 3 (b)).
+   * L, the largest CPU lever where Full is already ahead (hold / jungle -0.5 .. -0.8 [I]); nothing for pub_interior.
+   * Gates: byte-for-byte compare of the merged draw items / ref lists against the serial path on rolling passes, the side-effect digest (touch order), GPU-AV first run, 680M fps.
+5. **Pass-level reuse of unchanged passes** (item 3, with WS19's generations revived).
+   * L, medium risk (GPU addresses): -0.05 / -0.15 small.
+   * Only after 2: the reuse needs the same change knowledge the observers need.
+6. Small engineering: exact touch dedupe (4), material poll refresh on a worker (6), async statistics (11), copies / arenas (12). S each, -0.01 .. -0.04 each.
+7. RT rows on a worker / lagged TLAS (9): M, both modes, after F8 is decided (F8 removes it instead).
+
+**Never build:**
+* the persistent visible set as an exact cull (14.33)
+* lagged / GPU-derived LRU touches or residency for small scenes (not exact, no gain)
+* skipping the request's stamp / illumination / LOD side effects (Game.dll reads the stamp; 16.3)
+* skipping the particle render slot's `OnProcess` / depth sort
+* detours of tiny getters (`WasVisibleLastFrame` 0x6715e0, `GetEntityFlags` 0x852a0)
+* per-op worker fork / join for small passes
+* the main extract on a worker beside the shadow extracts (shared dedupe counter)
+* F10-4 before every class is owned
+
+**Is the small-scene gap worth XL work? No.**
+* The gap is +0.06 / +0.21 ms at ~500 - 1,000 fps (pub_interior 0.96 against 1.17 ms is ~1,040 against ~850 fps CPU-bound). Both scenes are GPU-bound or at parity in Full (16.6), so closing the CPU gap alone does not raise their frame rate.
+* What closes it most cheaply is not owning more bookkeeping (the owned per-op path is already cheaper than Wrapper's engine path) but the fixed Full-only items: light collect on a worker (S), observers by event (M), and the effect units at the graph level (L, already on the F13 roadmap).
+* Multithreading is the right next big lever, but for the big scenes, where it can take -0.5 .. -0.8 ms of the owned passes. Where Full is already ahead it widens the lead; in the small scenes it only helps through the independent fixed items (light collect, RT rows, statistics).
