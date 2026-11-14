@@ -68,6 +68,7 @@ ClusterStore::Entry* ClusterStore::request(const Key& key, std::uint64_t ibId, s
     e->srcHash = srcHash;
     entries_[key] = e;
     byId_[e->id] = e.get();
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
     ++pending_;
     ++stats_.requested;
     {
@@ -91,6 +92,7 @@ void ClusterStore::workerMain() {
         }
         if (!e->dead.load(std::memory_order_acquire)) buildOne(*e);
         else e->state.store(State::Failed, std::memory_order_release);
+        serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
     }
 }
 
@@ -130,6 +132,7 @@ void ClusterStore::buildOne(Entry& e) {
     std::vector<float>().swap(e.pos);
     if (!ok) e.result = {};
     e.state.store(ok ? State::Built : State::Failed, std::memory_order_release);
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
 }
 
 std::uint32_t ClusterStore::allocRows(std::uint32_t n) {
@@ -186,6 +189,7 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
         e.why = why;
         e.result = {};
         e.state.store(State::Failed, std::memory_order_release);
+        serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
         if (!e.accounted) --pending_;
         e.accounted = true;
         return false;
@@ -299,6 +303,7 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
     e.result.perm.clear();
     e.result.perm.shrink_to_fit();
     e.state.store(State::Ready, std::memory_order_release);
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
     if (!e.accounted) --pending_;
     e.accounted = true;
     epoch_.fetch_add(1, std::memory_order_release);
@@ -325,6 +330,7 @@ const ClusterRow* ClusterStore::rowsAt(std::uint32_t first, std::uint32_t count)
 void ClusterStore::releaseEntry(d3d9::Device* dev, Entry& e) {
     e.dead.store(true, std::memory_order_release);
     byId_.erase(e.id);
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
     const State s = e.state.load(std::memory_order_acquire);
     if (!e.accounted) --pending_;
     e.accounted = true;
@@ -336,6 +342,7 @@ void ClusterStore::releaseEntry(d3d9::Device* dev, Entry& e) {
         ++stats_.freed;
     }
     e.state.store(State::Failed, std::memory_order_release);
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
 }
 
 void ClusterStore::bufferChanged(std::uint64_t ibId) {
@@ -436,6 +443,7 @@ void ClusterStore::destroy(d3d9::Device* dev) {
     for (auto& kv : entries_) releaseEntry(dev, *kv.second);
     entries_.clear();
     byId_.clear();
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
     for (Check& c : checks_) c = Check{};
     table_.reset();
     tableFailed_ = false;

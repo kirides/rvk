@@ -106,6 +106,8 @@ public:
     std::uint64_t epoch() const { return epoch_; }
     // a retained draw / op record that was captured while entry `id` was Pending (`used` false) or drew with its copy (`used` true) asks whether that is still so; it is
     // remade when not (the build settled, or the entry is gone: its copy was freed / the setting went off) (render thread)
+    // WS19 (frame-ownership.md 14.61): moves with every entry state change / entry added / removed: a stale() answer stays valid while it does not move
+    std::uint64_t stateSerial() const { return serial_.load(std::memory_order_acquire); }
     bool stale(std::uint64_t id, bool used) const {
         const auto it = byId_.find(id);
         if (it == byId_.end()) return true;
@@ -152,6 +154,7 @@ private:
     std::atomic<bool> goneAny_{false};
     std::unordered_map<Key, std::shared_ptr<Entry>, ClusterKeyHash> entries_;
     std::unordered_map<std::uint64_t, Entry*> byId_;
+    std::atomic<std::uint64_t> serial_{0};  // WS19 (stateSerial)
     std::uint64_t nextId_ = 1;
     std::atomic<std::uint64_t> epoch_{1};
     std::uint32_t pending_ = 0;

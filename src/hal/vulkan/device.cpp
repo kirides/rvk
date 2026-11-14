@@ -14,6 +14,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/ws19_small.h"
 #include "api/capture.h"
 #include "core/caps.h"
 #include "core/crash_dump.h"
@@ -894,7 +895,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
                                                             return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
                                                         }});
-        if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
+        if (!matPack_) {
+            dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
+            // (WS19, frame-ownership.md 14.61: no pack = the answer never changes: a constant stamp lets retained packets / owned draws keep their word without a lookup per
+            // draw and frame; without a stamp the stamped state never held and every owned draw's signature called the provider)
+            if (!ws19SmallOff()) dev_.setPackStamp([]() -> std::uint32_t { return 0u; });
+        }
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
         lightTable_->setRtScene(rtScene_.get());
         for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingOccupancy, rs.lightingClusterBuild, rs.lightingFullLit, rs.lightingShadows, rs.lightingShadowQuality, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {

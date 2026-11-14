@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 
+#include "core/ws19_small.h"
 #include "d3d9/device.h"
 #include "gpuscene/bone_table.h"
 #include "core/cluster_cull.h"
@@ -469,7 +470,7 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
     if (opaqueObserver) {
         for (DrawReplacer* r : replacers_) {
             if (!r->wantsOpaque()) continue;
-            if (!loaded) {
+            if (!loaded && (ws19SmallOff() || r->opaqueReadsRegisters(q))) {  // (WS19: the water's floor learning reads the query's object rows)
                 loadOwnedRegisters(ow);
                 loaded = true;
             }

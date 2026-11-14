@@ -258,6 +258,7 @@ struct OpRecord {
     // scene forms were pending, a module / variant moved since): the op's late composition remakes the record (recEnter), as a check frame's refused derivation
     // would. Without it a player (native.owned_check = 0: no check frames) kept such records for the whole session and composed their ops late every frame
     mutable bool stale = false;
+    mutable std::uint64_t clusterOkSerial = ~0ull;  // WS19: ClusterStore::stateSerial when no draw of the record was stale (recLiveWhy)
     std::uint64_t lightEpoch = 0;
     std::vector<const void*> deps;
     std::vector<std::pair<const void*, std::uint64_t>> shaders;
