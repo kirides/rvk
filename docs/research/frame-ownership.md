@@ -4820,3 +4820,56 @@ matched, TLAS check frames 15 (3,660 instances) differing 0, picture check FAILE
 **Left:** the solid pass (the lighting entries need `ensureSlot`'s per-frame poll of each illumination object, the lighting records follow it: no layout reuse there), `treePlan`'s engine reads (2 - 3 per
 instance, no engine event to follow), `treeTemplate` per template and pass (the draw signature reads textures / bindings / modules), the leaf-card jobs of animated trees (per frame by nature). The layout reuse
 and the covers only pay while the view and the trees hold still (all four perf-ab scenes do); a walking player changes rows and sets every frame.
+
+### 14.55 WS13: the fixed per-frame costs of small scenes (2026-11-14, branch `worktree-agent-a2f46f4d0929a2678` on main b9bdd67; no new setting; overlay command `debug lightskip 0|1`, env `RVK_LIGHTS_SKIP_OFF=1`)
+
+**Question.** After 14.54 Full is below Wrapper at hold (-0.58 ms) and jungle (-0.77) but still +0.33 ms at pub_interior and harbour_docks: what of the fixed per-frame cost can go, exactly?
+
+**Profile (before; `-CpuProfile`, 2 sessions per scene and mode, alternating, shared copy; the profile percentages are share x the frame interval, so each log is normalised to its own perf line's engine+HAL CPU: +-30 %,
+single windows jump with other agents' games; the first Full pub_interior session ran 2.1 ms CPU under load and was dropped).** Full-only items (ms per frame, pub_interior / harbour_docks; Wrapper's counterparts
+are the draws these replace: Wrapper `drawIndexedPrimitive` + `prepareDraw` 0.29 + 0.21 at pub, `detourExecuteEffect` 0.17 / 0.22):
+`EffectOps::effectBegin` .265 / .298 (incl. `composeEffect` .110 / .123, `issueLean` .094 / .106, `drawComposed` .061 / .075, `applyDevice` .024),
+`StaticOps::opEnter` (the owned hand-over: `FrameTap::passBegin` .107 / .434, `ownedPass` .080 / .255, `issue` .068 / .223, `ownedDrawOpPersistent` .036 / .138, `orderedPlace` - / .081, `beginView` .024 / .080, `compactOwned` .011 / .067) .175 / .545,
+`LightTable::record` .093 / .104 (`lights::collect` .045 / .044, `readStaticLight` .021), `decalsBegin` - / .151 (`composeDecals` .076), `composeFx` .044 / .102, `composeParticle` .027 / .068, `OwnPost::runGroup` .032,
+`operator new` / `RtlAllocateHeap` +.013 / +.073, the vegetation / tree passes at harbour .088 / .085 (`vegPass`, `treePass`). Self-time hot lines inside the effect units: the 10 KB `*slot = *draws_[0]` own-post group copy (effect_ops.cpp:691), `captureDevice`'s block copies, `graphOutput` / `outputCount` (.4 % together).
+At pub_interior `LightTable::record` self + `collect` is the one block that works on identical input every frame (a still camera, static lights): the table + upload rebuilt to the same 64 KB.
+
+**Built (all exact; every cache heals on the normal path, none depends on check frames).**
+1. **Light table: an unchanged build keeps its table and its upload** (`LightTable::record`). The part after `collect` (near count, drawn-light merge, truncation to 1,024, lamp-shadow ids, the GPU table, change detection, known grid, upload) is a pure function of the
+   collected lights, the camera position, the drawn lights (set + colours, hashed under their mutex: the colours alternate with the draws that note them, so a generation counter never matched), the lamp-shadow mode and the collect radius. `collect` itself still re-reads every static light
+   every frame (it IS the change detector: a light's colour / range can change in place) and the signature hashes its output (~3 us). A build with the last full build's signature keeps `prev_` + the known grid + the registry state (the registry flags are re-asserted from the kept values: another view's early return flips
+   `registryNoteComplete` in between) and the per-slot upload serial (`uploadSerial_`): the upload of a table the slot already holds is skipped, also after a full build whose bytes equal the last table's (`buildSerial_` counts byte changes only). The cluster dispatch still runs every frame (view dependent).
+   Healing: every 64th build and every `gpuscene::periodic(frame, 10)` check frame (not with `owned_check = 0`) runs in full and, when its signature equals the kept one, compares its table with the kept table (`DIFFERING`); a changed signature simply rebuilds (nothing can stay stale). `RVK_LIGHTS_VERIFY=1` (the uncached reference every 8th build) runs on top.
+   rvk.log (5 s): `enh: lights: unchanged builds (5 s): skipped N, uploads skipped N, full builds with an unchanged signature compared N DIFFERING 0`.
+2. **Prefetch in `lights::collect`**: every cached static light's two cache lines are requested before the guarded reads (the lights are separate heap objects). Same values; no measurable change in `collect` (0.085 -> 0.077 - 0.085 ms), kept as harmless.
+3. **Decal pass scratch** (`composeDecals`): the 360 KB vertex / 20 KB index scratch was value-initialised every pass (`std::_Zero_range` 0.4 % of the harbour profile) and the queue / records / source vectors were allocated every pass: they are now `thread_local` and kept (nothing reads a byte `build()` did not write). `composeDecals` 48 -> 35 - 37 us per pass at harbour_docks.
+
+**Exactness evidence** (private copy `risen-test-vk-ws13`, instance 13, lock `rvk-ws13`, test baseline `owned_check = 10`, Full, `RVK_LIGHTS_VERIFY=1`, `freeze_wait = 1500`): pub_interior / harbour_docks / jungle: reference compare 0 DIFFERING (283 / 333 / 351 builds compared in the last window);
+`unchanged builds`: pub_interior skipped 856 in a 5 s window, 158 full builds with an unchanged signature compared, DIFFERING 0; harbour_docks 727 / 211 / 0; jungle 474 / 88 / 0 (a walking scene changes the signature: only the upload skip applies). `native.picture_check=true`: 0 FAILED windows in all three
+(jungle `ok`, worst view 0.03 %; pub_interior and harbour_docks windows were `UNRELIABLE (the scene moves)` with and without the change: `RVK_LIGHTS_SKIP_OFF=1` gives the same verdicts, so these two spots give no verdict at all here). rvk_tests 356 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors (no GPU-address code touched: the upload buffer and the push block are the old ones).
+Not run: `native.own_post=compare` / lean check counters (nothing in the post path or the effect units changed), menus / loading screens beyond the runs' own start.
+
+**Effect of the changes** (in-session A/B, `perf-ab.ps1 -Key lightskip -A 0 -B 1 -CommandTemplate 'debug lightskip {0}' -Scenes pub_interior,harbour_docks -Pairs 5 -Mode full -PlayerDefaults`, CPU engine+HAL; the decal scratch and the prefetch are in both arms):
+pub_interior 1.264 -> 1.200 ms (**-0.064**, z -6.7), harbour_docks 2.546 -> 2.446 (-0.100, z -0.4: sd 0.28 / 0.16, shared machine). `LightTable` timers per build at pub_interior: near merge + truncate + shadow ids + table + upload 0.095 -> ~0.012 ms (collect 0.085 stays).
+
+**perf-ab Full vs Wrapper (final, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults -Pairs 3`, shared copy + lock, RisenTest.exe, CPU engine+HAL mean +- sd of 3 windows; 14.54's delta in brackets):**
+
+| scene | Wrapper | Full | delta |
+|---|---|---|---|
+| pub_interior | 0.997 +- 0.021 | 1.247 +- 0.074 | **+0.25** (+0.33) |
+| harbour_docks | 2.010 +- 0.035 | 2.273 +- 0.012 | **+0.26** (+0.33) |
+| hold | 6.700 +- 0.017 | 5.477 +- 0.038 | **-1.22** (-0.58) |
+| jungle | 6.857 +- 0.042 | 6.100 +- 0.010 | **-0.76** (-0.77) |
+
+GPU frame ms (Wrapper -> Full): pub_interior 0.50 -> 1.18, harbour_docks 2.22 -> 2.44, hold 3.85 -> 2.87, jungle 3.91 -> 3.28. Hold / jungle stay below Wrapper; the small scenes still pay +0.25 ms (the goal is NOT reached there).
+
+**Not built (and why).**
+* **A dedicated post-quad draw path** (skip `prepareDraw` for the fixed full-screen units) and **render-pass merging of consecutive units on one target**: `prepareDraw` (draw.cpp 1059 - ~1900) is the one place that decides pipeline, variants, observers, taps, tags and the packet for every draw; a bypass copies its decisions for
+  the unit draws and has to stay equal to it for all of them (own-post ports, mask / SSAO chain, PSSM, GUI). 14.47's measurement says the unit cost is spread over ~35 small items of 10.7 us; the profile above agrees (no line over 0.3 %). It needs its own design with a draw-level compare
+  (`own_post=compare` compares images, not packets); not started. The least invasive form would be an `EffectDraw`-keyed packet memo (state hash of the unit's draw -> the packet + pipeline, compared on check frames).
+* **Decals: per-record `DrawDesc`s kept across frames.** `nonOpPasses` writes the record's lighting / illumination entry / material slot per frame, so keeping them needs the retained-op stamps of the packet cache for a non-op group (14.52 called it a design of its own); not started. What remains of `composeDecals` is ~1.1 us per decal (engine reads, key, `nonOpPasses`).
+* **Skipping `collect`'s re-read** of the static lights (0.085 ms at pub, 0.045 at harbour; the biggest remaining light item): a light's colour / intensity / range can change in place, the only exact detector is reading it; the cache lines are not the cost (prefetch changed nothing), the guarded copy + parse per light is.
+* The own-post group copy (`*slot = *draws_[0]`, 10 KB per unit, ~0.01 ms per frame) and `graphOutput` / `outputCount` (~0.012 ms): at the bar of this item, not touched.
+* The operator-new share of Full at harbour (+0.07 ms): no single owner in the `site2` call-site view (spread over the owned passes' vectors).
+
+**Left for the next item:** the owned hand-over (`StaticOps::opEnter` .175 / .545 ms: passBegin + ownedPass + issue), the effect units' draw path, `composeFx` / `composeParticle` / `decalsBegin` as per-frame passes over unchanged inputs.
