@@ -126,6 +126,7 @@ struct Op {
     OpKind kind = OpKind::Unknown;
     List list = List::ZPass;
     bool emptySlot = false;          // the slot Execute calls for this list is an empty function
+    bool lazy = false;               // WS6: a taken Mesh op whose sub-mesh / material / shader / state were not read (FrameTap::resolveLate fills them when the op is composed late)
     bool lean = false;               // O2b: drawn by the renderer, the engine's slot code skipped (native.lean): no engine draw
     std::uint32_t index = 0;         // position in its list (execution order)
     // attribution (Attribution)

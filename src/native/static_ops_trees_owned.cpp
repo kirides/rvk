@@ -798,7 +798,7 @@ void StaticOps::treeTake(List list, std::vector<Op>&& ops, std::uint64_t nsTake)
     if (!tro_) return;
     tro_->win().opsTaken += ops.size();
     tro_->win().takeNs += nsTake;
-    tro_->taken[list == List::Solid ? 1 : 0] = std::move(ops);
+    tro_->taken[list == List::Solid ? 1 : 0].swap(ops);
 }
 
 bool StaticOps::treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass) {

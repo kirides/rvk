@@ -18,6 +18,7 @@
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/owned_observe.h"
+#include "native/owned_timers.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -188,8 +189,12 @@ bool FrameTap::verifySortSites() {
 }
 
 FrameTap::VtableInfo& FrameTap::vtableInfo(const void* vtable) {
+    // WS6: a direct-mapped cache in front of the hash map (a view meets a handful of context classes over thousands of ops; unordered_map nodes are stable)
+    const std::size_t slot = (reinterpret_cast<std::uintptr_t>(vtable) >> 4) & (kVtCache - 1);
+    if (vtCache_[slot].first == vtable && vtCache_[slot].second != nullptr) return *vtCache_[slot].second;
     auto [it, inserted] = vtables_.try_emplace(vtable);
     VtableInfo& v = it->second;
+    vtCache_[slot] = {vtable, &v};
     if (!inserted) return v;
     const auto& s = engine::sym();
     const std::pair<void*, OpKind> exported[] = {
@@ -444,7 +449,19 @@ static std::int32_t vegetationState(const Op& op, void* (*vegAdmin)()) {
     return bits;
 }
 
-void FrameTap::resolve(Op& op) {
+void FrameTap::setStaticOps(StaticOps* ops) {
+    statics_ = ops;
+    if (ops != nullptr) ops->setOpResolver(&FrameTap::resolveLate, this);
+}
+
+void FrameTap::resolveLate(void* self, Op& op) {
+    static_cast<FrameTap*>(self)->resolve(op, false);
+}
+
+// deferHeavy (the ops compactOwned takes): a Mesh op's state and its sub-mesh / material / shader chain are not read (6 dependent loads of engine memory per op);
+// a taken op that is composed late completes them first (StaticOps::composeLate -> resolveLate)
+void FrameTap::resolve(Op& op, bool deferHeavy) {
+    op.lazy = false;
     const void* ctx = op.raw.context;
     if (ctx == nullptr || !readAt(ctx, 0, op.vtable) || op.vtable == nullptr) return;
     readAt(ctx, 0x10, op.entity);
@@ -465,7 +482,13 @@ void FrameTap::resolve(Op& op) {
     if (op.kind == OpKind::Mesh || op.kind == OpKind::Animation) {
         std::uint32_t flags = 0;
         if (readAt(op.entity, 0x28, flags)) op.overlay = flags & 0xe00000u;
-        if (op.kind == OpKind::Mesh) op.state = meshState(ctx, op.raw.desc);
+        if (op.kind == OpKind::Mesh) {
+            if (deferHeavy) {
+                op.lazy = true;
+                return;
+            }
+            op.state = meshState(ctx, op.raw.desc);
+        }
     } else if (op.kind == OpKind::SpeedTreeBB) {
         // the billboard mesh (eCSpeedTreeBBMesh_PS +0x30 = its eCMeshResource2): eCMeshResource2::RenderZPass / Render need it
         // cached (eCResource2 +0x38 == 3)
@@ -657,13 +680,13 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
         if (kListSorted[l] && count > 1) qsort_(raw_.data(), raw_.size(), sizeof(RawOp), compare_[l]);
         desc_.liveData[l] = data;
         desc_.count[l] = static_cast<std::uint32_t>(count);
+        desc_.ops.reserve(desc_.ops.size() + desc_.count[l]);
         for (std::uint32_t i = 0; i < desc_.count[l]; ++i) {
-            Op op;
+            Op& op = desc_.ops.emplace_back();  // (WS6: built in place, no 250-byte copy)
             op.raw = raw_[i];
             op.list = static_cast<List>(l);
             op.index = i;
             resolve(op);
-            desc_.ops.push_back(op);
         }
     }
     // the refraction copy Execute makes after the +0x1530 list: into the render-target desc's image desc +0 (API texture +0x60)
@@ -682,27 +705,30 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
 // (the others keep their relative order, the count shrinks) and handed to StaticOps sorted by the engine's comparator; `raw_` / `count` become the kept list,
 // so the snapshot, the sort copy and the attribution describe exactly what Execute will run
 bool FrameTap::compactOwned(void* db, List list, const std::uint8_t*& data, std::int32_t& count) {
-    const auto t0 = std::chrono::steady_clock::now();
+    // WS6: one selection pass (a selected op is an index + its kind until it is sorted), the engine's array rewritten in place, each class (mesh / actor, trees,
+    // vegetation) sorted by the engine's comparator (ties by raw position = the stable sort of the whole list followed by the stable partitions), the Ops built
+    // once in their final vectors; clock reads only while the stage timers are on
+    const auto t0 = tnow();
     const bool measure = f2c4::enabled();
     ownedMark_.assign(raw_.size(), 0);
-    ownedOps_.clear();
+    sel_.clear();
     for (std::size_t i = 0; i < raw_.size(); ++i) {
-        Op op;
-        op.raw = raw_[i];
-        op.list = list;
         const void* vtable = nullptr;
-        if (op.raw.context == nullptr || !readAt(op.raw.context, 0, vtable) || vtable == nullptr) continue;
+        if (raw_[i].context == nullptr || !readAt(raw_[i].context, 0, vtable) || vtable == nullptr) continue;
         const OpKind vk = vtableInfo(vtable).kind;
         if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->treeKindOk(desc_.kind)) && !(vk == OpKind::Animation && statics_->ownedActorsOn()) &&
             !(vk == OpKind::Vegetation && statics_->vegKindOk(desc_.kind))) continue;
+        Op op;  // (only the candidates: the select functions read it)
+        op.raw = raw_[i];
+        op.list = list;
         op.vtable = vtable;
         op.kind = vk;
         if (vk == OpKind::Mesh || vk == OpKind::Animation ? !statics_->ownedSelect(op) : vk == OpKind::Vegetation ? !statics_->vegSelect(op) : !statics_->treeSelect(op)) continue;
         ownedMark_[i] = 1;
-        ownedOps_.push_back(op);
+        sel_.push_back({static_cast<std::uint32_t>(i), vk});
     }
-    const auto tSelect = std::chrono::steady_clock::now();
-    if (ownedOps_.empty()) return false;
+    const auto tSelect = tnow();
+    if (sel_.empty()) return false;
     ownedKept_.clear();
     for (std::size_t i = 0; i < raw_.size(); ++i) {
         if (ownedMark_[i] == 0) ownedKept_.push_back(raw_[i]);
@@ -715,54 +741,55 @@ bool FrameTap::compactOwned(void* db, List list, const std::uint8_t*& data, std:
         std::int32_t capacity = 0;
         readAt(db, off + 0x14, capacity);
         if (kept > capacity || (data == nullptr && kept > 0)) {
-            if (!f10req::listSetCount(db, static_cast<std::uint8_t>(list), kept) || !readAt(db, off + 8, data) || data == nullptr) {
-                ownedOps_.clear();
-                return false;
-            }
+            if (!f10req::listSetCount(db, static_cast<std::uint8_t>(list), kept) || !readAt(db, off + 8, data) || data == nullptr) return false;
         }
     }
-    if (!ownedKept_.empty() && !engine::safeWrite(const_cast<std::uint8_t*>(data), ownedKept_.data(), ownedKept_.size() * sizeof(RawOp))) {
-        ownedOps_.clear();
-        return false;
-    }
+    if (!ownedKept_.empty() && !engine::safeWrite(const_cast<std::uint8_t*>(data), ownedKept_.data(), ownedKept_.size() * sizeof(RawOp))) return false;
     if (!engine::safeWrite(static_cast<std::uint8_t*>(db) + kListOffset[static_cast<std::size_t>(list)] + 0x10, &kept, sizeof(kept))) {
         // (the array was rewritten but its count could not be: put the original back when it fits)
         std::int32_t capacity = 0;
         readAt(db, kListOffset[static_cast<std::size_t>(list)] + 0x14, capacity);
         if (raw_.size() <= static_cast<std::size_t>(std::max(capacity, 0))) engine::safeWrite(const_cast<std::uint8_t*>(data), raw_.data(), raw_.size() * sizeof(RawOp));
-        ownedOps_.clear();
         return false;
     }
-    const auto tRewrite = std::chrono::steady_clock::now();
-    // the owned ops in the engine's sort order of their list
+    const auto tRewrite = tnow();
+    // the owned ops in the engine's sort order of their list, per class (F4-3: the tree ops go to their own pass, F7-2 the vegetation ops to theirs)
     const CompareFn cmp = compare_[static_cast<std::size_t>(list)];
-    std::stable_sort(ownedOps_.begin(), ownedOps_.end(), [cmp](const Op& a, const Op& b) { return cmp(&a.raw, &b.raw) < 0; });
-    const auto tSort = std::chrono::steady_clock::now();
-    for (Op& op : ownedOps_) {
-        resolve(op);  // (the sub-mesh / material / shader the late composition of a refused op needs)
-        op.index = 0;
-    }
-    // F4-3: the tree ops go to their own pass (StaticOps::treePass)
+    const RawOp* rawp = raw_.data();
+    auto before = [cmp, rawp](const Sel& a, const Sel& b) {
+        const int c = cmp(&rawp[a.i], &rawp[b.i]);
+        return c < 0 || (c == 0 && a.i < b.i);
+    };
+    // classes: 0 mesh / actor, 1 trees, 2 vegetation (sel_ is in raw order: a stable counting partition by class)
+    auto cls = [](OpKind k) -> std::size_t { return k == OpKind::SpeedTree ? 1 : k == OpKind::Vegetation ? 2 : 0; };
+    std::array<std::size_t, 4> begin{};
+    for (const Sel& e : sel_) ++begin[cls(e.kind) + 1];
+    for (std::size_t c = 1; c < 4; ++c) begin[c] += begin[c - 1];
+    selSorted_.resize(sel_.size());
     {
-        const auto mid = std::stable_partition(ownedOps_.begin(), ownedOps_.end(), [](const Op& o) { return o.kind != OpKind::SpeedTree; });
-        if (mid != ownedOps_.end()) {
-            std::vector<Op> trees(std::make_move_iterator(mid), std::make_move_iterator(ownedOps_.end()));
-            ownedOps_.erase(mid, ownedOps_.end());
-            statics_->treeTake(list, std::move(trees), 0);
-        }
+        std::array<std::size_t, 3> at{begin[0], begin[1], begin[2]};
+        for (const Sel& e : sel_) selSorted_[at[cls(e.kind)]++] = e;
     }
-    // F7-2: the vegetation ops go to theirs (StaticOps::vegPass)
-    {
-        const auto mid = std::stable_partition(ownedOps_.begin(), ownedOps_.end(), [](const Op& o) { return o.kind != OpKind::Vegetation; });
-        if (mid != ownedOps_.end()) {
-            std::vector<Op> veg(std::make_move_iterator(mid), std::make_move_iterator(ownedOps_.end()));
-            ownedOps_.erase(mid, ownedOps_.end());
-            statics_->vegTake(list, std::move(veg), 0);
+    for (std::size_t c = 0; c < 3; ++c) {
+        std::sort(selSorted_.begin() + static_cast<std::ptrdiff_t>(begin[c]), selSorted_.begin() + static_cast<std::ptrdiff_t>(begin[c + 1]), before);
+    }
+    const auto tSort = tnow();
+    const std::array<std::vector<Op>*, 3> out{&ownedOps_, &treeOps_, &vegOps_};
+    for (std::size_t c = 0; c < 3; ++c) {
+        std::vector<Op>& v = *out[c];
+        v.clear();
+        v.reserve(begin[c + 1] - begin[c]);
+        for (std::size_t k = begin[c]; k < begin[c + 1]; ++k) {
+            Op& op = v.emplace_back();
+            op.raw = raw_[selSorted_[k].i];
+            op.list = list;
+            resolve(op, true);  // (the sub-mesh / material / shader the late composition of a refused op needs: read then, resolveLate)
+            op.index = 0;
         }
     }
     raw_.swap(ownedKept_);
     count = kept;
-    const auto tEnd = std::chrono::steady_clock::now();
+    const auto tEnd = tnow();
     if (measure) {
         // F2c-4-0 item 7: where the compaction's time goes (the select loop = the stamp / record checks + the vtable reads of every op of the list)
         f2c4::Counters& m = f2c4::counters();
@@ -773,8 +800,13 @@ bool FrameTap::compactOwned(void* db, List list, const std::uint8_t*& data, std:
         m.compactResolveNs += f2c4::nsBetween(tSort, tEnd);
         m.compactTotalNs += f2c4::nsBetween(t0, tEnd);
     }
+    // (the takers swap: the vectors they held come back, so no frame allocates the op lists again)
+    if (!treeOps_.empty()) statics_->treeTake(list, std::move(treeOps_), 0);
+    if (!vegOps_.empty()) statics_->vegTake(list, std::move(vegOps_), 0);
     statics_->ownedTake(list, std::move(ownedOps_), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tEnd - t0).count()));
     ownedOps_.clear();
+    treeOps_.clear();
+    vegOps_.clear();
     return true;
 }
 
