@@ -14,6 +14,7 @@ struct RtShadowParams {
     uint4 mode;   // x frame index, y history valid (0 / 1), z debug, w 1 = opaque-first shadow rays (A/B), 0 = one query
     float4 sun;   // xyz unit vector towards the sun, w tan of the sun cone's half angle
     float4 range; // x range (view depth, world units), y ray reach, z origin bias (units), w spatial filter strength
+    uint4 aux;    // the soft shadow passes (shadow_soft_*.comp): xy the ShadowBlock address (shadow_block.hlsli), zw 0
 };
 
 struct RtShadowPush {

@@ -71,7 +71,7 @@ TEST(shadows_rt_mode_ranges) {
     CHECK(enh::RtShadows::modeRangeMetres(0) == 0.0f);
     CHECK(enh::RtShadows::modeRangeMetres(1) == 15.0f);
     CHECK(enh::RtShadows::modeRangeMetres(2) == 35.0f);
-    CHECK(sizeof(enh::RtShadowParams) == 80);
+    CHECK(sizeof(enh::RtShadowParams) == 96);
 }
 
 // ---- SDSM fit math (shadows.md 8.9) ----
@@ -226,4 +226,26 @@ TEST(sdsm_snap_and_margin) {
     const float turn[9] = {0, 0, 1, 0, 1, 0, -1, 0, 0};
     CHECK(sm::sdsm::axesAngle(id, id) < 1e-3f);
     CHECK(std::fabs(sm::sdsm::axesAngle(id, turn) - 1.5707963f) < 1e-3f);
+}
+
+TEST(shadows_soft_params) {
+    // the sun's cone: penumbra width per unit of blocker distance = 2 tan(half angle); a 0.6 degree half angle = 0.0209
+    const float texel[3] = {1.2f, 2.6f, 8.9f};  // the enhanced cascades' world texels (shadows.md 4)
+    const enh::SoftParams p = enh::softParams(0.6f, texel);
+    CHECK(std::fabs(p.scale - 2.0f * std::tan(0.6f * 3.14159265f / 180.0f)) < 1e-6f);
+    CHECK(std::fabs(p.scale - 0.02094f) < 1e-4f);
+    // a 15 m caster throws a 0.5 * 0.0209 * 1500 = 15.7 units half penumbra: 13 texels at cascade 0, 6 at cascade 1, the minimum at cascade 2
+    CHECK(std::fabs(p.searchRadius[0] - 13.09f) < 0.1f);
+    CHECK(std::fabs(p.searchRadius[1] - 6.04f) < 0.1f);
+    CHECK(p.searchRadius[2] == enh::kSoftSearchMin);
+    // the radius is clamped (a huge sun, a tiny texel) and grows with the sun's size
+    const float fine[3] = {0.05f, 0.05f, 0.05f};
+    for (float r : enh::softParams(2.0f, fine).searchRadius) CHECK(r == enh::kSoftSearchMax);
+    CHECK(enh::softParams(1.0f, texel).searchRadius[1] > enh::softParams(0.3f, texel).searchRadius[1]);
+    // a zero or negative texel size does not divide by zero
+    const float zero[3] = {0.0f, -1.0f, 0.0f};
+    for (float r : enh::softParams(0.6f, zero).searchRadius) CHECK(std::isfinite(r) && r <= enh::kSoftSearchMax);
+    // the half angle is clamped to a sane range
+    CHECK(enh::softParams(-5.0f, texel).scale > 0.0f);
+    CHECK(enh::softParams(90.0f, texel).scale < 0.4f);
 }
