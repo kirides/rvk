@@ -41,6 +41,7 @@ param(
     [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [string]$Exe = 'RisenTest.exe',
     [switch]$PlayerDefaults,
+    [switch]$Validation,
     [string]$QuickSave = 'C:\Users\johnh\AppData\Local\Risen\SaveGames\Risen_Save_0005.save',
     # the default copy + lock = timing runs (CLAUDE.md: perf timing uses the shared lock); -LockName for a private copy
     [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
@@ -90,6 +91,7 @@ function Invoke-Session([string]$Scene, [string]$Tag, [string[]]$Settings, [stri
     if ($Api -ne 'vulkan') { $h.Api = $Api }
     if ($Environment.Count -gt 0) { $h.Environment = $Environment }
     if ($PlayerDefaults) { $h.PlayerDefaults = $true }
+    if ($Validation) { $h.Validation = $true }
     if ($Scene -eq 'hold') {
         $h.Mods = 'rvk_perfsave'; $h.Scenario = 'rvk_perfsave'; $h.QuickSave = $QuickSave
         $h.Param = @('hold=240')   # (ended by the schedule's quit)
