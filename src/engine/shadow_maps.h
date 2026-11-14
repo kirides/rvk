@@ -123,6 +123,8 @@ float margin(float translation, float angle, float farZ, float fixedCm, float re
 float axesAngle(const float a[9], const float b[9]);
 // The whole fit of one cascade from plain inputs (no engine access, no globals: written to be ported 1:1 to a compute shader; shadows.md 8.9): the reduction, the
 // slice, the current light view's inverse and camera, the sphere box (fallback and cap) and the per-axis extent state. False = keep the sphere's box (out.fail)
+inline constexpr float kMaxSunAngle = 0.05f;  // rad (~3 degrees) of light-axis turn between the reduction and the fit that the margin absorbs; above: sphere
+inline constexpr float kSunReach = 1.5f;      // distance of the farthest visible point of a slice from the camera, in slice far ends (frustum corner)
 inline constexpr float kMinAspect = 0.5f;  // a box side is at least this fraction of the other (texels stay within 2:1)
 enum class FitFail : std::uint8_t { None, Sun, Fov, Motion, Empty };
 struct FitIn {
@@ -137,7 +139,7 @@ struct FitIn {
 struct FitOut {
     float lo[2]{}, hi[2]{};                    // the box's x / y
     FitFail fail = FitFail::None;
-    float margin = 0.0f, dp = 0.0f, angle = 0.0f;
+    float margin = 0.0f, dp = 0.0f, angle = 0.0f, sun = 0.0f;
 };
 bool fit(const FitIn& in, Axis ext[2], int calmFrames, FitOut& out);
 }  // namespace sdsm
