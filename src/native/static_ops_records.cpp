@@ -585,7 +585,10 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     // WS7 (frame-ownership.md 14.49): a record built while the draw's scene form was still being made (draws[k].scene false: the op is composed every frame, "not a scene
     // draw") is out of date as soon as the composition has the form: remade from this composition now, not at some later check frame
     static const bool ws7Off = GetEnvironmentVariableA("RVK_WS7_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour, remade at a check frame at best)
-    if (!ws7Off && !R.refused && !R.cur->actor && pkey != 0) {
+    // WS10: actor records too (an actor record built while its forms were pending - a cold shader cache - was "not a scene draw" for good with owned_check = 0: actors 0 % owned;
+    // RVK_WS10_BASELINE=1 keeps WS7's exclusion)
+    static const bool ws10ActorsOff = GetEnvironmentVariableA("RVK_WS10_BASELINE", nullptr, 0) != 0;
+    if (!ws7Off && !R.refused && (!R.cur->actor || !ws10ActorsOff) && pkey != 0) {
         const orec::DrawRec& cur = R.cur->draws[k];
         // the owned path's own tests of a retained draw (ownedDerive / deriveScene / orderedValid): a scene draw with its v2 pipeline, not made while a form was pending
         const auto ownable = [](const d3d9::Device::CachedDraw& c) {
@@ -605,7 +608,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     {
         static const bool ws10Off = GetEnvironmentVariableA("RVK_WS10_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour)
         constexpr std::uint64_t kWs10Gap = 20;
-        if (!ws10Off && !R.refused && R.cur->ownedRefused && !R.cur->actor) {
+        if (!ws10Off && !R.refused && R.cur->ownedRefused) {
             if (dev_.stats().frames - R.cur->builtFrame >= kWs10Gap) {
                 R.cur->ownedRefused = false;
                 R.refused = true;
