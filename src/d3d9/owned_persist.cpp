@@ -137,8 +137,8 @@ bool Device::ownedEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoc
 }
 
 std::uint64_t Device::ownedBucketKey(const CachedDraw& c, std::uint32_t viewSlot) const {
-    std::uint64_t h = hashVi(c.vi);
-    h = hmix(h, hashDyn(c.dyn));
+    std::uint64_t h = c.viHash;  // (WS11: = hashVi(c.vi), kept with the draw)
+    h = hmix(h, c.dynHash);
     h = hmix(h, static_cast<std::uint64_t>(c.scenePipeline2));
     h = hmix(h, c.packet.indexBuffer);
     h = hmix(h, c.packet.indexOffset);
@@ -148,7 +148,7 @@ std::uint64_t Device::ownedBucketKey(const CachedDraw& c, std::uint32_t viewSlot
 
 // S-4: the bucket of a pulled owned draw: no vertex input (the ref stream is the same for every item of a flush), the pulled pipeline, the state, the index binding
 std::uint64_t Device::ownedPullKey(const CachedDraw& c, std::uint32_t viewSlot) const {
-    std::uint64_t h = hmix(0x50554c4c50554c4cull, hashDyn(c.dyn));
+    std::uint64_t h = hmix(0x50554c4c50554c4cull, c.dynHash);  // (WS11: = hashDyn(c.dyn), kept with the draw: no walk over the cold dyn lines per pulled item)
     h = hmix(h, static_cast<std::uint64_t>(c.scenePipelinePull));
     h = hmix(h, c.packet.indexBuffer);
     h = hmix(h, c.packet.indexOffset);

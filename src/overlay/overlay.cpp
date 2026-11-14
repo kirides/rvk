@@ -450,6 +450,12 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         d3d9::pullViewMask().store(m);
         return ok(std::format("owned shadow views pulled mask {}", m));
     }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "treereuse") {
+        // frame-ownership.md 14.52 (WS11): the owned tree pass's reuse on / off inside one run (the z passes' kept layout, the RT scene's covers of tree runs)
+        if (w[2] != "0" && w[2] != "1") return fail("debug treereuse 0|1");
+        d3d9::treeReuse().store(w[2] == "1");
+        return ok(std::format("owned tree reuse {}", w[2] == "1" ? "on" : "off"));
+    }
     if (w[0] == "quit" && w.size() == 1) {
         // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs
         spdlog::info("overlay: [debug] command quit: terminating the process");

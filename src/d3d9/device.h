@@ -70,6 +70,9 @@ using rhi::kChunkPackets;
 // S-4 per view kind (frame-ownership.md 14.30): which owned shadow views draw vertex-pulled (bit 0 = the sun cascades, bit 1 = the terrain map + the point-light atlas cells);
 // a view with its bit clear keeps the input-assembler form (same clip position). Default 1 = the cascades pulled, the terrain map + atlas cells on the input assembler (perf-ab: atlas pass -0.006 .. -0.011 ms, 4 of 4 pairs); env RVK_PULL_VIEWS=<mask> at start, overlay command `debug pull <mask>`.
 std::atomic<std::uint32_t>& pullViewMask();
+// WS11 (frame-ownership.md 14.52): the owned tree pass's reuse (the z passes' kept layout, the observers' covers of no-op / unchanged tree runs); default on, `debug treereuse 0|1`
+// (overlay command) switches it inside one run for the A/B of perf-ab.ps1 (-CommandTemplate)
+std::atomic<bool>& treeReuse();
 
 class Device;
 
@@ -590,6 +593,10 @@ public:
     // F8-0 pre-filter, asked right after `observes` and before the query is built: true = the observer already holds everything observe() would
     // learn from this draw (a persistent table entry): the draw is not shown to it. Must be cheap and must not change device state.
     virtual bool coversDraw(const CoverQuery& /*draw*/) { return false; }
+    // WS11 (frame-ownership.md 14.52): an owned SpeedTree run of the main view's solid pass (`cd` = the template's retained draw, `rows[k]` = instance k's 16 floats c32 + 4 k of
+    // the run in list order, `count` instances) the observer already holds exactly as its last sighting of it left it: true = it has applied everything showing the run would have
+    // done (the instances refreshed) and the run is not shown. Asked after observes() / coversDraw(); must change nothing when it answers false.
+    virtual bool coversTreeRun(Device& /*device*/, const CoverQuery& /*draw*/, const void* /*cd*/, const float* const* /*rows*/, std::uint32_t /*count*/) { return false; }
     // F2c-3 (native.owned_static): what the observer reads of the draw's constant registers. An owned draw has no composed register file: `Material` = the
     // world rows (ReplaceQuery::objectRows) and the registers of the material / view / object windows (the device loads their CPU images before observe),
     // `All` (the default) = anything: owned draws are not made while such an observer is registered
@@ -1266,6 +1273,9 @@ public:
     // the rest by comparing the draw's description (shaders, declaration, streams, ranges, states, samplers) with the captured one.
     struct CachedDraw {
         bool valid = false;
+        // WS11: hashVi(vi) / hashDyn(dyn), made once when the draw is kept (fillCapture; vi / dyn never change afterwards): the bucket keys of the owned path read these
+        // instead of walking the 4 KiB of dyn / vi on every pass (ownedBucketKey, ownedPullKey, deriveScene)
+        std::uint64_t viHash = 0, dynHash = 0;
         DrawPacket packet;  // (vi / dyn point into a per-frame arena: the values are kept below and interned again at replay)
         VertexInputValues vi;
         DynamicStateValues dyn;
@@ -1593,6 +1603,12 @@ public:
     bool ownedTreeObserversOk(std::string* why = nullptr) const;  // (`why`: the first observer that gates, named)
     // at least one observer wants this template's draws (kind / phase), so ownedTreeObserve is to be called for its runs
     bool ownedTreeObserved(const CachedDraw& c) const;
+    // WS11: at least one observer must be SHOWN this run (it observes the kind / phase and does not cover the run: DrawObserver::coversDraw on the template's query with the device's
+    // draw tag as the caller set it). false = every observer declines or covers it: ownedTreeObserve would do nothing (it counts the run as shown and notes the frame)
+    // (`rows` = the run's instance rows, null = the observers' cover of whole runs (DrawObserver::coversTreeRun) is not asked)
+    bool ownedTreeRunWanted(const CachedDraw& c, const float* const* rows = nullptr, std::uint32_t count = 0);
+    std::uint64_t ownedTreeRunSerial() const { return treeRunSerial_; }  // one more per ownedTreeObserve call: a run's batches share it
+    void ownedTreeNoteObserved() { treeObservedFrame_ = frameValue(); }
     // F-VAR2: show the observers one owned vegetation batch (`ow` = the template's windows with the batch's lighting entry); returns the batches shown (0 or 1)
     std::uint32_t ownedVegObserve(const CachedDraw& c, const OwnedWindows& ow, std::uint32_t instances);
     // the observers' turn for one run of owned tree instances (`rows` = 16 floats per instance = VS c32 + 4 i .. c35 + 4 i; chunks of the engine's batch size): returns the number of
@@ -1600,6 +1616,7 @@ public:
     std::uint32_t ownedTreeObserve(const CachedDraw& c, const OwnedWindows& ow, Buffer* ramp, const float* rows, std::uint32_t count);
     std::uint64_t ownedTreeObservedFrame() const { return treeObservedFrame_; }
     std::uint64_t treeObservedFrame_ = 0;
+    std::uint64_t treeRunSerial_ = 0;
     std::uint64_t treeObserveCaptures = 0;  // capture requests an observer made for an owned tree draw (refused: 0 expected)
     rhi::RingAlloc allocOwnedRing(std::uint64_t bytes, std::uint64_t align) { return game_->allocRing(bytes, align); }
     struct TreeItem {

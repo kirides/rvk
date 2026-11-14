@@ -17,6 +17,11 @@
 
 namespace rvk::d3d9 {
 
+std::atomic<bool>& treeReuse() {
+    static std::atomic<bool> on{true};
+    return on;
+}
+
 std::uint64_t Device::treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok) {
     const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
     const std::size_t k = treeEnvIndex(solid, viewSlot);
@@ -116,9 +121,45 @@ bool Device::ownedTreeObserved(const CachedDraw& c) const {
     return false;
 }
 
+bool Device::ownedTreeRunWanted(const CachedDraw& c, const float* const* rows, std::uint32_t count) {
+    CoverQuery cq = coverOf(c.query);
+    cq.tag = &tag_;
+    cq.textures = c.tex;
+    bool wanted = false;
+    for (std::size_t i = 0; i < observers_.size(); ++i) {
+        DrawObserver* o = observers_[i];
+        if (!o->observes(c.kind, c.phase) || o->coversDraw(cq)) continue;
+        if (rows != nullptr && o->coversTreeRun(*this, cq, &c, rows, count)) continue;
+        wanted = true;
+    }
+    return wanted;
+}
+
 std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& ow, Buffer* ramp, const float* rows, std::uint32_t count) {
     if (ramp == nullptr || rows == nullptr || count == 0 || !c.valid || !c.query.instanced) return 0;
     constexpr std::uint32_t kBatch = 50;  // (the engine's batch limit; the RT scene reads up to 64 instances of one draw)
+    ++treeRunSerial_;
+    // WS11: which observers must be shown this run at all, asked once per run on the template's own query (the answers do not depend on the batch): a run every observer
+    // declines or covers (the RT scene's no-op rejections of the z pre-pass / cascade trees) is not set up (shaders, stream, window registers, rows) and not copied
+    constexpr std::size_t kMaxObservers = 16;
+    bool wants[kMaxObservers] = {};
+    const bool perBatch = observers_.size() > kMaxObservers;  // (more observers than the table holds: the old per-batch loop decides)
+    bool any = perBatch;
+    if (!any) {
+        CoverQuery cq = coverOf(c.query);
+        cq.tag = &tag_;
+        cq.textures = c.tex;
+        for (std::size_t i = 0; i < observers_.size(); ++i) {
+            DrawObserver* o = observers_[i];
+            if (!o->observes(c.kind, c.phase) || o->coversDraw(cq)) continue;
+            wants[i] = true;
+            any = true;
+        }
+        if (!any) {
+            treeObservedFrame_ = frameValue();
+            return count;
+        }
+    }
     struct Scope {
         Device& d;
         const OwnedWindows* savedOwned;
@@ -146,7 +187,7 @@ std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& 
     std::uint32_t shown = 0;
     for (std::uint32_t at = 0; at < count; at += kBatch) {
         const std::uint32_t n = std::min(kBatch, count - at);
-        for (std::uint32_t i = 0; i < n; ++i) setVertexShaderConstantF(32 + 4 * i, rows + static_cast<std::size_t>(at + i) * 16, 4);
+        setVertexShaderConstantF(32, rows + static_cast<std::size_t>(at) * 16, 4 * n);  // (WS11: the batch's rows c32 + 4 i .. are contiguous: one call, not n)
         ReplaceQuery q = c.query;
         q.tag = &tag_;
         q.textures = c.tex;
@@ -159,8 +200,7 @@ std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& 
         const CoverQuery cq = coverOf(q);
         for (std::size_t i = 0; i < observers_.size(); ++i) {
             DrawObserver* o = observers_[i];
-            if (!o->observes(c.kind, c.phase)) continue;
-            if (o->coversDraw(cq)) continue;
+            if (perBatch ? (!o->observes(c.kind, c.phase) || o->coversDraw(cq)) : !wants[i]) continue;
             o->observe(*this, q);
         }
         if (!captureRequest_.null()) {
@@ -348,8 +388,8 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
         ++treeFlushStats.kindCalls[inst != nullptr ? 1 : 0];
         start = end;
     }
-    {
-        // S-5: what vertex pulling of these flushes could merge (the calls are cut by the vertex input today)
+    if (perfEnabled()) {
+        // S-5: what vertex pulling of these flushes could merge (the calls are cut by the vertex input today; WS11: measurement only, so only with -Perf)
         const std::size_t k = inst != nullptr ? 1 : 0;
         std::vector<std::uint64_t> keys;
         keys.reserve(n);
@@ -357,7 +397,7 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
             const CachedDraw& c = *it.cd;
             const std::uintptr_t ids[2] = {reinterpret_cast<std::uintptr_t>(c.vs), reinterpret_cast<std::uintptr_t>(c.ps)};
             std::uint64_t h = hashBytes(1469598103934665603ull, ids, sizeof(ids));
-            h = hashBytes(h ^ hashDyn(c.dyn), &c.packet.indexBuffer, sizeof(c.packet.indexBuffer));
+            h = hashBytes(h ^ c.dynHash, &c.packet.indexBuffer, sizeof(c.packet.indexBuffer));
             h ^= static_cast<std::uint64_t>(c.packet.index32) << 63;
             keys.push_back(h);
         }
