@@ -629,6 +629,38 @@ void LightTable::record(d3d9::PassContext& ctx) {
         ++skipped_;
         return;
     }
+    // Rolling backstop (review fix; runs with native.owned_check = 0 too): every 64th build the static lights are compared field by field with a fresh uncached walk of the
+    // tree. A cache / worker result that differs (a stale payload pointer, a changed tree the signature missed) is counted, logged once, and replaced by the fresh walk (the
+    // shared cache rewalks on its next use).
+    if ((++backstopCounter_ & 63u) == 0) {
+        const double b0 = nowMs();
+        auto& ref = compareScratch_;
+        const std::size_t nStat = std::min<std::size_t>(stats_.staticNear, scratch_.size());
+        if (engine::lights::collectStaticsReference(cam.position.data(), collectRadius_, ref)) {
+            bool same = ref.size() == nStat;
+            for (std::size_t i = 0; same && i < nStat; ++i) {
+                const auto& a = scratch_[i];
+                const auto& b = ref[i];
+                same = std::memcmp(a.pos, b.pos, sizeof(a.pos)) == 0 && a.range == b.range && std::memcmp(a.col, b.col, sizeof(a.col)) == 0 && a.ambient == b.ambient &&
+                       a.dynamic == b.dynamic;
+            }
+            ++backstopChecks_;
+            if (!same) {
+                ++backstopMismatch_;
+                if (backstopMismatch_ == 1) {
+                    spdlog::warn("enh: lights: backstop: the cached / worker static lights differ from a fresh tree walk (build {}: {} cached, {} fresh): rewalking; counted in the 5 s line", passes_,
+                                 nStat, ref.size());
+                }
+                engine::lights::invalidateStaticCache();
+                truncated_.assign(ref.begin(), ref.end());
+                truncated_.insert(truncated_.end(), scratch_.begin() + static_cast<std::ptrdiff_t>(nStat), scratch_.end());
+                scratch_.swap(truncated_);
+                stats_.staticNear = static_cast<std::uint32_t>(ref.size());
+                haveStaticsHash = false;
+            }
+        }
+        backstopUs_ += (nowMs() - b0) * 1000.0;
+    }
     const bool doVerify = verify_ && (passes_ % 8) == 0;
     // WS13: the build below (near count, drawn-light merge, truncation, shadow ids, table, known grid) is a pure function of the collected lights, the camera
     // position, the drawn lights (set + colours, hashed) and the shadow mode: a build whose signature equals the last full build's keeps its table (prev_) and
