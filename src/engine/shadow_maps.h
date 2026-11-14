@@ -11,6 +11,7 @@ struct Overrides {
     int mapSize = 0;            // texels per side, 0 = the game's
     float range = 0.0f;         // world units (cm), 0 = the game's
     float splitFactor = -1.0f;  // 0 (logarithmic) .. 1 (uniform) splits, < 0 = the game's
+    int fit = 0;                // the cascade fit (shadows.fit): 0 = the engine's (bounding sphere merged from the slice's corners), 1 = the minimal sphere
 };
 
 // any thread; applies at the next RenderShadowMaps
@@ -39,6 +40,25 @@ const void* cascadeObject();
 // N5.5c (native/effect_ops, group 2048): called on the render thread right before the engine's RenderShadowMaps runs the fit and
 // renders the cascades (after the overrides above were applied), with the eCCascadeShadowMap; null = none
 void setFitTap(void (*tap)(void* cascadeObject));
+
+// shadows.md 8: the minimal sphere of a view-space frustum slice (symmetric projection: half extents tanX / tanY per unit of depth,
+// depths n .. f). The centre is on the view axis at depth centreZ, radius the farthest corner's distance (GD3D11's fit); pure
+struct SliceSphere {
+    float centreZ = 0.0f;
+    float radius = 0.0f;
+};
+SliceSphere minimalSphere(float tanX, float tanY, float n, float f);
+
+// true while the cascade fit is not the engine's (the UpdateCamera pre-hook rewrote the light box): checks that recompute the
+// engine's camera from its own fit stand down. Any thread
+bool fitOverridden();
+
+// The last fit per cascade (render thread / log): the engine's box side and ours, cm
+struct FitInfo {
+    float engineSide = 0.0f, side = 0.0f;
+    int size = 0;
+};
+FitInfo lastFit(int cascade);
 
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();
