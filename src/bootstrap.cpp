@@ -5,12 +5,14 @@
 #include <algorithm>
 #include <charconv>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cwctype>
 #include <filesystem>
 #include <format>
 #include <ranges>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <windows.h>
@@ -198,6 +200,10 @@ void detourInitializeAdmin(void* self, int apiType) {
         // the runtime HLSL compiler (docs/research/hlsl-rhi.md 2): dxcompiler.dll next to config.toml, compiled shaders cached beside the others
         shader::dxc::setLibraryDirectory(paths::dataDir());
         shader::dxc::setCacheDirectory(paths::dataDir() / L"cache" / L"hlsl");
+        std::thread([] {  // (WS12: entries of builds nobody ran for 30 days; background, below normal priority)
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            if (const std::size_t n = shader::dxc::pruneCache(std::chrono::hours(24 * 30)); n != 0) spdlog::info("shader cache: {} entries unused for 30 days removed", n);
+        }).detach();
         vo.screenshotFrames = g_config.screenshotFrames;
         vo.logDraws = g_config.logDraws;
         vo.logFrame = g_config.logFrame;

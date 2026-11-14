@@ -334,7 +334,8 @@ bool loadCache(const fs::path& file, const SourceReader& reader, Request const& 
 void storeCache(const fs::path& file, const std::vector<std::pair<std::string, std::uint64_t>>& includes, const void* payload, std::size_t size) {
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
-    const fs::path tmp = fs::path(file).concat(".tmp");
+    // (a tmp file per thread: two workers that compile the same text at once must not write one file)
+    const fs::path tmp = fs::path(file).concat(std::format(".{}.tmp", GetCurrentThreadId()));
     {
         std::ofstream out(tmp, std::ios::binary);
         if (!out) return;
@@ -372,6 +373,25 @@ void setSourceReader(SourceReader reader) {
 void setCacheDirectory(fs::path dir) {
     const std::lock_guard lock(g_mutex);
     g_cacheDir = std::move(dir);
+}
+
+std::size_t pruneCache(std::chrono::hours age) {
+    fs::path dir;
+    {
+        const std::lock_guard lock(g_mutex);
+        dir = g_cacheDir;
+    }
+    std::size_t removed = 0;
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec)) return 0;
+    const auto limit = fs::file_time_type::clock::now() - age;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().extension() != ".dxo") continue;
+        std::error_code e2;
+        const auto t = it->last_write_time(e2);
+        if (!e2 && t < limit && fs::remove(it->path(), e2)) ++removed;
+    }
+    return removed;
 }
 
 void setLibraryDirectory(fs::path dir) {
@@ -491,7 +511,7 @@ Result compileNow(const Request& request) {
     if (!cacheDir.empty() && request.cache) {
         cacheFile = cacheDir / std::format("{:016x}.dxo", requestKey(request, source, args));
         std::vector<std::uint8_t> payload;
-        if (loadCache(cacheFile, reader, request, payload)) {
+        if (!request.refresh && loadCache(cacheFile, reader, request, payload)) {
             if (request.target == Target::Spirv) {
                 result.words.resize(payload.size() / 4);
                 std::memcpy(result.words.data(), payload.data(), result.words.size() * 4);
@@ -502,7 +522,13 @@ Result compileNow(const Request& request) {
                 }
             }
             result.fromCache = result.ok();
-            if (result.fromCache) return result;
+            if (result.fromCache) {
+                // (WS12: a used entry is kept: pruneCache removes the ones nobody used for weeks)
+                std::error_code ec;
+                const auto now = fs::file_time_type::clock::now();
+                if (const auto t = fs::last_write_time(cacheFile, ec); !ec && now - t > std::chrono::hours(24)) fs::last_write_time(cacheFile, now, ec);
+                return result;
+            }
         }
     }
 

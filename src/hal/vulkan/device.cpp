@@ -1938,6 +1938,7 @@ void HalDevice::updateMenuPacing() {
     const auto& rs = settings::renderer();
     const auto* menuFps = rs.menuFps;
     dev_.setUnpaced(st.state == engine::menu::State::Loading);
+    dev_.setBackgroundFree(st.state != engine::menu::State::Game);  // WS12: the background compiles run on every thread outside the world, on few in it
     // frame generation: the world only (Unknown = the GUI is not up yet: the world), not paused (app state 1)
     if (framegen_) framegen_->setGameState(st.state == engine::menu::State::Game || st.state == engine::menu::State::Unknown, st.appState == 1);
     dev_.setMenuCap(st.state == engine::menu::State::Menu && menuFps != nullptr ? menuFps->value() : 0.0);

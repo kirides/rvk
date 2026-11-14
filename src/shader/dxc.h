@@ -7,6 +7,7 @@
 // instead (edit, rerun, no rebuild).
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <span>
@@ -31,7 +32,8 @@ struct Request {
     std::vector<Define> defines;
     Target target = Target::Spirv;
     int optLevel = 3;        // -O<n> (0..3) without debug info; generated shaders use 1: the driver compiles them again anyway
-    bool cache = true;       // use the disk cache (generated shaders have their own: the device's SPIR-V cache keyed by the bytecode)
+    bool cache = true;       // use the disk cache: keyed by the source text + arguments (flags, defines) + DXC's version, each #include's text hash checked on a hit (WS12: the generated shaders use it too, so an update that leaves a module's text alone keeps it)
+    bool refresh = false;    // skip the lookup, compile and store again (a hit that turned out damaged)
     bool half16 = false;     // -enable-16bit-types: `half` / min16float are real 16-bit types (SPIR-V Float16, DXIL native 16-bit ops: needs shaderFloat16 / D3D12 Native16BitShaderOpsSupported); part of the cache key
     bool debugInfo = false;  // -Zi -Od + SPIR-V debug info (RenderDoc / PIX show names and source); part of the cache key
 };
@@ -54,6 +56,9 @@ using SourceReader = std::function<bool(std::string_view path, std::string& text
 void setSourceReader(SourceReader reader);
 // Where the disk cache lives (<dir>/<key>.dxo); empty = no disk cache (default)
 void setCacheDirectory(std::filesystem::path dir);
+// WS12: the cache is content-keyed, so entries of earlier builds (a changed shader or header) stay behind: a hit refreshes the file's time (at most once a day), and this
+// removes the *.dxo not used for `days` days (a background thread of the proxy, once per start; returns the number of files removed)
+std::size_t pruneCache(std::chrono::hours age);
 // Where dxcompiler.dll is searched first (next to d3d9.dll: bin\rvk); the executable's and the module's directories follow
 void setLibraryDirectory(std::filesystem::path dir);
 
