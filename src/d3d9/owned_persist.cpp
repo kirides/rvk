@@ -389,7 +389,7 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
     obsBone_ = boneOfCached(c);  // (14.13: the owned draw is the bone-motion form: its motion needs no capture)
     obsNoMotion_ = !obsBone_ && noMotionOf(c);  // (F6-2)
     std::uint32_t wanted = 0;
-    bool perDraw = opaqueObserver;
+    bool perDrawObs = false;
     for (std::size_t i = 0; i < observers_.size(); ++i) {
         DrawObserver* o = observers_[i];
         if (!o->observes(c.kind, c.phase)) continue;
@@ -397,10 +397,19 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
         if (eligible && i < 32 && (ordered ? o->bulkOrdered() && o->bulkOrderedDraw(*this, c.query) : o->bulkOwned())) {
             wanted |= 1u << i;
         } else {
-            perDraw = true;
+            perDrawObs = true;
             if (ordered && eligible && i < 32 && o->bulkOrdered()) ++ordBulkStats.refusedByObserver;
         }
     }
+    // WS23: the replacers' opaque learning (the water's sea floor) for a record it found nothing more to learn from (same retained draw, signature, env epoch and object rows)
+    bool opaqueDo = opaqueObserver;
+    bool opaqueRecheck = false;
+    const float* memoRows = nullptr;
+    if (opaqueObserver && eventObs_) {
+        memoRows = c.query.instanced ? nullptr : ownedObjectRows();
+        if (memoRows != nullptr && eventObsSkip(info.id, &c, info.sig, info.epoch, kObsOpaque, false, info.changed, memoRows, opaqueRecheck)) opaqueDo = false;
+    }
+    const bool perDraw = perDrawObs || opaqueDo;
     if (wanted != 0) {
         OwnedRecordView& v = ordered ? ordBulk_.emplace_back() : ownedBulk_.emplace_back();
         v.cd = &c;
@@ -430,7 +439,7 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
     if (!perDraw) return true;
     if (ordered) {
         ++ordBulkStats.perDraw;
-        if (opaqueObserver) ++ordBulkStats.perDrawReplacer;
+        if (opaqueDo) ++ordBulkStats.perDrawReplacer;
     }
     ReplaceQuery q = c.query;
     q.tag = &tag_;
@@ -467,17 +476,121 @@ bool Device::ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const Own
         }
         o->observe(*this, q);
     }
-    if (opaqueObserver) {
+    if (opaqueDo) {
+        bool settled = true, learned = false;
         for (DrawReplacer* r : replacers_) {
             if (!r->wantsOpaque()) continue;
             if (!loaded && (ws19SmallOff() || r->opaqueReadsRegisters(q))) {  // (WS19: the water's floor learning reads the query's object rows)
                 loadOwnedRegisters(ow);
                 loaded = true;
             }
-            r->observeOpaque(*this, q);
+            const OpaqueResult res = r->observeOpaque(*this, q);
+            settled &= res != OpaqueResult::Retry;
+            learned |= res == OpaqueResult::Learned;
         }
+        if (memoRows != nullptr) eventObsDone(info.id, &c, info.sig, info.epoch, kObsOpaque, memoRows, settled, opaqueRecheck && learned);
     }
     return captureRequest_.null();
+}
+
+// ---- WS23: event-driven observers (frame-ownership.md 16.9) -----------------------------------------------------------------------------------------
+
+namespace {
+std::uint32_t ws23Env(const char* name, std::uint32_t dflt) {
+    char v[16] = {};
+    if (GetEnvironmentVariableA(name, v, sizeof(v)) == 0) return dflt;
+    return static_cast<std::uint32_t>(std::strtoul(v, nullptr, 10));
+}
+bool ws23EnvOff() {
+    static const bool off = ws23Env("RVK_WS23_OFF", 0) != 0;
+    return off;
+}
+std::uint32_t ws23Heal() {
+    static const std::uint32_t n = ws23Env("RVK_WS23_HEAL", 64);
+    return n;
+}
+std::uint32_t ws23Drop() {
+    static const std::uint32_t n = ws23Env("RVK_WS23_DROP", 0);
+    return n;
+}
+}  // namespace
+
+void Device::setEventObservers(bool on) {
+    on = on && !ws23EnvOff();
+    if (on != eventObs_) obsMemo_.clear();
+    eventObs_ = on;
+}
+
+bool Device::eventObsSkip(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, bool entered, bool changed, const float* rows, bool& recheck) {
+    recheck = false;
+    if (!eventObs_) return false;
+    if (id >= obsMemo_.size()) obsMemo_.resize(static_cast<std::size_t>(id) + 256);
+    ObsMemo& m = obsMemo_[id];
+    const std::size_t k = bit == kObsOpaque ? 0 : 1;
+    const bool same = m.cd == cd && m.sig == sig && m.epoch == epoch;
+    if (!same) {
+        // FAULT INJECTION (RVK_WS23_DROP=n): every n-th first sighting of a record is remembered as observed without the observation (a dropped `entered` event): the rolling
+        // re-observation / the check frames must find what the observer did not learn
+        static std::uint32_t seen = 0;
+        const std::uint32_t every = ws23Drop();
+        if (bit == kObsOpaque && every != 0 && rows != nullptr && ++seen % every == 0) {
+            m = {};
+            m.cd = cd;
+            m.sig = sig;
+            m.epoch = epoch;
+            std::memcpy(m.rows, rows, sizeof(m.rows));
+            m.haveRows = true;
+            m.bits = bit;
+            ++eventObsStats.injected;
+            ++eventObsStats.skipped[k];
+            return true;
+        }
+        return false;
+    }
+    if (entered || changed || (m.bits & bit) == 0) return false;
+    if (bit == kObsOpaque && (rows == nullptr || !m.haveRows || std::memcmp(m.rows, rows, sizeof(m.rows)) != 0)) return false;
+    const bool compareFrame = gpuscene::periodic(stats_.frames, 10);
+    const std::uint32_t heal = ws23Heal();
+    const bool roll = heal != 0 && ((((id * 0x9E3779B1u) ^ (static_cast<std::uint32_t>(stats_.frames) * 0x85EBCA6Bu)) >> 7) % heal) == 0;
+    if (compareFrame || roll) {
+        recheck = true;
+        ++eventObsStats.rechecked[k];
+        return false;
+    }
+    ++eventObsStats.skipped[k];
+    return true;
+}
+
+void Device::eventObsDone(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, const float* rows, bool settled, bool wasRecheck) {
+    if (!eventObs_) return;
+    if (id >= obsMemo_.size()) obsMemo_.resize(static_cast<std::size_t>(id) + 256);
+    ObsMemo& m = obsMemo_[id];
+    const std::size_t k = bit == kObsOpaque ? 0 : 1;
+    ++eventObsStats.observed[k];
+    if (wasRecheck) {
+        ++eventObsStats.mismatch[k];
+        if (gpuscene::periodic(stats_.frames, 10)) {
+            ++eventObsStats.compareMismatch[k];
+            static int logged = 0;
+            if (logged < 8) {
+                ++logged;
+                spdlog::error("native: event observers: DIFFERING: record {} ({}) was remembered as observed but its observation still found something to do (fixed)", id, bit == kObsOpaque ? "replacers' opaque learning" : "object motion");
+            }
+        }
+    }
+    if (m.cd != cd || m.sig != sig || m.epoch != epoch) {
+        m = {};
+        m.cd = cd;
+        m.sig = sig;
+        m.epoch = epoch;
+    }
+    if (bit == kObsOpaque && rows != nullptr) {
+        if (m.haveRows && std::memcmp(m.rows, rows, sizeof(m.rows)) != 0) m.bits &= static_cast<std::uint8_t>(~kObsOpaque);
+        std::memcpy(m.rows, rows, sizeof(m.rows));
+        m.haveRows = true;
+    }
+    if (settled) m.bits |= bit;
+    else m.bits &= static_cast<std::uint8_t>(~bit);
 }
 
 // ---- F2c-4b bulk observers (frame-ownership.md 7.23) -------------------------------------------------------------------------------------------------

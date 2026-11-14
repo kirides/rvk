@@ -438,6 +438,15 @@ void StaticOps::orderedReport() {
                      static_cast<double>(w.flushNs) / static_cast<double>(std::max<std::uint64_t>(1, w.owned[0] + w.owned[1] + w.owned[2])) / 1000.0, w.owned[0] + w.owned[1] + w.owned[2]);
         b = {};
     }
+    {
+        // 16.9 (WS23): the event-driven observers: per observer kind (replacers' opaque learning = the water's sea floor, object motion's covered draws) the calls skipped for
+        // unchanged records, the full observations, the re-observations (rolling 1 in 64 + check frames), the mismatches they found (fixed), DIFFERING on check frames
+        const d3d9::Device::EventObsStats& e = dev_.eventObsStats;
+        if (dev_.eventObservers() || e.observed[0] + e.observed[1] != 0) {
+            spdlog::info("native: event observers (5 s, totals): sea floor learning: skipped {}, observed {} (rechecked {}, mismatch {}, DIFFERING {}); object motion: skipped {}, observed {} (rechecked {}, mismatch {}, DIFFERING {}); fault injection dropped {}",
+                         e.skipped[0], e.observed[0], e.rechecked[0], e.mismatch[0], e.compareMismatch[0], e.skipped[1], e.observed[1], e.rechecked[1], e.mismatch[1], e.compareMismatch[1], e.injected);
+        }
+    }
     w = {};
 }
 

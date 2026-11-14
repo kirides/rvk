@@ -541,6 +541,10 @@ struct DrawReplacement {
     draws::Water water = draws::Water::None;  // the body as the replacer classified it (goes into the record)
 };
 
+// WS23 (frame-ownership.md 16.9): what DrawReplacer::observeOpaque made of the draw. Known = nothing (more) to learn from this exact draw (learnt before, or never learnable);
+// Learned = it learnt something new now; Retry = it could not decide (budget, a read failed): show the draw again
+enum class OpaqueResult : std::uint8_t { Retry, Known, Learned };
+
 class DrawReplacer {
 public:
     virtual ~DrawReplacer() = default;
@@ -551,7 +555,7 @@ public:
     // the main view's opaque static meshes (Solid pass, indexed, from buffers), when wanted: an enhancement reads the
     // engine's geometry (enh/water: the sea floor field). Called before the draw is recorded; must not change device state.
     virtual bool wantsOpaque() const { return false; }
-    virtual void observeOpaque(Device& /*device*/, const ReplaceQuery& /*query*/) {}
+    virtual OpaqueResult observeOpaque(Device& /*device*/, const ReplaceQuery& /*query*/) { return OpaqueResult::Retry; }
     // WS19: observeOpaque of this query reads the device's register file (an owned draw's windows are loaded into it first: Device::loadOwnedRegisters); false = it
     // reads only the query (e.g. its objectRows)
     virtual bool opaqueReadsRegisters(const ReplaceQuery& /*query*/) const { return true; }
@@ -1465,6 +1469,21 @@ public:
         bool changed = false;
     };
     bool ownedObserve(const CachedDraw& c, const OwnedWindows& ow, const OwnedObsInfo& info);
+    // WS23 (frame-ownership.md 16.9, native.event_observers): observers that keep no per-frame state for an unchanged record are not shown it again. Per record id the device
+    // remembers the record (retained draw, signature, env epoch) and what an observer made of it; kObsOpaque = the replacers' opaque learning (water sea floor) found nothing
+    // more to learn (also its object rows), kObsMotion = object motion's covered branch (counters only). A record that entered / changed / left re-observes in full; of the
+    // unchanged ones a rolling 1 in `healPeriod` per frame and every one on a check frame are observed again anyway and the result compared with the memory
+    // (mismatch: counted, fixed; DIFFERING on a check frame). RVK_WS23_OFF=1 = off, RVK_WS23_HEAL=n the period (0: no rolling check), RVK_WS23_DROP=n the fault injection
+    // (every n-th first sighting is remembered without the observation: the rolling check / the check frames must find it)
+    static constexpr std::uint8_t kObsOpaque = 1, kObsMotion = 2;
+    void setEventObservers(bool on);
+    bool eventObservers() const { return eventObs_; }
+    // may the observer skip the record (an unchanged one whose memory holds `bit`)? false = observe it in full, then eventObsDone; `recheck` = observed only to compare
+    bool eventObsSkip(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, bool entered, bool changed, const float* rows, bool& recheck);
+    void eventObsDone(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, const float* rows, bool settled, bool wasRecheck);
+    struct EventObsStats {
+        std::uint64_t skipped[3] = {}, observed[3] = {}, rechecked[3] = {}, mismatch[3] = {}, compareMismatch[3] = {}, injected = 0;
+    } eventObsStats;
     // one owned draw as the bulk observers see it (immutable for the call): the retained draw, its windows (the record's own persistent ones), the tag it is drawn under
     struct OwnedRecordView {
         const CachedDraw* cd = nullptr;
@@ -2189,6 +2208,15 @@ private:
     float ownedRegSnapVs_[kVsFloatConsts][4]{};
     float ownedRegSnapPs_[kPsFloatConsts][4]{};
     std::vector<OwnedRecordView> ownedBulk_;
+    struct ObsMemo {
+        const CachedDraw* cd = nullptr;
+        std::uint64_t sig = 0, epoch = 0;
+        float rows[12] = {};
+        bool haveRows = false;
+        std::uint8_t bits = 0;
+    };
+    std::vector<ObsMemo> obsMemo_;
+    bool eventObs_ = true;
     // per kind: 0 z, 1 solid (the plain static passes), 2 + list - 1 the ordered list segments (14.44: solid, refracted, alpha)
     static constexpr std::size_t kBulkKinds = 5;
     std::vector<std::uint32_t> ownedBulkIds_[kBulkKinds];        // this pass's ids per kind: the next pass's `left` is made from them

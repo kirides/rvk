@@ -2858,6 +2858,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_ordered", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeEventObservers = &reg.add({
+        .key = "native.event_observers",
+        .label = "Native frame: observers by event",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, with persistent owned draws (frame-ownership.md 16.9, WS23): an observer that keeps no per-frame state for a record is shown the record only when it "
+                       "entered or changed (retained draw, signature, env epoch, object rows): the enhanced water's sea floor learning (a draw it has learnt is not shown again) and "
+                       "object motion's covered draws (counters only). Of the unchanged records a rolling 1 in 64 per frame and every one on a native.owned_check frame are observed "
+                       "again and compared with what the observer remembers (mismatch: counted and fixed; DIFFERING on a check frame). Off = every owned draw is shown per draw. "
+                       "rvk.log `native: event observers (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedDelta = &reg.add({
         .key = "native.owned_delta",
         .label = "Native frame: owned path work by change",
