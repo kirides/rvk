@@ -1350,6 +1350,7 @@ public:
         Buffer* indices = nullptr;
     };
     void beginCapture(CachedDraw* into) { capture_ = into; if (into != nullptr) into->valid = false; }
+    bool captureOkNow() const { return captureOk_; }  // (diagnostic: the last prepareDraw's retention verdict)
     bool endCapture() { const bool ok = capture_ != nullptr && capture_->valid; capture_ = nullptr; return ok; }
     // true = drawn from the retained packet; false = not valid / not allowed: nothing was drawn, draw normally
     bool replayDraw(const CachedDraw& c, const ReplayInputs& in);
