@@ -47,7 +47,9 @@ std::atomic<std::uint64_t> g_registryGeneration{1};
 std::atomic<std::uint64_t> g_knownHash{0};
 std::mutex g_drawnMutex;
 struct DrawnLight {
-    engine::lights::WorldLight l;
+    engine::lights::WorldLight l;  // (l.col = the colour of the last note)
+    float first[3]{};  // the colour of the first note: a static registry light takes THIS one (the draws that note a light weight it per object; the last one to note it is whichever
+                       // op happened to be composed, so the last note made the table depend on which ops were owned: frame-ownership.md 16.10)
     std::uint64_t stamp = 0;  // the build counter at the last note
     std::uint64_t evalGen = 0;  // the registry cell generation `matched` was evaluated at (record())
     std::int32_t matched = -1;  // index of the static registry light within 8 units (scratch_ order), -1 = none
@@ -184,7 +186,11 @@ void LightTable::noteDrawnLight(const float pr[4], const float col[4]) {
     l.range = 1.0f / std::sqrt(pr[3]);
     std::memcpy(l.col, col, 12);
     l.dynamic = true;
-    g_drawn.push_back({l, g_buildCounter});
+    DrawnLight dl;
+    dl.l = l;
+    std::memcpy(dl.first, col, 12);
+    dl.stamp = g_buildCounter;
+    g_drawn.push_back(dl);
 }
 
 float lightSliceScale(float nearZ, float farZ, std::uint32_t slices) { return static_cast<float>(slices) / std::log(farZ / nearZ); }
@@ -640,10 +646,11 @@ void LightTable::record(d3d9::PassContext& ctx) {
         // (the drawn lights' content as the merge below reads it: the colours alternate with the draws that note them, so the state is hashed, not counted)
         std::uint64_t h = 0xcbf29ce484222325ull;
         for (const auto& d : g_drawn) {
-            std::uint32_t b[7];
+            std::uint32_t b[10];
             std::memcpy(b, d.l.pos, 12);
             std::memcpy(b + 3, d.l.col, 12);
             std::memcpy(b + 6, &d.l.range, 4);
+            std::memcpy(b + 7, d.first, 12);
             for (const std::uint32_t w : b) {
                 h = (h ^ w) * 0x100000001b3ull;
                 h ^= h >> 29;
@@ -706,10 +713,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         const std::size_t registry = scratch_.size();
         // (collect appends the static lights first, then the dynamic ones)
         const std::size_t nStatic = std::min<std::size_t>(stats_.staticNear, registry);
-        if (doVerify) {
-            verifyDrawn_.clear();
-            for (const auto& dl : g_drawn) verifyDrawn_.push_back(dl.l);
-        }
+        if (doVerify) verifyDrawn_.clear();  // (filled in the merge below: a static-matched light with its first-note colour)
         // The static lights of the registry in 16-unit cells: a drawn light is "the same" within 8 units. The static lights carry the colour the engine's
         // DRAWS give them: the registry's rgb x intensity x scale x 0.5 is a guess, the draws' register colour differs per light by 0.2 .. 2.0 (measured:
         // gpu-scene.md 9.10; the engine weights each static light), so a matched light takes the colour of the draw that was seen last.
@@ -766,13 +770,17 @@ void LightTable::record(d3d9::PassContext& ctx) {
                 }
             }
             bool known = false;
+            if (doVerify) {
+                verifyDrawn_.push_back(d);
+                if (dl.matched >= 0) std::memcpy(verifyDrawn_.back().col, dl.first, sizeof(dl.first));
+            }
             if (dl.matched >= 0) {
                 known = true;
                 auto& w = scratch_[static_cast<std::size_t>(dl.matched)];
-                if (w.col[0] > 1e-4f && w.col[1] > 1e-4f && w.col[2] > 1e-4f && d.col[0] + d.col[1] + d.col[2] > 1e-4f) {
-                    for (int c = 0; c < 3; ++c) colourRatio_[c] += d.col[c] / w.col[c];
+                if (w.col[0] > 1e-4f && w.col[1] > 1e-4f && w.col[2] > 1e-4f && dl.first[0] + dl.first[1] + dl.first[2] > 1e-4f) {
+                    for (int c = 0; c < 3; ++c) colourRatio_[c] += dl.first[c] / w.col[c];
                     ++colourRatioN_;
-                    std::memcpy(w.col, d.col, sizeof(w.col));
+                    std::memcpy(w.col, dl.first, sizeof(w.col));
                 }
             } else {
                 // the dynamic lights move (carried torches): compared every frame (a handful)

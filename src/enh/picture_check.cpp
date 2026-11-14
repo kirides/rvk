@@ -26,6 +26,8 @@ constexpr std::uint32_t kStatsBytes = 64;
 constexpr std::uint64_t kMaxAge = 16;  // an owned frame is compared with a reference at most this many frames old (native.owned_check = 10 renews it)
 // the tolerance of the verdict: an owned view fails when its differing pixels exceed this share of the picture AND 3 x the worst control view
 constexpr double kShareTol = 2.0e-4;
+constexpr double kNoControlFloor = 5.0e-4;  // a window without a composed pair (a camera that alternates: no two consecutive composed frames share it): the yardstick is the noise floor measured
+                                           // with RVK_PICTURE_FAKE_OWNED on crystal_cave (0.034 % of the picture at age <= 8), not 0 (frame-ownership.md 16.10)
 constexpr double kMovingShare = 0.01;  // control views differing by more than this share of the picture: the scene is not still
 constexpr std::uint64_t kSettleFrames = 32;  // frames without compares after a frame-value jump (the post-capture transient decays in ~20)
 
@@ -52,6 +54,7 @@ PictureCheck::PictureCheck(d3d9::Device& device) : dev_(device) {
     if (GetEnvironmentVariableA("RVK_PICTURE_DUMP_MIN", buf, sizeof(buf)) != 0) dumpMin_ = std::atof(buf);
     ignoreLight_ = GetEnvironmentVariableA("RVK_PICTURE_IGNORE_LIGHT", nullptr, 0) != 0;
     if (GetEnvironmentVariableA("RVK_PICTURE_FAKE_OWNED", buf, sizeof(buf)) != 0) fakeOwned_ = static_cast<std::uint32_t>(std::max(0, std::atoi(buf)));
+    if (GetEnvironmentVariableA("RVK_PICTURE_TRACE", buf, sizeof(buf)) != 0) traceLeft_ = std::max(0, std::atoi(buf));
     dumpEver_ = dumpLeft_ > 0 || dumpTo_ != 0;
 }
 
@@ -148,6 +151,20 @@ void PictureCheck::record(d3d9::PassContext& ctx) {
     // the global lighting (frame-ownership.md 14.39): the weather's sky light (the hemisphere's SH, intensity, indoor colour) moves while the weather changes and with
     // every lightning flash; two frames of one camera under different global light are no pair (the whole picture changes, owned or composed)
     const std::uint64_t light = lightStamp();
+    if (traceLeft_ > 0 && frame >= dumpFrom_) {  // RVK_PICTURE_TRACE=<n> (from the frame of RVK_PICTURE_DUMP_RANGE=<from>-..): the first n main views, one line each (frame, owned, the camera against the reference's)
+        --traceLeft_;
+        float maxd = 0.0f;
+        int at = -1;
+        for (int i = 0; i < 16; ++i) {
+            const float d = std::fabs(cam[static_cast<std::size_t>(i)] - refCamera_[i]);
+            if (d > maxd) {
+                maxd = d;
+                at = i;
+            }
+        }
+        spdlog::info("native: picture trace: frame {} {} refFrame {} refValid {} sameCamera {} max camera delta {:.3e} at [{}] ({:.6f} vs {:.6f}) sameLight {}", frame, owned ? "owned" : "composed", refFrame_,
+                     refValid_, sameCamera, maxd, at, at >= 0 ? cam[static_cast<std::size_t>(at)] : 0.0f, at >= 0 ? refCamera_[at] : 0.0f, light == refLight_);
+    }
     const bool sameLight = light == refLight_;
 
     bool compare = false, control = false;
@@ -438,16 +455,23 @@ void PictureCheck::report() {
     // against the window's worst control view; the cycle of the current reference stays open into the next window
     std::erase_if(cycles_, [&](const Cycle& c) {
         if (refValid_ && c.ref == refFrame_) return false;
-        judge(c, controlShare, false);
+        judge(c, std::max(controlShare, control_.views == 0 ? kNoControlFloor : 0.0), false);
         return true;
     });
     // the verdict needs owned views compared; a window without them is `no data`
     // (a window where the scene moved is no verdict: the camera changed during it, or two composed frames of one camera already differ by > 1 % of the picture)
     // FAILED = a cycle whose worst owned view differs by more than kShareTol of the picture AND 3 x its own closing control (frame-ownership.md 14.37: the window's
     // control was the wrong yardstick when the scene changed during a cycle whose closing control fell into the next window)
-    const bool moving = skippedCamera_ != 0 || skippedLight_ != 0 || controlShare > kMovingShare;
+    // (16.10: skipped pairs alone no longer make a window unreliable: the pairs that were compared have the very same camera and light, and a camera that alternates between two
+    // states frame by frame (crystal_cave: 3e-5 of the view-projection) skips every other owned view while the rest are exact pairs; only a window where the skipped views
+    // outnumber the compared ones two to one, or whose composed pairs differ, is a moving scene)
+    const bool moving = (skippedCamera_ + skippedLight_ > 2 * owned_.views && skippedCamera_ + skippedLight_ != 0) || controlShare > kMovingShare;
     const std::uint64_t judged = cyclesJudged_ + cyclesOpenJudged_;
-    const char* verdict = owned_.views == 0 && judged == 0 ? "NO DATA" : moving ? "UNRELIABLE (the scene moves)" : cyclesFailed_ != 0 ? "FAILED" : "ok";
+    // (no composed pair in the window = no control: such a FAILED is judged against 0 and says so)
+    const char* verdict = owned_.views == 0 && judged == 0 ? "NO DATA"
+                          : moving                         ? "UNRELIABLE (the scene moves)"
+                          : cyclesFailed_ != 0             ? (control_.views == 0 ? "FAILED (no control pair in the window)" : "FAILED")
+                                                           : "ok";
     if (verdict[0] == 'F') ++failedWindows_;
     if (verdict[0] == 'o') ++okWindows_;
     failLines_ = 0;
