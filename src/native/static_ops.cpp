@@ -822,7 +822,7 @@ void StaticOps::writeLightingRegisters(const sc::Pass& pass, bool& holdsAll) {
                 float e[8]{};
                 rd(illum + 0x10 + 0x40 * i, 0, &e[0], 16);
                 rd(illum + 0x10 + 0x40 * i, 0x10, &e[4], 16);
-                enh::LightTable::noteDrawnLight(e, e + 4);
+                enh::LightTable::noteDrawnLight(e, e + 4, !ownedView_.active);
             }
         }
     }
@@ -858,7 +858,7 @@ void StaticOps::noteListLights(const std::uint8_t* list) {
         U8* src = const_cast<U8*>(list) + 0x38 + 0x40 * i;
         rd(src, 0, &e[0], 16);
         rd(src, 0x10, &e[4], 16);
-        enh::LightTable::noteDrawnLight(e, e + 4);
+        enh::LightTable::noteDrawnLight(e, e + 4, !ownedView_.active);
     }
 }
 

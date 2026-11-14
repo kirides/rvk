@@ -106,6 +106,7 @@ private:
     std::uint64_t dumpFrom_ = 0, dumpTo_ = 0;  // RVK_PICTURE_DUMP_RANGE=<from>-<to>: the compared views of these frames are dumped (any window; at most 48)
     double dumpMin_ = 0.0;                     // RVK_PICTURE_DUMP_MIN=<share>: ... those differing on at least this share of the picture
     int rangeLeft_ = 48;
+    int traceLeft_ = 0;             // RVK_PICTURE_TRACE=<n>: log the first n main views (frame, owned, camera delta)
     std::uint32_t fakeOwned_ = 0;   // RVK_PICTURE_FAKE_OWNED=<n>: frames whose value % n >= 2 count as owned (a control of the check itself: run it with nothing owned)
     std::uint32_t detailLines_ = 0;  // per-view lines this window
     double stillShare_ = 1.0;         // the last age-1 control view's share (warm-up vs check frame): the scene stands still now when it is small
