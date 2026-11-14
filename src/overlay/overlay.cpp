@@ -4,6 +4,7 @@
 
 #include "gpuscene/owned_compact.h"
 #include "overlay/overlay.h"
+#include "enh/light_table.h"
 #include "enh/material_pack.h"
 
 #include <windows.h>
@@ -455,6 +456,12 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         if (w[2] != "0" && w[2] != "1") return fail("debug treereuse 0|1");
         d3d9::treeReuse().store(w[2] == "1");
         return ok(std::format("owned tree reuse {}", w[2] == "1" ? "on" : "off"));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "lightskip") {
+        // frame-ownership.md 14.55 (WS13): the light table's unchanged-build skip on / off inside one run
+        if (w[2] != "0" && w[2] != "1") return fail("debug lightskip 0|1");
+        enh::lightBuildSkip().store(w[2] == "1");
+        return ok(std::format("light table build skip {}", w[2] == "1" ? "on" : "off"));
     }
     if (w[0] == "quit" && w.size() == 1) {
         // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs

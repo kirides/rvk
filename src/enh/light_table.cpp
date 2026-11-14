@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include "enh/rhi_scope.h"
+#include "gpuscene/verify.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 
@@ -46,6 +47,10 @@ std::uint64_t g_buildCounter = 0;
 constexpr std::uint64_t kDrawnKeep = 900;  // builds
 }  // namespace
 
+std::atomic<bool>& lightBuildSkip() {
+    static std::atomic<bool> on{true};
+    return on;
+}
 bool fullLitActive() { return g_fullLit.load(std::memory_order_relaxed); }
 void setFullLitActive(bool on) { g_fullLit.store(on, std::memory_order_relaxed); }
 namespace {
@@ -171,6 +176,8 @@ LightTable::LightTable(d3d9::Device& device) : dev_(device) {
     {
         char v[8]{};
         verify_ = GetEnvironmentVariableA("RVK_LIGHTS_VERIFY", v, sizeof(v)) != 0 && v[0] == '1';
+        char w[8]{};
+        if (GetEnvironmentVariableA("RVK_LIGHTS_SKIP_OFF", w, sizeof(w)) != 0 && w[0] == '1') lightBuildSkip().store(false);
         if (verify_) spdlog::info("enh: lights: RVK_LIGHTS_VERIFY: every 8th build is compared with the uncached reference");
     }
     rhi::Device* rdev = dev_.rhi();
@@ -479,8 +486,62 @@ void LightTable::record(d3d9::PassContext& ctx) {
         return;
     }
     const bool doVerify = verify_ && (passes_ % 8) == 0;
+    // WS13: the build below (near count, drawn-light merge, truncation, shadow ids, table, known grid) is a pure function of the collected lights, the camera
+    // position, the drawn lights (set + colours, hashed) and the shadow mode: a build whose signature equals the last full build's keeps its table (prev_) and
+    // upload; check builds (RVK_LIGHTS_VERIFY every 8th, gpuscene::periodic 1 of 10) and every kFullEvery-th build run in full and compare with the kept table
+    std::uint64_t drawnGen = 0;
+    {
+        const std::lock_guard lock(g_drawnMutex);
+        ++g_buildCounter;
+        std::erase_if(g_drawn, [](const DrawnLight& d) { return g_buildCounter - d.stamp > kDrawnKeep; });
+        // (the drawn lights' content as the merge below reads it: the colours alternate with the draws that note them, so the state is hashed, not counted)
+        std::uint64_t h = 0xcbf29ce484222325ull;
+        for (const auto& d : g_drawn) {
+            std::uint32_t b[7];
+            std::memcpy(b, d.l.pos, 12);
+            std::memcpy(b + 3, d.l.col, 12);
+            std::memcpy(b + 6, &d.l.range, 4);
+            for (const std::uint32_t w : b) {
+                h = (h ^ w) * 0x100000001b3ull;
+                h ^= h >> 29;
+            }
+        }
+        drawnGen = h ^ (static_cast<std::uint64_t>(g_drawn.size()) << 48);
+    }
+    std::uint64_t sig = 0xcbf29ce484222325ull;
+    {
+        const auto mix = [&sig](std::uint64_t w) { sig = (sig ^ w) * 0x100000001b3ull; sig ^= sig >> 31; };
+        const auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return std::uint64_t{u}; };
+        for (int c = 0; c < 3; ++c) mix(bits(cam.position[static_cast<std::size_t>(c)]));
+        mix(drawnGen);
+        mix(scratch_.size());
+        mix(stats_.staticNear);
+        mix(bits(collectRadius_));
+        mix((shadowHeld_ ? 1u : 0u) | (static_cast<std::uint64_t>(shadow_.mode) << 1));
+        for (const auto& w : scratch_) {
+            mix(bits(w.pos[0]) | bits(w.pos[1]) << 32);
+            mix(bits(w.pos[2]) | bits(w.range) << 32);
+            mix(bits(w.col[0]) | bits(w.col[1]) << 32);
+            mix(bits(w.col[2]) | static_cast<std::uint64_t>(w.ambient ? 1u : 0u) << 32 | static_cast<std::uint64_t>(w.dynamic ? 1u : 0u) << 33);
+        }
+    }
+    const bool sigMatch = haveSig_ && sig == buildSig_;
+    const bool checkBuild = doVerify || gpuscene::periodic(dev_.stats().frames, 10);
+    const bool skipBuild = sigMatch && !checkBuild && sinceFull_ < kFullEvery && lightBuildSkip().load(std::memory_order_relaxed);
     if (doVerify) verifyDyn_.assign(scratch_.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(stats_.staticNear, scratch_.size())), scratch_.end());
     const double tm1 = nowMs();
+    double tm2 = tm1, tm3 = tm1, tm4 = tm1;
+    std::uint32_t count = lastCount_;
+    if (skipBuild) {
+        ++skipHits_;
+        ++sinceFull_;
+        lastChanged_ = 0;
+        // (the registry's state transitions of a full build, with the kept values: an early return of another view may have flipped the flag in between)
+        g_registryThin.store(lastNearStatic_ == 0, std::memory_order_relaxed);
+        registryNoteComplete(lastNearAny_ != 0);
+        registryNoteKnown(knownGridHash_);
+    } else {
+    sinceFull_ = 0;
     // "the registry holds lights" means lights that reach the NEAR level (the old collection range, kLightFar): the far lights of the whole island (the far level,
     // up to kLightFar1) are in the tree even where nothing is cached in around the camera, and must not hide the objects' own lights (a teleport into the
     // monastery: the candles are only in the drawn lists)
@@ -505,8 +566,6 @@ void LightTable::record(d3d9::PassContext& ctx) {
         const std::size_t registry = scratch_.size();
         // (collect appends the static lights first, then the dynamic ones)
         const std::size_t nStatic = std::min<std::size_t>(stats_.staticNear, registry);
-        ++g_buildCounter;
-        std::erase_if(g_drawn, [](const DrawnLight& d) { return g_buildCounter - d.stamp > kDrawnKeep; });
         if (doVerify) {
             verifyDrawn_.clear();
             for (const auto& dl : g_drawn) verifyDrawn_.push_back(dl.l);
@@ -586,7 +645,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         }
         lastDrawnAdded_ = static_cast<std::uint32_t>(scratch_.size() - registry);
     }
-    const double tm2 = nowMs();
+    tm2 = nowMs();
     const auto reach = [&](const engine::lights::WorldLight& l) {
         const float dx = l.pos[0] - cam.position[0], dy = l.pos[1] - cam.position[1], dz = l.pos[2] - cam.position[2];
         return std::sqrt(dx * dx + dy * dy + dz * dz) - l.range;
@@ -614,8 +673,8 @@ void LightTable::record(d3d9::PassContext& ctx) {
         for (std::uint32_t i = 0; i < kLightMax; ++i) truncated_[i] = scratch_[reachKeys_[i].index];
         scratch_.swap(truncated_);
     }
-    const double tm3 = nowMs();
-    const std::uint32_t count = static_cast<std::uint32_t>(scratch_.size());
+    tm3 = nowMs();
+    count = static_cast<std::uint32_t>(scratch_.size());
     // lamp shadows: the nearest lights within the mode's reach get the ids 1..N (the pass light.shadow traces them)
     std::vector<std::uint32_t>& shadowId = shadowIdScratch_;
     shadowId.assign(count, 0);
@@ -661,7 +720,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         for (std::uint32_t k = 0; k < nearLights.size() && k < maxLights; ++k) shadowId[nearLights[k].second] = k + 1;
         shadowLights_ = static_cast<std::uint32_t>(std::min<std::size_t>(nearLights.size(), maxLights));
     }
-    const double tm4 = nowMs();
+    tm4 = nowMs();
     cur_.resize(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         const auto& w = scratch_[i];
@@ -694,6 +753,20 @@ void LightTable::record(d3d9::PassContext& ctx) {
         if (i >= prev_.size() || std::memcmp(&prev_[i], &cur_[i], sizeof(GpuLight)) != 0) ++lastChanged_;
     }
     changedTotal_ += lastChanged_;
+    {
+        const bool same = cur_.size() == prev_.size() && (cur_.empty() || std::memcmp(cur_.data(), prev_.data(), cur_.size() * sizeof(GpuLight)) == 0);
+        if (sigMatch && lightBuildSkip().load(std::memory_order_relaxed)) {
+            // (a full build whose inputs equal the last build's: its table must be the kept one)
+            ++skipChecks_;
+            if (!same) {
+                ++skipDiffering_;
+                if (skipFirst_.empty()) skipFirst_ = "build " + std::to_string(passes_) + ": table " + std::to_string(prev_.size()) + " -> " + std::to_string(cur_.size()) + " lights";
+            }
+        }
+        if (!same) ++buildSerial_;
+        buildSig_ = sig;
+        haveSig_ = true;
+    }
     prev_.swap(cur_);
     lastCount_ = count;
     {
@@ -727,11 +800,21 @@ void LightTable::record(d3d9::PassContext& ctx) {
         registryNoteKnown(posHash);  // (the generation: a build whose light positions equal the last build's leaves it alone)
     }
 
+    }
     if (doVerify) verifyReference(cam.position.data());
     const double tm5 = nowMs();
     rhi::Buffer& up = *upload_[dev_.frameValue() % rhi::kFramesInFlight];
-    if (count > 0) std::memcpy(up.map(), prev_.data(), std::size_t{count} * kLightBytes);
-    up.flush();
+    {
+        // (the upload of a table the slot already holds is skipped: per slot in flight, the serial of the table it was written from)
+        const std::size_t slot = dev_.frameValue() % rhi::kFramesInFlight;
+        if (count > 0 && uploadSerial_[slot] != buildSerial_) {
+            std::memcpy(up.map(), prev_.data(), std::size_t{count} * kLightBytes);
+            up.flush();
+            uploadSerial_[slot] = buildSerial_;
+        } else {
+            ++uploadsSkipped_;
+        }
+    }
 
     RhiScope rs(dev_, ctx.cmd);
     if (!rs) {
@@ -869,6 +952,11 @@ void LightTable::logStats() {
                  fullLitActive() ? "on" : "off");
     if (verify_ && verifyBuilds_ > 0) {
         spdlog::info("enh: lights: verify (5 s): {} builds compared, DIFFERING {}{}{}", verifyBuilds_, verifyDiffering_, verifyFirst_.empty() ? "" : "; first: ", verifyFirst_);
+    }
+    if (skipHits_ + skipChecks_ > 0) {
+        spdlog::info("enh: lights: unchanged builds (5 s): skipped {}, uploads skipped {}, full builds with an unchanged signature compared {} DIFFERING {}{}{}", skipHits_, uploadsSkipped_, skipChecks_,
+                     skipDiffering_, skipFirst_.empty() ? "" : "; first: ", skipFirst_);
+        skipHits_ = skipChecks_ = uploadsSkipped_ = 0;
     }
     if (cpuN_ > 0) {
         spdlog::info("enh: lights: CPU per build (ms, mean of {}): collect {:.3f}, near + drawn merge {:.3f}, truncate {:.3f}, shadow ids {:.3f}, table + known grid {:.3f}, upload + record {:.3f}",

@@ -14,6 +14,7 @@
 // Stage (b) (GPU-driven draws that consume the table instead of engine lists) and stage (c) (point-light shadow cubes) build on the same buffer.
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -97,6 +98,9 @@ float lightEngineFalloff(float d2, float rcpSqrRange);
 // Full-owned lighting (setting lighting.full_lit, gpu-scene.md 9.8): lit draws are composed with one 3-light permutation and take ALL their point
 // lights from the table. Set by HalDevice::applyLighting (needs the table on and no compare run); read by native::StaticOps.
 bool fullLitActive();
+// WS13 (frame-ownership.md 14.55): a build with the inputs of the last one keeps its table + upload; default on, `debug lightskip 0|1` (overlay command) switches it inside one run
+// (perf-ab.ps1 -CommandTemplate), RVK_LIGHTS_SKIP_OFF=1 at start
+std::atomic<bool>& lightBuildSkip();
 void setFullLitActive(bool on);
 // the two table lighting options (lighting.trust_table / lighting.tree_merge), meaningful while fullLitActive()
 bool fullLitSkipsReads();   // lighting.trust_table: lit draws skip their own point-light reads when the table verifiably holds every light of the object
@@ -203,6 +207,14 @@ private:
     std::vector<engine::lights::WorldLight> truncated_;
     double cpuMs_[6]{};  // record()'s CPU per section, summed over cpuN_ builds (logged every 5 s)
     std::uint64_t cpuN_ = 0;
+    // WS13: unchanged builds keep the table + upload (record())
+    static constexpr std::uint32_t kFullEvery = 64;
+    std::uint64_t buildSig_ = 0, buildSerial_ = 1;
+    bool haveSig_ = false;
+    std::uint32_t sinceFull_ = 0;
+    std::array<std::uint64_t, rhi::kFramesInFlight> uploadSerial_{};
+    std::uint64_t skipHits_ = 0, skipChecks_ = 0, skipDiffering_ = 0, uploadsSkipped_ = 0;
+    std::string skipFirst_;
 };
 
 }  // namespace rvk::enh
