@@ -659,6 +659,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         if (rc != 0) {
             why = kFbRefused;
             lateDetail_ = lateOfCode(dev_, cd, rc);
+            markStale(rec, lateDetail_);
             tag = baseTag;
             return false;
         }
