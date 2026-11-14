@@ -51,6 +51,24 @@ struct Tpl {
     std::uint64_t passSerial = 0;       // the pass this template was made ready in (scratch)
     std::uint32_t passRun = 0;          // its run in the pass's list (scratch)
     std::uint64_t devBucket = 0;        // Device::ownedBucketKey (scratch, per pass)
+    std::uint64_t uid = 0;              // WS11: unique for the life of the process (State::tplSerial): the layout reuse compares uids, never addresses (a freed template's address is reused)
+};
+
+// WS11 (frame-ownership.md 14.52): what a z-type pass (the main z pre-pass, a cascade) laid out last time, kept while the next pass is the same instance for instance: the row block,
+// the records (window 2's base relative to the block), the items and the position list. Reused only when every instance has the same template (uid) and the same 16 row floats,
+// every run's template record and bucket are the same, and no observer wants a run; check frames build the layout anyway and compare
+struct Layout {
+    bool valid = false;
+    std::uint32_t P = 0, viewSlot = 0, missRun = 0;
+    std::vector<std::uint64_t> uid;                    // per plan instance: its template's uid
+    std::vector<float> rows;                           // per plan instance: its 16 row floats
+    std::vector<std::uint32_t> runFirst, runN;         // per run (order of first appearance): the plan index of its first instance, its instances
+    std::vector<shader::abi::DrawRecord> runBase;      // the template's record when the layout was made
+    std::vector<std::uint64_t> runBucket;
+    std::vector<d3d9::Device::TreeItem> items;
+    std::vector<shader::abi::DrawRecord> recs;         // vsWin[2] = the block's chunk base is patched in
+    std::vector<std::uint32_t> recChunk, posRec;
+    std::vector<std::uint8_t> block;
 };
 
 // what an op's templates are valid for (read at the op's entry; the pass compares)
@@ -114,6 +132,9 @@ struct Stats {
     // check frames: the composition against the plan and the templates
     std::uint64_t checkOps = 0, checkInst = 0, checkRowDiff = 0, checkLightDiff = 0, checkKeyDiff = 0, checkCountDiff = 0, checkDraws = 0, checkTplDiff = 0, checkMiss = 0, checkMissCompared = 0;
     std::uint64_t planNs = 0, tplNs = 0, rowNs = 0, flushNs = 0, sideNs = 0, takeNs = 0;
+    // WS11 detail timers (RVK_OWNED_TIMERS=1): the op's checks, treeTemplate, the lighting entries, the observers' call, the passes' whole
+    std::uint64_t opNs = 0, mkTplNs = 0, entryNs = 0, obsNs = 0, passNs = 0, recNs = 0, zPassNs = 0, zInst = 0, sInst = 0;
+    std::uint64_t layoutHits = 0, layoutBuilt = 0, layoutChecks = 0, layoutDiff = 0, layoutInst = 0;  // WS11 layout reuse: passes served from / stored in the layout, check-frame comparisons, differences, instances served
     void add(const Stats& o);
 };
 
@@ -157,6 +178,9 @@ struct State {
     std::vector<std::uint32_t> order;
     std::uint64_t scrubTick = 0;
     std::uint64_t differingSeen = 0;
+    std::uint64_t tplSerial = 0;
+    std::vector<Layout> layout;          // WS11: by view key x pass (viewKey * 2 + solid)
+    std::vector<std::uint32_t> recChunk; // scratch: the chunk of each of this pass's records (z passes)
 };
 
 }  // namespace rvk::native::tro

@@ -67,6 +67,7 @@ def main():
     ap.add_argument("--kind", default="self")
     ap.add_argument("--filter", default="")
     ap.add_argument("--dll", default="out/cpu/base.dll")
+    ap.add_argument("--interval", type=float, default=0.0, help="frame interval ms when the log has no perf: lines (-NoPerf)")
     ap.add_argument("logs", nargs="+")
     a = ap.parse_args()
     data = {}
@@ -74,7 +75,7 @@ def main():
     for spec in a.logs:
         tag, path = spec.split("=", 1)
         wins = load(path, a.skip)
-        iv = statistics.mean(w[0] for w in wins if w[0]) if wins else 0
+        iv = statistics.mean(w[0] for w in wins if w[0]) if any(w[0] for w in wins) else a.interval
         ivs[tag] = iv
         tot = collections.Counter()
         for w in wins:

@@ -152,6 +152,17 @@ public:
     std::vector<Instance>& instancesMutable() { return list_; }  // (per-frame state only: never key / blas / owner)
     const Instance* find(std::uint64_t key) const;
     Instance* find(std::uint64_t key);  // (pointer valid until the next change)
+    // WS11: the position of an instance of `instances()` as a hint a caller keeps (positions move when instances are removed: `at` compares the key), and what see()
+    // does to an instance that exists (owner 0): the cover of the owned tree runs refreshes its instances through it
+    std::size_t positionOf(const Instance& in) const { return static_cast<std::size_t>(&in - list_.data()); }
+    Instance* at(std::size_t pos, std::uint64_t key) { return pos < list_.size() && list_[pos].key == key ? &list_[pos] : nullptr; }
+    static void refresh(Instance& in, std::uint32_t flags, std::uint32_t data, std::uint8_t view, std::uint64_t frame, double time) {
+        in.lastFrame = frame;
+        in.lastTime = time;
+        in.flags |= flags;
+        if (data != 0) in.data = data;
+        in.views |= view;
+    }
     // an instance only `view` saw while its owner has a live instance seen in `preferred` (the cascades draw some objects at
     // another level of detail than the main view: the TLAS takes the main view's, not both)
     bool supersededBy(const Instance& in, std::uint8_t preferred) const;

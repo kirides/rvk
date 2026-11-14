@@ -123,6 +123,7 @@ public:
     // true when a light of the last build (any level: the far lights too) sits within 8 units of `pos`: the table lights an object's own light there
     // per pixel, so the object's batch need not end on that light (native::planTreeBatches' table merge)
     static bool lightKnown(const float pos[3]);
+    static std::uint64_t knownSerial();  // WS11: changes whenever the grid lightKnown reads is replaced
     // F2c-1: a counter bumped whenever what `lightKnown` / `registryComplete` depend on changes (the "registry complete" flag flips, or the set of the last build's
     // light positions differs from the previous build's): a retained record that took its `holdsAll` decision from them stays valid while the value is the same
     static std::uint64_t registryGeneration();

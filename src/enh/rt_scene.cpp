@@ -401,6 +401,10 @@ void RtScene::learnEngineMaterials(d3d9::Device& dev, const d3d9::ReplaceQuery& 
 
 std::uint8_t RtScene::viewBit(View v) const { return v == View::Main ? 1 : v == View::Shadow ? 2 : 4; }
 
+namespace {
+constexpr const char* kWhyLeaves = "leaves (op > 1)";  // (observe()'s reject reason and treeObserveNoop's test of "already logged": one pointer)
+}
+
 void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (ordProbe_ != nullptr) *ordProbe_ = kOrdNothing;  // (14.44 verify: the outcome reached, set at the branches below)
     if (!active_) return;
@@ -511,7 +515,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // the topology and the material (`animatedOnly`)
     const bool leaf = speedTree && q.tag != nullptr && q.tag->opDesc > 1;
     const bool leafAnimated = leaf && animated_ && q.phase.view == View::Main && q.phase.pass == Pass::Solid;
-    if (speedTree && (q.tag == nullptr || (leaf && !leafAnimated))) return reject(q.tag == nullptr ? "untagged" : "leaves (op > 1)");  // P4
+    if (speedTree && (q.tag == nullptr || (leaf && !leafAnimated))) return reject(q.tag == nullptr ? "untagged" : kWhyLeaves);  // P4
     // the vertex shader's verdict (cached by its hash and the draw's instancing: most rejected draws stop here)
     {
         const std::uint64_t vsKey = q.engineVs->hash ^ (q.instanced ? 0x9E3779B97F4A7C15ull : 0ull) ^ (leafAnimated ? 0xD1B54A32D192ED03ull : 0ull);
@@ -939,8 +943,32 @@ void RtScene::tableInstanceRemoved(std::uint64_t instKey) {
     tableByInst_.erase(instKey);
 }
 
+// observe()'s branches for a tree draw of the z pre-pass / a cascade up to the vertex shader verdict, replicated (every one of them rejects without touching the scene: only counters
+// and the once-per-reason log line differ), and for a LEAF run of the main solid pass while the trees are not animated (the leaf cards are only taken with the wind compute / capture:
+// about half of the owned solid runs of the jungle). Not a blended draw (learnExcluded), not water-tagged; branches / fronds of the solid pass are treeRunFast's.
+bool RtScene::treeObserveNoop(const d3d9::CoverQuery& d) {
+    if (!d3d9::treeReuse().load(std::memory_order_relaxed) || !active_ || d.kind != Kind::SpeedTree || d.tag == nullptr || d.engineVs == nullptr || d.blending) return false;
+    const bool z = d.phase.view == View::Main && d.phase.pass == Pass::DepthPrepass;
+    const bool solid = d.phase.view == View::Main && d.phase.pass == Pass::Solid;
+    if (!z && !solid && d.phase.view != View::Shadow) return false;
+    if (d.tag->water != d3d9::draws::Water::None || (d.primitiveType != 4 && d.primitiveType != 5)) return false;
+    if (d.tag->opDesc > 1) {  // (a leaf outside the animated solid pass: "leaves (op > 1)", logged once; the main solid pass's leaves are taken while animated trees are on)
+        if (solid && animated_) return false;
+        if (speedTreeLogged_.size() < 16 && !speedTreeLogged_.contains(kWhyLeaves)) return false;
+        ++tts_.noop;
+        return true;
+    }
+    if (solid) return false;  // (branches / fronds of the solid pass: treeRunFast / coversTreeRun / the full observation)
+    const std::uint64_t vsKey = d.engineVs->hash ^ (d.instanced ? 0x9E3779B97F4A7C15ull : 0ull);
+    const auto it = vsVerdict_.find(vsKey);
+    if (it == vsVerdict_.end() || it->second == nullptr || (speedTreeLogged_.size() < 16 && !speedTreeLogged_.contains(it->second))) return false;  // (not known yet, or the verdict is to be logged by an observation first)
+    ++tts_.noop;
+    return true;
+}
+
 bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
     f81Arm_.valid = false;
+    if (d.kind == Kind::SpeedTree && treeObserveNoop(d)) return true;
     bool entryDecides = false;  // (an F8-0 entry exists for the draw: it decides, as before F8-1)
     const bool covered = tableCover(d, entryDecides);
     if (covered || entryDecides || !f81On_) return covered;
@@ -1879,6 +1907,9 @@ void RtScene::logRecords(double frames) {
                      static_cast<double>(tts_.runs) / frames, static_cast<double>(tts_.fast) / frames, 100.0 * static_cast<double>(tts_.fast) / static_cast<double>(tts_.runs),
                      static_cast<double>(tts_.sightings) / frames, treeTpl_.size(), tts_.learned, tts_.refused, tts_.compared, tts_.matched, tts_.differing);
     }
+    if (tts_.noop != 0) spdlog::info("rt: scene records: tree draws that are no-ops to observe (z pre-pass, cascades, leaves while the trees are not animated) answered by coversDraw: {:.0f} per frame", static_cast<double>(tts_.noop) / frames);
+    if (treeCoverRuns_ != 0) spdlog::info("rt: scene records: owned tree runs covered by their last sightings (coversTreeRun): {:.0f} runs / {:.0f} instances per frame", static_cast<double>(treeCoverRuns_) / frames, static_cast<double>(treeCoverInstances_) / frames);
+    treeCoverRuns_ = treeCoverInstances_ = 0;
     tts_ = {};
     f8s_ = {};
     f81FirstDiff_ = nullptr;
@@ -1888,13 +1919,22 @@ void RtScene::logRecords(double frames) {
 // ---- F8-1: owned SpeedTree runs from their templates -----------------------------------------------------------------------------------------------------------------
 
 bool RtScene::treeTplGuards(const TreeTpl& t, const d3d9::ReplaceQuery& q, const rt::BlasKey& key, Blas*& b, Blas::MaterialSlot*& slot) {
+    if (q.tag == nullptr) {
+        b = nullptr;
+        slot = nullptr;
+        return false;
+    }
+    return treeTplGuards(t, q.tag->material, q.tag->opDesc, RtMaterials::signature(q), key, b, slot);
+}
+
+bool RtScene::treeTplGuards(const TreeTpl& t, const void* tagMaterial, std::uint32_t opDesc, std::uint64_t matSig, const rt::BlasKey& key, Blas*& b, Blas::MaterialSlot*& slot) {
     const std::uint64_t frame = dev_.frameValue();
     b = nullptr;
     slot = nullptr;
-    if (!t.valid || t.exclEpoch != exclEpoch_ || t.animated != animated_ || !(t.key == key) || q.tag == nullptr || q.tag->material != t.tagMaterial || q.tag->opDesc > 1 != t.leaf) return false;
+    if (!t.valid || t.exclEpoch != exclEpoch_ || t.animated != animated_ || !(t.key == key) || tagMaterial != t.tagMaterial || opDesc > 1 != t.leaf) return false;
     b = findBlas(t.blas);
     if (b == nullptr || b->state == BlasState::Failed || !(b->key == key) || b->glass) return false;
-    if (RtMaterials::signature(q) != t.matSig) return false;
+    if (matSig != t.matSig) return false;
     for (Blas::MaterialSlot& m : b->materials) {
         if (m.id == t.material && m.sig == t.matSig) slot = &m;
     }
@@ -1924,36 +1964,45 @@ bool RtScene::treeRunFast(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         return false;
     }
     ++tts_.fast;
-    // materialOf's slot hit + memo, the BLAS's stamps (as observe() leaves them)
     const double now = dev.secondsSinceCreate();
-    slot->used = frame;
-    slot->rank = std::max(slot->rank, t.rank);
+    treeRunEffects(t, *b, *slot, frame, now);
     const bool overlay = slot->overlay;
-    b->memoFrame = frame;
-    b->memoSig = t.matSig;
-    b->memoRank = t.rank;
-    b->memoBlending = false;
-    b->memoId = slot->id;
-    b->memoOverlay = overlay;
-    b->lastUsedFrame = frame;
-    b->lastUsedTime = now;
-    b->opaqueMainFrame = frame;  // (the main view's solid pass)
-    if (t.leaf) b->animatedOnly = true;
     const d3d9::scene::CameraBlock& camBlock = dev.camera().valid ? dev.camera() : dev.lastCamera();
     const std::uint32_t n = std::min(q.instances, kMaxBatch);
     TreeBatch treeBatch;
     const bool treeBatchOk = animated_;
+    // WS11: the run's cover record (a run = the batches of one Device::ownedTreeObserve call; the record is complete when the next run begins)
+    // (animated trees take the wind jobs per frame: no cover, nothing recorded)
+    TreeCover scratchCover;
+    TreeCover& cover = animated_ ? scratchCover : treeCover_[cd];
+    if (!animated_ && cover.serial != dev.ownedTreeRunSerial()) {
+        cover.serial = dev.ownedTreeRunSerial();
+        cover.n = 0;
+        cover.bad = false;
+        cover.rows.clear();
+        cover.key.clear();
+        cover.pos.clear();
+    }
     for (std::uint32_t i = 0; i < n; ++i) {
         // (the identity instance stream of the owned runs: instance i = row i, observe()'s ramp case)
         const std::uint32_t reg = kInstanceDataBase + 4 * i + 1;
-        if (reg + 2 >= kInstanceDataEnd) continue;
+        if (reg + 2 >= kInstanceDataEnd) {
+            cover.bad = true;
+            continue;
+        }
         rt::Rows rows;
         for (std::uint32_t r = 0; r < 3; ++r) std::memcpy(&rows[r * 4], dev.vsConstant(reg + r), sizeof(float) * 4);
-        if (!rt::finite(rows)) continue;
+        if (!rt::finite(rows)) {
+            cover.bad = true;
+            continue;
+        }
         if (camBlock.valid && limits_.radius > 0.0f && b->bounds.valid()) {
             const rt::Sphere sp = rt::worldSphere(b->bounds, rows);
             const float dx = sp.c[0] - camBlock.position[0], dy = sp.c[1] - camBlock.position[1], dz = sp.c[2] - camBlock.position[2];
-            if (std::sqrt(dx * dx + dy * dy + dz * dz) - sp.r > limits_.radius) continue;
+            if (std::sqrt(dx * dx + dy * dy + dz * dz) - sp.r > limits_.radius) {
+                cover.bad = true;
+                continue;
+            }
         }
         ++iv_.sightings;
         ++tts_.sightings;
@@ -1964,6 +2013,107 @@ bool RtScene::treeRunFast(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
         if (in != nullptr) treeSetNote(dev, *in);
         if (in != nullptr && treeBatchOk) observeTree(dev, q, *b, *in, rows, treeBatch, i, n);
+        if (animated_) {
+            // (no record)
+        } else if (in == nullptr) {
+            cover.bad = true;
+        } else {
+            cover.rows.insert(cover.rows.end(), rows.begin(), rows.end());
+            cover.key.push_back(in->key);
+            cover.pos.push_back(static_cast<std::uint32_t>(registry_.positionOf(*in)));
+            ++cover.n;
+        }
+    }
+    return true;
+}
+
+void RtScene::treeRunEffects(const TreeTpl& t, Blas& b, Blas::MaterialSlot& slot, std::uint64_t frame, double now) {
+    // materialOf's slot hit + memo, the BLAS's stamps (as observe() leaves them)
+    slot.used = frame;
+    slot.rank = std::max(slot.rank, t.rank);
+    b.memoFrame = frame;
+    b.memoSig = t.matSig;
+    b.memoRank = t.rank;
+    b.memoBlending = false;
+    b.memoId = slot.id;
+    b.memoOverlay = slot.overlay;
+    b.lastUsedFrame = frame;
+    b.lastUsedTime = now;
+    b.opaqueMainFrame = frame;  // (the main view's solid pass)
+    if (t.leaf) b.animatedOnly = true;
+}
+
+// WS11 (frame-ownership.md 14.52): an owned tree run of the main view's solid pass whose instances are the ones the last complete run of its template saw (same rows, still in the
+// registry at the position kept, still inside the radius) is covered: the guards and the stamps of treeRunFast, then per instance the refresh see() does for an existing instance,
+// the material rule and the tree set note - without the key hashing and the lookups, and without the device loading the run's registers. Everything is checked before anything is
+// applied; a relearn / check frame, animated trees (the wind jobs are per frame) and every guard that fails leave the run to treeRunFast.
+bool RtScene::coversTreeRun(d3d9::Device& dev, const d3d9::CoverQuery& d, const void* cd, const float* const* rows, std::uint32_t count) {
+    if (!d3d9::treeReuse().load(std::memory_order_relaxed) || !f81On_ || !active_ || animated_ || cd == nullptr || rows == nullptr || count == 0 || d.kind != Kind::SpeedTree || d.phase.view != View::Main || d.phase.pass != Pass::Solid || !d.instanced ||
+        d.tag == nullptr || d.vertexBuffer == nullptr || d.indexBuffer == nullptr || d.vertexBuffer->ringCopied() || d.indexBuffer->ringCopied() || dev.ownedObsInfo() != nullptr) {
+        return false;
+    }
+    const auto ct = treeCover_.find(cd);
+    if (ct == treeCover_.end()) return false;
+    TreeCover& cover = ct->second;
+    // a complete record of an earlier run (this run's batches have not been observed yet), of this run's size
+    if (cover.bad || cover.n != count) return false;
+    const auto tt = treeTpl_.find(cd);
+    if (tt == treeTpl_.end()) return false;
+    const TreeTpl& t = tt->second;
+    const std::uint64_t frame = dev.frameValue();
+    if (gpuscene::periodic(frame, kRecordCheck) || (frame + t.salt) % kRecordRelearn == 0) return false;
+    rt::BlasKey key;
+    {
+        const d3d9::ResourceRef vr = d.vertexBuffer->ref(), ir = d.indexBuffer->ref();
+        key.vb = vr.id;
+        key.vbGen = vr.generation;
+        key.ib = ir.id;
+        key.ibGen = ir.generation;
+        key.vertexOffset = d.vertexOffset;
+        key.stride = d.vertexStride;
+        key.first = d.first;
+        key.primitives = d.primitives;
+        key.baseVertex = d.baseVertex;
+        key.index32 = d.indexBuffer->index32() ? 1u : 0u;
+        key.strip = d.primitiveType == 5 ? 1u : 0u;
+    }
+    Blas* b = nullptr;
+    Blas::MaterialSlot* slot = nullptr;
+    if (!treeTplGuards(t, d.tag->material, d.tag->opDesc, RtMaterials::signature(d.engineVs, d.enginePs, d.tag->material, d.textures), key, b, slot)) return false;
+    const d3d9::scene::CameraBlock& camBlock = dev.camera().valid ? dev.camera() : dev.lastCamera();
+    // every instance: its rows unchanged, still inside the radius, still the registry's instance at its position
+    static thread_local std::vector<rt::Registry::Instance*> found;
+    found.clear();
+    for (std::uint32_t k = 0; k < count; ++k) {
+        const float* r = rows[k] + 4;  // c33..c35 of the instance's four registers
+        if (std::memcmp(r, &cover.rows[static_cast<std::size_t>(k) * 12], 12 * sizeof(float)) != 0) return false;
+        if (camBlock.valid && limits_.radius > 0.0f && b->bounds.valid()) {
+            rt::Rows rr;
+            std::memcpy(rr.data(), r, sizeof(rr));
+            const rt::Sphere sp = rt::worldSphere(b->bounds, rr);
+            const float dx = sp.c[0] - camBlock.position[0], dy = sp.c[1] - camBlock.position[1], dz = sp.c[2] - camBlock.position[2];
+            if (std::sqrt(dx * dx + dy * dy + dz * dz) - sp.r > limits_.radius) return false;
+        }
+        rt::Registry::Instance* in = registry_.at(cover.pos[k], cover.key[k]);
+        if (in == nullptr || in->blas != b->id) return false;
+        found.push_back(in);
+    }
+    // applied
+    ++tts_.runs;
+    ++tts_.fast;
+    ++treeCoverRuns_;
+    treeCoverInstances_ += count;
+    const double now = dev.secondsSinceCreate();
+    treeRunEffects(t, *b, *slot, frame, now);
+    const bool overlay = slot->overlay;
+    for (std::uint32_t k = 0; k < count; ++k) {
+        rt::Registry::Instance* in = found[k];
+        ++iv_.sightings;
+        ++tts_.sightings;
+        rt::Registry::refresh(*in, t.flags, t.alphaWord, t.view, frame, now);
+        applyMaterial(*in, t.material, t.rank, overlay, frame);
+        if (tableOn_ && in->ambiguous) tableDropInstance(in->key);
+        treeSetNote(dev, *in);
     }
     return true;
 }

@@ -21,6 +21,7 @@
 #include "d3d9/device.h"
 #include "gpuscene/cluster_table.h"
 #include "d3d9/memeq.h"
+#include "d3d9/scene_hash.h"
 #include "native/f2c_measure.h"
 #include "shader/abi.h"
 
@@ -1812,6 +1813,8 @@ void Device::fillCapture(const DrawPacket& p) {
     c.clusterUsing = clusterUsing_;
     c.vi = *p.vi;
     c.dyn = *p.dyn;
+    c.viHash = hashVi(c.vi);
+    c.dynHash = hashDyn(c.dyn);
     c.block = lastBlock_;
     c.query = lastQuery_;
     c.kind = lastKind_;

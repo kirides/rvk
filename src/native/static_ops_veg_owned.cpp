@@ -21,6 +21,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/defs.h"
+#include "d3d9/scene_hash.h"
 #include "enh/light_table.h"
 #include "engine/memread.h"
 #include "gpuscene/illumination_table.h"
@@ -516,6 +517,7 @@ void StaticOps::vegCompEnd(const Op& op) {
             }
             c.vi.buffers[found] = sb.buffer;
             c.vi.offsets[found] = sb.offset;
+            c.viHash = d3d9::hashVi(c.vi);  // (WS11: the draw's kept hash follows its vertex input)
             c.stream[1] = sb;
         }
         for (std::size_t i = 0; i < 4; ++i) {

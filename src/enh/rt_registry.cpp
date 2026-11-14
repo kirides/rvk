@@ -110,11 +110,7 @@ std::pair<Registry::Instance*, bool> Registry::see(std::uint64_t key, std::uint6
                                                    double time) {
     if (auto it = index_.find(key); it != index_.end()) {
         Instance& in = list_[it->second];
-        in.lastFrame = frame;
-        in.lastTime = time;
-        in.flags |= flags;
-        if (data != 0) in.data = data;
-        in.views |= view;
+        refresh(in, flags, data, view, frame, time);
         if (owner != 0) {
             in.owner = owner;
             if ((in.ownerViews & view) != view) {

@@ -4754,3 +4754,69 @@ of both kinds, hashes -0.4 ms, allocations -0.1 ms). Full is still slower than W
 
 **Left:** the per-op validity reads (the retained list above needs device generations + engine events), the tree pass (0.9 - 1.3 ms per frame: `ownedTreeObserve` shows every tree instance to
 the observers per frame, the RT scene has no cover for SpeedTree draws), `hashDyn` in `ownedPullKey` per pulled item (0.09 ms), the engine's own list building (F10-1 extension, 15.5).
+
+
+### 14.54 WS11: the owned tree pass by change (2026-11-14, branch `worktree-agent-a48d74b5484dd6d68` on main 18b677c; no setting, overlay command `debug treereuse 0|1`, env `RVK_WS11_LAYOUT_OFF=1`, `RVK_OWNED_TIMERS=1` for the detail timers)
+
+Question (14.51 "Left"): the owned tree pass costs 0.9 - 1.3 ms a frame, `ownedTreeObserve` shows every tree instance to the observers per frame and the RT scene has no cover for SpeedTree draws:
+what of it follows what changed, exactly, and heals without check frames (players run `native.owned_check = 0`)?
+
+**Before (savegame hold, player defaults, Full; `-CpuProfile` + `RVK_OWNED_TIMERS=1`, profile percentages x the frame interval, so +-30 %).** `StaticOps::treePass` 1.2 - 1.3 ms inclusive: `ownedTreeObserve` 0.22,
+`treePlan` 0.21 (the engine's tree objects: 2 - 3 cache-missing reads per instance), `treeTemplate` 0.06, `ownedTreeFlush` 0.05, the rest (0.7) the per-instance loops of `treePass` itself. Timers per owned main view
+(z + solid pass): side effects 61 us, plan 208, templates 336, rows 398 (of them the observers ~220), flush 84 us; per cascade view 155 us (4.3 views a frame). Jungle: main view 1.26 ms, cascade view 0.17 ms
+(observers 207 us of the main view). `hashDyn` in `ownedPullKey` was 0.11 - 0.19 ms (all pulled items, not only trees). Wrapper's equivalent (`contextSlot<7>` + `<8>`, the engine's tree slots, RT observe inside):
+~1.25 ms at hold, so the owned pass was already level with composing: **`native.owned_trees` off / on in Full (perf-ab -Restart, 2 pairs): hold CPU 7.74 -> 6.70 ms**.
+**The RT scene's tree observation itself is small** (`-Perf` census, per frame: hold SpeedTree main solid 130 runs 0.068 ms 307 sightings, z 0.006, cascades 0.003; jungle 0.135 ms 560 sightings): what cost
+was the device side of showing a run (shader refs, stream, window registers, one `setVertexShaderConstantF` per instance, query copies) for runs that change nothing in the scene:
+z / cascade runs are rejected by the vertex shader verdict, and **half of the solid runs (jungle 169 -> 93 a frame) are leaf runs the RT scene rejects while the trees are not animated**.
+
+**Built** (all exact by construction or compared; none of them relies on check frames to refresh state):
+1. **Hashes kept with the draw** (`CachedDraw::viHash / dynHash`, made once in `fillCapture`; the veg template refreshes `viHash` after its stream-1 patch): `ownedBucketKey`, `ownedPullKey`
+   (the per-item `hashDyn` of 14.51 "left"), `deriveScene`, `f2c4BucketKey` read them; the S-5 flush statistics (allocation + hash + sort per tree flush, measurement only) run with `-Perf` only.
+2. **No-op observations are answered by `coversDraw`** (`RtScene::treeObserveNoop`: the branches of `observe()` up to the vertex shader verdict, replicated, for z / cascade tree draws and for leaf runs of the
+   solid pass while `animated_` is off; only once the reason was logged). `Device::ownedTreeRunWanted` asks the observers once per run on the template's query BEFORE anything is set up
+   (`ownedTreeObserve` also asks once per run, not per batch); an unwanted run is counted shown, the frame noted, nothing loaded. One `setVertexShaderConstantF(32, rows, 4 n)` per batch.
+3. **`DrawObserver::coversTreeRun` / `RtScene::coversTreeRun` (the RT scene's cover for owned tree runs, F8-1 `treeRunFast` + F2c-4b's skip model).** `treeRunFast` records per run (the batches of one
+   `ownedTreeObserve` call) each instance's rows c33..c35, registry key and registry position (`TreeCover`; not for animated trees, not for a run that skipped an instance). The next frame's run is covered when
+   the template guards hold (`treeTplGuards`, now also callable from a `CoverQuery`), it is not a relearn frame (`(frame + salt) % 32`, per template: this is the healing, no check frame involved) nor a check frame,
+   every instance has the same 12 rows (memcmp), is inside the radius (recomputed) and is still the registry's instance at its kept position with the same key and BLAS (`Registry::at`); everything is checked before
+   anything is applied, then the stamps of `treeRunFast` (`treeRunEffects`), per instance `Registry::refresh` (= `see()` of an existing instance, now shared) + `applyMaterial` + the table drop + `treeSetNote`.
+   Hold: 66 of 69 runs a frame covered (293 instances), jungle 86 of 97 (534 of 571 sightings).
+4. **Layout reuse of the z-type passes** (main z pre-pass, cascades; `tro::Layout`, per view key): the pass's row block, records (window 2's base relative to the block), items and position list are kept (the block
+   is built in cacheable memory and copied to the write-combined ring once) and served again when every plan instance has the same template (`Tpl::uid`: never an address) and the same 16 row floats, every
+   run's template record (`tab.record` byte for byte) and device bucket are the same and no observer wants a run. Check frames (frame + 5, every 10th) build the layout anyway and compare it with the kept one:
+   `layout reuse ... check-frame comparisons, DIFFERING` in the `owned trees` line (counted in the DIFFERING sum, which turns the stage off). A moving scene keeps a layout twice and then every 8th miss
+   (the copy costs about what the comparison saves).
+5. Smaller: the runs of a pass are a pool (no per-pass vector allocations), `std::sort` with the run index as tie break instead of `std::stable_sort`, `LightTable::lightKnown` memoised per position and grid serial
+   (`knownSerial`), the lighting entry of consecutive instances of one template + illumination (an engine batch shares it) reused. `RVK_OWNED_TIMERS=1` adds `detail:` timers to the line (op checks, treeTemplate,
+   lighting entries, observers, whole pass, z passes).
+
+**Result.** Detail timers (same build, one session each, so the machine load differs: compare shares): observers 108 us of the 656 us main-view pass at hold (16 %) -> 14 of 1,145 (1.2 %), jungle 207 of 1,263 (16 %)
+-> 11 of 915 (1.2 %), cascade views 8 -> 0 us. `debug treereuse 0|1` (layout reuse + both covers off / on, one session, perf-ab `-CommandTemplate 'debug treereuse {0}' -A 0 -B 1`, CPU engine+HAL, medians of the
+windows): jungle 7.15 -> 6.79 ms (-0.36, 5 pairs, z -2.2), hold 6.20 -> 6.09 (-0.12, 8 pairs; the first 5-pair run was noise-dominated: +-0.5 between windows of one arm), harbour_docks 2.43 -> 2.41. The
+always-on parts (hashes, run pool, memos) are not switchable; build A/B (the unchanged main build vs this one, one session per window, 3 pairs, `-ConfigA` copy of the old d3d9.dll): hold 6.84 / 8.80 / 9.97 ->
+6.52 / 6.77 / 6.71, jungle 7.67 -> 7.12 median (before the leaf / cover work: -0.5 ms); with other agents' games on the machine single windows jump 2x in both arms.
+
+**perf-ab Full vs Wrapper after the merge of main 18b677c** (shared copy + shared lock, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults`, 3 pairs, 240-frame windows, CPU engine+HAL, every owned
+stage at its arm's state; 14.51's deltas in brackets):
+
+| scene | Wrapper (windows) | Full (windows) | delta of the medians |
+|---|---|---|---|
+| pub_interior | 0.96 / 0.97 / 0.97 | 1.30 / 1.26 / 1.32 | +0.33 (+0.35) |
+| harbour_docks | 2.07 / 2.01 / 2.07 | 2.36 / 2.48 / 2.40 | +0.33 (+0.50) |
+| hold | 6.88 / 6.71 / 6.79 | 6.04 / 6.40 / 6.21 | **-0.58** (+0.79) |
+| jungle | 6.97 / 6.89 / 6.95 | 6.14 / 6.18 / 6.19 | **-0.77** (+0.06) |
+
+(This run is quiet: the windows of one arm agree within 0.1 - 0.4 ms; the 14.51 table had 2x jumps. The main merge of WS10's / WS9's work is in both columns; this item's share is the tree numbers above.)
+Full is now faster than Wrapper at hold and jungle; pub_interior (no trees) and harbour_docks (few) are still +0.33 and are not tree work.
+
+**Exactness.** `rvk_tests` 355 / 0 (new `rt_registry_position_hint_and_refresh`), `rvk_d3d9test --validation` 0 failures 0 validation errors; private copy `risen-test-vk-ws11`, instance 31, lock `rvk-ws11`, test baseline
+(`owned_check = 10`, `picture_check`): jungle + harbour_docks + pub_interior (`freeze_wait = 2000`) after the merge of main: layout check-frame comparisons 577, DIFFERING 0 (all counters), RT scripts 299 / 299
+matched, TLAS check frames 15 (3,660 instances) differing 0, picture check FAILED 0 in the repeat (19 ok windows) and 1 of 23 in the first run: a window between two UNRELIABLE ones at a spot change (control
+0.44 %), gone in the repeat; jungle alone 12 ok / 0 FAILED twice; `jungle_wind` (`wind=1`) with `shadows.rt = near` (animated trees: no cover, layout reuse on) + `native.tree_wind = compare`: 24,396 jobs
+7.3 M vertices compared, max error 0.00146 units (leaf cards; branches 0.0011), 0 over 0.1, TLAS check frames differing 0; GPU-AV (`GPU_BASED_GPU_ASSISTED`) hold + `jungle_wind` + RT shadows: 0 validation lines;
+`rvk_rtwalk` (load = 0) PASS 4 checks. The tree-motion compare reads 0 vertices (no motion target in that setup).
+
+**Left:** the solid pass (the lighting entries need `ensureSlot`'s per-frame poll of each illumination object, the lighting records follow it: no layout reuse there), `treePlan`'s engine reads (2 - 3 per
+instance, no engine event to follow), `treeTemplate` per template and pass (the draw signature reads textures / bindings / modules), the leaf-card jobs of animated trees (per frame by nature). The layout reuse
+and the covers only pay while the view and the trees hold still (all four perf-ab scenes do); a walking player changes rows and sets every frame.

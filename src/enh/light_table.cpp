@@ -64,6 +64,7 @@ struct KnownGrid {
     std::vector<std::pair<std::uint64_t, std::array<float, 3>>> cells;  // sorted by key (binary search; no node allocations)
 };
 std::atomic<std::shared_ptr<const KnownGrid>> g_known;
+std::atomic<std::uint64_t> g_knownSerial{1};  // WS11: bumped with every store of g_known (lightKnown's answers are memoised per serial)
 std::uint64_t knownKey(std::int32_t x, std::int32_t y, std::int32_t z) {
     return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) * 73856093ull) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) * 19349663ull) ^
            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(z)) * 83492791ull);
@@ -88,6 +89,8 @@ bool LightTable::lightKnown(const float pos[3]) {
     }
     return false;
 }
+
+std::uint64_t LightTable::knownSerial() { return g_knownSerial.load(std::memory_order_acquire); }
 
 bool LightTable::registryComplete() { return g_registryComplete.load(std::memory_order_relaxed); }
 
@@ -719,6 +722,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
             }
             std::sort(known->cells.begin(), known->cells.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
             g_known.store(std::move(known));
+            g_knownSerial.fetch_add(1, std::memory_order_release);
         }
         registryNoteKnown(posHash);  // (the generation: a build whose light positions equal the last build's leaves it alone)
     }
