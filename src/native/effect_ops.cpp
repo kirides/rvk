@@ -582,11 +582,19 @@ bool EffectOps::effectBegin(void* filterPtr) {
     QueryPerformanceCounter(&t0);
     timeLast_ = t0.QuadPart;
     timing_ = true;
+    timeHeld_ = false;
+    const auto partsBefore = timeParts_;
     const bool r = effectBeginImpl(filterPtr);
     timing_ = false;
     QueryPerformanceCounter(&t1);
     timeTicks_ += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart);
     ++timeUnits_;
+    if (timeHeld_) {
+        // WS16 (frame-ownership.md 14.58): the held own-post group units on their own (the completing unit of a group includes its kernel's recording)
+        for (std::size_t i = 0; i < timeParts_.size(); ++i) timeHeldParts_[i] += timeParts_[i] - partsBefore[i];
+        timeHeldTicks_ += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart);
+        ++timeHeldUnits_;
+    }
     return r;
 }
 
@@ -709,6 +717,7 @@ bool EffectOps::effectBeginImpl(void* filterPtr) {
             grpHeld_ = 0;
         }
     }
+    timeHeld_ = hold && grp >= 0;
     // S-7c: the single draw units on our pixel shaders; a unit that samples the held ToneMap image and cannot fold it gets it drawn first
     ownSwap_ = false;
     {
@@ -1439,6 +1448,16 @@ void EffectOps::report() {
                      1e6 * static_cast<double>(timeParts_[6]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[7]) / f.QuadPart / timeUnits_,
                      1e6 * static_cast<double>(timeParts_[8]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[9]) / f.QuadPart / timeUnits_,
                      1e6 * static_cast<double>(timeParts_[10]) / f.QuadPart / timeUnits_);
+        if (timeHeldUnits_ != 0) {
+            const auto us = [&](std::size_t i) { return 1e6 * static_cast<double>(timeHeldParts_[i]) / f.QuadPart / timeHeldUnits_; };
+            spdlog::info("native: effect units CPU held (5 s): {} held group units, {:.2f} us per held unit, {:.3f} ms per frame", timeHeldUnits_,
+                         1e6 * static_cast<double>(timeHeldTicks_) / f.QuadPart / timeHeldUnits_, 1e3 * static_cast<double>(timeHeldTicks_) / f.QuadPart / frames);
+            spdlog::info("native: effect units CPU held parts (us per held unit): before compose {:.2f}, compose {:.2f} + parameter objects {:.2f}, device capture + target {:.2f}, passes {:.2f}; "
+                         "names + groups + own (incl. the kernels' recording) {:.2f}, predict {:.2f}, issue {:.2f} (applyDevice {:.2f}), adopt {:.2f}",
+                         us(0), us(1), us(6), us(7), us(8), us(2), us(3), us(4), us(9), us(5));
+        }
+        timeHeldParts_.fill(0);
+        timeHeldTicks_ = timeHeldUnits_ = 0;
         timeParts_.fill(0);
         timeTicks_ = timeUnits_ = 0;
         timeFrame_ = dev_.stats().frames;

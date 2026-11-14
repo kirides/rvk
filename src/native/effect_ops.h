@@ -79,9 +79,10 @@ public:
     bool effectBegin(void* filter) override;
     bool effectBeginImpl(void* filter);
     std::uint64_t timeTicks_ = 0, timeUnits_ = 0, timeFrame_ = 0;  // RVK_FX_TIME
-    std::array<std::uint64_t, 11> timeParts_{};
+    std::array<std::uint64_t, 11> timeParts_{}, timeHeldParts_{};
+    std::uint64_t timeHeldTicks_ = 0, timeHeldUnits_ = 0;
     long long timeLast_ = 0;
-    bool timing_ = false;
+    bool timing_ = false, timeHeld_ = false;
     void lap(int slot);
     void effectEnd(void* filter) override;
     void copyBegin(void* filter) override;
