@@ -387,9 +387,22 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     rvk_clDefRough = ctl.w;
     uint4 offs = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 48u));
     float2 uv = rvk_mvFrag.xy * f.viewport.zw;
-    RvkAddr cb = rvkLightClusterAt(base, rvkMvViewDepth(f), uv);
+    uint cid;
+    RvkAddr cb = rvkLightClusterAtId(base, rvkMvViewDepth(f), uv, cid);
+    // WS20 occupancy (gpu-scene.md 9.15): a cluster without lights (one bit) leaves every slot as the engine's own registers (src 0, K 1): with no table
+    // light in reach no slot is refilled, no kept slot has a table twin (no physical ratio, no shadow id), no lamp shadow darkens the baked light, and an
+    // unkept slot's colour is zero already. Debug views keep the full path (they show its bookkeeping).
+    const float4 occP = f.params[8];  // kFrameParamLightOcc: z mode (0 off, 1 on, 2 compare)
+    const uint occMode = uint(occP.z + 0.5);
+    const bool shortcut = occMode != 0u && ctl.z < 0.5 && !rvkLightClusterOccupied(base, cid);
+    if (shortcut && occMode == 1u) {
+        rvk_clCount = 0u;
+        return;
+    }
     uint cnt = min(rvkRawLoad<uint, 4>(cb), RVK_LIGHT_MAX_PER_CLUSTER);
     rvk_clCount = cnt;
+    // lamp shadows traced this frame? (header word z = the shadow image's slot; 0 = none: every lookup would return 1, so the shadow ids are not even read)
+    const bool readSid = h0.z != 0u || occMode == 0u || ctl.z >= 0.5;
 
     // the engine's lights at this pixel: positions, which carry a shadow selector
     float3 ePos[RVK_MV_CL_COUNT];
@@ -418,7 +431,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
         {
             // lamp shadows on the BAKED light: the lightmaps / probes of static surfaces hold this lamp's light unshadowed by the characters and props, so the
             // traced visibility of every shadow-casting lamp also darkens the pixel by the lamp's share of its light (rvkMvBakedShade, the epilogue)
-            uint bsid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u));
+            uint bsid = readSid ? rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u)) : 0u;
             if (bsid != 0u) {
                 float3 blv = pr.xyz - P;
                 float bfall = 1.0 - saturate(dot(blv, blv) * pr.w);
@@ -441,7 +454,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 if ((selMask >> i & 1u) != 0u || rvkLmLum(rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * i + 1u).rgb) > 0.0) {
                     twin = true;
                     if ((selMask >> i & 1u) == 0u) {
-                        uint tsid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u));
+                        uint tsid = readSid ? rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u)) : 0u;
                         if (tsid != 0u) twinSid[i] = tsid;
                     }
                 }
@@ -502,7 +515,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 float3 lv = pr.xyz - P;
                 k = rvkLmPhysicalRatio(dot(lv, lv), pr.w);
             }
-            uint sid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, pk * RVK_LIGHT_BYTES + 52u));
+            uint sid = readSid ? rvkRawLoad<uint, 4>(rvkAddrAdd(lb, pk * RVK_LIGHT_BYTES + 52u)) : 0u;
             if (sid != 0u) {
                 float sv = rvkMvLightShadow(h0.z, h0.w, sid);
                 k *= sv;
@@ -514,6 +527,29 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
             ++rvk_clUsed;
         } else {
             rvk_clK[i] = 0.0;  // an unused slot: colour 0 (the loop still runs, adds nothing)
+        }
+    }
+    // lighting.occupancy = compare: the full path ran for a pixel the shortcut would take; its slots must be what the shortcut leaves (src 0, factor 1, or an
+    // unkept slot whose colour is zero), no shadow / bake state, count 0
+    if (shortcut) {
+        uint bad = cnt != 0u ? 2u : 0u;
+        if (cnt != 0u) bad |= 0x100u;
+        [unroll] for (uint c = 0; c < RVK_MV_CL_COUNT; ++c) {
+            const float3 ec = rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * c + 1u).rgb;
+            const float3 es = rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * c + 2u).rgb;
+            const bool zeroCol = all(ec == float3(0.0, 0.0, 0.0)) && all(es == float3(0.0, 0.0, 0.0));
+            if (rvk_clSrc[c] != 0u) bad |= 4u;
+            if (rvk_clK[c] != 1.0 && !(rvk_clK[c] == 0.0 && zeroCol)) bad |= 8u;
+        }
+        if (rvk_clShadowTested != 0.0 || rvk_clBake.x != 0.0 || rvk_clBake.y != 0.0 || rvk_clShadow != 1.0) bad |= 16u;
+        RvkAddr cmp = rvkAddr(asuint(occP.xy));
+        if ((asuint(occP.x) | asuint(occP.y)) != 0u) {
+            rvkRwAtomicAdd(rvkAddrAdd(cmp, 4u), 1u);
+            if (bad != 0u) {
+                rvkRwAtomicAdd(cmp, 1u);
+                if ((bad & 0x100u) != 0u) rvkRwAtomicAdd(rvkAddrAdd(cmp, 8u), 1u);
+                rvkRwAtomicMax(rvkAddrAdd(cmp, 12u), bad);
+            }
         }
     }
 }

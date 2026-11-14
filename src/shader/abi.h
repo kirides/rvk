@@ -291,7 +291,8 @@ inline constexpr std::uint32_t kFrameParamMaterials = 2;   // materials.*: x qua
 inline constexpr std::uint32_t kFrameParamLod = 1;         // lod.trees: x the billboard fade distance scale (Device::lodModule)
 inline constexpr std::uint32_t kFrameParamTreeMotion = 7;  // native.tree_motion=compare (frame-ownership.md 14.42): xy the compare buffer reference (uint bits), z 1 = on
 inline constexpr std::uint32_t kFrameParamBoneMotion = 6;  // native.bone_motion=compare (frame-ownership.md 14.13): xy the compare buffer's read-write reference (uint bits), z 1 = on
-inline constexpr std::uint32_t kFrameParamLights = 4;      // lighting.*: params[4].xy the light table buffer reference (enh/light_table), params[5] = enabled, style (0 original / 1 physical), debug view
+inline constexpr std::uint32_t kFrameParamLightOcc = 8;    // lighting.occupancy (gpu-scene.md 9.15): z mode (0 off: the full cluster path, 1 on: empty clusters take the short path, 2 compare), xy the compare counters' read-write reference (uint bits)
+inline constexpr std::uint32_t kFrameParamLights = 4;     // lighting.*: params[4].xy the light table buffer reference (enh/light_table), params[5] = enabled, style (0 original / 1 physical), debug view
 
 // One geometry record per TLAS instance x geometry of the ray tracing scene (enh/rt_scene; GLSL RvkRtRecord in
 // shaders/include/rvk_rt.glsl, reached as records[instanceCustomIndex + geometryIndex]). Vertex attributes are words

@@ -1,6 +1,7 @@
 #include "enh/light_table.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <atomic>
@@ -25,7 +26,11 @@ constexpr std::uint32_t kClusters = kClusters0 + kClusters1;
 constexpr std::uint64_t kLightsOffset = kLightHeaderBytes;
 constexpr std::uint64_t kClustersOffset = kLightsOffset + std::uint64_t{kLightMax} * kLightBytes;
 constexpr std::uint64_t kClusters1Offset = kClustersOffset + std::uint64_t{kClusters0} * kLightClusterBytes;
-constexpr std::uint64_t kBufferBytes = kClustersOffset + std::uint64_t{kClusters} * kLightClusterBytes;
+constexpr std::uint64_t kClusterBytesEnd = kClustersOffset + std::uint64_t{kClusters} * kLightClusterBytes;
+// the occupancy bit set (WS20): one bit per cluster, written by the build pass (groups of 64 clusters = 2 words), the offset in header word 11
+static_assert(kClusters % 64 == 0, "the build pass writes whole 64-cluster groups of the occupancy bit set");
+constexpr std::uint64_t kOccOffset = kClusterBytesEnd;
+constexpr std::uint64_t kBufferBytes = kOccOffset + std::uint64_t{kClusters} / 8;
 
 std::atomic<bool> g_fullLit{false};
 std::atomic<bool> g_registryThin{true};
@@ -263,6 +268,32 @@ bool LightTable::shadowPipelinesReady() {
         }
     }
     return all;
+}
+
+void LightTable::setOccupancy(int mode) {
+    occMode_ = std::clamp(mode, 0, 2);
+    if (failed_) return;
+    std::uint32_t ref[2]{};
+    if (occMode_ == 2) {
+        if (dev_.rhi() == nullptr || dev_.rhi()->caps().backend != rhi::Backend::Vulkan) {
+            spdlog::warn("enh: lights: lighting.occupancy compare needs Vulkan: using on");
+            occMode_ = 1;
+        } else if (!occCmp_) {
+            occCmp_ = dev_.rhi()->createBuffer({64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "light occupancy compare"});
+            if (occCmp_) {
+                std::memset(occCmp_->map(), 0, 64);
+                occCmp_->flush();
+            } else {
+                occMode_ = 1;
+            }
+        }
+        if (occCmp_ && occMode_ == 2) {
+            const auto r = occCmp_->shaderRefRw(0);
+            ref[0] = r[0];
+            ref[1] = r[1];
+        }
+    }
+    dev_.setFrameParam(shader::abi::kFrameParamLightOcc, {std::bit_cast<float>(ref[0]), std::bit_cast<float>(ref[1]), static_cast<float>(occMode_), 0.0f});
 }
 
 void LightTable::configure(bool enabled, int style, int debug, float defaultRoughness) {
@@ -525,6 +556,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
     push.zs[0] = kLightNear;
     push.zs[1] = kLightFar;
     push.zs[2] = lightSliceScale(kLightNear, kLightFar, kLightGridZ);
+    push.zs[3] = std::bit_cast<float>(static_cast<std::uint32_t>(kOccOffset));
     push.offs[0] = static_cast<std::uint32_t>(kLightsOffset);
     push.offs[1] = static_cast<std::uint32_t>(kClustersOffset);
     push.offs[2] = static_cast<std::uint32_t>(style_);
@@ -610,6 +642,12 @@ void LightTable::recordShadow(d3d9::PassContext& ctx) {
 
 void LightTable::logStats() {
     const double now = dev_.secondsSinceCreate();
+    if (occMode_ == 2 && occCmp_ && now - occLog_ >= 5.0) {
+        occLog_ = now;
+        occCmp_->invalidate();
+        const auto* w = static_cast<const std::uint32_t*>(occCmp_->map());
+        spdlog::info("enh: lights: occupancy compare: {} empty-cluster pixels checked, {} mismatches ({} occupancy bit wrong), first mismatch kind {:#x}", w[1], w[0], w[2], w[3]);
+    }
     if (now - lastLog_ < 5.0) return;
     lastLog_ = now;
     spdlog::info("enh: lights: tree walk {} nodes ({} static lights seen), near lights {} (static near {} / any {} of the registry), {} lights in the table ({} changed since the last frame, {} dropped beyond {}, {} from drawn lists), {} builds ({} skipped), style {}, "

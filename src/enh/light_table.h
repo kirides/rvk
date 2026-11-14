@@ -140,6 +140,9 @@ public:
     void setRtScene(RtScene* scene) { scene_ = scene; }
     void configureShadows(const ShadowSettings& s);
     void setCollectRadius(float r) { collectRadius_ = r; }
+    // lighting.occupancy: 0 off (every pixel takes the full cluster path), 1 on (pixels in a cluster without lights take the short path), 2 compare (Vulkan:
+    // the short path's state is checked against the full path for every empty-cluster pixel; mismatches are counted into the compare buffer, logged)
+    void setOccupancy(int mode);
 
 private:
     void record(d3d9::PassContext& ctx);
@@ -156,6 +159,9 @@ private:
     float collectRadius_ = 96000.0f;
     double colourRatio_[3]{};
     std::uint64_t colourRatioN_ = 0;
+    int occMode_ = 1;
+    std::unique_ptr<rhi::Buffer> occCmp_;  // compare counters (uint words: 0 mismatches, 1 empty-cluster pixels checked, 2 occupancy bit wrong, 3 first mismatch kind bits)
+    double occLog_ = -1e9;
     float defaultRoughness_ = 0.7f;  // the physical style's roughness of surfaces without a pack entry
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_;

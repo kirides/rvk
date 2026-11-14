@@ -896,7 +896,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
         lightTable_->setRtScene(rtScene_.get());
-        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingShadows, rs.lightingShadowQuality, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingOccupancy, rs.lightingFullLit, rs.lightingShadows, rs.lightingShadowQuality, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
         }
         applyLighting();
@@ -1130,6 +1130,10 @@ void HalDevice::applyLighting() {
     lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : d == "bake" ? 4 : d == "prebake" ? 5 : d == "path" ? 6 : 0,
                            frozen::kMaterialRoughness);
     lightTable_->setCollectRadius(frozen::kLightCollectRadius);
+    if (rs.lightingOccupancy != nullptr) {
+        const std::string_view o = rs.lightingOccupancy->asEnum();
+        lightTable_->setOccupancy(o == "off" ? 0 : o == "compare" ? 2 : 1);
+    }
     {
         enh::LightTable::ShadowSettings ls;
         const std::string_view m = rs.lightingShadows->asEnum();

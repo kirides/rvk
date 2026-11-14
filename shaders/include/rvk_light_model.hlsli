@@ -73,7 +73,8 @@ uint rvkLightSlice(float viewZ, float nearZ, float slicesPerLn, uint slices) {
 
 // the cluster that holds view depth `viewZ` at screen position `uv` (0..1): level 0 (exponential slices zs.x .. zs.y), beyond zs.y the coarse far level 1
 // (a finer tile grid over a few slices up to zs1.y: lights of the far forests the material shaders' per-object lists still carry); `base` = the table
-RvkAddr rvkLightClusterAt(RvkAddr base, float viewZ, float2 uv) {
+// `cid` = the cluster's index in the combined space (level 0's clusters, then level 1's): bit `cid` of the occupancy bit set (below)
+RvkAddr rvkLightClusterAtId(RvkAddr base, float viewZ, float2 uv, out uint cid) {
     uint4 grid = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 16u));
     float4 zs = rvkRawLoad<float4, 16>(rvkAddrAdd(base, 32u));
     uint4 offs = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 48u));
@@ -82,9 +83,26 @@ RvkAddr rvkLightClusterAt(RvkAddr base, float viewZ, float2 uv) {
         float4 zs1 = rvkRawLoad<float4, 16>(rvkAddrAdd(base, 80u));
         uint tx1 = min(uint(uv.x * float(grid1.x)), grid1.x - 1u), ty1 = min(uint(uv.y * float(grid1.y)), grid1.y - 1u);
         uint sl1 = rvkLightSlice(viewZ, zs1.x, zs1.z, grid1.z);
-        return rvkAddrAdd(base, grid1.w + ((sl1 * grid1.y + ty1) * grid1.x + tx1) * RVK_LIGHT_CLUSTER_BYTES);
+        uint u1 = (sl1 * grid1.y + ty1) * grid1.x + tx1;
+        cid = grid.x * grid.y * grid.z + u1;
+        return rvkAddrAdd(base, grid1.w + u1 * RVK_LIGHT_CLUSTER_BYTES);
     }
     uint tx = min(uint(uv.x * float(grid.x)), grid.x - 1u), ty = min(uint(uv.y * float(grid.y)), grid.y - 1u);
     uint sl = rvkLightSlice(viewZ, zs.x, zs.z, grid.z);
-    return rvkAddrAdd(base, offs.y + ((sl * grid.y + ty) * grid.x + tx) * RVK_LIGHT_CLUSTER_BYTES);
+    cid = (sl * grid.y + ty) * grid.x + tx;
+    return rvkAddrAdd(base, offs.y + cid * RVK_LIGHT_CLUSTER_BYTES);
+}
+
+RvkAddr rvkLightClusterAt(RvkAddr base, float viewZ, float2 uv) {
+    uint cid;
+    return rvkLightClusterAtId(base, viewZ, uv, cid);
+}
+
+// The occupancy bit set (WS20, gpu-scene.md 9.15): one bit per cluster (1 = at least one light), 1 KB for all clusters, written by the cluster build pass at
+// the byte offset in header word 11 (zs.w bits; 0 = none, every cluster counts as occupied). The pixel shaders read one bit (usually a scalar load: a
+// wave sits in one cluster) instead of the 256-byte-strided cluster's count word.
+bool rvkLightClusterOccupied(RvkAddr base, uint cid) {
+    uint occ = rvkRawLoad<uint, 4>(rvkAddrAdd(base, 44u));
+    if (occ == 0u) return true;
+    return ((rvkRawLoad<uint, 4>(rvkAddrAdd(base, occ + (cid >> 5) * 4u)) >> (cid & 31u)) & 1u) != 0u;
 }
