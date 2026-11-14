@@ -17,6 +17,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/ws19_small.h"
 #include "d3d9/defs.h"
 #include "enh/light_table.h"
 #include "engine/memread.h"
@@ -361,9 +362,14 @@ int StaticOps::recLiveWhy(const orec::OpRecord& rec) {
     if (!rec.watch.empty() && !ret::validate(rec.watch.data(), rec.watch.size())) return static_cast<int>(orec::kStampFields) + 5;
     // F5-1: a draw was composed while its range's cluster build was pending (the build has finished or failed since: composed again, it takes the clustered copy) or drew with a
     // clustered copy that is gone (the index buffer's copy was replaced, the setting went off)
+    // WS19 (frame-ownership.md 14.61): one map lookup per clustered draw and frame before; the answer only moves with the store's state serial
     {
-        for (const orec::DrawRec& d : rec.draws) {
-            if (d.cd && d.cd->clusterWait != 0 && gpuscene::clusterstore().stale(d.cd->clusterWait, d.cd->clusterUsing)) return static_cast<int>(orec::kStampFields) + 5;
+        const std::uint64_t cs = gpuscene::clusterstore().stateSerial();
+        if (rec.clusterOkSerial != cs || ws19SmallOff()) {
+            for (const orec::DrawRec& d : rec.draws) {
+                if (d.cd && d.cd->clusterWait != 0 && gpuscene::clusterstore().stale(d.cd->clusterWait, d.cd->clusterUsing)) return static_cast<int>(orec::kStampFields) + 5;
+            }
+            rec.clusterOkSerial = cs;
         }
     }
     return -1;

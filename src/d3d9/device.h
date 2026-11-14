@@ -552,6 +552,9 @@ public:
     // engine's geometry (enh/water: the sea floor field). Called before the draw is recorded; must not change device state.
     virtual bool wantsOpaque() const { return false; }
     virtual void observeOpaque(Device& /*device*/, const ReplaceQuery& /*query*/) {}
+    // WS19: observeOpaque of this query reads the device's register file (an owned draw's windows are loaded into it first: Device::loadOwnedRegisters); false = it
+    // reads only the query (e.g. its objectRows)
+    virtual bool opaqueReadsRegisters(const ReplaceQuery& /*query*/) const { return true; }
 };
 
 // The N5.0 op tap (native/frame_tap.*): every draw, at the start of prepareDraw (before anything is decided), with the tag

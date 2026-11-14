@@ -37,6 +37,9 @@ param(
     [string[]]$Setting = @(),
     [string]$SettingsFile = '',
     [string[]]$Environment = @(),
+    # -Restart only: Win32 environment of the A / B sessions on top of -Environment (a start-time env knob as the arm; use with -Key env:<name>: no setting is passed, the stage states are not asserted)
+    [string[]]$EnvironmentA = @(),
+    [string[]]$EnvironmentB = @(),
     [ValidateSet('wrapper', 'full')][string]$Mode = 'full',
     [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [string]$Exe = 'RisenTest.exe',
@@ -85,11 +88,11 @@ if (-not $Restart) {
     }
 }
 
-function Invoke-Session([string]$Scene, [string]$Tag, [string[]]$Settings, [string[]]$Commands) {
+function Invoke-Session([string]$Scene, [string]$Tag, [string[]]$Settings, [string[]]$Commands, [string[]]$ExtraEnv = @()) {
     $h = @{ GameDir = $GameDir; Mode = $Mode; WaitForResult = $true; Seconds = $Seconds; Setting = $Settings; Perf = $true; Vsync = 'off'; Exe = $Exe; Commands = $Commands }
     if ($Instance -ne 0) { $h.Instance = $Instance }
     if ($Api -ne 'vulkan') { $h.Api = $Api }
-    if ($Environment.Count -gt 0) { $h.Environment = $Environment }
+    if ($Environment.Count + $ExtraEnv.Count -gt 0) { $h.Environment = @($Environment) + @($ExtraEnv) }
     if ($PlayerDefaults) { $h.PlayerDefaults = $true }
     if ($Validation) { $h.Validation = $true }
     if ($Scene -eq 'hold') {
@@ -157,7 +160,9 @@ foreach ($scene in $Scenes) {
             foreach ($arm in 'A', 'B') {
                 $value = if ($arm -eq 'A') { $A } else { $B }
                 $cmds = @("${anchor}+$($RestartLead + $Settle): perf window $Window ${arm}_$p", "${anchor}+$($RestartLead + $Settle + $Window + 60): quit") + $ExtraCommands
-                $logs += , @($scene, (Invoke-Session $scene "${scene}_${arm}$p" ($base + "$Key=$value") $cmds))
+                $armSettings = if ($Key -like 'env:*') { $base } else { $base + "$Key=$value" }
+                $armEnv = if ($arm -eq 'A') { $EnvironmentA } else { $EnvironmentB }
+                $logs += , @($scene, (Invoke-Session $scene "${scene}_${arm}$p" $armSettings $cmds $armEnv))
             }
         }
     }
@@ -172,7 +177,7 @@ foreach ($l in $logs) {
     if ($wins.Count -eq 0) { $failures += "$($l[0]): no perf window in $($l[1]) (did the schedule's anchor fire? see 'overlay: [debug] command' lines)" }
     foreach ($w in $wins) {
         $value = if ($w.Tag -like 'A_*') { $A } else { $B }
-        if ($CommandTemplate -ne '') { continue }
+        if ($CommandTemplate -ne '' -or $Key -like 'env:*') { continue }
         try { Assert-WindowStages -Window $w -Settings @("$Key=$value") -Arm "$($l[0]) $($w.Tag)" -Quiet -AllowIdle:$AllowIdle }
         catch { $failures += $_.Exception.Message }
     }
