@@ -106,7 +106,6 @@ private:
         bool busy = false;
     } cmp_[rhi::kFramesInFlight];
     bool zeroed_ = false;
-    std::uint64_t logged_ = 0;
     BuildStats last_;
 };
 

@@ -543,9 +543,9 @@ void LightTable::verifyReference(const float cam[3]) {
                 differ = true;
                 what = "light " + std::to_string(i) + " differs: cached pos " + std::to_string(prev_[i].posRcp[0]) + "," + std::to_string(prev_[i].posRcp[1]) + "," +
                        std::to_string(prev_[i].posRcp[2]) + " col " + std::to_string(prev_[i].colRange[0]) + " range " + std::to_string(prev_[i].colRange[3]) +
-                       " shadow id " + std::to_string(*reinterpret_cast<const std::uint32_t*>(&prev_[i].misc[1])) + "; reference pos " + std::to_string(table[i].posRcp[0]) + "," +
+                       " shadow id " + std::to_string(std::bit_cast<std::uint32_t>(prev_[i].misc[1])) + "; reference pos " + std::to_string(table[i].posRcp[0]) + "," +
                        std::to_string(table[i].posRcp[1]) + "," + std::to_string(table[i].posRcp[2]) + " col " + std::to_string(table[i].colRange[0]) + " range " +
-                       std::to_string(table[i].colRange[3]) + " shadow id " + std::to_string(*reinterpret_cast<const std::uint32_t*>(&table[i].misc[1]));
+                       std::to_string(table[i].colRange[3]) + " shadow id " + std::to_string(std::bit_cast<std::uint32_t>(table[i].misc[1]));
                 break;
             }
         }
