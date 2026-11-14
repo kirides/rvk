@@ -446,7 +446,7 @@ bool StaticOps::ownedSelect(const Op& op) {
 void StaticOps::ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs) {
     ownedStats().owned += ops.size();
     ownedStats().compactNs += compactNs;
-    ownedOps_[list == List::Solid ? 1 : 0] = std::move(ops);
+    ownedOps_[list == List::Solid ? 1 : 0].swap(ops);
 }
 
 // the record's read log against the engine's memory, at the pass (some of what the composition read is the pass's own state: the admin's pass type)

@@ -117,9 +117,16 @@ private:
     std::vector<f10req::Deferred> deferred_;
     std::vector<RawOp> merged_;
     std::vector<RawOp> ownedKept_;
-    std::vector<Op> ownedOps_;
+    std::vector<Op> ownedOps_, treeOps_, vegOps_;  // (WS6: persistent scratch, swapped with the StaticOps takers)
+    struct Sel {
+        std::uint32_t i = 0;  // position in raw_
+        OpKind kind = OpKind::Unknown;
+    };
+    std::vector<Sel> sel_, selSorted_;
+    static constexpr std::size_t kVtCache = 16;
     std::vector<std::uint8_t> ownedMark_;
     std::unordered_map<const void*, VtableInfo> vtables_;
+    std::array<std::pair<const void*, VtableInfo*>, kVtCache> vtCache_{};
 
     // per view kind: the last view, the window since the last report, its first view with mismatches
     std::array<TapCounts, kViewKindCount> last_{}, window_{};

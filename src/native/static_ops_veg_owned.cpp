@@ -624,7 +624,7 @@ void StaticOps::vegTake(List list, std::vector<Op>&& ops, std::uint64_t nsTake) 
     if (!vro_) return;
     vro_->window.opsTaken += ops.size();
     vro_->window.takeNs += nsTake;
-    vro_->taken[list == List::Solid ? 1 : 0] = std::move(ops);
+    vro_->taken[list == List::Solid ? 1 : 0].swap(ops);
 }
 
 // ---- the pass ----------------------------------------------------------------------------------------------------------------------
