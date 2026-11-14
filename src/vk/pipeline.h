@@ -157,6 +157,7 @@ private:
     void stopLibraries();
     void destroyLibraries();
     bool useLibraries_ = false;
+    bool prewarmLink_ = true;  // WS25: the prewarm workers fast-link first (RVK_PREWARM_LINK=0: whole builds)
     bool retainLto_ = false;  // true = the former library recipe (RVK_GPL_RECIPE=lto); false = DXVK's
     std::mutex libMutex_;
     std::map<LibKey, VkPipeline> shaderLibs_;
