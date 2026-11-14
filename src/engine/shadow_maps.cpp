@@ -74,6 +74,7 @@ struct SdsmState {
     float pos[3]{}, axes[9]{}, tan[2]{};
     bool camValid = false;
     // statistics (5 s window)
+    int lastFail[4]{-1, -1, -1, -1};  // reason of this update's fallback (-1 = sdsm used), for the debug line
     std::uint64_t fits[4]{}, fallback[4][5]{};  // reasons: 0 no data, 1 old, 2 sun / fov changed, 3 motion / cut, 4 empty slice
     std::uint64_t ageSum = 0, ageCount = 0, cuts = 0;
     double lastReport = 0.0;
@@ -244,8 +245,10 @@ bool sdsmFit(int idx, float n, float f, const Mat& invL, int size, float nb[6], 
     SdsmReason why = kNoData;
     const auto fail = [&](SdsmReason r) {
         ++g.fallback[idx][r];
+        g.lastFail[idx] = r;
         return false;
     };
+    g.lastFail[idx] = -1;
     if (!sdsmDataUsable(g_counter.load(std::memory_order_relaxed), why)) return fail(why);
     if (!g.camValid) return fail(kNoData);
     sdsm::FitIn in;
@@ -341,6 +344,12 @@ bool detourUpdateCamera(void* self, int face) {
                                 g.tan[1] = 1.0f / std::fabs(proj[5]);
                             }
                             sdsmUsed = sdsmFit(idx, n, f, invL, size, nb, sideY);
+                            if (spdlog::should_log(spdlog::level::debug)) {
+                                static const char* const kWhy[] = {"no-data", "old", "sun-fov", "motion", "empty"};
+                                const int lf = g_sdsm.lastFail[idx];
+                                spdlog::debug("enh: shadows: sdsm update {} c{}: {} box {:.1f} x {:.1f} cm", g_counter.load(std::memory_order_relaxed), idx,
+                                              sdsmUsed ? "sdsm" : (lf >= 0 && lf < 5 ? kWhy[lf] : "sphere"), nb[3] - nb[0], nb[4] - nb[1]);
+                            }
                         }
                         std::memcpy(me + 0xe0, nb, sizeof nb);
                         done = true;
