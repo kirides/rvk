@@ -235,18 +235,33 @@ bool PipelineCache::prewarmOnce(const PipelineDesc& desc) {
     return true;
 }
 
+void PipelineCache::setBackgroundLimit(unsigned n, bool low) {
+    {
+        const std::lock_guard lock(prewarmMutex_);
+        backgroundLimit_ = n;
+        backgroundLow_ = low;
+    }
+    prewarmCv_.notify_all();
+}
+
 void PipelineCache::prewarmWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline prewarm");
     std::unique_lock lock(prewarmMutex_);
     for (;;) {
-        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmQueue_.empty() || !prewarmUrgent_.empty(); });
+        // (WS12: the plain queue only while fewer than backgroundLimit_ of its builds run: the engine's own thread keeps its core in the world)
+        const auto plainOk = [&] { return !prewarmQueue_.empty() && (backgroundLimit_ == 0 || backgroundActive_ < backgroundLimit_); };
+        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmUrgent_.empty() || plainOk(); });
         if (prewarmQuit_) {
             return;
         }
-        std::deque<PipelineDesc>& q = !prewarmUrgent_.empty() ? prewarmUrgent_ : prewarmQueue_;
+        const bool urgent = !prewarmUrgent_.empty();
+        std::deque<PipelineDesc>& q = urgent ? prewarmUrgent_ : prewarmQueue_;
         const PipelineDesc d = q.front();
         q.pop_front();
+        if (!urgent) ++backgroundActive_;
+        const int priority = urgent ? THREAD_PRIORITY_NORMAL : backgroundLow_ ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_BELOW_NORMAL;
         lock.unlock();
+        SetThreadPriority(GetCurrentThread(), priority);
         bool claimed = false;
         {
             // claimed under the lock, built outside it: draws meanwhile find their pipelines, a get() of this one waits for it
@@ -274,6 +289,10 @@ void PipelineCache::prewarmWorker() {
             builtCv_.notify_all();
         }
         lock.lock();
+        if (!urgent) {
+            --backgroundActive_;
+            prewarmCv_.notify_one();  // (a worker waiting for a free background slot)
+        }
     }
 }
 

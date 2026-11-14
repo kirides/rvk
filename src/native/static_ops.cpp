@@ -2856,6 +2856,7 @@ void StaticOps::issue() {
             dev_.beginCapture(pktFresh_.get());
         }
         const PClock::time_point dt0 = timed ? PClock::now() : PClock::time_point{};
+        const std::uint64_t ncSkip0 = dev_.stats().drawsSkipped, ncTaken0 = dev_.stats().drawsTakenOver, ncNot0 = dev_.replayStats.notCaptured, ncCap0 = dev_.replayStats.captured;  // (RVK_NCLOG diagnostics)
         if (d.indexed) {
             dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         } else {
@@ -2864,8 +2865,18 @@ void StaticOps::issue() {
         if (d.skyDome) skyOwnAfter(d, skyPorted);
         if (d.particleGpu == 2) particleCompareAfter();
         if (capturing) {
+            const bool capOkNow = dev_.captureOkNow();
             if (!dev_.endCapture()) {
                 ++pktWindow_.notBuilt;
+                {
+                    static const bool ncLog = GetEnvironmentVariableA("RVK_NCLOG", nullptr, 0) != 0;  // (diagnostic: an actor draw that cannot be retained)
+                    static int ncLogged = 0;
+                    if (ncLog && op_->kind == OpKind::Animation && ncLogged < 30 && dev_.stats().frames > 9000) {
+                        ++ncLogged;
+                        spdlog::info("native: not built: {} draw {} captureOk {} held {} entry {} stale {} verify {} lean {}; skipped +{} taken over +{} notCaptured +{} captured +{}", describe(*op_), k, capOkNow, held, pe != nullptr, stale, verifyFrame, leanFrameOn_,
+                                     dev_.stats().drawsSkipped - ncSkip0, dev_.stats().drawsTakenOver - ncTaken0, dev_.replayStats.notCaptured - ncNot0, dev_.replayStats.captured - ncCap0);
+                    }
+                }
                 // (also an entry of another description: left in place it would be the packet an op record is built from after this draw, with the vertex input of an
                 // earlier frame: an actor's morph stream offsets; frame-ownership.md 7.41 addendum)
                 if (sc::packetAfterCapture(false, held, pe != nullptr) == sc::PacketAfterCapture::Erase) {

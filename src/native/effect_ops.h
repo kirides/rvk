@@ -34,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -76,6 +77,13 @@ public:
     void maskBegin(void* illum) override;
     void maskEnd() override;
     bool effectBegin(void* filter) override;
+    bool effectBeginImpl(void* filter);
+    std::uint64_t timeTicks_ = 0, timeUnits_ = 0, timeFrame_ = 0;  // RVK_FX_TIME
+    std::array<std::uint64_t, 11> timeParts_{}, timeHeldParts_{};
+    std::uint64_t timeHeldTicks_ = 0, timeHeldUnits_ = 0;
+    long long timeLast_ = 0;
+    bool timing_ = false, timeHeld_ = false;
+    void lap(int slot);
     void effectEnd(void* filter) override;
     void copyBegin(void* filter) override;
     void copyEnd(void* filter) override;
@@ -130,7 +138,9 @@ private:
         std::vector<std::uint8_t> bytes;
         const void* image = nullptr;
         bool isImage = false;
+        bool live = false;  // set since the mask's last begin (WS5: the entries persist across masks, no node allocations)
     };
+    Override& setOverride(std::string_view name);
 
     bool verify();
     const Live& liveOf(const d3d9::Shader* s);
@@ -479,7 +489,7 @@ private:
     std::vector<std::string> plan_;        // the mask filter's ExecuteEffect calls in order (techniques)
     std::vector<std::int32_t> planCascade_;
     std::size_t planNext_ = 0;
-    std::map<std::string, Override> overrides_;
+    std::map<std::string, Override, std::less<>> overrides_;
     float r_[16]{};                        // depth -> view space -> world (inv(V) x inv(diag(P11, P22, 1)) x far)
     std::uint64_t blurFrame_ = ~0ull;
     std::uint32_t blurIndex_ = 0;
@@ -550,6 +560,8 @@ private:
     int unitTech_ = -1;
     std::uint32_t unitPasses_ = 0;
     int leanVerified_ = 0;
+    std::vector<const void*> composeTextures_, composeShaders_;  // composeEffect's scratch (WS5: capacity kept across units)
+    std::vector<std::uint8_t> semBytes_, composeArr_;
     std::vector<std::uint32_t> resetTextures_;  // the technique's Texture / Image parameters (their Reset detaches them)
     bool spriteExecuted_ = false, spriteBlendSet_ = false;   // the flush's batches attached an image / set a blend
     std::uint32_t spriteEndStart_ = 0, spriteEndCount_ = 0;  // the mesh ring after the flush
@@ -568,6 +580,20 @@ private:
         void add(const LeanStats& o);
     };
     std::map<std::string, LeanStats> leanWindow_, leanTotal_;
+    struct NameEntry {
+        const void* filter = nullptr;
+        Unit unit = Unit::None;
+        const void* text = nullptr;
+        std::string tech, filterName, postName, fullName;
+        Stats* stats = nullptr;
+        LeanStats* leanStats = nullptr;
+        int grp = -1, grpIdx = -1;  // OwnPost::groupUnit of the post name
+        PostUnit pu = PostUnit::None;  // OwnPost::unitOf of the technique
+    };
+    std::vector<NameEntry> nameCache_;
+    NameEntry slowName_;  // RVK_FX_SLOW
+    fxc::ConstantsStats cstatsTotal_;
+    const NameEntry& unitNames(Unit unit, const std::uint8_t* filter);
     LeanStats* leanStats_ = nullptr;
     std::uint32_t afterLogged_ = 0;
     void reportLean();

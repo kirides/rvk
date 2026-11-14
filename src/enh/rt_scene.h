@@ -171,6 +171,7 @@ public:
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
     bool coversDraw(const d3d9::CoverQuery& draw) override;
+    bool coversTreeRun(d3d9::Device& device, const d3d9::CoverQuery& draw, const void* cd, const float* const* rows, std::uint32_t count) override;
     const char* observerName() const override { return "rt scene"; }
     Registers registersRead() const override { return Registers::Material; }  // (world rows: ReplaceQuery::objectRows; the uv map's material constants)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
@@ -707,9 +708,29 @@ private:
     bool treeTplCompare_ = false;
     bool treeRunFast(d3d9::Device& dev, const d3d9::ReplaceQuery& q);
     bool treeTplGuards(const TreeTpl& t, const d3d9::ReplaceQuery& q, const rt::BlasKey& key, Blas*& b, Blas::MaterialSlot*& slot);
+    bool treeTplGuards(const TreeTpl& t, const void* tagMaterial, std::uint32_t opDesc, std::uint64_t matSig, const rt::BlasKey& key, Blas*& b, Blas::MaterialSlot*& slot);
+    // WS11: the run-level stamps of a template's sightings (materialOf's slot hit + memo, the BLAS's last use)
+    void treeRunEffects(const TreeTpl& t, Blas& b, Blas::MaterialSlot& slot, std::uint64_t frame, double now);
+    // WS11 (14.52): what the last complete run of a template saw, per instance: its rows (c33..c35), registry key and position. A run whose instances are all there, unmoved and
+    // alive is covered: coversTreeRun refreshes them without the hash lookups and without the device loading the run's registers. Not kept for runs that skipped an instance
+    struct TreeCover {
+        std::uint64_t serial = 0;  // Device::ownedTreeRunSerial of the run being / last recorded
+        std::uint32_t n = 0;
+        bool bad = false;
+        std::vector<float> rows;   // 12 per instance
+        std::vector<std::uint64_t> key;
+        std::vector<std::uint32_t> pos;
+    };
+    std::unordered_map<const void*, TreeCover> treeCover_;
+    std::uint64_t treeCoverRuns_ = 0, treeCoverInstances_ = 0;
     struct TreeTplStats {
         std::uint64_t runs = 0, fast = 0, learned = 0, refused = 0, compared = 0, matched = 0, differing = 0, sightings = 0;
+        std::uint64_t noop = 0;  // WS11: tree draws of the z pre-pass / the cascades answered by coversDraw (their observation is a no-op)
     } tts_;
+    // WS11 (frame-ownership.md 14.52): the observation of a SpeedTree draw outside the main view's solid pass changes nothing when it is rejected before it learns anything
+    // (a leaf op, a vertex shader class whose verdict is cached as "not taken": the depth-only vertex shaders of the z pre-pass and the cascades): coversDraw says so, and the
+    // owned tree runs are not even set up for the observers (Device::ownedTreeObserve)
+    bool treeObserveNoop(const d3d9::CoverQuery& d);
 
     // ---- F8-0 persistent entries ----
     struct TableEntry {

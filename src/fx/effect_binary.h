@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -293,6 +294,9 @@ struct Shader {
     std::vector<std::uint32_t> tokens;  // whole bytecode (version token .. END)
     ConstantTable constants;            // CTAB
     std::uint32_t preshader = kNone;    // index into Effect::preshaders ("PRES" comment)
+    // WS5 (native/effect_compose.cpp constantsFor): the registers last evaluated for this shader with the values of the parameters the evaluation
+    // reads (opaque to this module; shared by copies: they have the same content)
+    mutable std::shared_ptr<void> evalCache;
 };
 
 struct Object {

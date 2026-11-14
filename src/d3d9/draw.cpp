@@ -21,6 +21,7 @@
 #include "d3d9/device.h"
 #include "gpuscene/cluster_table.h"
 #include "d3d9/memeq.h"
+#include "d3d9/scene_hash.h"
 #include "native/f2c_measure.h"
 #include "shader/abi.h"
 
@@ -238,11 +239,13 @@ bool Device::prepareTextures() {
 // F15-1 (frame-ownership.md 14.20): the same per-texture step as prepareTextures, for an owned draw's texture (no draw is being prepared: the record's own texture)
 bool Device::ownedTextureNeedsPrep(const Texture* t) const {
     if (t == nullptr || t->isNull()) return false;
+    // WS9: the common answer first (a sampleable texture needs nothing; the bound-target test below only turns a "needs" into "no")
+    if (!t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
     for (Surface* s : rt_) {
         if (s != nullptr && s->texture() == t) return false;  // (a feedback loop: the derivation refuses it, as before)
     }
     if (ds_ != nullptr && ds_->texture() == t) return false;
-    return t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return true;
 }
 
 void Device::ownedPrepTexture(Texture* t) {
@@ -1810,6 +1813,8 @@ void Device::fillCapture(const DrawPacket& p) {
     c.clusterUsing = clusterUsing_;
     c.vi = *p.vi;
     c.dyn = *p.dyn;
+    c.viHash = hashVi(c.vi);
+    c.dynHash = hashDyn(c.dyn);
     c.block = lastBlock_;
     c.query = lastQuery_;
     c.kind = lastKind_;
@@ -1856,6 +1861,13 @@ void Device::fillCapture(const DrawPacket& p) {
         // only draws whose textures were all sampled as such (the block holds their bindless slots)
         if (t == nullptr || t->isNull() || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t == substituteFrom_) {
             ++replayStats.notCaptured;
+            static const bool ncLog = GetEnvironmentVariableA("RVK_NCLOG", nullptr, 0) != 0;  // (diagnostic: why a draw's textures keep it out of the packet cache)
+            static int ncLogged = 0;
+            if (ncLog && ncLogged < 40 && stats_.frames > 600 && lastKind_ == draws::Kind::Skinned) {
+                ++ncLogged;
+                spdlog::info("d3d9: not captured (texture): kind {} slot {} tex {} null {} layout {} substitute {} material '{}'", draws::name(lastKind_), slot, static_cast<const void*>(t), t != nullptr && t->isNull(),
+                             t != nullptr ? static_cast<int>(t->layout()) : -1, t == substituteFrom_, tag_.materialName != nullptr ? tag_.materialName : "");
+            }
             return;
         }
         c.texMask |= 1u << slot;
@@ -1872,7 +1884,16 @@ void Device::fillCapture(const DrawPacket& p) {
     c.env.depthReversed = boundDepthReversed() ? 1u : 0u;
     c.valid = replayAllowed(c);
     if (c.valid) ++replayStats.captured;
-    else ++replayStats.notCaptured;
+    else {
+        ++replayStats.notCaptured;
+        static const bool ncLog = GetEnvironmentVariableA("RVK_NCLOG", nullptr, 0) != 0;
+        static int ncLogged = 0;
+        if (ncLog && ncLogged < 40 && stats_.frames > 600 && lastKind_ == draws::Kind::Skinned) {
+            ++ncLogged;
+            spdlog::info("d3d9: not captured (replayAllowed): kind {} tint {} gbuf {} armed {} logDraws {} wp0 {} custom {} up {} material '{}'", draws::name(lastKind_), static_cast<int>(tint_), gbuf_.active, gbufArmed_,
+                         stats_.totalDraws < options_.logDraws, wp0_.on, customVertices_, up_.active, tag_.materialName != nullptr ? tag_.materialName : "");
+        }
+    }
 }
 
 // F2c-2: the world rows (c33..c35) of the draw being prepared as the object table holds them (null: not an object-window draw); counted against the register file

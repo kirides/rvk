@@ -403,6 +403,18 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     rvk_clCount = cnt;
     // lamp shadows traced this frame? (header word z = the shadow image's slot; 0 = none: every lookup would return 1, so the shadow ids are not even read)
     const bool readSid = h0.z != 0u || occMode == 0u || ctl.z >= 0.5;
+    if (cnt == 0u && !shortcut) {  // (compare mode keeps the full path for the pixels the occupancy shortcut would take)
+        // an empty cluster (most of the open world by day: no lamp reaches the pixel): nothing to pick and no table twin, so the slots are the engine's own
+        // (kept: a lit light or a shadow selector, colour factor 1) or unused (factor 0): the result of the full selection below without its engine-light
+        // position tests, the cluster walk and the pick logic (WS8, frame-ownership.md 14.50)
+        [unroll] for (uint e = 0; e < RVK_MV_CL_COUNT; ++e) {
+            const bool eSel = dot(abs(rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * e + 3u)), float4(1.0, 1.0, 1.0, 1.0)) > 0.0;
+            const bool eKeep = eSel || rvkLmLum(rvkMvEngineReg(uint(RVK_MV_CL_REG) + 4u * e + 1u).rgb) > 0.0;
+            rvk_clK[e] = eKeep ? 1.0 : 0.0;
+            if (eKeep) rvk_clKeptState = max(rvk_clKeptState, eSel ? 3.0 : 2.0);
+        }
+        return;
+    }
 
     // the engine's lights at this pixel: positions, which carry a shadow selector
     float3 ePos[RVK_MV_CL_COUNT];

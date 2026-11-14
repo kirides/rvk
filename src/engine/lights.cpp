@@ -1,10 +1,13 @@
 #include "engine/lights.h"
 
 #include <windows.h>
+#include <xmmintrin.h>
 
 #include <atomic>
 #include <cmath>
+#include <algorithm>
 #include <cstring>
+#include <mutex>
 
 #include <spdlog/spdlog.h>
 
@@ -79,6 +82,154 @@ float staticScale() {
 
 }  // namespace
 
+namespace {
+
+// The static lights change only when the engine caches a cell in or out: the walk of the sphere tree (a few thousand SEH-guarded node reads, 0.1 - 0.35 ms
+// in a town) is kept between calls and re-run when the tree's own header changes (root / node array / node count words at +0x20, +0x30, +0x38), the query
+// leaves the walked sphere, or every kRewalkCalls calls (a safety net for an in-place change); each call filters the kept list by its own centre and
+// radius (same lights, same order as a walk with that radius: the walk visits in tree order and only prunes).
+struct StaticCache {
+    std::vector<const char*> lights;  // the payload of every static light within `radius` of `center` at walk time; its values are re-read on every call
+    float center[3]{};
+    float radius = 0.0f;             // the walk's radius (query radius + margin)
+    std::uint64_t sig[3]{};
+    std::uint32_t calls = 0;         // calls served since the walk
+    std::uint64_t walks = 0;
+    Stats walkStats;                 // nodes / staticTotal / unknown of the walk
+    bool valid = false;
+};
+StaticCache g_cache;
+std::mutex g_cacheMutex;
+constexpr std::uint32_t kRewalkCalls = 150;
+constexpr float kWalkMargin = 4000.0f;
+
+// One static light's current values (one guarded read of the object's first 0x78 bytes: vtable, colour, intensity, range, both position slots).
+// 0 = not a readable static light, 1 = readable but not usable (range / intensity), 2 = usable
+int readStaticLight(const void* payload, const void* ptfv, const void* ambfv, float scale, WorldLight& l) {
+    alignas(8) std::uint8_t b[0x78];
+    if (payload == nullptr || !safeReadN<sizeof(b)>(payload, b)) return 0;
+    const void* vt;
+    std::memcpy(&vt, b, sizeof(vt));
+    if (vt != ptfv && vt != ambfv) return 0;
+    float rgb[3], intensity, range, pos[3];
+    std::memcpy(rgb, b + kLightRgb, sizeof(rgb));
+    std::memcpy(&intensity, b + kLightIntensity, sizeof(intensity));
+    std::memcpy(&range, b + kLightRange, sizeof(range));
+    std::memcpy(pos, b + (vt == ptfv ? kPointPos : kAmbientPos), sizeof(pos));
+    // the draws' constants carry half of rgb x intensity x scale (measured: ratio 0.49-0.50, rtgi.md 19)
+    const float k = intensity * scale * kDrawShare;
+    if (!(range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k))) return 1;
+    l = WorldLight{};
+    std::memcpy(l.pos, pos, sizeof(pos));
+    l.range = range;
+    l.ambient = vt == ambfv;
+    for (int c = 0; c < 3; ++c) l.col[c] = rgb[c] * k;
+    return 2;
+}
+
+// WS15: the per-call re-read of the kept static lights (2,500 at pub_interior, every frame) in ONE guarded region instead of one SEH call + 120-byte copy per light: the same
+// fields, the same arithmetic, the same filter as readStaticLight + `reaches`, written to `out` (capacity n). Plain data only (a function holding a __try cannot unwind objects).
+// -1 = a read faulted somewhere (a freed light: the caller redoes the whole list with the per-light guarded reads, which skip the unreadable ones as before)
+std::atomic<bool> g_fastStaticOffA{false};
+int readStaticLightsFast(const char* const* payloads, std::size_t n, const void* ptfv, const void* ambfv, float scale, const float center[3], float radius, WorldLight* out) {
+    int kept = 0;
+    __try {
+        for (std::size_t i = 0; i < n; ++i) {
+            const char* p = payloads[i];
+            if (p == nullptr) continue;
+            const void* vt = *reinterpret_cast<const void* const volatile*>(p);
+            if (vt != ptfv && vt != ambfv) continue;
+            const float intensity = *reinterpret_cast<const volatile float*>(p + kLightIntensity);
+            const float range = *reinterpret_cast<const volatile float*>(p + kLightRange);
+            const float k = intensity * scale * kDrawShare;
+            if (!(range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k))) continue;
+            const volatile float* rgb = reinterpret_cast<const volatile float*>(p + kLightRgb);
+            const volatile float* pos = reinterpret_cast<const volatile float*>(p + (vt == ptfv ? kPointPos : kAmbientPos));
+            WorldLight& l = out[kept];
+            l.pos[0] = pos[0];
+            l.pos[1] = pos[1];
+            l.pos[2] = pos[2];
+            l.range = range;
+            l.ambient = vt == ambfv;
+            l.dynamic = false;
+            l.col[0] = rgb[0] * k;
+            l.col[1] = rgb[1] * k;
+            l.col[2] = rgb[2] * k;
+            const float dx = l.pos[0] - center[0], dy = l.pos[1] - center[1], dz = l.pos[2] - center[2];
+            const float reach = radius + l.range;
+            if (dx * dx + dy * dy + dz * dz <= reach * reach) ++kept;
+        }
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        return -1;
+    }
+    return kept;
+}
+
+void walkStatics(const char* admin, const float center[3], float radius, StaticCache& c) {
+    c.lights.clear();
+    c.walkStats = {};
+    Stats& stats = c.walkStats;
+    const auto& s = sym();
+    const auto reaches = [&](const float p[3], float r) {
+        const float dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
+        const float reach = radius + r;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    };
+    const void* ptfv = s.staticPointLightVftable;
+    const void* ambfv = s.staticAmbientLightVftable;
+    const float scale = staticScale();
+    const char* tree = admin + kAdminTree;
+    std::int64_t root = -1;
+    const char* nodes = nullptr;
+    if (readAt(tree, kTreeRoot, root) && readAt(tree, kTreeNodes, nodes) && nodes != nullptr && root >= 0) {
+        std::vector<std::int64_t> stack;
+        stack.reserve(256);
+        stack.push_back(root);
+        while (!stack.empty() && stats.nodes < kMaxNodes) {
+            const std::int64_t idx = stack.back();
+            stack.pop_back();
+            std::int64_t child = -1;
+            if (!readAt(nodes + idx * kNodeSize, kNodeChild, child)) continue;
+            while (child != -1 && stats.nodes < kMaxNodes) {
+                ++stats.nodes;
+                const char* n = nodes + child * kNodeSize;
+                // the node's 80 bytes in one guarded copy (one element of the node array: always whole)
+                alignas(8) std::uint8_t nb[kNodeSize];
+                if (!safeReadN<kNodeSize>(n, nb)) break;
+                const std::uint8_t flags = nb[kNodeFlags];
+                float sphere[4];
+                std::int64_t next, firstChild;
+                const void* payload;
+                std::memcpy(sphere, nb + kNodeSphere, sizeof(sphere));
+                std::memcpy(&next, nb + kNodeSibling, sizeof(next));
+                std::memcpy(&firstChild, nb + kNodeChild, sizeof(firstChild));
+                std::memcpy(&payload, nb + kNodePayload, sizeof(payload));
+                bool descend = true;
+                if ((flags & 4) != 0) {
+                    if (payload != nullptr) {
+                        WorldLight l;
+                        const int r = readStaticLight(payload, ptfv, ambfv, scale, l);
+                        if (r == 0) {
+                            ++stats.unknown;
+                        } else {
+                            ++stats.staticTotal;
+                            if (r == 2 && reaches(l.pos, l.range)) c.lights.push_back(static_cast<const char*>(payload));
+                        }
+                    }
+                } else if (std::isfinite(sphere[0]) && std::isfinite(sphere[3])) {
+                    descend = reaches(sphere, sphere[3]);
+                }
+                if (descend && firstChild != -1) stack.push_back(child);
+                child = next;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+void setFastStatic(bool on) { g_fastStaticOffA.store(!on, std::memory_order_relaxed); }
+
 bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
     out.clear();
     stats = {};
@@ -92,6 +243,112 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
         return dx * dx + dy * dy + dz * dz <= reach * reach;
     };
 
+    // static lights: the sphere tree (walked only when it changed, see StaticCache)
+    {
+        const std::lock_guard lock(g_cacheMutex);
+        StaticCache& c = g_cache;
+        const char* tree = admin + kAdminTree;
+        std::uint64_t sig[3]{};
+        readAt(tree, kTreeRoot, sig[0]);
+        readAt(tree, kTreeNodes, sig[1]);
+        readAt(tree, 0x38, sig[2]);
+        const float dx = center[0] - c.center[0], dy = center[1] - c.center[1], dz = center[2] - c.center[2];
+        const bool inside = c.valid && std::sqrt(dx * dx + dy * dy + dz * dz) + radius <= c.radius;
+        const bool reuse = inside && std::memcmp(sig, c.sig, sizeof(sig)) == 0 && c.calls < kRewalkCalls;
+        if (!reuse) {
+            // the walk's radius never shrinks (the GI asks for 16,000, the light table for 96,000: one walk serves both)
+            const float want = radius + kWalkMargin;
+            const float walkRadius = c.valid ? std::max(want, c.radius) : want;
+            walkStatics(admin, center, walkRadius, c);
+            std::memcpy(c.center, center, sizeof(c.center));
+            c.radius = walkRadius;
+            std::memcpy(c.sig, sig, sizeof(sig));
+            c.calls = 0;
+            c.valid = true;
+            ++c.walks;
+        }
+        ++c.calls;
+        stats.nodes = c.walkStats.nodes;
+        stats.staticTotal = c.walkStats.staticTotal;
+        stats.unknown = c.walkStats.unknown;
+        out.reserve(c.lights.size());
+        const float scale = staticScale();
+        const void* ptfv = s.staticPointLightVftable;
+        const void* ambfv = s.staticAmbientLightVftable;
+        // (WS13: the lights are separate heap objects: the loads below were one cache miss after the other; every light's two lines are requested first, so the
+        // misses overlap. A prefetch of an unmapped address does not fault; the values read are the same)
+        for (const char* payload : c.lights) {
+            _mm_prefetch(payload, _MM_HINT_T0);
+            _mm_prefetch(payload + 64, _MM_HINT_T0);
+        }
+        static thread_local std::vector<WorldLight> fast;
+        int kept = -1;
+        if (!g_fastStaticOffA.load(std::memory_order_relaxed) && !c.lights.empty()) {
+            if (fast.size() < c.lights.size()) fast.resize(c.lights.size());
+            kept = readStaticLightsFast(c.lights.data(), c.lights.size(), ptfv, ambfv, scale, center, radius, fast.data());
+        }
+        if (kept >= 0) {
+            stats.staticNear += static_cast<std::uint32_t>(kept);
+            out.insert(out.end(), fast.begin(), fast.begin() + kept);
+        } else {
+            for (const char* payload : c.lights) {
+                WorldLight l;
+                if (readStaticLight(payload, ptfv, ambfv, scale, l) != 2 || !reaches(l.pos, l.range)) continue;
+                ++stats.staticNear;
+                out.push_back(l);
+            }
+        }
+    }
+
+    // dynamic lights: the engine's own light list entry of each (flicker / effects included)
+    const void* pfv = s.pointLightVftable;
+    const auto add = reinterpret_cast<AddFn>(s.pointLightAddToLightList);
+    const char* data = nullptr;
+    std::uint32_t count = 0;
+    if (pfv != nullptr && add != nullptr && readAt(admin, kAdminDynData, data) && readAt(admin, kAdminDynCount, count) &&
+        data != nullptr && count > 0 && count < 4096) {
+        stats.dynamicRaw = count;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            void* light = nullptr;
+            const void* vt = nullptr;
+            if (!readAt(data, i * 8, light) || !readAt(light, 0, vt)) continue;
+            if (i < 4) stats.dynamicVt[i] = reinterpret_cast<std::uintptr_t>(vt);
+            if (vt != pfv) continue;
+            ++stats.dynamicTotal;
+            alignas(16) char list[0x200]{};
+            if (!callAdd(add, light, list)) continue;
+            if (list[kListCount] == 0) continue;  // disabled
+            float pos[3]{}, col[3]{}, invR2 = 0.0f;
+            std::memcpy(pos, list + kListPos, sizeof(pos));
+            std::memcpy(&invR2, list + kListInvR2, sizeof(invR2));
+            std::memcpy(col, list + kListColour, sizeof(col));
+            if (!(invR2 > 0.0f) || !std::isfinite(invR2) || !(col[0] + col[1] + col[2] > 0.0f)) continue;
+            const float range = 1.0f / std::sqrt(invR2);
+            if (!reaches(pos, range)) continue;
+            ++stats.dynamicNear;
+            WorldLight l;
+            std::memcpy(l.pos, pos, sizeof(pos));
+            l.range = range;
+            std::memcpy(l.col, col, sizeof(col));
+            l.dynamic = true;
+            out.push_back(l);
+        }
+    }
+    return true;
+}
+
+// The pre-cache static walk, verbatim (RVK_LIGHTS_VERIFY compares the cached path against it)
+bool collectStaticsReference(const float center[3], float radius, std::vector<WorldLight>& out) {
+    out.clear();
+    Stats stats;
+    char* admin = static_cast<char*>(g_admin.load(std::memory_order_relaxed));
+    if (admin == nullptr) return false;
+    const auto& s = sym();
+    const auto reaches = [&](const float p[3], float r) {
+        const float dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
+        const float reach = radius + r;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    };
     // static lights: the sphere tree
     const void* ptfv = s.staticPointLightVftable;
     const void* ambfv = s.staticAmbientLightVftable;
@@ -155,40 +412,6 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
         }
     }
 
-    // dynamic lights: the engine's own light list entry of each (flicker / effects included)
-    const void* pfv = s.pointLightVftable;
-    const auto add = reinterpret_cast<AddFn>(s.pointLightAddToLightList);
-    const char* data = nullptr;
-    std::uint32_t count = 0;
-    if (pfv != nullptr && add != nullptr && readAt(admin, kAdminDynData, data) && readAt(admin, kAdminDynCount, count) &&
-        data != nullptr && count > 0 && count < 4096) {
-        stats.dynamicRaw = count;
-        for (std::uint32_t i = 0; i < count; ++i) {
-            void* light = nullptr;
-            const void* vt = nullptr;
-            if (!readAt(data, i * 8, light) || !readAt(light, 0, vt)) continue;
-            if (i < 4) stats.dynamicVt[i] = reinterpret_cast<std::uintptr_t>(vt);
-            if (vt != pfv) continue;
-            ++stats.dynamicTotal;
-            alignas(16) char list[0x200]{};
-            if (!callAdd(add, light, list)) continue;
-            if (list[kListCount] == 0) continue;  // disabled
-            float pos[3]{}, col[3]{}, invR2 = 0.0f;
-            std::memcpy(pos, list + kListPos, sizeof(pos));
-            std::memcpy(&invR2, list + kListInvR2, sizeof(invR2));
-            std::memcpy(col, list + kListColour, sizeof(col));
-            if (!(invR2 > 0.0f) || !std::isfinite(invR2) || !(col[0] + col[1] + col[2] > 0.0f)) continue;
-            const float range = 1.0f / std::sqrt(invR2);
-            if (!reaches(pos, range)) continue;
-            ++stats.dynamicNear;
-            WorldLight l;
-            std::memcpy(l.pos, pos, sizeof(pos));
-            l.range = range;
-            std::memcpy(l.col, col, sizeof(col));
-            l.dynamic = true;
-            out.push_back(l);
-        }
-    }
     return true;
 }
 

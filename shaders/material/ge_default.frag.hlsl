@@ -617,6 +617,17 @@ float4 PS_Default() {
     rvkMvClusterNow();  // the light table's per-pixel slots, right before they are read
 #endif
     [loop] for (int i = 0; i < XFX_PNTLIGHTCOUNT; ++i) {
+#if defined(RVK_MV_CLUSTER)
+        {
+            // table lighting (every lit draw runs the 3-light permutation, slots of the pixel's cluster that are unused / out of reach are common):
+            // a light adds `colour * falloff * ..` to both accumulators (CustumFragmentLight), so colour 0 or falloff 0 (d^2 / R^2 >= 1) adds exactly 0:
+            // skip its normalize / BRDF / specular power (WS8, frame-ownership.md 14.50)
+            const float4 lpr = g_PointLight_PosAndRcpRange(i);
+            const float3 ldif = g_PointLight_Diffuse(i).rgb, lspc = g_PointLight_Specular(i).rgb;
+            const float3 llv = lpr.xyz - PassData.m_vecWorldPos;
+            if (dot(ldif, ldif) + dot(lspc, lspc) == 0.0 || dot(llv, llv) * lpr.w >= 1.0) continue;
+        }
+#endif
         AddPointLight(PassData, g_PointLight_PosAndRcpRange(i), g_PointLight_Diffuse(i).rgb, g_PointLight_Specular(i).rgb, g_PointLight_ShadowMask(i));
     }
 #endif

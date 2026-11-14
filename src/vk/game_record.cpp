@@ -80,6 +80,10 @@ void GameRecord::prewarmOncePipeline(const PipelineDesc& desc) {
     pipelines_.prewarmOnce(desc);
 }
 
+void GameRecord::setPipelineBackgroundLimit(unsigned n, bool low) {
+    pipelines_.setBackgroundLimit(n, low);
+}
+
 void GameRecord::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage) {
     pipelines_.prepareShader(module, stage);
 }

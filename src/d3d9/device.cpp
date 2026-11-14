@@ -834,6 +834,21 @@ void Device::destroy() {
                 ++retired;
             }
         }
+        // (WS12: the particle expansion / billboard fade forms the workers built that no draw asked for again: nobody holds them but their futures)
+        const auto dropBuilt = [&](auto& builds) {
+            for (auto& [k, f] : builds) {
+                try {
+                    if (f.valid() && f.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                        const rhi::ShaderModule m = f.get();
+                        if (m != rhi::ShaderModule::None && destroyed.insert(m).second) game_->destroyShaderModule(m, false);
+                    }
+                } catch (const std::future_error&) {
+                }
+            }
+            builds.clear();
+        };
+        dropBuilt(particleBuild_);
+        dropBuilt(lodBuild_);
         spdlog::info("d3d9: shader modules destroyed: {} held by shader slots, {} variants reset out of their slots, {} shared only, {} replaced before a slot", inSlots, unslotted,
                      sharedOnly, retired);
         retiredModules_.clear();
@@ -1632,9 +1647,10 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         return nullptr;
     }
     const std::span<const std::uint32_t> tokens = bytecode.first(bytes / 4);
-    const std::uint32_t hashSeed = kTranslatorVersion | (shader::debugInfo() ? 0x80000000u : 0u);  // debug-info SPIR-V is cached apart
-    const std::uint64_t includesHash = shader::hlslIncludesHash();  // an edited ABI header recompiles the cached modules
-    const std::uint64_t hash = fnv1a(tokens.data(), tokens.size_bytes(), fnv1a(&includesHash, sizeof(includesHash), fnv1a(&hashSeed, sizeof(hashSeed))));
+    // WS12: the shader's identity is its bytecode alone. It used to carry the translator version and the ABI headers' hash (the SPIR-V cache's key), which made every
+    // update a new identity for every shader: the pipeline keys of earlier runs (pipelines.keys: shader hashes) matched nothing, so nothing was prewarmed and no variant
+    // requested at load. The module caches are keyed by the generated text now (shader/dxc.h), which follows the translator and the headers by itself.
+    const std::uint64_t hash = fnv1a(tokens.data(), tokens.size_bytes());
     {
         const std::lock_guard lock(shaderMutex_);
         if (auto it = shaders_.find(hash); it != shaders_.end()) {
@@ -1684,27 +1700,16 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     auto done = std::make_shared<std::promise<void>>();
     s->ready = done->get_future().share();
     s->compiling.store(true, std::memory_order_release);
-    const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
-                                                     : options_.cacheDir / "spirv" / std::format("{:016x}.spv", hash);
-    enqueueShaderJob(s.get(), [this, s, done, text = std::move(hlsl.hlsl), cacheFile, hash] {
+    // (WS12: the module comes from the DXC disk cache, keyed by the generated text + arguments + DXC's version: shader/dxc.h)
+    enqueueShaderJob(s.get(), [this, s, done, text = std::move(hlsl.hlsl), hash] {
         rhi::ShaderModule module = rhi::ShaderModule::None;
         const bool dx12 = options_.backend == rhi::Backend::D3D12;
         if (dx12) {
             ++shadersCompiled_;
-            module = dxilModule(s->stage, text, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s->stage, hash, {}), hash);
+            module = dxilModule(s->stage, text, "translated.hlsl", moduleLabel(game_->namesEnabled(), s->stage, hash, {}), hash);
         }
         std::vector<std::uint32_t> spirv;
-        if (!dx12)
-        if (!cacheFile.empty()) {
-            std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
-            if (in) {
-                const auto size = static_cast<std::size_t>(in.tellg());
-                spirv.resize(size / 4);
-                in.seekg(0);
-                in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-            }
-        }
-        if (!dx12 && spirv.empty()) {
+        if (!dx12) {
             ++shadersCompiled_;
             auto compiled = shader::compileHlsl(s->stage, text);
             if (!compiled.ok()) {
@@ -1714,16 +1719,6 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
                 return;
             }
             spirv = std::move(compiled.words);
-            if (!cacheFile.empty()) {
-                std::error_code ec;
-                std::filesystem::create_directories(cacheFile.parent_path(), ec);
-                const auto tmp = std::filesystem::path(cacheFile).concat(".tmp");
-                {
-                    std::ofstream out(tmp, std::ios::binary);
-                    out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-                }
-                std::filesystem::rename(tmp, cacheFile, ec);  // (a half-written file is never a hit)
-            }
         }
         if (!dx12) module = game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s->stage, hash, {}).c_str());
         if (module != rhi::ShaderModule::None) {
@@ -1745,58 +1740,32 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
 }
 
 // The DX12 backend's shader module of generated HLSL: DXIL (SM 6.6) through DXC, cached next to the SPIR-V cache (`.dxo`), never SPIR-V
-rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile,
-                                     const std::string& label, std::uint64_t hash, bool half16) {
+rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::string& label, std::uint64_t hash, bool half16) {
     std::vector<std::uint8_t> dxil;
-    std::filesystem::path cacheFile;
     if (char dump[MAX_PATH]; GetEnvironmentVariableA("RVK_DUMP_HLSL", dump, MAX_PATH) != 0) {  // diagnostics: the generated text of every module
         std::error_code ec;
         std::filesystem::create_directories(dump, ec);
         std::ofstream(std::filesystem::path(dump) / std::format("{:016x}_{}.hlsl", hash, stage == shader::Stage::Vertex ? "vs" : "ps")) << text;
     }
-    if (!spvCacheFile.empty()) {
-        cacheFile = spvCacheFile.parent_path().parent_path() / "dxil" / spvCacheFile.filename();
-        // keyed by the text too: the cached DXIL follows the translator (the SPIR-V cache key's hash does not see every change of the generated HLSL)
-        const std::uint64_t textHash = fnv1a(text.data(), text.size());
-        cacheFile.replace_extension();
-        cacheFile += std::format("_{:08x}.dxo", static_cast<std::uint32_t>(textHash ^ (textHash >> 32)));
-        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
-        if (in) {
-            dxil.resize(static_cast<std::size_t>(in.tellg()));
-            in.seekg(0);
-            in.read(reinterpret_cast<char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
-            // a cache file that a crash / power loss left zero-filled or cut short (NTFS commits the rename before the data: found 2026-11-08, 14 of 5,067 files all zero)
-            // reaches CreateGraphicsPipelineState as a blob the debug layer rejects ("Encoded Vertex Shader size doesn't match"; E_FAIL, the draws are skipped = unlit
-            // meshes): the DXBC container names its own size, which must be the file's
-            std::uint32_t declared = 0;
-            if (dxil.size() >= 32) std::memcpy(&declared, dxil.data() + 24, 4);
-            if (dxil.size() < 32 || std::memcmp(dxil.data(), "DXBC", 4) != 0 || declared != dxil.size()) {
-                spdlog::warn("d3d9: DXIL cache file {} is damaged ({} bytes, container size {}): recompiled", cacheFile.filename().string(), dxil.size(), declared);
-                dxil.clear();
-                in.close();
-                std::error_code ec;
-                std::filesystem::remove(cacheFile, ec);
-            }
-        }
-    }
-    if (dxil.empty()) {
-        auto compiled = shader::compileHlslDxil(stage, text, name, half16);
+    // WS12: through the DXC disk cache (keyed by the text, the arguments, DXC's version). A cache file that a crash / power loss left zero-filled or cut short (NTFS commits
+    // the rename before the data: found 2026-11-08, 14 of 5,067 files all zero) reaches CreateGraphicsPipelineState as a blob the debug layer rejects ("Encoded Vertex Shader
+    // size doesn't match"; E_FAIL, the draws are skipped = unlit meshes): the DXBC container names its own size, which must be the blob's; a hit that fails it is compiled again
+    for (const bool refresh : {false, true}) {
+        auto compiled = shader::compileHlslDxil(stage, text, name, half16, refresh);
         if (!compiled.ok()) {
             if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (teardown: a variant worker's compile cancelled)
             spdlog::error("d3d9: shader {:016x} does not compile to DXIL: {}", hash, compiled.log.substr(0, 1500));
             return rhi::ShaderModule::None;
         }
-        dxil = std::move(compiled.bytes);
-        if (!cacheFile.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(cacheFile.parent_path(), ec);
-            const auto tmp = std::filesystem::path(cacheFile).concat(".tmp");
-            {
-                std::ofstream out(tmp, std::ios::binary);
-                out.write(reinterpret_cast<const char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
-            }
-            std::filesystem::rename(tmp, cacheFile, ec);
+        std::uint32_t declared = 0;
+        if (compiled.bytes.size() >= 32) std::memcpy(&declared, compiled.bytes.data() + 24, 4);
+        const bool sound = compiled.bytes.size() >= 32 && std::memcmp(compiled.bytes.data(), "DXBC", 4) == 0 && declared == compiled.bytes.size();
+        if (!sound && compiled.fromCache && !refresh) {
+            spdlog::warn("d3d9: DXIL cache entry of shader {:016x} is damaged ({} bytes, container size {}): recompiled", hash, compiled.bytes.size(), declared);
+            continue;
         }
+        dxil = std::move(compiled.bytes);
+        break;
     }
     return game_->createShaderModule({.dxil = dxil}, label.empty() ? nullptr : label.c_str());
 }
@@ -1883,13 +1852,36 @@ rhi::ShaderModule Device::tintModule(Shader& ps) {
 // scaled by FrameBlock params[kFrameParamLod].x: used for billboard draws while lod.trees is not 1, built as tintModule
 rhi::ShaderModule Device::lodModule(Shader& vs) {
     if (vs.lodModule == rhi::ShaderModule::None && !vs.lodFailed) {
-        vs.lodFailed = true;
         shader::TranslateOptions o;
         o.inputOverrides.push_back(
             {shader::Usage::BlendWeight, 1, std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
-        vs.lodModule = variantModule(vs, o, std::format("lod{}_t{}", kLodVariantVersion, kTranslatorVersion));
-        vs.lodFailed = vs.lodModule == rhi::ShaderModule::None;
-        spdlog::info("d3d9: billboard fade variant of vertex shader {:016x}: {}", vs.hash, vs.lodFailed ? "FAILED" : "built");
+        const std::string tag = std::format("lod{}_t{}", kLodVariantVersion, kTranslatorVersion);
+        // WS12: built by the shader workers: a cold module cache cost the render thread ~300 ms per billboard shader at the first trees of a world (the draw takes the plain
+        // module, the engine's own fade distances, until the form is ready)
+        const auto bit = lodBuild_.find(&vs);
+        if (bit == lodBuild_.end()) {
+            const std::shared_ptr<Shader> owner = shaderOwner(&vs);
+            if (!owner) {
+                vs.lodFailed = true;
+                vs.lodModule = variantModule(vs, o, tag);
+                vs.lodFailed = vs.lodModule == rhi::ShaderModule::None;
+                return vs.lodModule;
+            }
+            auto done = std::make_shared<std::promise<rhi::ShaderModule>>();
+            lodBuild_.emplace(&vs, done->get_future().share());
+            enqueueShaderJob(&vs, [this, owner, o, tag, done] { done->set_value(variantModule(*owner, o, tag)); });
+        }
+        if (const auto it = lodBuild_.find(&vs); it != lodBuild_.end()) {
+            if (it->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return rhi::ShaderModule::None;
+            try {
+                vs.lodModule = it->second.get();
+            } catch (const std::future_error&) {  // (the job was dropped at teardown)
+                vs.lodModule = rhi::ShaderModule::None;
+            }
+            lodBuild_.erase(it);
+            vs.lodFailed = vs.lodModule == rhi::ShaderModule::None;
+            spdlog::info("d3d9: billboard fade variant of vertex shader {:016x}: {}", vs.hash, vs.lodFailed ? "FAILED" : "built");
+        }
     }
     return vs.lodModule;
 }
@@ -2015,8 +2007,35 @@ Shader* Device::particleVs(Shader& vs, int kind, const VertexDecl* engineDecl, c
         h *= 1099511628211ull;
     }
     const bool usePort = port != nullptr && canonical && port->module.load(std::memory_order_acquire) != rhi::ShaderModule::None;
-    const rhi::ShaderModule m = usePort ? port->module.load(std::memory_order_acquire)
-                                        : variantModule(vs, o, std::format("particle{:08x}_t{}", static_cast<std::uint32_t>(h ^ (h >> 32)), kTranslatorVersion));
+    rhi::ShaderModule m = usePort ? port->module.load(std::memory_order_acquire) : rhi::ShaderModule::None;
+    if (!usePort) {
+        // WS12: the translated expansion form is compiled by the shader workers, not here: a cold module cache cost the render thread 100 - 300 ms per form (several in the
+        // first frames of a world: a 2.4 s frame). Until it is ready the particles take the CPU quads (the caller asks again at its next emission; nothing is remembered)
+        const std::string tag = std::format("particle{:08x}_t{}", static_cast<std::uint32_t>(h ^ (h >> 32)), kTranslatorVersion);
+        const auto bit = particleBuild_.find(key);
+        if (bit == particleBuild_.end()) {
+            const std::shared_ptr<Shader> owner = shaderOwner(&vs);
+            if (!owner) {
+                m = variantModule(vs, o, tag);
+            } else {
+                auto done = std::make_shared<std::promise<rhi::ShaderModule>>();
+                particleBuild_.emplace(key, done->get_future().share());
+                enqueueShaderJob(&vs, [this, owner, o, tag, done] { done->set_value(variantModule(*owner, o, tag)); });
+            }
+        }
+        if (const auto it = particleBuild_.find(key); it != particleBuild_.end()) {
+            if (it->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                if (why != nullptr) *why = "its expansion form is building";
+                return nullptr;
+            }
+            try {
+                m = it->second.get();
+            } catch (const std::future_error&) {  // (the job was dropped at teardown)
+                m = rhi::ShaderModule::None;
+            }
+            particleBuild_.erase(it);
+        }
+    }
     if (m == rhi::ShaderModule::None) return refuse("the expansion form does not build");
     auto s = std::make_shared<Shader>();
     s->stage = vs.stage;
@@ -2148,6 +2167,7 @@ void Device::resetUberVariants() {
         std::unique_lock lock(variantMutex_);
         for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
         variantJobs_.clear();
+        variantUrgentJobs_ = 0;
         variantIdleCv_.wait(lock, [this] { return variantBusy_ == 0; });
     }
     std::vector<std::shared_ptr<Shader>> all;
@@ -2223,28 +2243,13 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
     if (glsl.empty()) return rhi::ShaderModule::None;
     // S-2: the lit core in real half precision (ge_default.frag.hlsl `rvkh`) when the device has 16-bit arithmetic; float otherwise (RVK_UBER_HALF=0 forces it)
     const bool half16 = !vertex && uberHalf();
-    // the cache key: the embedded sources + the assembled text (the request's defines, the translated part of a vertex shader: a translator change moves it too)
-    std::uint64_t textHash = shader::uberHlslHash();
-    for (const char c : glsl) textHash = (textHash ^ static_cast<std::uint8_t>(c)) * 1099511628211ull;
+    // (WS12: the module cache is the DXC disk cache: keyed by the assembled text, the arguments and DXC's version, the includes' hashes checked on a hit)
     std::vector<std::uint32_t> spirv;
-    const auto cacheFile =
-        options_.cacheDir.empty()
-            ? std::filesystem::path()
-            : options_.cacheDir / "spirv" /
-                  std::format("{:016x}_{}_u{:08x}{}.spv", s.hash, tag, static_cast<std::uint32_t>(textHash ^ (textHash >> 32)), half16 ? "h" : "");
     // S-4: one module per distinct text (two requests of different bytecode that assemble the same text share it, and with it their pipelines and owned buckets)
     const ModuleTextKey textKey = moduleTextKey(s.stage, glsl, half16);
     if (const rhi::ShaderModule shared = sharedModule(textKey); shared != rhi::ShaderModule::None) return shared;
     if (options_.backend == rhi::Backend::D3D12) {
-        return addSharedModule(textKey, dxilModule(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16));
-    }
-    if (!cacheFile.empty()) {
-        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
-        if (in) {
-            spirv.resize(static_cast<std::size_t>(in.tellg()) / 4);
-            in.seekg(0);
-            in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-        }
+        return addSharedModule(textKey, dxilModule(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash, half16));
     }
     if (spirv.empty()) {
         auto compiled = shader::compileHlsl(s.stage, glsl, vertex ? "uber_vs.hlsl" : "uber.hlsl", half16);
@@ -2257,12 +2262,6 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
             return rhi::ShaderModule::None;
         }
         spirv = std::move(compiled.words);
-        if (!cacheFile.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(cacheFile.parent_path(), ec);
-            std::ofstream out(cacheFile, std::ios::binary);
-            out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-        }
     }
     if (const std::uint64_t n = ++ubershadersBuilt_; n == 1 || n % 50 == 0) {
         spdlog::info("d3d9: GLSL material shaders: {} modules built, {} failed", n, ubershadersFailed_.load());
@@ -2296,20 +2295,10 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
         return rhi::ShaderModule::None;
     }
     std::vector<std::uint32_t> spirv;
-    const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
-                                                     : options_.cacheDir / "spirv" / std::format("{:016x}_{}_h{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::hlslIncludesHash() ^ (shader::hlslIncludesHash() >> 32)));
     const ModuleTextKey textKey = moduleTextKey(dec.program.version.stage, glsl.hlsl, false);  // (S-4: one module per distinct text, as uberModule)
     if (const rhi::ShaderModule shared = sharedModule(textKey); shared != rhi::ShaderModule::None) return shared;
     if (options_.backend == rhi::Backend::D3D12) {
-        return addSharedModule(textKey, dxilModule(dec.program.version.stage, glsl.hlsl, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag), s.hash));
-    }
-    if (!cacheFile.empty()) {
-        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
-        if (in) {
-            spirv.resize(static_cast<std::size_t>(in.tellg()) / 4);
-            in.seekg(0);
-            in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-        }
+        return addSharedModule(textKey, dxilModule(dec.program.version.stage, glsl.hlsl, "translated.hlsl", moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag), s.hash));
     }
     if (spirv.empty()) {
         auto compiled = shader::compileHlsl(dec.program.version.stage, glsl.hlsl);
@@ -2319,12 +2308,6 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
             return rhi::ShaderModule::None;
         }
         spirv = std::move(compiled.words);
-        if (!cacheFile.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(cacheFile.parent_path(), ec);
-            std::ofstream out(cacheFile, std::ios::binary);
-            out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-        }
     }
     return addSharedModule(textKey, game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag).c_str()));
 }
@@ -2404,10 +2387,17 @@ std::shared_ptr<Shader> Device::shaderOwner(const Shader* s) {
     return it != shaders_.end() && it->second.get() == s ? it->second : nullptr;
 }
 
+// WS12: variant requests made from the known pipeline keys (prewarmKey: nobody has drawn them this session) are background work; every other request is a draw's
+static thread_local bool t_variantBackground = false;
+
 rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     const std::size_t i = static_cast<std::size_t>(slot);
     const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
     if (state == 2) return s->variants[i].load(std::memory_order_acquire);
+    if (state == 1 && !t_variantBackground) {
+        s->variantDemand[i].fetch_add(1, std::memory_order_relaxed);
+        if ((s->variantUrgent.load(std::memory_order_relaxed) & (1u << i)) == 0) promoteVariant(s, slot);
+    }
     if (state != 0) return rhi::ShaderModule::None;
     if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (F15-1: a shader worker's key prewarm during destroy() must not restart the workers)
     s->variantState[i].store(1, std::memory_order_release);
@@ -2424,7 +2414,14 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
             s->variantState[i].store(3);
             return rhi::ShaderModule::None;
         }
-        variantJobs_.push_back({std::move(owner), slot});
+        if (t_variantBackground) {
+            s->variantUrgent.fetch_and(~(1u << i), std::memory_order_relaxed);
+            variantJobs_.push_back({std::move(owner), slot, false});
+        } else {  // a draw wants it now: ahead of the known-key requests, after the earlier draw requests
+            s->variantUrgent.fetch_or(1u << i, std::memory_order_relaxed);
+            variantJobs_.insert(variantJobs_.begin() + static_cast<std::ptrdiff_t>(variantUrgentJobs_), {std::move(owner), slot, true});
+            ++variantUrgentJobs_;
+        }
         if (variantThreads_.empty()) {
             variantStop_ = false;
             const unsigned n = variantThreadCount();
@@ -2434,6 +2431,54 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     }
     variantCv_.notify_one();
     return rhi::ShaderModule::None;
+}
+
+// WS12: a draw needs a variant that is queued (requested from the known keys at load): moved behind the other draw requests, ahead of the background ones (once per slot)
+void Device::promoteVariant(const ShaderRef& s, VariantSlot slot) {
+    const std::size_t i = static_cast<std::size_t>(slot);
+    if (s->variantUrgent.fetch_or(1u << i, std::memory_order_relaxed) & (1u << i)) return;
+    const std::lock_guard lock(variantMutex_);
+    for (std::size_t k = variantUrgentJobs_; k < variantJobs_.size(); ++k) {
+        if (variantJobs_[k].shader.get() != s.get() || variantJobs_[k].slot != slot) continue;
+        VariantJob j = std::move(variantJobs_[k]);
+        variantJobs_.erase(variantJobs_.begin() + static_cast<std::ptrdiff_t>(k));
+        j.urgent = true;
+        variantJobs_.insert(variantJobs_.begin() + static_cast<std::ptrdiff_t>(variantUrgentJobs_), std::move(j));
+        ++variantUrgentJobs_;
+        ++variantPromoted_;
+        return;
+    }
+}
+
+// WS12: how many variant workers build at once, and at what priority. Measured (frame-ownership.md 14.53): the engine thread's cost while forms are pending (30 ms a frame, 10 when
+// they are ready) does not depend on the number of workers (12 or 4: the same per-frame cost, the pending phase just lasted 2x longer with 4), so by default every worker runs in the
+// world as well; they run at the lowest thread priority there (below normal outside it), so on a machine with few threads the engine / render / record threads keep their cores.
+// RVK_VARIANT_GAMEPLAY=n limits the workers building at once in the world, RVK_PREWARM_GAMEPLAY=n the plain pipeline prewarm builds (experiments)
+unsigned Device::variantLimit() const {
+    const unsigned all = variantThreadCount();
+    if (backgroundFree_.load(std::memory_order_relaxed)) return all;
+    static const unsigned world = [] {
+        char v[16];
+        if (const DWORD len = GetEnvironmentVariableA("RVK_VARIANT_GAMEPLAY", v, sizeof v); len > 0 && len < sizeof v) {
+            const int k = std::atoi(v);
+            if (k > 0) return static_cast<unsigned>(std::min(k, 32));
+        }
+        return 0u;
+    }();
+    return world != 0 ? std::min(all, world) : all;
+}
+
+void Device::setBackgroundFree(bool free) {
+    if (backgroundFree_.exchange(free, std::memory_order_relaxed) == free) return;
+    variantCv_.notify_all();  // (workers waiting for a free slot re-check the limit)
+    static const unsigned prewarmWorld = [] {
+        char v[16];
+        if (const DWORD len = GetEnvironmentVariableA("RVK_PREWARM_GAMEPLAY", v, sizeof v); len > 0 && len < sizeof v) return static_cast<unsigned>(std::max(std::atoi(v), 0));
+        return 0u;
+    }();
+    game_->setPipelineBackgroundLimit(free ? 0u : prewarmWorld, !free);
+    spdlog::info("d3d9: background compiles: {} (variant workers {} at {} priority, pipeline prewarm {})", free ? "outside the world (loading / menu)" : "in the world", variantLimit(),
+                 free ? "below normal" : "the lowest", free || prewarmWorld == 0 ? std::string("unlimited") : std::to_string(prewarmWorld));
 }
 
 // the variant workers (frame-ownership.md 14.26): an ubershader variant compiles in ~0.8 s, and a cold cache (every build that changes an embedded header moves the
@@ -2464,11 +2509,29 @@ void Device::variantWorker() {
         VariantProvider provider;
         {
             std::unique_lock lock(variantMutex_);
-            variantCv_.wait(lock, [this] { return variantStop_ || !variantJobs_.empty(); });
+            // (WS12: a job is taken only while fewer than variantLimit() workers build; the limit changes with the engine's state: a timed wait re-checks it)
+            while (!variantStop_ && (variantJobs_.empty() || variantBusy_ >= static_cast<int>(variantLimit()))) {
+                if (!variantJobs_.empty()) ++variantLimited_;
+                variantCv_.wait_for(lock, std::chrono::milliseconds(variantJobs_.empty() ? 1000 : 100));
+            }
             if (variantStop_) return;
-            job = std::move(variantJobs_.front());
-            variantJobs_.pop_front();
+            // (WS12: the draw-requested jobs first, the one the most draws asked for ahead of the others; then the known-key requests in their order = the last session's first use)
+            std::size_t pick = 0;
+            if (variantUrgentJobs_ > 1) {
+                std::uint32_t best = 0;
+                for (std::size_t k = 0; k < std::min(variantUrgentJobs_, variantJobs_.size()); ++k) {
+                    const std::uint32_t d = variantJobs_[k].shader->variantDemand[static_cast<std::size_t>(variantJobs_[k].slot)].load(std::memory_order_relaxed);
+                    if (d > best) {
+                        best = d;
+                        pick = k;
+                    }
+                }
+            }
+            job = std::move(variantJobs_[pick]);
+            variantJobs_.erase(variantJobs_.begin() + static_cast<std::ptrdiff_t>(pick));
+            if (job.urgent && variantUrgentJobs_ > 0) --variantUrgentJobs_;
             ++variantBusy_;
+            SetThreadPriority(GetCurrentThread(), backgroundFree_.load(std::memory_order_relaxed) ? THREAD_PRIORITY_BELOW_NORMAL : THREAD_PRIORITY_LOWEST);
             provider = variantProviders_[static_cast<std::size_t>(job.slot)];
             if (isSceneSlot(job.slot)) {
                 // a scene form (7.11): the base slot's provider + sceneRecord (SceneVs / ScenePs: no base options)
@@ -2519,6 +2582,7 @@ void Device::variantWorker() {
                 --variantBusy_;
             }
             variantIdleCv_.notify_all();
+            variantCv_.notify_one();  // (a worker waiting for a free slot)
         };
         shader::TranslateOptions o;
         const bool hadSource = job.shader->source.load(std::memory_order_acquire) != nullptr;
@@ -2617,6 +2681,7 @@ void Device::stopVariantWorker() {
         }
         for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
         variantJobs_.clear();
+        variantUrgentJobs_ = 0;
     }
     variantCv_.notify_all();
     for (std::thread& t : variantThreads_) {
@@ -3452,7 +3517,7 @@ bool Device::takeBackBufferRead(std::vector<std::uint8_t>& bgra, std::uint32_t& 
 
 namespace {
 
-constexpr char kKeysMagic[8] = {'R', 'V', 'K', 'P', 'K', 'E', 'Y', '2'};  // (2: F15-1's variant slots)
+constexpr char kKeysMagic[8] = {'R', 'V', 'K', 'P', 'K', 'E', 'Y', '3'};  // (3: WS12: stable shader ids (bytecode hash alone); 2: F15-1's variant slots)
 inline std::uint64_t variantKeyOf(std::uint64_t hash, std::uint8_t slot) { return (hash ^ (static_cast<std::uint64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull) * 0xff51afd7ed558ccdull; }
 
 }  // namespace
@@ -3573,6 +3638,11 @@ void Device::recordBackgroundKey(const PipelineDesc& pd) {
 // F15-1: the known pipeline keys_[index]: its modules (base or variant) resolved; a missing variant is requested and the key waits for it (prewarmVariantKeys)
 bool Device::prewarmKey(std::size_t index) {
     if (destroying_.load(std::memory_order_acquire)) return true;
+    struct Background {  // (WS12: the variants this requests are background work, behind the ones a draw asks for)
+        bool was = t_variantBackground;
+        Background() { t_variantBackground = true; }
+        ~Background() { t_variantBackground = was; }
+    } background;
     PipelineKey k;
     {
         const std::lock_guard lock(keysMutex_);
@@ -3782,7 +3852,9 @@ void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Sha
 bool Device::prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural) {
     PipelineDesc pd{};
     if (!replacementDesc(vs, ps, procedural, pd)) return false;
-    if (!game_->pipelineContains(pd)) game_->prewarmPipeline(pd);
+    // urgent (prewarmOnce): the engine draws its own water until this pipeline exists, so it goes ahead of the pipelines known from earlier runs
+    // (Full queues thousands of those at the start; on the plain queue the water waited behind them for 17 s and more, frame-ownership.md 14.45)
+    if (!game_->pipelineContains(pd)) game_->prewarmOncePipeline(pd);
     return true;
 }
 

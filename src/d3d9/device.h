@@ -70,6 +70,12 @@ using rhi::kChunkPackets;
 // S-4 per view kind (frame-ownership.md 14.30): which owned shadow views draw vertex-pulled (bit 0 = the sun cascades, bit 1 = the terrain map + the point-light atlas cells);
 // a view with its bit clear keeps the input-assembler form (same clip position). Default 1 = the cascades pulled, the terrain map + atlas cells on the input assembler (perf-ab: atlas pass -0.006 .. -0.011 ms, 4 of 4 pairs); env RVK_PULL_VIEWS=<mask> at start, overlay command `debug pull <mask>`.
 std::atomic<std::uint32_t>& pullViewMask();
+// WS11 (frame-ownership.md 14.52): the owned tree pass's reuse (the z passes' kept layout, the observers' covers of no-op / unchanged tree runs); default on, `debug treereuse 0|1`
+// (overlay command) switches it inside one run for the A/B of perf-ab.ps1 (-CommandTemplate)
+std::atomic<bool>& treeReuse();
+// WS17 (frame-ownership.md 14.59): the owned tree pass's three additions as a bit mask, default 7, overlay command `debug treeown <mask>` (A/B inside one run): bit 0 = solid ops with
+// static-SH instances, bit 1 = branch / fronds instances take their batch's first start (no "no template"), bit 2 = ops that draw nothing keep a record (no "no record")
+std::atomic<std::uint32_t>& treeOwnMask();
 
 class Device;
 
@@ -328,6 +334,8 @@ public:
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
     std::array<std::atomic<rhi::ShaderModule>, kVariantSlots> variants{};  // (VariantSlot::Count)
     std::array<std::atomic<std::uint8_t>, kVariantSlots> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::array<std::atomic<std::uint32_t>, kVariantSlots> variantDemand{};  // WS12: draws that asked for variants[i] while it was queued (the workers build the most asked-for first)
+    std::atomic<std::uint32_t> variantUrgent{0};  // WS12: bit i = a draw asked for variants[i] while it was queued: moved ahead of the background (known-key) requests, once
     std::atomic<std::uint32_t> uberSlots{0};  // S-1a: bit i = variants[i] was built from the HLSL ubershader (not the translated bytecode)
 };
 
@@ -590,6 +598,10 @@ public:
     // F8-0 pre-filter, asked right after `observes` and before the query is built: true = the observer already holds everything observe() would
     // learn from this draw (a persistent table entry): the draw is not shown to it. Must be cheap and must not change device state.
     virtual bool coversDraw(const CoverQuery& /*draw*/) { return false; }
+    // WS11 (frame-ownership.md 14.52): an owned SpeedTree run of the main view's solid pass (`cd` = the template's retained draw, `rows[k]` = instance k's 16 floats c32 + 4 k of
+    // the run in list order, `count` instances) the observer already holds exactly as its last sighting of it left it: true = it has applied everything showing the run would have
+    // done (the instances refreshed) and the run is not shown. Asked after observes() / coversDraw(); must change nothing when it answers false.
+    virtual bool coversTreeRun(Device& /*device*/, const CoverQuery& /*draw*/, const void* /*cd*/, const float* const* /*rows*/, std::uint32_t /*count*/) { return false; }
     // F2c-3 (native.owned_static): what the observer reads of the draw's constant registers. An owned draw has no composed register file: `Material` = the
     // world rows (ReplaceQuery::objectRows) and the registers of the material / view / object windows (the device loads their CPU images before observe),
     // `All` (the default) = anything: owned draws are not made while such an observer is registered
@@ -814,6 +826,7 @@ public:
     // state (render thread)
     void setRenderState(std::uint32_t rs, std::uint32_t value);
     std::uint32_t renderState(std::uint32_t rs) const { return rs < RS_COUNT ? rs_[rs] : 0; }
+    const std::uint32_t* renderStateArray() const { return rs_.data(); }  // RS_COUNT entries (native/effect_ops: the bulk capture / compare)
     void setSamplerState(std::uint32_t sampler, std::uint32_t ss, std::uint32_t value);  // sampler: 0..15, 257..260
     std::uint32_t samplerState(std::uint32_t sampler, std::uint32_t ss) const;
     void setTexture(std::uint32_t sampler, Texture* texture);
@@ -1207,6 +1220,10 @@ public:
     // thread that presents, one present after each load step; docs/research/menu-fps.md 3): at most 30 frames a second
     // are shown, the others are rendered but not presented
     void setUnpaced(bool unpaced) { unpaced_ = unpaced; }
+    // WS12 (frame-ownership.md 14.53): the engine is not in the world (loading screen, menu, GUI not up yet): the background compile workers (variants, pipeline
+    // prewarm) may use every thread at their normal low priority; in the world they run on few threads at the lowest one
+    void setBackgroundFree(bool free);
+    bool backgroundFree() const { return backgroundFree_.load(std::memory_order_relaxed); }
     bool unpaced() const { return unpaced_; }
     // Exclusive fullscreen (docs/research/window-mode.md 8). `monitor` != null: the swapchain is built with the exclusive
     // structures for that monitor (re-created now when this changes); `hold`: the window is in front, take the exclusive
@@ -1265,6 +1282,9 @@ public:
     // the rest by comparing the draw's description (shaders, declaration, streams, ranges, states, samplers) with the captured one.
     struct CachedDraw {
         bool valid = false;
+        // WS11: hashVi(vi) / hashDyn(dyn), made once when the draw is kept (fillCapture; vi / dyn never change afterwards): the bucket keys of the owned path read these
+        // instead of walking the 4 KiB of dyn / vi on every pass (ownedBucketKey, ownedPullKey, deriveScene)
+        std::uint64_t viHash = 0, dynHash = 0;
         DrawPacket packet;  // (vi / dyn point into a per-frame arena: the values are kept below and interned again at replay)
         VertexInputValues vi;
         DynamicStateValues dyn;
@@ -1343,6 +1363,7 @@ public:
         Buffer* indices = nullptr;
     };
     void beginCapture(CachedDraw* into) { capture_ = into; if (into != nullptr) into->valid = false; }
+    bool captureOkNow() const { return captureOk_; }  // (diagnostic: the last prepareDraw's retention verdict)
     bool endCapture() { const bool ok = capture_ != nullptr && capture_->valid; capture_ = nullptr; return ok; }
     // true = drawn from the retained packet; false = not valid / not allowed: nothing was drawn, draw normally
     bool replayDraw(const CachedDraw& c, const ReplayInputs& in);
@@ -1592,6 +1613,12 @@ public:
     bool ownedTreeObserversOk(std::string* why = nullptr) const;  // (`why`: the first observer that gates, named)
     // at least one observer wants this template's draws (kind / phase), so ownedTreeObserve is to be called for its runs
     bool ownedTreeObserved(const CachedDraw& c) const;
+    // WS11: at least one observer must be SHOWN this run (it observes the kind / phase and does not cover the run: DrawObserver::coversDraw on the template's query with the device's
+    // draw tag as the caller set it). false = every observer declines or covers it: ownedTreeObserve would do nothing (it counts the run as shown and notes the frame)
+    // (`rows` = the run's instance rows, null = the observers' cover of whole runs (DrawObserver::coversTreeRun) is not asked)
+    bool ownedTreeRunWanted(const CachedDraw& c, const float* const* rows = nullptr, std::uint32_t count = 0);
+    std::uint64_t ownedTreeRunSerial() const { return treeRunSerial_; }  // one more per ownedTreeObserve call: a run's batches share it
+    void ownedTreeNoteObserved() { treeObservedFrame_ = frameValue(); }
     // F-VAR2: show the observers one owned vegetation batch (`ow` = the template's windows with the batch's lighting entry); returns the batches shown (0 or 1)
     std::uint32_t ownedVegObserve(const CachedDraw& c, const OwnedWindows& ow, std::uint32_t instances);
     // the observers' turn for one run of owned tree instances (`rows` = 16 floats per instance = VS c32 + 4 i .. c35 + 4 i; chunks of the engine's batch size): returns the number of
@@ -1599,6 +1626,7 @@ public:
     std::uint32_t ownedTreeObserve(const CachedDraw& c, const OwnedWindows& ow, Buffer* ramp, const float* rows, std::uint32_t count);
     std::uint64_t ownedTreeObservedFrame() const { return treeObservedFrame_; }
     std::uint64_t treeObservedFrame_ = 0;
+    std::uint64_t treeRunSerial_ = 0;
     std::uint64_t treeObserveCaptures = 0;  // capture requests an observer made for an owned tree draw (refused: 0 expected)
     rhi::RingAlloc allocOwnedRing(std::uint64_t bytes, std::uint64_t align) { return game_->allocRing(bytes, align); }
     struct TreeItem {
@@ -2084,6 +2112,8 @@ private:
     bool gbufferLit() const;                                                        // ... that test
     BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
+    unsigned variantLimit() const;         // WS12: workers allowed to build at once: all while the engine is not in the world (loading / menu), a few while it is
+    void promoteVariant(const ShaderRef& s, VariantSlot slot);  // WS12: a draw needs a queued variant: it goes ahead of the known-key (background) requests
     static unsigned variantThreadCount();  // 14.26: the variant workers (all hardware threads but four, 3..12; RVK_VARIANT_THREADS)
     struct VariantTimes {
         std::atomic<std::uint64_t> n{0}, moduleUs{0}, prewarmUs{0};
@@ -2106,9 +2136,11 @@ private:
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
     std::unordered_map<std::uint64_t, std::shared_ptr<Shader>> particleVs_;  // F11: (engine vertex shader, kind, declaration) -> its expansion form (null: refused)
     std::unordered_map<std::uint64_t, const char*> particleVsWhy_;
+    std::unordered_map<const Shader*, std::shared_future<rhi::ShaderModule>> lodBuild_;  // WS12: the billboard fade forms being built by the shader workers (render thread)
+    std::unordered_map<std::uint64_t, std::shared_future<rhi::ShaderModule>> particleBuild_;  // WS12: the expansion forms being built by the shader workers (render thread)
     std::unordered_set<const Shader*> particlePorted_;  // 14.28 addendum: the expansion forms that are a port
     std::unique_ptr<VertexDecl> particleDecl_[3];
-    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash, bool half16 = false);
+    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::string& label, std::uint64_t hash, bool half16 = false);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
     void resetUberVariants();  // S-1a: debug.ubershader toggled at run time: every material pixel shader's variants are built again in the new form
     rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
@@ -2743,6 +2775,7 @@ private:
     struct VariantJob {
         std::shared_ptr<Shader> shader;
         VariantSlot slot;
+        bool urgent = false;  // WS12: a draw asked for it (ahead of the known-key requests)
     };
     std::mutex variantMutex_;
     std::condition_variable variantCv_, variantIdleCv_;
@@ -2752,6 +2785,9 @@ private:
     int uberFailLogged_ = 0;
     std::atomic<std::uint64_t> uberLateSource_{0}, uberLateReset_{0};  // 14.22: variants rebuilt because the engine's request arrived during / after their build
     std::deque<VariantJob> variantJobs_;
+    std::size_t variantUrgentJobs_ = 0;  // WS12: the jobs at the front of variantJobs_ that a draw asked for (variantMutex_)
+    std::atomic<bool> backgroundFree_{true};
+    std::atomic<std::uint64_t> variantPromoted_{0}, variantLimited_{0};
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
     mutable std::mutex shaderJobMutex_;
     std::condition_variable shaderJobCv_;

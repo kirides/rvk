@@ -4211,6 +4211,211 @@ User decision 2026-11-12: S-9 first (all owned stages on in Full, check frames a
 
 **Left.** (1) The deliveries are now the RT scene's per-record work (0.38 us: the query copy, two hash lookups, the blended stamp, materialOf's signature, the registry lookup); a per-record cache (record id -> outcome, key, BLAS, instance keys while the record's signature / epoch and the BLAS are unchanged) would cut it to about a third, at the cost of epochs for the BLAS / water-material state it reads. (2) What remains of the ~3.3 us per op is not the observers: `ownedDrawOpPersistent`'s windows + signature (the "draws" timer) and the run flushes (1.4 us per op); the per-op target "well below the composition" (~4.5 us) is met at the op (3.3) but not with the flushes (4.7 together). (3) GI / material RT / the water replacer per draw (above).
 
+### 14.45 Full drew the engine's water for 17 s to minutes: the enhanced water's pipelines waited behind the known-keys queue (2026-11-14, branch `worktree-agent-afc9e347bdf378c49`; no new setting)
+
+**Finding.** perf-ab `renderer.mode` (hold, jungle) showed `water.rt` / `water.ocean` / `water.wet_shore` at 0 ms in Full's windows (`rvk-work/scratch/perf-ab/renderer_mode_20261113-232050`). Not an ownership bug: Full's water draws are composed (14.22: "water / replaced" ops have no packet), go through `Device::draw`, and the `Water` replacer sees them (rvk.log: bodies learnt, models resolved, `water: pipelines ready or building`). What was missing was the replacement itself: `Water::replace` returns (the engine draws its own water) until `replacementReady` finds the wave-grid / mesh pipeline, and `Device::prebuildReplacement` queued it with `prewarmPipeline` = the plain prewarm queue, FIFO behind every pipeline known from earlier runs. Full keys are thousands (3922 known keys, 2570 with variant modules in B1), Wrapper's few hundred, so Wrapper's water was ready after ~3 s and Full's after 17 s (warm copy, measured: `wave grid pipeline ready` 17.2 s after the prebuild line) and in the cold A/B copy not within 40 s of two sessions (B1, B2). A perf window of 240 frames shortly after the load therefore measured Full without the water passes (hold B: water.rt 0, ocean 0), which made Full look 1.3 + 0.3 ms cheaper than it is (jungle B: sd 0.665 = one window with, one without).
+
+**Fix.** `prebuildReplacement` uses `prewarmOncePipeline` (the urgent queue draw-time requests use: ahead of the known keys, deduplicated by description). Same time to ready in both modes now: 0.19 s after the prebuild line at hold (was 17.2 s, same copy, same save). No picture or ownership change; a template that changes after the first request was looked at (a drift log of the water template's attachment class never fired).
+
+**Numbers** (perf-ab hold, `-PlayerDefaults`, wrapper vs full, one pair each, GPU ms): before (default copy, B1/B2 of the finding) Full water.rt 0.00 / ocean 0.00 against Wrapper 1.32 / 0.30; after (fix) Wrapper 1.06 / 0.25, Full 1.06 / 0.25 (`rvk-work/scratch/ws2/pab_fix2_default`; the same copy before the fix: Full ready after 17 s). Jungle spot (rvkcompare) Full 0.72 vs Wrapper 0.72 ms. The hold scene shows almost no water (a pond at the right edge): hold pictures Wrapper / Full identical (`scratch/ws2/shots_fix`).
+
+**Pictures.** `water-compare.ps1 -EngineSetting 'water.enabled=true','renderer.mode=wrapper' -Setting 'renderer.mode=full'` (private copy ws2, warm sea floor cache; `out/water/20261114-001010`): luma Wrapper vs Full beach_sun -1.5, harbour_docks +0.4, lake_jungle +1.9, waterfall_jungle +5.9 (the lighting table, 11.2), surf / splash differ only by the sea's clock. A first run with a cold sea floor cache (Wrapper learnt it, Full loaded a more complete one from disk) showed less foam in the cold arm: compare Wrapper / Full only with a warm `cache/ocean/floor_v1.bin`.
+
+**water.rt at hold is not wasteful for waterfalls.** Waterfall draws are not bodies (no plane within 150 units, no RT); the 4 bodies are the sea and lakes, `water_rt.comp` already rejects non-water pixels per pixel (plane + box test) before any ray. No clean reduction found that stays picture-neutral (a coverage-tile pre-pass would cost about what the cheap pixel test does); not changed.
+
+### 14.46 WS1: `native.owned_check` defaults to 0 for players (2026-11-14, branch `worktree-agent-a1d6b144182af1180` on main 2db2189; no new setting)
+
+**Why.** The periodic check frames (1 check + 1 warm-up frame of every 10, composed and compared) cost Full -2.1 to -2.3 ms CPU and -0.85 to -1.3 ms GPU per frame (measured on main 300494f with `-Setting 'native.owned_check=0'`, hold / jungle); with 0, Full is at or below Wrapper's CPU at hold (6.56 vs 6.84 ms). Roadmap row 19 (15.4, F15-2) planned exactly this end state.
+
+**Change.** `native.owned_check` default 10 -> 0 (src/core/settings.cpp). `scripts/run.ps1`'s test baseline (non `-PlayerDefaults`) pins `native.owned_check=10`, so soaks and the picture check keep their net; `-PlayerDefaults` runs get 0. No script assumed the default (perf-ab / stage-state / water-compare grep: no `owned_check`). `settings_tests` now expects 0. The picture check with 0 has no composed reference after the start-up frames: reports "no reference" skips / NO DATA, not FAILED (turn it on with `owned_check=10`).
+
+**Audit of other periodic work in Full by default (all gated by `gpuscene::checksOff()` / `periodic()` already, nothing new needed):** the tables' per-draw verify and 240-frame read-backs (material / illumination / mesh parts / draw records / bone / object / row / view / window / instance / cluster), lighting jobs compare, owned compaction read-back (env knob overrides), rolling scrubs (persistent draws, ordered, trees, vegetation, events, non-op records, F10 collection), vegetation stream re-conversion, packet cache verify_10, scene-draws check, lean check (device.cpp passes 0), RT scene record / table checks (F8-1, kRecordCheck, verify frames `frame + 5`), billboard check frames, F10 request / extract compare views (interval 0 = Lean). Not gated, cheap, left: owned_persist's bucket-key clash test (1 of 8 items, a pointer compare per item, a hard safety guard); idle sweeps (maintenance, not verification); F5 / bone / tree-motion compare are opt-in modes or env-gated (`RVK_F5_MEASURE`).
+
+**Correctness (private copy `risen-test-vk-ws1`, Full, player defaults).** GPU-AV first run (`-Validation`, GPU_BASED_GPU_ASSISTED, testdemo): PASS, 0 validation messages, `check frames off` line. `rvk_rtwalk` (load=0): PASS, 0 errors / device loss / DIFFERING. refcompare (stored reference 20261022-093252, whose spots / spass hashes are stale: re-calibrate): owned_check=0: 5 FAIL (lake_jungle, monastery_hall, sea_cliff, pub_interior, harbour_mouth), 8 WARN, 7 PASS; owned_check=10: 7 FAIL (the same five + harbour_docks, hero_closeup), 6 WARN, 7 PASS. The by-design FAILs are monastery_hall / pub_interior (crystal_cave only WARN); lake_jungle / sea_cliff / harbour_mouth FAIL in both arms (stale reference, to re-check against Wrapper), the extra two with 10 are run-to-run (harbour_docks dluma +4.6 in the check arm only). No picture got worse with 0.
+
+**perf-ab** (`renderer.mode wrapper|full -Mode wrapper -Restart -PlayerDefaults -Pairs 2`, shared copy, RisenTest.exe; engine+HAL CPU ms / GPU frame ms / interval p50 ms; Wrapper -> Full):
+
+| scene | CPU | GPU | interval p50 |
+|---|---|---|---|
+| hold | 7.81 -> 7.91 | 3.54 -> 4.21 | 8.10 -> 8.14 |
+| jungle | 12.31 -> 8.28 | 4.73 -> 4.20 | 12.91 -> 9.02 |
+| harbour_docks | 1.98 -> 2.93 | 2.24 -> 2.38 | 2.50 -> 3.24 |
+| pub_interior | 0.97 -> 1.79 | 0.50 -> 1.96 | 1.19 -> 2.21 |
+
+**Open.** Full is still slower than Wrapper at harbour_docks (CPU +0.95 ms, `1600x900 (97)` pass +0.2 ms) and pub_interior (table lighting: `light.shadow` +1.09 ms GPU, by design 11.2) and has +0.7 ms GPU at hold (`light.shadow` / `light.cluster`); hold CPU is only equal (the 14.43 / 14.44 numbers were 6.56 with extra settings).
+
+### 14.47 WS5: the effect units' composition cost (2026-11-14, branch `worktree-agent-a963a91c24de5160d` on main e1221d0; no new setting; debug env `RVK_FX_TIME`, `RVK_FX_SLOW`)
+
+**Question.** The WS4 census (`-CpuProfile`, d6e4b0d) had `EffectOps::effectBegin` (the post chain + shadow mask + SSAO units: ~29 units per frame at pub_interior) at .41-.50 ms per frame against Wrapper's `detourExecuteEffect` .21-.31. Can the composition be made clearly cheaper than Wrapper's?
+
+**Measured first (new `RVK_FX_TIME=1`, QPC around every `effectBegin`, rvk.log `native: effect units CPU (5 s)` + two `parts` lines; the sampling profile of the same units reads ~.1 ms higher than this timer: profiler skew).** pub_interior, Full, player defaults, private copy: **29 units / frame, 10.7 us per unit, .31 ms per frame**, split (us per unit): parameter objects 2.3, `Device::drawIndexedPrimitive` of the composed draw 2.8 (`drawComposed`), names + groups + own-post bookkeeping 1.8, `applyPass` + visual 1.1, `applyDevice` .9, device capture + target .5, predict / adopt / rest 1.3. So the cost is spread over ~35 small items: no single hot spot. The device draw path (`prepareDraw`, dynamic-rendering begin / end per distinct target: `endRendering` +.05 ms over Wrapper in the WS4 table) is the largest block and is shared code outside this task.
+
+**Done (all exact, state-level).**
+* **Per-shader register cache** (`fxc::constantsFor`, `fx::Shader::evalCache`): the registers `fx::evaluateShaderConstants` produces are a pure function of the bytes of the top-level parameters the shader's constant table and its preshader's inputs name; the last evaluation is kept per shader with those bytes (compared in place, ~100 B) and reused when equal: 86 % of the evaluations at pub_interior (`native: effect constants cache (5 s)`: reused / evaluated). **Check frames** (`gpuscene::periodic(frame, 10)`: off with `native.owned_check=0`): every cache hit is also evaluated fresh and compared bitwise; `DIFFERING` must stay 0 (0 in 100 k+ compared evaluations; the first version compared floats with `==` and reported 150 false differences on NaN registers of the rare effects: now `memcmp`).
+* `applySamplers` used the cached parameter index of `fillConstants` (a name scan per sampler constant per pass); `HalEffect::handleOf` O(1) (pointer arithmetic, was a scan of the handle table per `parameterOf`).
+* Per unit allocations gone: scratch vectors for the texture / shader / semantic-bytes / array values (`composeTextures_` ...), the unit names + stats / lean-stats nodes + the own-post group / port classification cached per (filter, unit kind, technique, name pointer) in `NameEntry` (re-verified against the engine's string every 64th frame), the mask's `overrides_` persistent (`live` flag, transparent `std::less<>` lookups, no node churn).
+* Fewer calls: the parameter object read once (`safeReadN<0x98>`, falls back to the guarded loads), `captureDevice` / `applyDevice` / `issueLean` compare and copy the render states and sampler rows as blocks (`Device::renderStateArray`), the float register diff uses one inline 128-bit compare, `predictAfter` copies the ~10 KB last draw only on check frames.
+* The `RVK_FX_SLOW=1` switch restores the pre-WS5 paths of the register cache, the names and the sampler indices (and the guarded parameter reads) for an A/B in one build.
+
+**Exactness.** (private copy `risen-test-vk-ws5`, instance 15, lock `rvk-ws5`; GPU-AV not needed: no GPU-address code touched.) Test baseline + `native.own_post=on` + `native.scene_ops_compare=true` + `native.lean_check=10`, pub_interior / harbour_docks / rare effects (`post effect RadialBlur|Wobble|EdgeSmooth|HDRI`, `post default`, `post overlay OverlayHit`): lean check after 0 / 36,127 (36,186; 31,259), store 0 / same, fields 0 / 72,680 (73,000; 63,018) differing, master flags 0; constants cache 0 DIFFERING; own fx shaders engine 0. `native.own_post=compare`: images 0 steps except `streak` (max 138 steps in 0.0001 % of the pixels, a port the change does not touch). Picture: a refcompare of Full against the stored D3D9 reference cannot run (stale spots hash) and two runs of the SAME build differ in 12-30 % of the pixels (time of day / animation phase), so pixel diffs between runs prove nothing; the state-level compares above are the exactness evidence. rvk_tests 354, `rvk_d3d9test --validation` 0 validation errors.
+
+**Effect of the changes.** `RVK_FX_TIME` per frame at pub_interior (same session type, alternating runs): `RVK_FX_SLOW=1` (no register cache / names / sampler index / block reads) .348-.356 ms, WS5 .308-.320 ms (10.6-11.0 us per unit vs 12.0-12.3): **-.04 ms per frame (-12 %)**; the unit count is unchanged. Sampling profile (`-CpuProfile`, before = WS4 d6e4b0d, after = this branch; the machine was not idle for the "after" runs): `composeEffect` .198 -> .174 ms, `applyPass` .055 -> .037, `applyConstants` .037 -> .014 (`evaluateShaderConstants` gone from the list), `effectBegin` .428 -> .436 (inside the noise of the profiler: the `issueLean` -> `drawComposed` -> `Device::drawIndexedPrimitive` .12 ms and the dynamic-rendering begin / end per target are untouched and are now the largest blocks). **The target (-0.2 .. -0.3 ms below Wrapper) is not reached**: after the 12 % the units cost about what Wrapper's `detourExecuteEffect` did (.31 vs .31 at pub_interior in the WS4 table), not clearly less. A per-unit template that skips the parameter objects would have to re-read them anyway (2.3 us of the 10.7 are those reads, one block each now), and what is left is the device draw path (2.8 us per draw), the render-pass switches and the own-post bookkeeping: the next step is there (a dedicated post-quad draw path that skips `prepareDraw`'s state hashing, merging passes of consecutive units on one target), not in the composition.
+
+**perf-ab** (`renderer.mode wrapper|full -Mode wrapper -Restart -PlayerDefaults -Pairs 3`, shared copy, RisenTest.exe, 3 windows per arm; engine+HAL CPU ms / GPU frame ms / interval p50 ms; Wrapper -> Full; the lock was shared with other agents' runs; **`-Perf` adds a per-draw timer to Wrapper only (~0.07-0.26 ms), so it slightly flatters Full**):
+
+| scene | CPU | GPU | interval p50 |
+|---|---|---|---|
+| pub_interior | 0.97 -> 1.36 | 0.50 -> 1.16 | 1.21 -> 1.57 |
+| harbour_docks | 2.68 -> 2.83 (A sd 1.1) | 2.23 -> 2.48 | 2.98 -> 3.13 |
+| hold | 6.86 -> 7.99 | 3.35 -> 3.66 | 7.72 -> 8.29 |
+| jungle | 7.10 -> 8.08 | 4.06 -> 4.54 | 7.83 -> 8.69 |
+
+Full is slower than Wrapper in all four (the stage states match their arms). The 14.46 table (CPU 0.97 -> 1.79 / 1.98 -> 2.93 / 7.81 -> 7.91 / 12.31 -> 8.28) was measured on another main commit without the other agents' work in these runs: the CPU gap is now +0.15 .. +1.1 ms and is not in the effect units (their whole cost is .31 ms per frame); the `1600x900 (97)` main pass (+0.4 .. +0.5 ms GPU at hold / jungle), `light.shadow` / `light.cluster` and the owned hand-over remain the open items of the other work streams.
+
+### 14.50 WS8: where Full's main colour pass loses 0.2 - 0.5 ms against Wrapper (2026-11-14, branch `worktree-agent-aeff013f5e559dbc1` on main e1221d0; no new setting)
+
+**Question.** WS4's census: Full's `1600x900, 1 colour (97), depth 130` pass costs more than Wrapper's (+.21 harbour_docks, +.49 hold, +.39 jungle, +.28 pub_interior ms) while its depth-only z pass is cheaper. Suspects: ubershader, vertex pulling, table lighting, depth_z, owned indirect draws.
+
+**Method.** The GPU is shared with other agents' builds / runs (absolute pass times moved up to +30 % between sessions, `water.rt` 0.79 -> 1.05 ms in a loaded one), so every figure below is compared against `pass water.rt` of the SAME session (a pass no setting here touches): "ratio" = colour pass / water.rt. One session per configuration (`scripts/perf-ab.ps1 -Key debug.ubershader -A true -B true -Setting <config>` = 6 windows of 360 frames, `-PlayerDefaults`, RisenTest.exe, 7900 XTX), in-session A/Bs where the key switches at run time.
+
+**Attribution (harbour_docks, colour pass ms / ratio / z pass ms / draws in the pass; Wrapper from the WS4 census: 0.63 - 0.64 ms, ratio 0.76, colour-z 0.077, 214 draws):**
+
+| configuration | colour | ratio | z pass | draws | reading |
+|---|---|---|---|---|---|
+| Full (player defaults), 3 sessions | 0.805 / 0.824 / 0.829 | 1.02 | 0.055 | 506 | |
+| `native.vertex_pull=false` (restart) | 0.824 | 1.02 | 0.056 | 506 | not a factor |
+| `native.depth_z=off` | 0.827 | 1.03 | 0.088 (colour z) | 506 | depth_z saves 0.033 in the z pass, nothing in the colour pass (jungle: colour +0.09 +- 0.07 with it on, z = 1.7: noise) |
+| `native.cluster_cull=false` | 0.823 | 1.02 | 0.080 | 506 | the cull saves 0.025 in z, nothing in colour |
+| `debug.ubershader` false / true, in-session (3 pairs) | harbour -0.03, jungle -0.10, pub +0.00 (hold: sd 1.1, no reading) | | | | the HLSL ubershader is as fast as the translated shader |
+| `lighting.enabled` false / true, in-session | harbour -0.05, jungle -0.33 (sd 0.24 - 1.3: noise) | | | | the per-pixel cluster lookup is not measurable in the colour pass |
+| `lighting.full_lit=false` | 0.818 | 0.91 | 0.075 | 208 | -0.09 ms: the draws fall to Wrapper's count |
+| `native.owned_persistent=false` | 0.723 | 0.92 | 0.072 | 197 | -0.10 ms: same, the owned indirect path off |
+| `lighting.clustered=false` (restart: no table, no owned stages) | 0.880 (water.rt 1.05) | 0.84 | 0.081 | 208 | ~ Wrapper's picture of the frame |
+
+So of the +0.18 ms (harbour) about **0.10 ms is the owned persistent indirect draw path** (`ownedFlush`: one indirect command per item: 506 draws / 101 scene indirect calls per view in the pass against Wrapper's 214 hardware-instanced batches; hold 2561 vs 1014, jungle 4393 vs 1275 draws; 0.13 - 0.33 us per extra command), the table lighting / rest ~0.05 - 0.08, and the colour-less z pass gives 0.02 - 0.03 back. `native.owned_persistent` off is NOT the answer (z pass +0.017, CPU cost of the composed path). **Lead for the owned hand-over work (not touched here: `ownedFlush` / `compactOwned` belong to another workstream):** coalesce consecutive items of a bucket with identical (index count, first index, vertex offset) into ONE command with `instanceCount = run length`, `firstInstance` = the first item's list position (the per-instance `ref` stream is already indexed by that position, `args[5j+4] = j`), the GPU compact path then emits runs. Items of one mesh are consecutive in the engine's op order (its hardware batches), so the command count should fall towards Wrapper's batch count.
+
+**Tried, not kept as a cost win (measured):**
+* `rvkSceneBeginPs` made wave-uniform (`WaveReadLaneFirst(rvk_sceneIdx)`, so the DrawRecord and every pixel constant are scalar loads; unsafe as an experiment: no per-lane check): colour 0.849 / 0.831 against 0.805 / 0.824, ratio 1.02 - 1.04: the record loads are not the cost. Not shipped.
+* The light-table work per pixel is cheap already (S-2b): see `lighting.enabled` above.
+
+**Shipped (shader text only, exact; `RVK_MV_CLUSTER` variants, i.e. Full's table lighting).**
+* `shaders/material/ge_default.frag.hlsl`: the point-light loop skips a slot whose diffuse + specular colour is 0 or whose pixel is out of reach (`d^2 / R^2 >= 1`): such a light adds exactly 0 to both accumulators (`CustumFragmentLight` multiplies both by the falloff), every lit draw runs the 3-light permutation and unused slots are the common case by day.
+* `shaders/include/rvk_material_variant.hlsli` `rvkMvCluster`: an EMPTY cluster (count 0: no table light reaches the pixel) returns right after the lookup with the slots the full selection would give (engine light kept: factor 1, else unused: factor 0; `rvk_clKeptState` as before) instead of the engine-light position tests, the cluster walk and the pick logic.
+* Effect (old text via `RVK_SHADER_DIR` vs new, one session each, ratio-checked): harbour_docks colour 0.835 -> 0.819 / 0.827 (-1.5 %), jungle 1.263 (2 sessions) -> 1.218 (-3.5 %); the empty-cluster path alone (cl) 0.829 at harbour: within noise. A small, safe saving, not the missing 0.2 ms.
+* Pictures: Full old text vs Full new text, 7 spots (`harbour_night`, `pub_interior`, `jungle`, `harbour_docks`, `torch_hero`, `monastery_hall`, `swamp_camp`; bursts of 3, median): the old-vs-new difference (mean abs 0.36 - 3.1 of 255, jungle's is the swaying foliage) equals the old-vs-old session-to-session difference (0.46 - 3.4); no structure in the diff images beyond foliage / water motion. (`tools/refcompare.py` needs scipy: not installed here, a numpy median diff was used.)
+* Gates: `rvk_tests` 354 / 0, `rvk_shadertool dxil-check embedded` 185 / 185, `dxil-check uber out/matsrc/census_jungle.jsonl` 1689 / 1689, `rvk_vktest --passes` PASS. `ubershader_check.py` / `vs_equiv.py` compare the plain shader without `RVK_MV_CLUSTER` (game-shaders export not in the worktree): the changed code is inside `#if defined(RVK_MV_CLUSTER)` only.
+
+**By design / not a defect:** the colour-less z pass, vertex pulling and the cluster cull do not cost colour-pass time; the per-pixel cluster lookup is below the noise at the player-default lamp counts; pub_interior's 3x colour pass (0.14 -> 0.42 ms in the census) is the table lighting at 39 draws (its absolute figure also depends on the GPU clock at 1 ms frames: sessions gave 0.16 - 0.58 ms for the same configuration), accepted with `light.shadow` / `light.cluster`.
+
+### 14.49 WS7: ordered / composed per-op CPU in the big scenes: stale records (2026-11-14, branch `worktree-agent-a5b94f990d48f0072` on main e1221d0; no new setting, `RVK_WS7_BASELINE=1` = the old behaviour for A/B)
+
+**Census (before; hold, Full, player defaults, `native: owned ordered (5 s)`, steady windows).** Of the ~63 ordered ops per frame the solid list's blended / no-z-write ops were owned 19 - 84 % and the alpha list's 10 - 85 %, a different share in every run (same scene, same cache): the rest was "composed, not a scene draw" (every frame, via `composeSolid` + `subMeshDraws`, each composed op also cutting the pending ordered run: ~2x the runs / flushes). New census (`{not scene, first draw: [kind ordered|unordered, no v2 pipeline: n]}` in that line): all of them StaticMesh / InstancedMesh draws of records with `scene` false or v1-only (`scenePipeline2` None, `CachedDraw::v.scenePending` true). Root cause: the record keeps the retained packet's `CachedDraw` as it was when the record was built; a draw whose scene forms (v2 modules + pipeline, now built asynchronously) were still pending at that first composition is `scenePending` / unordered, so `orderedValid` ("not a scene draw") and `deriveScene` ("variant", site 1) refuse it **for good**. The only thing that remade such a record was the check frame (`recDraw`'s derive + compare, `Fallback` 9 "scene form"): with `native.owned_check` 0 for players (14.46) that net is gone, and the packet cache's own entry (which has the forms by then) is replayed by the composition without touching the record. Particles: not a missed GPU path. `composeParticle` IS the F11 path (the record build / per-op setup of the GPU expansion, own_particles on): 0.22 ms at jungle vs the engine's `detourParticleRender` 0.365 ms in Wrapper, 0.09 ms at pub (the CPU vertices are not built); nothing to cut there. `decalsBegin` (harbour, +0.06 .. 0.13 ms): left, see below.
+
+**Change** (`StaticOps::recDraw`, static_ops_records.cpp; every composed draw of a record, all lists / views): when the record's draw is not ownable (`!scene`, no v2 pipeline, `v.scenePending` / `!v.sceneActive`, neither batchable nor ordered) and the retained packet the composition just replayed IS (`valid`, v2 pipeline, scene active, not pending, batchable or ordered) the record is remade from this composition (`R.refused`, counted in the records' "scene form" not-derived column). Actor records keep their own rule (14.23). No GPU-visible change: the owned path's own guards (`orderedValid`, `ownedDerive` 9 / 16, `ownedFlush` per item) are untouched; the rebuilt record is the one a check frame would have made. A first try that only looked at `scene` (the probe) left v1-only records behind (hold solid 24 %); one that also keyed on the probe churned: the rule above keys on the packet's own readiness.
+
+**Result (hold / jungle / harbour_docks / pub_interior, ordered ops owned, solid / alpha; `summ7.py`, steady state, 3 reps at hold):**
+
+| scene | before (old behaviour, A) | after |
+|---|---|---|
+| hold | solid 64 - 84 % (3 runs: 84 / 64 / 84), alpha 39 - 85 %, 7,000 - 11,000 runs per 5 s | solid 100 % (3 / 3 runs), alpha 87.8 % (the rest = water / no packet, by design), 3,000 - 3,500 runs |
+| jungle | solid 29 %, alpha 84 % | solid 100 %, alpha 85 % |
+| harbour_docks | solid 30 %, alpha 40 % | solid 100 %, alpha 60 % |
+| pub_interior | solid 94.5 %, alpha 0 % (no ordered alpha ops) | solid 100 % |
+
+Profile (`-CpuProfile`, inclusive ms per frame, window-share x 5 s / main views; before = the 84 % state of two hold runs, the other states are worse by up to 0.9 ms more): hold `opEnterImpl` 2.22 -> 1.33 (-0.89; `issue` 0.87 -> 0.35, `replayDraw` 0.38 -> 0, `composeSolid` 0.28 -> 0.10, `orderedFlushRun` 0.22 -> 0.18, `orderedPlace` 0.55 -> 0.56), jungle `opEnterImpl` 3.15 -> 2.28 (-0.87), harbour_docks 0.75 -> 0.47 (-0.29), pub_interior 0.48 -> 0.41 (-0.07). The runs left composed (jungle `composeSolid` 0.2) are instance-list ops (v1 form only, `owned_instances`; not this change's).
+
+**Exactness.** Test baseline runs (private copy): `native: owned ordered` / `owned static` / `rt: scene ordered bulk` DIFFERING 0, MISS 0, `native.own_particles=compare` and `owned_decals` counters 0, `owned static turned off` absent, no FAILED in the settled windows of jungle / harbour_docks / pub_interior (rvkcompare spots) and hold. GPU-AV first run (`-Validation`, GPU_BASED_GPU_ASSISTED, hold, Full): 0 validation messages, no device loss.
+
+**perf-ab** (`renderer.mode wrapper|full -Mode wrapper -Restart -PlayerDefaults -Pairs 3`, shared copy, RisenTest.exe, other agents' runs on the machine at the same time; engine+HAL CPU ms per frame, Wrapper -> Full; Wrapper has `-Perf`'s per-draw timer): pub_interior 1.13 -> 1.76, harbour_docks 2.11 -> 2.74, hold 7.10 -> 8.24 (sd 0.5), jungle 7.08 -> 7.53. A second pair of runs of hold / jungle: hold 6.99 -> 7.41, jungle 7.38 -> 7.44. The same hold / jungle run with `RVK_WS7_BASELINE=1` (Full as before this change): hold 7.39 -> **11.59** (sd 2.6: a session that comes up with stale ordered records costs up to +4 ms), jungle 7.72 -> 8.12. So at hold Full 11.6 (0 - 4 ms worse, by session) -> 7.4 - 8.2 and at jungle 8.12 -> 7.4 - 7.5; hold / jungle are within 0.05 - 1.1 ms of Wrapper (the sd of the Full arm at hold is 0.5), harbour_docks / pub_interior still +0.6 each (not this change's: `decalsBegin`, the lighting table). `rvk_tests` 354 / 0 failures, `rvk_d3d9test --validation` PASS, `rvk_spells` PASS (4 checks), `rvk_rtwalk load=0` PASS (4 checks).
+
+**Left (measured, not cut).** (1) The ordered path itself is a flat tail: per frame at hold ~87 ops, ~0.55 ms at the ops (stamps 0.04, setup 0.03 + 0.1 per list pass, draws 0.22, side effects 0.04) + 0.18 ms in 6 - 12 run flushes; every self time is < 0.15 ms (`ownedDrawSig` 0.10, `ownedFlush` 0.09, RtlAllocateHeap 0.15 total over the whole frame). (2) `decalsBegin` at harbour_docks: 0.12 - 0.18 ms vs 0.03 for Wrapper's detour: the per-frame `composeDecals` pass runs even with an unchanged decal set (owned_decals hits). (3) Instance-list ops stay composed (no v2 form for `InstancedMesh`).
+
+
+### 14.52 WS10: audit of check-frame-only healing with `owned_check = 0` (2026-11-14, branch `worktree-agent-a933f6f459014b910`, merged with main 2bb0415; extends 14.51; no new setting, `RVK_WS10_ACTORS_OFF=1` = WS7's actor exclusion back, `RVK_NCLOG=1` = diagnostics)
+
+**Question.** 14.49 found that op records built while a draw's scene form was pending stayed un-ownable until a check frame remade them. Is there any other state that is (re)built, refreshed, re-validated, recovered or switched back on only on check / warm-up frames (`verifyFrame()`, `periodic()`, `leanFrameKind` check / warm-up, the composed check views) and so never heals with `owned_check = 0`? Method: read every site of `verifyFrame` / `periodic` / `checksOff` / `leanFrameKind` / `ownedCheck_` / `ownedShadowCheck_`, then measure the owned shares per stage per 5 s window with the player defaults (`owned_check` 0) against `owned_check=10` (`scratch/ws10/shares.py`: static / shadows / ordered solid + alpha / actors main z + cascades / trees cascades / instances / decals; steady = last 6 windows), cold (fresh private copy: empty shader / pipeline caches) and warm.
+
+**Audit table** (heals without check frames: yes / no / fixed):
+
+| stage / cache | what only a check / warm-up frame did | heals with 0 |
+|---|---|---|
+| op records (static, ordered, instances, cascades) | `recDraw`'s derive + compare set `R.refused` for stale module / variant / binding / texture / scene form | **no -> fixed (a)**: the owned path flags the record when its derivation is refused for those reasons, the late composition remakes it |
+| op records of skinned actors | same (+ WS7's packet-ready rule excluded actor records) | **no -> fixed (b)**: cold start: actors 0 % owned for ever |
+| tree templates (`owned_trees`) / vegetation templates (`owned_vegetation_ops`) | none: `treeCompEnd` / veg replace a template that is `stale` (set by the owned derive's rc 1 / 4 / 6 / 7), `scenePending`, `windStale`, texture moved, material slot re-allocated | yes (event driven already) |
+| packet cache entries (retained draws: variant decision, `clusterWait`, `boneObs`, `replayStale_`) | `verify_10` only compares; every replay refusal with code 0 / 5 / 6 / 7 / 10 / 11 sets `replayStale_` and the composition captures again | yes |
+| `ret::` retained entries (lean pools, non-op groups) | `retValid` (read log) per use; the check kind only compares | yes |
+| actor bone table images, morph pick sets, instance rows, object / row / view / window tables | written per use; `kVerifyEvery` only adds read-backs (`periodic`) | yes (verify only) |
+| cascade + shadow-view records (`owned_shadows` / `owned_shadow_views`) | the cascades' own check view (`ownedShadowCheck_`) = a derive + compare | yes after (a); their `lastSeen` / `builtFrame` ageing is not check driven |
+| sky / gui owned records, non-op records, decals | the record is rewritten on every composition (`rec->desc = d`); the check only compares; decals: keyed content, scrub only compares | yes |
+| rt_records scripts | `kRecordRelearn` re-observes independently of checks; `kRecordCheck` only compares | yes |
+| F10 own_collection / own_extract / request | interval 0 = Lean; the compare views are verification; `g_trippedMode` only after a DIFFERING (which cannot happen unchecked) | yes |
+| tables / lighting images / owned compaction / RT scene / tint, lean check | read-backs, compares, rolling scrubs (all `checksOff()`) | yes (verify only) |
+| stages that turn themselves off (owned static / actors / shadows / trees / vegetation draws "turned off") | only on a DIFFERING / MISS, which needs checks; once tripped they stay off by design (a bug signal) | n/a |
+| "created only during the composed start-up frames" | `g_verifyFrame` is cleared by `setVerifyInterval(0)` before the first frame; nothing is built only there | yes |
+
+**(a) Cold / refused records.** Census, hold with a cold copy (`hold_c0_cold`, `owned_check` 0, shader variant queue 0 after 125 s): `owned ordered` solid **21 %**, alpha **44 %**, `owned static` 88 %, shadows 94.9 %, for the whole rest of the run (30 windows), every window "composed (a draw refused [derive / signature] <variant 31752>), records built 0": the owned path refused the draws (the record's retained `CachedDraw` named a variant / module the device had since replaced) and the composition that follows re-used the record untouched, since `recDraw`'s derive (the only thing that set `R.refused` for rc 1 / 4 / 6 / 7 / 9) runs on check frames only. Warm (cache populated) the same defect showed in smaller form: hold 2,178 ops per 5 s composed late ("forms pending at the record's composition"), harbour_docks 3,819 ("variant module arrived since"), jungle 5,957 (same), all with a stable set of ops (never remade), and 0 with `owned_check=10`.
+Change: found and fixed independently of WS9 (14.51), whose mechanism is the one kept after the merge: `OpRecord::stale` set by `markStale` in `ownedDrawOpPersistent` / `replayOwned` for pending / module / variant-arrived / variant-moved refusals, remade by `recEnter` at the op's late composition, switch `native.owned_delta`, `RVK_WS9_STALE_OFF=1`. My first version (flag `ownedRefused`, remake in `recDraw`, 20-frame gap, also binding / texture / no-v2-form codes) was dropped: the no-v2-form code would remake instance-list records (v1 form only) every frame, texture / binding remakes change nothing. The pre-merge numbers below are from that first version; the merged build was re-run (see Merged result).
+
+**(b) Actor records.** Cold copy after (a): actors **0 %** (main z, solid; cascades 0 - 8 %) for the whole run; `native: actor census`: "record refused at selection 9212" per window (`owned static`: "not a scene draw 18424"): the actor's record was built while the forms were pending (`DrawRec::scene` false) and WS7's rule (14.49) excluded actor records, the check frame's derive was the only remake. WS7's packet-ready remake rule (`recDraw`) now also applies to actor records (`RVK_WS10_ACTORS_OFF=1` restores the exclusion); the stale flag of (a) covers actors too (`recEnter`).
+
+**Result** (player defaults, `owned_check` 0 unless stated; steady shares, 5 s windows; `fix` = this branch, `base` = `RVK_WS10_BASELINE=1` or the pre-fix run):
+
+| scene | stage | before (0) | after (0) | `owned_check=10` |
+|---|---|---|---|---|
+| hold, cold copy | ordered solid / alpha | 21 / 44 % | 100 / 87.8 % | 100 / 87.8 % |
+| | static / shadows | 88 / 94.9 % | 99.5 / 100 % | 99.5 / 100 % |
+| | actors main z / cascades | 0 / 0 % | 100 / 100 % | 100 / 100 % |
+| hold, warm | static composed late (ops per 5 s) | 2,178 | 0 | 0 |
+| harbour_docks, warm | static composed late | 3,819 (root: variant module arrived since) | 0 | 0 |
+| jungle, warm | static composed late | 5,957 (same) | 0 | 0 |
+| pub_interior / walk (load=0, 120 s) / night walk | all stages | not run on base | 100 % each (ordered alpha 0 / 93.5 / 93.5, no ordered alpha ops indoors) | same |
+
+Between two identical sessions the shares are equal (hold warm, three fix sessions: ordered solid 100 / 100 / 100 %, static 99.5 / 99.5 / 99.5 %, static_late 0).
+
+**Merged result (main 2bb0415 + this branch, WS9's stale mechanism, `owned_check` 0 vs 10, steady shares):** cold hold c0: ordered solid / alpha 100 / 87.8 %, static 99.5, shadows 100, actors main z / cascades 100 / 100, composed late 0. Warm c0 = c10 in every stage: hold static 99.5 / ordered 100 / 87.8 / actors 100 / shadows 100; harbour_docks static 100 / ordered 100 / 60 / actors 100; jungle static 100 / ordered 100 / 84.7 / actors 100; composed late 0 everywhere. All 8 merged runs (cold hold, hold / docks / jungle at 0 and 10, GPU-AV hold at 10): DIFFERING 0, MISS 0, no `turned off`, no `[error]`, no device loss, GPU-AV 0 validation messages. `rvk_tests` 354 / 0, `rvk_d3d9test --validation` PASS.
+
+**Exactness (test baseline `owned_check=10`, fix build):** hold, harbour_docks, jungle, pub_interior, walk, night walk: `check frames DIFFERING 0 draws`, no `DIFFERING [1-9]` / `MISS [1-9]` / `turned off` / `[error]` / device loss in any run, `rvk_tests` 354 / 0, `rvk_d3d9test --validation` PASS (no GPU address / record index change: the change decides only which op composes late and when a CPU record is remade).
+
+**decalsBegin (the small item).** `native: owned decals (5 s)` times `composeDecals` alone: hold 46 us per pass, jungle 74 us, harbour_docks 90 us (32 records per pass, every one a persistent hit: `nonOpPasses` per record is the cost, not the queue / key / hash), i.e. 60 - 70 % of the 0.12 - 0.18 ms WS7 measured for `decalsBegin` at harbour_docks. Skipping the pass when the decal set (keys) is unchanged exactly needs the per-record `DrawDesc`s to be retained across frames (their lighting / illumination entry / material slot are per frame inputs): that is the retained-op machinery of the packet cache for a non-op group, a design of its own and in WS9's area; not done here.
+
+Also run with the final build: `rvk_spells` (c0 and `owned_check=10`: PASS 4 checks, static 99.1 - 100 %, actors 100 %, DIFFERING / MISS 0), hold warm c0 (static 99.5, ordered 100 / 87.8, actors 100, shadows 100: the same as `owned_check=10`) and c10 (exact), harbour_docks warm c0 (actors z 100 %, cascades 91 - 100 %, static 100 %, ordered 100 / 60, static_late 0), GPU-AV first run (`-Validation`, `GPU_BASED_GPU_ASSISTED`, hold, `owned_check=10`, shared warm copy): 0 validation messages, no device loss, DIFFERING / MISS 0.
+
+**Left.** Not audited by measurement: `rvk_pointshadow`, savegame streaming loads (only the new-game walk streams), a second `rvkcompare` spot-change sequence within one session (each spot was a session of its own). `RVK_NCLOG=1` logs the first actor draws that cannot be retained (`native: not built`) and the first not-capturable skinned draws (`d3d9: not captured`): the diagnosis of (b) went through it (the 0 % was a stuck record, not a capture failure).
+
+
+### 14.53 WS12: the first minutes of a session: cold / updated / warm caches, Full against Wrapper (2026-11-14, branch `worktree-agent-a6e7bc8251e279d22`, merged with main 18b677c; no new setting; env knobs `RVK_VARIANT_GAMEPLAY`, `RVK_PREWARM_GAMEPLAY`)
+
+**Method.** `scripts/first-minutes.ps1` (new game + `rvk_rtwalk load=0` walk, 150 s, private copy, player defaults, `-Perf`) + `tools/firstminutes.py` (loading screens, frame intervals per 5 s window after the world appeared, the engine thread's CPU per frame, `owned share >= 90 % at world+N s`, degraded windows = 5 s windows with a median interval above 20 ms). States: `cold` = `bin\rvk\cache` emptied; `updated` = `cache\hlsl` + `cache\spirv` emptied, pipeline keys kept (what an update does to the new build); `-DropKeys` additionally forgets `pipelines.keys` (what a real update did to every build before WS12, see below). The machine is shared: other agents' builds / games moved single runs by 2 - 5x (a 90 ms median with 18 compiler processes; one run's loading screen 41 s with the CPU idle), so `<tag>_cpu.csv` records the others' load (`firstminutes.py` calls a window clean below 12 % foreign CPU and no compiler), every comparison was taken back to back and repeated. Before = main 18b677c built in a separate worktree (`Base2`), after = this branch merged with it. Before the merge (main 2bb0415, Full's pending state was much costlier: 30 ms of engine-thread CPU per frame while the scene forms were pending, 10 when ready, `-NoOwned` 12 - 14, Wrapper 8) the same work gave the same ordering with bigger numbers (below).
+
+**Findings.**
+1. **The key list died with every update.** `Shader::hash` (the id `pipelines.keys` stores) was FNV(bytecode, translator version, ABI header hash): a changed header or a bumped `kTranslatorVersion` renamed every shader, so no known pipeline matched, nothing was prewarmed and no variant requested at shader creation; the session started like a cold one (`-DropKeys` runs). The module caches had the same coupling: `cache\spirv` was keyed by that hash + tag + embedded-header hash, so any header edit recompiled every module whether its text changed or not.
+2. **Worker count is not the lever.** The frame cost while forms are pending is the engine thread's own work (the tap derives every op the owned path cannot take: `opEnter` 62 % of a 30 ms frame, 2.3x the same ops with `-NoOwned`; 1 - 2 ops a frame were composed late, the rest are plain composed draws with failing scene decisions). Limiting the variant workers to 4 in the world (built, measured, removed): the same per-frame cost for 2.5x as long (owned share 90 % never within 150 s; 25 - 28 degraded windows). More compile throughput and a sensible order are the only levers short of a cheaper pending path.
+3. **Synchronous compiles on the render thread.** Spike profile of the first world frames of a cold copy: 23 % of the stall inside DXC called from `prepareDraw` = `Device::lodModule` (billboard fade form, `lod.trees` 1.5 is the player default) and `Device::particleVs` (expansion forms) compiled on the calling thread, 100 - 300 ms each: the 1 - 3 s first world frame of cold / updated runs (2.4 s, 2.6 s before).
+
+**Changes** (commit e5539f0 + merge).
+* Every generated module (translated, ubershader, variants; SPIR-V and DXIL) goes through the DXC disk cache (`cache\hlsl`): key = generated text + arguments (-O, half, debug) + DXC version, each include's text hash validated on a hit (the existing exact scheme of the embedded shaders; `rvk_tests dxc_generated_text_cache_is_content_keyed`); the device's own `spirv/` / `dxil/` files are gone, the DXIL damaged-entry check stays (`Request::refresh` recompiles + stores a hit that fails the container-size test); store uses a tmp file per thread; a hit refreshes the file's time at most daily and `dxc::pruneCache` (start-up thread) removes entries unused for 30 days. A translator / header change that leaves a module's text alone keeps it, one that changes it recompiles exactly that module. `kTranslatorVersion` is only a tag now. Shipped prebuilt binaries: none (game-derived).
+* `Shader::hash` = FNV(bytecode); `pipelines.keys` magic `...KEY3` (old files, which matched nothing, are dropped).
+* Variant queue: a draw's request goes ahead of the known-key requests (`prewarmKey` marks its requests background: the last session's first-use order), a draw that needs a queued background one promotes it, and the worker takes the draw-requested job the most draws asked for (`Shader::variantDemand`) first.
+* Background threads (variant workers, pipeline prewarm plain queue, library optimizer): below normal priority outside the world (`Device::setBackgroundFree` from the menu state: loading / menu / GUI not up), the variant and prewarm ones at the lowest in it; counts unchanged (limits only by env, finding 2). Draw-time requests (`prewarmOnce`) keep normal priority.
+* `Device::lodModule` and `Device::particleVs` build their forms on the shader workers; the draw uses the plain module / the CPU quads until ready (nothing remembered); modules nobody asked for again are destroyed at teardown (a validation error found and fixed); `rvk_d3d9test` waits for the particle forms.
+
+**Numbers, merged tree** (windows after the world appeared; 5 s windows; Wrapper steady state p50 16.7 / p95 18.2 - 18.5, CPU 7.3 ms):
+
+| state | run | owned share >= 90 % at world+ | degraded windows (p50 > 20 ms) | first 60 s p50 / p95 / worst frame | after 60 s p50 / p95 |
+|---|---|---|---|---|---|
+| cold, Full | before (2 runs) | 49 / 49 s | 6 / 7 | 20.7 / 29.2 / 635 ms; 22.4 / 28.0 / 638 ms | 16.7 / 18.4 |
+| cold, Full | after (2 runs) | 45 / 40 s | 5 / 2 | 18.8 / 22.5 / 315 ms; 16.7 / 20.7 / 256 ms | 16.7 / 18.4 |
+| updated, Full (real update: keys dead before, alive after) | before (2 runs) | 44 / 49 s | 5 / 7 | 19.7 / 27.6 / 626 ms; 23.2 / 29.2 / 659 ms | 16.7 / 18.3 |
+| updated, Full | after (2 runs) | 33 / 30 s | 2 / 3 | 17.0 / 21.7 / 392 ms; 16.9 / 21.3 / 253 ms | 16.7 / 18.3 |
+| warm, Full | after | 8 s | 0 | 16.7 / 18.5 / 72 ms | 16.7 / 18.3 |
+| warm, Wrapper | after | - | 0 | 17.0 / 18.2 / 74 ms | 17.1 / 18.2 |
+
+Before the merge (2bb0415, worse pending state; 3 - 4 runs per state, `rvk-work/scratch/ws12`): cold Full share >= 90 % at 65 / 51 / 49 / 96 s (4 runs, last one disturbed) -> 44 / 48 / 54 s after; degraded 11 / 7 / 8 / 15 windows -> 5 / 6 / 6; first-minute p50 29 / 27 / 26 -> 19 / 20 / 22 ms; real update 54 / 59 s, 9 / 11 windows, p50 28 / 26 -> 37 / 41 s, 9 / 4 windows, p50 20 / 19; Wrapper never degraded (p50 16.8, p95 18.4, worst 81 - 686 ms).
+
+**Gates.** Warm (state c): Full = Wrapper (p95 18.5 vs 18.2, CPU 6.9 vs 7.4 ms, worst 72 vs 74 ms): met. Updated / cold (b / a): the degraded phase is shorter (cold 2 - 5 windows, updated 2 - 3, first-minute p50 17 - 19 against Wrapper 17) and the worst frame is halved, but the first 60 s p95 is 20.7 - 22.5 (Wrapper 18.2 - 20) and the worst frame 250 - 390 ms against Wrapper's 70 - 80 in a warm run: NOT fully met; what remains is the pending phase itself. Pictures: no rendering path changed once warm (rvk_tests 355 / 0, `rvk_d3d9test --validation` Vulkan PASS and `--backend d3d12 --validation` PASS, 0 validation errors; no shader text or ABI header changed, so no `dxil-check`; refcompare not run).
+
+**Left.** (1) The pending path: ops whose scene forms are pending cost 2.3x a composed op through the tap (per frame, per op: derive, scene decision, failing attempt); a per-record "pending until a variant of this shader pair arrived" memo, or composing a pass natively while most of it is pending, would cut the remaining 20 - 40 s. (2) A world-entry stall remains (250 - 400 ms): the first frames build records for every op. (3) Loading-screen hold (keep the loading image until the known-key variants of the last session are built, budgeted) was not built: it changes what the player sees and the engine keeps simulating behind it. (4) The corpus tool `rvk_vktest --gpl-corpus <cache\spirv>` reads the removed `.spv` files (point it at an exported corpus). (5) Not measured: the 680M (a third of the threads: the cold phase scales with the compile CPU, ~8 CPU minutes of variants + ~3 of base shaders), D3D12 first minutes (the shared `Device` code is used, no D3D12 run), a Wrapper pair for the D3D12 key file.
+
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
 User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us
@@ -4414,3 +4619,404 @@ moves to two runs); its first step is the exact float32 position stream for the 
 **Limits.** One run per scene (5 s windows, frozen spots), the actors' exclusion reasons and the grass split under frame generation not resolved, the CPU profile in a private
 copy (other agents' load), the sampler hides entries below ~1.5 % (particles, sky, GUI composition are below it), 680M numbers are the 14.3 model, no new counter was added
 (the existing stage lines were enough; the `uber ... failed` reading is proven by the control run c4).
+
+### 14.48 WS6: the owned hand-over's CPU (2026-11-14, branch `worktree-agent-a3d31af7630495a12` on main e1221d0; no new setting, no new env knob)
+
+Question: the profile census WS4 (14.47-era, `-CpuProfile`) put `FrameTap::passBegin` -> `StaticOps::ownedPass` at .147 / .615 / 2.63 / 3.07 ms inclusive (pub_interior / harbour_docks / hold / jungle), with `compactOwned`
+.028 / .10 / .42 / .42, `beginView` .042 / .12 / .45 / .47. What of the hand-over (compaction, view snapshot, record lookup) can go?
+
+**Built (all exact, no behaviour change; every item is an allocation / lookup / read that produced the same bytes before):**
+1. `FrameTap::compactOwned`: one selection pass (the `Op` is only built for candidates, selected ops are an index + kind), the three classes (mesh / actor, trees, vegetation) are
+   counting-partitioned and each sorted with the engine comparator by `std::sort` with the raw position as tie-break (= the former `stable_sort` of the whole list followed by two `stable_partition`s: a
+   stable sort of a subsequence is the subsequence of the stable sort), the `Op`s are built once in their final vectors (persistent scratch `ownedOps_ / treeOps_ / vegOps_`, `reserve`d), and
+   `StaticOps::ownedTake / treeTake / vegTake` now `swap` instead of move-assigning, so the vectors' capacity goes back and forth and no frame allocates the op lists again (the old code moved a
+   freshly grown vector into StaticOps every pass: ~log2(n) reallocations of 250-byte `Op`s per list and view = the `operator new` of the census). The chrono calls of the function are the owned stage timers' (`tnow()`: none unless `RVK_OWNED_TIMERS` / `RVK_F2C4_MEASURE`).
+2. `FrameTap::vtableInfo`: a 16-entry direct-mapped cache in front of the `unordered_map` (a view meets ~6 context classes over thousands of ops).
+3. `beginView`: the kept ops are built in place in `desc_.ops` (`emplace_back` + `reserve`, no 250-byte copy per op).
+4. Lazy resolve of taken Mesh ops (`Op::lazy`): a taken op's `meshState` and its sub-mesh / material / shader chain (5 dependent loads of engine memory per op) are read only when the op is composed
+   late (`StaticOps::composeLate` -> `FrameTap::resolveLate` = the same `resolve()`), nothing else reads them (checked: the owned files use `op.shader` only in the late composition, which falls back to the pointer chain anyway).
+5. `orec::Store::lookup` (`op_records.h`): the per-op record lookup of `ownedSelect` and `ownedPass` (two `unordered_map::find` per owned op and view, ~60 ns each) behind a direct-mapped memo of the
+   hits (`g_recMemo`, 32,768 x 8 bytes); a record erases its own slot in `~OpRecord`, a hit also checks `rec->key == key`, so a hit is the map's own answer. A first version with one global
+   generation bumped by every destroyed record hit only 38 % (hold rebuilds ~2.4 records per frame: it wiped the memo every frame), the per-slot erase hits 90 - 100 %. Check: every 64th hit is compared with
+   `map.find` (the owned views never run on a check frame, so a per-check-frame compare would not execute; off with `native.owned_check=0`), rvk.log `native: record memo (5 s): hits, misses, checked, BAD`
+   (BAD must stay 0, a mismatch switches the memo off).
+
+**Measured** (shared copy + lock, Full, `-PlayerDefaults`, `RVK_OWNED_TIMERS=1`, `native: owned static (5 s)` "CPU per main view: compaction" = compaction of all views incl. cascades per main view,
+median of the 5 s windows after the first two; builds Base = e1221d0, Lazy = items 1-4, Memo = + item 5; one run per cell: this machine is shared with other agents and the windows vary 1.5 - 2x inside one run (min vs median), so only the compaction column is comparable):
+
+| scene | compaction Base | Lazy | Memo | select (stamp / record checks) Base -> Memo |
+|---|---|---|---|---|
+| hold | 376 us | 321 | 320 | 200 -> 201 |
+| jungle | 329 | 277 | 256 | 152 -> 140 |
+
+That is -55 .. -73 us per frame (-15 .. -22 % of the compaction), i.e. 0.05 - 0.07 ms: **the target (-0.1 .. -0.15 small, -0.5 at hold / jungle) was not reached**. A CPU-profile comparison
+against the WS4 logs is not possible (the machine's speed moved 1.3x between sessions: harbour_docks interval 3.4 -> 4.5 ms with the same code path), an in-session A/B of two DLLs (`-Config`) is what the table is.
+
+**Where the rest is (facts for the next step):** per main view at hold, with the timers on: select 200 us (666 ops looked at per view incl. cascades = 300 ns per op: the stamp / `depFast` polls and the engine-memory
+loads of the record's anchors, the map find was only ~60 of it), `ownedPass` build 1.2 ms (the per-draw part: `ownedDrawOpPersistent`, the texture-prep loop `ownedTextureNeedsPrep` per texture of every draw (reads
+`rt_` surfaces + the texture's layout per call), `tag = savedTag`, side effects 1.15 M touches per 5 s), compaction rewrite / sort / resolve ~120 us. The fixed per-pass part (2 x 7 KiB register save, view table set) is ~1 us:
+not worth a window-wise save. What would move hold / jungle by 0.5 ms is not the hand-over but the per-op / per-draw work: a retained per-view op list (skip select for unchanged ops by event: needs the engine's own list-building takeover, `native.own_collection`) and a per-pass memo of
+texture-ready checks.
+
+**Gates** (private copy `risen-test-vk-ws6`, instance 6, lock `rvk-ws6`, test baseline: `native.owned_check=10`, `native.picture_check=true`; jungle / harbour_docks / pub_interior, `freeze_wait=2000`): `native: owned static / owned shadows / owned persistent` DIFFERING 0 /
+MISS 0, `owned picture check`: 19 windows ok, FAILED 0 of 29 (the rest NO DATA / UNRELIABLE while the camera moves), `native: record memo`: 345 checked, 0 BAD; `rvk_tests` 354 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors,
+`rvk_rtwalk` (load=0) PASS 4 checks, `rvk_spells` PASS 4 checks, no device loss. No GPU-address code changed (no GPU-AV run). No new cache needs a check-frame image compare: the memo has its own sampled compare, the vtable cache is immutable, the lazy resolve calls the same function.
+
+**perf-ab Full vs Wrapper** (`-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults`, 3 pairs, 240-frame windows, `-Perf` adds a per-draw timer to Wrapper only, ~0.07 - 0.26 ms; the lock queue made the runs interleave with other agents' games):
+
+| scene | CPU engine+HAL Wrapper | Full | delta | interval p50 delta |
+|---|---|---|---|---|
+| pub_interior | 0.97 | 1.41 | +0.44 | +0.43 |
+| harbour_docks | 1.99 | 2.85 | +0.86 | +0.64 |
+| hold | 6.97 | 11.66 +- 4.5 (one noisy window) | +4.7 (not significant) | +4.1 |
+| jungle | 7.01 | 7.81 | +0.80 | +0.57 |
+
+Full is still slower than Wrapper on the CPU in every scene (the WS4 deltas were of the same size): WS6 alone does not close it.
+
+### 14.51 WS9: the owned frame's per-op work by change (2026-11-14, branch `worktree-agent-a02f9ebabf91b1b2e` on main cf62f0b, merged main f4f0cf5; one Debug setting `native.owned_delta`, Full, run time, default on; settings count 166; env `RVK_WS9_STALE_OFF=1`)
+
+Question: 14.48 ended with "a retained per-view op list (skip select for unchanged ops by event) and a per-pass memo of texture-ready checks" as what would move hold / jungle by 0.5 ms. What of the owned
+path's per-op cost can follow what CHANGED instead of what is visible, exactly?
+
+**First finding (CPU profile, savegame hold, player defaults = `native.owned_check=0`): the biggest per-op cost was not the checks but ops that should have been owned and were composed every frame.**
+`native: composed late (1 s)` said "forms pending at the record's composition" for 16 main-view ops per frame at t+65 s with an empty variant queue (WS6's logs: hold 28 / view, jungle 25 + 10 per
+cascade view, harbour 1); ~13 more per view were left as "not a scene draw". Cause: an op record keeps the CachedDraw its composition took from the packet cache; built while the draw's scene forms were
+still being made (cold start, a variant / module that arrived later), its draw is refused by the owned path (`ownedDerive` rc 16: no v2 pipeline) and the op is composed late; the composition replays the
+REFRESHED packet but the record stays valid by its stamps, and only a check frame's derivation (`recDraw`, 7.27) remade it. Players have no check frames since 14.46: such records lived for the
+session. Built:
+1. `OpRecord::stale` (op_records.h): `ownedDrawOpPersistent` marks the record when it refuses a draw for a reason a fresh composition removes (late reason "forms pending at the record's composition",
+   "shader module changed", "variant module arrived since", "variant decision moved"; not texture / env / table reasons: remaking changes nothing there), `recEnter` treats a marked record as refused
+   (remade from this composition, its read log taken). Gated by `native.owned_delta`; `RVK_WS9_STALE_OFF=1` = the old behaviour. Counters: `native: owned static (5 s)` ... `records out of date (run): N
+   marked, M remade`, stages line `owned_delta=active(P passes, N marked, M remade)`.
+2. The "not a scene draw" half (a record made before its draw was a scene draw): WS9 remade it in `recDraw` when the composition's probe was a scene draw; WS7 (14.49) fixed the same class in the same
+   place in parallel, wider (any record whose retained packet was not ownable while the replayed packet is), so the merge keeps WS7's block and WS9 keeps (1) for the refusals the owned path sees.
+   Hold before / after (same build otherwise): owned share 90.7 % -> 99.5 %, composed late 16 -> 0 ops per view in the steady state; `StaticOps::opEnter` (the compositions) 2.52 -> 1.32 ms per
+   frame in the profile (cross-session, includes item 3). The marks settle to 0 per window once the variants are built (gate run: 566 / 242 / ... / 0 per 5 s after the warm-up, again a few hundred at a
+   spot change): no rebuild loop.
+
+**The engine-side cost of a hash nobody suspected:** `hashBytes` (d3d9/scene_hash.h, FNV byte by byte) behind `hashVi` / `hashDyn` was 0.43 ms per frame at hold (self time of `hashVi` + its 4 KiB page
+in the profile): every composed scene draw hashes its interned vertex input (`toScenePacket`'s probe, `deriveScene`) and every owned tree / grass template its bucket key per pass
+(`ownedBucketKey`). Now eight bytes per step (multiply + xor-shift, the byte loop only for the tail): 0.43 -> 0.04 ms. The hashes are only compared within the process (bucket keys, probe vs
+derivation); the bucket keys keep their 1-in-8 exact check in `ownedFlush` (bucketKeyClash). `hashDyn` is still 0.09 ms (cold `c.dyn` lines of `ownedPullKey` per pulled item: a key per OwnedItem
+would remove it; not done).
+
+**Per-pass memos without allocations:** the owned path's per-pass caches (`ownedAmbient_`: lighting key -> ambient registers non-zero; `ownedCache_.light`: lighting key -> lighting entry) were
+`std::unordered_map`s cleared every pass and re-allocating one node per key (the profile's `RtlAllocateHeap` under `ownedAmbientLit`). `StaticOps::PassMemo<V, N>` (static_ops.h): a direct-mapped table
+with 8-entry probing, O(1) clear by generation, a full probe window drops the memo entry (the caller computes it again): exact by construction (the key is compared). RtlAllocateHeap + RtlFreeHeap self
+0.23 -> 0.17 ms, `ownedAmbientLit` + `ownedBuildWindows` 0.14 -> 0.10 ms per frame at hold.
+
+**Texture-ready checks** (task item 2): `Device::ownedTextureNeedsPrep` answers "ready" (not pending, SHADER_READ_ONLY) before the render-target loop (the loop could only turn a "needs" into "no"):
+the same answer, one load of the texture instead of five compares first. A per-texture-per-frame memo would NOT be exact: a late composition / `ownedPrepTexture` in the same pass changes the layout;
+the check reads the texture's own two fields, which is what a memo would read too.
+
+**Side-effect touches** (task item 3): already once per resource and frame (`StaticOps::touchNow` + `sc::TouchSet`, 7.21 / F2c-4-0 item 5): the 1.15 M "touches" of 14.48 are the calls into the dedupe,
+`RequestData(res, 1)` itself runs once per resource per frame. Engine semantics (verified in F2c-4-0 item 5, Engine.dll `eCResource2::RequestData` 0x684100 -> resident: LRU touch 0x6843e0 = relink at the
+head + stamp `res + 0x20 = cache + 0x28`, the frame's epoch; loading / not loaded: 0x6852d0 queues once): a second touch in a frame changes only the LRU position among the frame's touched resources,
+which the eviction (tail first, untouched for a frame) never looks at. Nothing more to deduplicate; batching would only move the same calls.
+
+**Instance coalescing in the GPU compaction (orchestrator lead, WS8 14.50): built, measured, NOT kept.** `owned_compact.comp.hlsl` wrote consecutive plain entries of a bucket chunk with equal
+(indexCount, firstIndex, vertexOffset) as one record with instanceCount = their number (instance i reads the ref stream at firstInstance + i = its own entry; job flag z bit 1; check frames' CPU
+expectation merged the same way; `rvk_d3d9test` case with a NEVER-alpha slot before / after / twice next to a quad: pictures equal, 3 coalesced records, Vulkan + D3D12, 0 validation errors; GPU-AV
+jungle run clean; picture check FAILED 0). In game only 8 - 10 % of the checked records coalesced (jungle 490 of 4,960 = 1,410 instances; harbour 40 of 430): the F2f instance draws of one op are
+mostly different meshes / LODs, not repeats. In-session A/B (`perf-ab -Key native.owned_delta`, 3 pairs, private copy): colour pass hold 0.6956 vs 0.6946 ms, jungle 1.0301 vs 1.0266, harbour 0.8586 vs
+0.8792 (water.rt of the same windows moved +0.04 / +0.05): no measurable GPU gain, so the shader / flush changes were reverted (patch: `rvk-work/scratch/ws9/coalesce_patch/coalesce.patch`). The
+command count is not what costs the colour pass.
+
+**Not built: the retained per-view draw list (task item 1).** What an owned op's validity needs every frame, by source: the stamp polls of `depFast` (LOD resource, entity, flags, illumination +
+light list words, fade, switch, scene-table slot, shader fingerprints: polled because the engine has no event for them, 7.30), the material structure versions (`pollOwned`, per material slot and
+frame), the object record (`serveFast`: the scene-table signals; it also marks the slot served), and per draw `ownedDrawSig`'s inputs: the variant modules' build state, the stream / index buffers'
+current GPU binding (`Buffer::gpu`, which moves for dynamic buffers), each sampled texture's readiness / bindless slot, the pack stamp, the bone forms, the four window bases (the lighting entry follows
+the lights). A pass whose op list is unchanged still has to read every one of these to stay exact: none of them raises an event today, and their reads ARE the per-op cost (cache misses on engine
+contexts, entities, textures, buffers; ~300 ns select + ~1.5 us build per op at hold). A list skip needs device-side generation counters on Texture (layout / pending / slot), Buffer (binding),
+the variant modules and the lighting entries, plus engine events for the polled stamp fields: a change on both sides, not a cache. The bulk observers (RT scene, object motion) already skip unchanged
+records themselves (`RtScene::observeOwned`'s OwnedCover). Item 4 (skip the engine's Request for owned elements, F10-1) was not reached.
+
+**Exactness / gates** (private copy `risen-test-vk-ws9`, instance 19, lock `rvk-ws9`, test baseline `native.owned_check=10`, `native.picture_check=true`): jungle / harbour_docks / pub_interior
+(`freeze_wait=2000`) before and after the main merge: check frames DIFFERING 0, every MISS 0, EVENT MISS 0, picture check FAILED 0 of 29 / 31 (settled windows); pub_idle + hero_idle with
+`show_actors=1`: FAILED 0 of 20, PASS; `rvk_rtwalk` (load=0, fresh copy) PASS 4 checks, placeholder binds as on main (273 in the load window, 0 - 12 after: WS6's run 273 / 8); `rvk_spells` PASS 4
+checks; `rvk_tests` 354 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors, `rvk_shadertool dxil-check embedded` 185 / 185; GPU-AV jungle run (with the coalescing build) clean. No new
+cache skips work, so there is no fault-injection knob: the stale marks only ADD remakes (a missed mark = the old behaviour), PassMemo compares its keys, the hash change keeps every key's exact
+check; the A/B knobs are `native.owned_delta` / `RVK_WS9_STALE_OFF=1`.
+
+**perf-ab Full vs Wrapper after the merge** (shared copy + lock, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults`, 3 pairs, 240-frame windows; `-Perf` adds a per-draw timer
+to Wrapper only, ~0.07 - 0.26 ms; one warm-up session per scene first: the first attempt ran with the shared copy's variant cache cold after main's shader changes (variant queue 300+ at t+50 s, owned
+74 %: Full +3.1 / +10.7 ms, invalid), the second with every owned stage at 100 % / 98.9 %; medians of the windows because single windows of both arms jumped 2x (hold A 13.47, jungle B 15.64)):
+
+| scene | CPU engine+HAL Wrapper (windows) | Full (windows) | delta of the medians | 14.48 (WS6) delta |
+|---|---|---|---|---|
+| pub_interior | 0.97 / 1.03 / 1.01 | 1.36 / 1.39 / 1.30 | +0.35 | +0.44 |
+| harbour_docks | 2.18 / 2.16 / 2.28 | 2.68 / 2.66 / 2.69 | +0.50 | +0.86 |
+| hold | 6.85 / 6.92 / 13.47 | 7.71 / 6.77 / 7.75 | +0.79 | ~+0.8 (not significant) |
+| jungle | 7.40 / 7.44 / 7.22 | 7.46 / 15.64 / 7.27 | +0.06 | +0.80 |
+
+These include WS7's (14.49) remake of non-ownable records merged in the same build; WS9's own share is what the profiles above attribute (compositions -0.3 .. -0.9 ms at hold with the stale records
+of both kinds, hashes -0.4 ms, allocations -0.1 ms). Full is still slower than Wrapper on the CPU in pub_interior, harbour_docks and hold; jungle is level.
+
+**Left:** the per-op validity reads (the retained list above needs device generations + engine events), the tree pass (0.9 - 1.3 ms per frame: `ownedTreeObserve` shows every tree instance to
+the observers per frame, the RT scene has no cover for SpeedTree draws), `hashDyn` in `ownedPullKey` per pulled item (0.09 ms), the engine's own list building (F10-1 extension, 15.5).
+
+
+### 14.54 WS11: the owned tree pass by change (2026-11-14, branch `worktree-agent-a48d74b5484dd6d68` on main 18b677c; no setting, overlay command `debug treereuse 0|1`, env `RVK_WS11_LAYOUT_OFF=1`, `RVK_OWNED_TIMERS=1` for the detail timers)
+
+Question (14.51 "Left"): the owned tree pass costs 0.9 - 1.3 ms a frame, `ownedTreeObserve` shows every tree instance to the observers per frame and the RT scene has no cover for SpeedTree draws:
+what of it follows what changed, exactly, and heals without check frames (players run `native.owned_check = 0`)?
+
+**Before (savegame hold, player defaults, Full; `-CpuProfile` + `RVK_OWNED_TIMERS=1`, profile percentages x the frame interval, so +-30 %).** `StaticOps::treePass` 1.2 - 1.3 ms inclusive: `ownedTreeObserve` 0.22,
+`treePlan` 0.21 (the engine's tree objects: 2 - 3 cache-missing reads per instance), `treeTemplate` 0.06, `ownedTreeFlush` 0.05, the rest (0.7) the per-instance loops of `treePass` itself. Timers per owned main view
+(z + solid pass): side effects 61 us, plan 208, templates 336, rows 398 (of them the observers ~220), flush 84 us; per cascade view 155 us (4.3 views a frame). Jungle: main view 1.26 ms, cascade view 0.17 ms
+(observers 207 us of the main view). `hashDyn` in `ownedPullKey` was 0.11 - 0.19 ms (all pulled items, not only trees). Wrapper's equivalent (`contextSlot<7>` + `<8>`, the engine's tree slots, RT observe inside):
+~1.25 ms at hold, so the owned pass was already level with composing: **`native.owned_trees` off / on in Full (perf-ab -Restart, 2 pairs): hold CPU 7.74 -> 6.70 ms**.
+**The RT scene's tree observation itself is small** (`-Perf` census, per frame: hold SpeedTree main solid 130 runs 0.068 ms 307 sightings, z 0.006, cascades 0.003; jungle 0.135 ms 560 sightings): what cost
+was the device side of showing a run (shader refs, stream, window registers, one `setVertexShaderConstantF` per instance, query copies) for runs that change nothing in the scene:
+z / cascade runs are rejected by the vertex shader verdict, and **half of the solid runs (jungle 169 -> 93 a frame) are leaf runs the RT scene rejects while the trees are not animated**.
+
+**Built** (all exact by construction or compared; none of them relies on check frames to refresh state):
+1. **Hashes kept with the draw** (`CachedDraw::viHash / dynHash`, made once in `fillCapture`; the veg template refreshes `viHash` after its stream-1 patch): `ownedBucketKey`, `ownedPullKey`
+   (the per-item `hashDyn` of 14.51 "left"), `deriveScene`, `f2c4BucketKey` read them; the S-5 flush statistics (allocation + hash + sort per tree flush, measurement only) run with `-Perf` only.
+2. **No-op observations are answered by `coversDraw`** (`RtScene::treeObserveNoop`: the branches of `observe()` up to the vertex shader verdict, replicated, for z / cascade tree draws and for leaf runs of the
+   solid pass while `animated_` is off; only once the reason was logged). `Device::ownedTreeRunWanted` asks the observers once per run on the template's query BEFORE anything is set up
+   (`ownedTreeObserve` also asks once per run, not per batch); an unwanted run is counted shown, the frame noted, nothing loaded. One `setVertexShaderConstantF(32, rows, 4 n)` per batch.
+3. **`DrawObserver::coversTreeRun` / `RtScene::coversTreeRun` (the RT scene's cover for owned tree runs, F8-1 `treeRunFast` + F2c-4b's skip model).** `treeRunFast` records per run (the batches of one
+   `ownedTreeObserve` call) each instance's rows c33..c35, registry key and registry position (`TreeCover`; not for animated trees, not for a run that skipped an instance). The next frame's run is covered when
+   the template guards hold (`treeTplGuards`, now also callable from a `CoverQuery`), it is not a relearn frame (`(frame + salt) % 32`, per template: this is the healing, no check frame involved) nor a check frame,
+   every instance has the same 12 rows (memcmp), is inside the radius (recomputed) and is still the registry's instance at its kept position with the same key and BLAS (`Registry::at`); everything is checked before
+   anything is applied, then the stamps of `treeRunFast` (`treeRunEffects`), per instance `Registry::refresh` (= `see()` of an existing instance, now shared) + `applyMaterial` + the table drop + `treeSetNote`.
+   Hold: 66 of 69 runs a frame covered (293 instances), jungle 86 of 97 (534 of 571 sightings).
+4. **Layout reuse of the z-type passes** (main z pre-pass, cascades; `tro::Layout`, per view key): the pass's row block, records (window 2's base relative to the block), items and position list are kept (the block
+   is built in cacheable memory and copied to the write-combined ring once) and served again when every plan instance has the same template (`Tpl::uid`: never an address) and the same 16 row floats, every
+   run's template record (`tab.record` byte for byte) and device bucket are the same and no observer wants a run. Check frames (frame + 5, every 10th) build the layout anyway and compare it with the kept one:
+   `layout reuse ... check-frame comparisons, DIFFERING` in the `owned trees` line (counted in the DIFFERING sum, which turns the stage off). A moving scene keeps a layout twice and then every 8th miss
+   (the copy costs about what the comparison saves).
+5. Smaller: the runs of a pass are a pool (no per-pass vector allocations), `std::sort` with the run index as tie break instead of `std::stable_sort`, `LightTable::lightKnown` memoised per position and grid serial
+   (`knownSerial`), the lighting entry of consecutive instances of one template + illumination (an engine batch shares it) reused. `RVK_OWNED_TIMERS=1` adds `detail:` timers to the line (op checks, treeTemplate,
+   lighting entries, observers, whole pass, z passes).
+
+**Result.** Detail timers (same build, one session each, so the machine load differs: compare shares): observers 108 us of the 656 us main-view pass at hold (16 %) -> 14 of 1,145 (1.2 %), jungle 207 of 1,263 (16 %)
+-> 11 of 915 (1.2 %), cascade views 8 -> 0 us. `debug treereuse 0|1` (layout reuse + both covers off / on, one session, perf-ab `-CommandTemplate 'debug treereuse {0}' -A 0 -B 1`, CPU engine+HAL, medians of the
+windows): jungle 7.15 -> 6.79 ms (-0.36, 5 pairs, z -2.2), hold 6.20 -> 6.09 (-0.12, 8 pairs; the first 5-pair run was noise-dominated: +-0.5 between windows of one arm), harbour_docks 2.43 -> 2.41. The
+always-on parts (hashes, run pool, memos) are not switchable; build A/B (the unchanged main build vs this one, one session per window, 3 pairs, `-ConfigA` copy of the old d3d9.dll): hold 6.84 / 8.80 / 9.97 ->
+6.52 / 6.77 / 6.71, jungle 7.67 -> 7.12 median (before the leaf / cover work: -0.5 ms); with other agents' games on the machine single windows jump 2x in both arms.
+
+**perf-ab Full vs Wrapper after the merge of main 18b677c** (shared copy + shared lock, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults`, 3 pairs, 240-frame windows, CPU engine+HAL, every owned
+stage at its arm's state; 14.51's deltas in brackets):
+
+| scene | Wrapper (windows) | Full (windows) | delta of the medians |
+|---|---|---|---|
+| pub_interior | 0.96 / 0.97 / 0.97 | 1.30 / 1.26 / 1.32 | +0.33 (+0.35) |
+| harbour_docks | 2.07 / 2.01 / 2.07 | 2.36 / 2.48 / 2.40 | +0.33 (+0.50) |
+| hold | 6.88 / 6.71 / 6.79 | 6.04 / 6.40 / 6.21 | **-0.58** (+0.79) |
+| jungle | 6.97 / 6.89 / 6.95 | 6.14 / 6.18 / 6.19 | **-0.77** (+0.06) |
+
+(This run is quiet: the windows of one arm agree within 0.1 - 0.4 ms; the 14.51 table had 2x jumps. The main merge of WS10's / WS9's work is in both columns; this item's share is the tree numbers above.)
+Full is now faster than Wrapper at hold and jungle; pub_interior (no trees) and harbour_docks (few) are still +0.33 and are not tree work.
+
+**Exactness.** `rvk_tests` 355 / 0 (new `rt_registry_position_hint_and_refresh`), `rvk_d3d9test --validation` 0 failures 0 validation errors; private copy `risen-test-vk-ws11`, instance 31, lock `rvk-ws11`, test baseline
+(`owned_check = 10`, `picture_check`): jungle + harbour_docks + pub_interior (`freeze_wait = 2000`) after the merge of main: layout check-frame comparisons 577, DIFFERING 0 (all counters), RT scripts 299 / 299
+matched, TLAS check frames 15 (3,660 instances) differing 0, picture check FAILED 0 in the repeat (19 ok windows) and 1 of 23 in the first run: a window between two UNRELIABLE ones at a spot change (control
+0.44 %), gone in the repeat; jungle alone 12 ok / 0 FAILED twice; `jungle_wind` (`wind=1`) with `shadows.rt = near` (animated trees: no cover, layout reuse on) + `native.tree_wind = compare`: 24,396 jobs
+7.3 M vertices compared, max error 0.00146 units (leaf cards; branches 0.0011), 0 over 0.1, TLAS check frames differing 0; GPU-AV (`GPU_BASED_GPU_ASSISTED`) hold + `jungle_wind` + RT shadows: 0 validation lines;
+`rvk_rtwalk` (load = 0) PASS 4 checks. The tree-motion compare reads 0 vertices (no motion target in that setup).
+
+**Left:** the solid pass (the lighting entries need `ensureSlot`'s per-frame poll of each illumination object, the lighting records follow it: no layout reuse there), `treePlan`'s engine reads (2 - 3 per
+instance, no engine event to follow), `treeTemplate` per template and pass (the draw signature reads textures / bindings / modules), the leaf-card jobs of animated trees (per frame by nature). The layout reuse
+and the covers only pay while the view and the trees hold still (all four perf-ab scenes do); a walking player changes rows and sets every frame.
+
+### 14.55 WS13: the fixed per-frame costs of small scenes (2026-11-14, branch `worktree-agent-a2f46f4d0929a2678` on main b9bdd67; no new setting; overlay command `debug lightskip 0|1`, env `RVK_LIGHTS_SKIP_OFF=1`)
+
+**Question.** After 14.54 Full is below Wrapper at hold (-0.58 ms) and jungle (-0.77) but still +0.33 ms at pub_interior and harbour_docks: what of the fixed per-frame cost can go, exactly?
+
+**Profile (before; `-CpuProfile`, 2 sessions per scene and mode, alternating, shared copy; the profile percentages are share x the frame interval, so each log is normalised to its own perf line's engine+HAL CPU: +-30 %,
+single windows jump with other agents' games; the first Full pub_interior session ran 2.1 ms CPU under load and was dropped).** Full-only items (ms per frame, pub_interior / harbour_docks; Wrapper's counterparts
+are the draws these replace: Wrapper `drawIndexedPrimitive` + `prepareDraw` 0.29 + 0.21 at pub, `detourExecuteEffect` 0.17 / 0.22):
+`EffectOps::effectBegin` .265 / .298 (incl. `composeEffect` .110 / .123, `issueLean` .094 / .106, `drawComposed` .061 / .075, `applyDevice` .024),
+`StaticOps::opEnter` (the owned hand-over: `FrameTap::passBegin` .107 / .434, `ownedPass` .080 / .255, `issue` .068 / .223, `ownedDrawOpPersistent` .036 / .138, `orderedPlace` - / .081, `beginView` .024 / .080, `compactOwned` .011 / .067) .175 / .545,
+`LightTable::record` .093 / .104 (`lights::collect` .045 / .044, `readStaticLight` .021), `decalsBegin` - / .151 (`composeDecals` .076), `composeFx` .044 / .102, `composeParticle` .027 / .068, `OwnPost::runGroup` .032,
+`operator new` / `RtlAllocateHeap` +.013 / +.073, the vegetation / tree passes at harbour .088 / .085 (`vegPass`, `treePass`). Self-time hot lines inside the effect units: the 10 KB `*slot = *draws_[0]` own-post group copy (effect_ops.cpp:691), `captureDevice`'s block copies, `graphOutput` / `outputCount` (.4 % together).
+At pub_interior `LightTable::record` self + `collect` is the one block that works on identical input every frame (a still camera, static lights): the table + upload rebuilt to the same 64 KB.
+
+**Built (all exact; every cache heals on the normal path, none depends on check frames).**
+1. **Light table: an unchanged build keeps its table and its upload** (`LightTable::record`). The part after `collect` (near count, drawn-light merge, truncation to 1,024, lamp-shadow ids, the GPU table, change detection, known grid, upload) is a pure function of the
+   collected lights, the camera position, the drawn lights (set + colours, hashed under their mutex: the colours alternate with the draws that note them, so a generation counter never matched), the lamp-shadow mode and the collect radius. `collect` itself still re-reads every static light
+   every frame (it IS the change detector: a light's colour / range can change in place) and the signature hashes its output (~3 us). A build with the last full build's signature keeps `prev_` + the known grid + the registry state (the registry flags are re-asserted from the kept values: another view's early return flips
+   `registryNoteComplete` in between) and the per-slot upload serial (`uploadSerial_`): the upload of a table the slot already holds is skipped, also after a full build whose bytes equal the last table's (`buildSerial_` counts byte changes only). The cluster dispatch still runs every frame (view dependent).
+   Healing: every 64th build and every `gpuscene::periodic(frame, 10)` check frame (not with `owned_check = 0`) runs in full and, when its signature equals the kept one, compares its table with the kept table (`DIFFERING`); a changed signature simply rebuilds (nothing can stay stale). `RVK_LIGHTS_VERIFY=1` (the uncached reference every 8th build) runs on top.
+   rvk.log (5 s): `enh: lights: unchanged builds (5 s): skipped N, uploads skipped N, full builds with an unchanged signature compared N DIFFERING 0`.
+2. **Prefetch in `lights::collect`**: every cached static light's two cache lines are requested before the guarded reads (the lights are separate heap objects). Same values; no measurable change in `collect` (0.085 -> 0.077 - 0.085 ms), kept as harmless.
+3. **Decal pass scratch** (`composeDecals`): the 360 KB vertex / 20 KB index scratch was value-initialised every pass (`std::_Zero_range` 0.4 % of the harbour profile) and the queue / records / source vectors were allocated every pass: they are now `thread_local` and kept (nothing reads a byte `build()` did not write). `composeDecals` 48 -> 35 - 37 us per pass at harbour_docks.
+
+**Exactness evidence** (private copy `risen-test-vk-ws13`, instance 13, lock `rvk-ws13`, test baseline `owned_check = 10`, Full, `RVK_LIGHTS_VERIFY=1`, `freeze_wait = 1500`): pub_interior / harbour_docks / jungle: reference compare 0 DIFFERING (283 / 333 / 351 builds compared in the last window);
+`unchanged builds`: pub_interior skipped 856 in a 5 s window, 158 full builds with an unchanged signature compared, DIFFERING 0; harbour_docks 727 / 211 / 0; jungle 474 / 88 / 0 (a walking scene changes the signature: only the upload skip applies). `native.picture_check=true`: 0 FAILED windows in all three
+(jungle `ok`, worst view 0.03 %; pub_interior and harbour_docks windows were `UNRELIABLE (the scene moves)` with and without the change: `RVK_LIGHTS_SKIP_OFF=1` gives the same verdicts, so these two spots give no verdict at all here). rvk_tests 356 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors (no GPU-address code touched: the upload buffer and the push block are the old ones).
+Not run: `native.own_post=compare` / lean check counters (nothing in the post path or the effect units changed), menus / loading screens beyond the runs' own start.
+
+**Effect of the changes** (in-session A/B, `perf-ab.ps1 -Key lightskip -A 0 -B 1 -CommandTemplate 'debug lightskip {0}' -Scenes pub_interior,harbour_docks -Pairs 5 -Mode full -PlayerDefaults`, CPU engine+HAL; the decal scratch and the prefetch are in both arms):
+pub_interior 1.264 -> 1.200 ms (**-0.064**, z -6.7), harbour_docks 2.546 -> 2.446 (-0.100, z -0.4: sd 0.28 / 0.16, shared machine). `LightTable` timers per build at pub_interior: near merge + truncate + shadow ids + table + upload 0.095 -> ~0.012 ms (collect 0.085 stays).
+
+**perf-ab Full vs Wrapper (final, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults -Pairs 3`, shared copy + lock, RisenTest.exe, CPU engine+HAL mean +- sd of 3 windows; 14.54's delta in brackets):**
+
+| scene | Wrapper | Full | delta |
+|---|---|---|---|
+| pub_interior | 0.997 +- 0.021 | 1.247 +- 0.074 | **+0.25** (+0.33) |
+| harbour_docks | 2.010 +- 0.035 | 2.273 +- 0.012 | **+0.26** (+0.33) |
+| hold | 6.700 +- 0.017 | 5.477 +- 0.038 | **-1.22** (-0.58) |
+| jungle | 6.857 +- 0.042 | 6.100 +- 0.010 | **-0.76** (-0.77) |
+
+GPU frame ms (Wrapper -> Full): pub_interior 0.50 -> 1.18, harbour_docks 2.22 -> 2.44, hold 3.85 -> 2.87, jungle 3.91 -> 3.28. Hold / jungle stay below Wrapper; the small scenes still pay +0.25 ms (the goal is NOT reached there).
+
+**Not built (and why).**
+* **A dedicated post-quad draw path** (skip `prepareDraw` for the fixed full-screen units) and **render-pass merging of consecutive units on one target**: `prepareDraw` (draw.cpp 1059 - ~1900) is the one place that decides pipeline, variants, observers, taps, tags and the packet for every draw; a bypass copies its decisions for
+  the unit draws and has to stay equal to it for all of them (own-post ports, mask / SSAO chain, PSSM, GUI). 14.47's measurement says the unit cost is spread over ~35 small items of 10.7 us; the profile above agrees (no line over 0.3 %). It needs its own design with a draw-level compare
+  (`own_post=compare` compares images, not packets); not started. The least invasive form would be an `EffectDraw`-keyed packet memo (state hash of the unit's draw -> the packet + pipeline, compared on check frames).
+* **Decals: per-record `DrawDesc`s kept across frames.** `nonOpPasses` writes the record's lighting / illumination entry / material slot per frame, so keeping them needs the retained-op stamps of the packet cache for a non-op group (14.52 called it a design of its own); not started. What remains of `composeDecals` is ~1.1 us per decal (engine reads, key, `nonOpPasses`).
+* **Skipping `collect`'s re-read** of the static lights (0.085 ms at pub, 0.045 at harbour; the biggest remaining light item): a light's colour / intensity / range can change in place, the only exact detector is reading it; the cache lines are not the cost (prefetch changed nothing), the guarded copy + parse per light is.
+* The own-post group copy (`*slot = *draws_[0]`, 10 KB per unit, ~0.01 ms per frame) and `graphOutput` / `outputCount` (~0.012 ms): at the bar of this item, not touched.
+* The operator-new share of Full at harbour (+0.07 ms): no single owner in the `site2` call-site view (spread over the owned passes' vectors).
+
+**Left for the next item:** the owned hand-over (`StaticOps::opEnter` .175 / .545 ms: passBegin + ownedPass + issue), the effect units' draw path, `composeFx` / `composeParticle` / `decalsBegin` as per-frame passes over unchanged inputs.
+
+### 14.57 WS15: the owned hand-over per pass kind (fixed vs per-op), lights::collect's re-read, the veg pass' allocations (2026-11-14, branch `worktree-agent-a234869f55dfaa6ef` on main c862ad8; overlay command `debug lightsfast 0|1`, `RVK_OWNED_TIMERS=1` adds the pass profile lines)
+
+**Question.** 14.55 left `StaticOps::opEnter` (.175 / .545 ms at pub_interior / harbour_docks: passBegin + ownedPass + issue) and asked whether the per-pass FIXED part (register saves, view table sets, scope begins, maps; many passes with few ops) can go, plus the remaining `operator new` share (+.013 / +.073).
+
+**Measured: the per-pass fixed part is small.** `RVK_OWNED_TIMERS=1` now logs, every 5 s, `native: pass profile <view kind> <z|solid> owned ops <class>: N passes ..., us per pass` (`FrameTap::passBegin` by view kind and owned-op count class 0 / 1 / 2-4 / 5-16 / 17-64 / 65+) and `native: owned pass phases: ... us per pass: view, view table, save, lookup+scope+reserve, ops, end`
+(`ownedPass`' own phases, `owned_timers.h` `g_passPhaseNs`). Steady windows (frozen game, Full, timers on; the machine ran other agents' games, single windows vary 2x, the ratios hold):
+* pub_interior: 2.0 passes / frame (main z 20 ops / 21 draws, main solid 25 ops / 30 draws; no cascade pass in the frozen scene). Per pass: view 0.75, view table 1.4, register save 0.3, record lookups + scope + reserve + bulk begin 4.4 - 6 (22 record lookups inside), op loop 55 - 100, end 0.8 us -> **fixed 7.7 us = 12 % of a 62 us pass, 2 x 7.7 = 0.015 ms of ~0.125 ms passBegin per frame**; the ops cost 2.2 - 2.7 us each (z) and 3.4 - 5.2 us (solid, with their observers). A pass with nothing owned (0.4 - 0.9 us) already returns before any setup (`ownedPass` / `treePass` / `vegPass` test `ops.empty()` first).
+* harbour_docks: 3.5 passes / frame (main z 86 ops, main solid 63, 1.5 cascade passes of ~33 ops), 56.6 ops per pass; per pass view 0.72 - 1.0, view table 1.1 - 1.5, save 0.3, lookup+scope+reserve 5.5 - 8.9, ops 80 - 166, end 0.7 - 1.0 -> fixed 8.5 - 12 us = 6 - 9 % of a 100 - 190 us pass, **3.5 x ~9 = 0.03 ms of 0.3 - 0.6 ms per frame**; 1.4 - 2.8 us per op.
+So the hand-over's cost is the PER-OP validity reads (14.51's conclusion: stamp polls, material versions, the draw signature's texture / buffer / module reads, the observers' record views), not pass setup: removing every fixed microsecond would be -0.015 / -0.03 ms. Nothing of the pass setup was changed (a lazy / persistent per-pass state would save ~1 - 2 us of the 8).
+
+**Where the Full-only per-frame time was instead** (CPU sampling profile + deterministic timers, pub_interior; Full-only self time against Wrapper, ms per frame): `lights::collect` + `readStaticLight` + `safeReadN<120>` + the SEH helper (`__NLG_Return2`) ~0.14 (2,526 static lights of the whole island are re-read every frame, only ~335 are near), `EffectOps::applyDevice` / `composeEffect` ~0.10 (WS14), the RT GPU build's rows (`gpuBlasRow`, `tableMaintain`, `gpuInput`) ~0.05, `f10x::cullNode` +0.01 (replaces the engine's CullNode), memmove +0.03 (own-post group copy, 14.55).
+
+**Built.**
+1. **`lights::collect`: the kept static lights re-read in one guarded region** (`readStaticLightsFast`, lights.cpp). 14.55 kept the per-frame re-read (it IS the change detector: a light's colour / range can change in place) but every light cost one SEH function call + a 120-byte copy + a `WorldLight` build. One `__try` region now reads the same fields (vtable, rgb, intensity, range, position) with the same arithmetic and the same `reaches` filter straight into a kept scratch array (plain data only: a function holding `__try` cannot unwind objects); a fault anywhere (a freed light) returns -1 and the whole list is redone with the per-light guarded reads, which skip an unreadable light as before. No cache: nothing can go stale (healing question: none). `debug lightsfast 0|1` (overlay command) switches it inside one run. Per build `collect` 0.0765 -> 0.0435 ms at pub_interior (in-session toggle, 2 x 2 arms of 5 s, `RVK_OWNED_TIMERS=1`, the 5 s line `enh: lights: CPU per build ... collect`), -0.033 ms per frame.
+2. **Veg pass: the plan vectors keep their capacity** (`vegPass`, static_ops_veg_owned.cpp; the tree pass had its pools since WS11): each of ~51 veg ops per frame owned `batches` / `entries` / `tpls` vectors and one run vector, freed with the pass, plus `drawnOps`, the `order` vector, the `entryMemo` `unordered_map` (nodes) and `recKeys` per pass. `plans` / `runs` recycle their vectors through spare pools, `drawnOps` / `order` / `recKeys` are `thread_local`, `entryMemo` is a `PassMemo` (exact: the key is compared, a full probe window computes the entry again). Same values, no cache across frames.
+3. `nonOpPasses` (decals: the `std::vector<sc::Pass>` per record: 32 allocations per frame at harbour) and `composeParticle`'s `trials` (a 10 KB `DrawDesc` block per particle op) are `thread_local`.
+
+Allocation profile (engine thread, a temporary `operator new` replacement with `CaptureStackBackTrace`, `RVK_ALLOC_PROF=1`, patch in `rvk-work/scratch/ws15/frame_tap_with_allocprof.cpp`, not committed; `RVK_F2C4_MEASURE` adds ~46 / frame of its own): **harbour_docks 533 -> 376 `operator new` per frame (-157, -29 %)** with item 2 (items 3 and the `recKeys` vector came after that measurement); pub_interior 206 per frame (20 of them the F2C4 measure's maps). Top remaining sites: `effect_ops.cpp:652` own-post group copy (`vector<vector<byte>>` copies, 14 + 14 + 6 + 6 + 5 + 5 per frame at harbour: WS14), `std::format` in `Device::inject` and `CopyCurrentRTToImage` (only with `-Perf`, not for players), `emitPacket` (the same count in Wrapper's `flushBatch`), `RtScene::record` (both modes), `f10x::extract / walkRooms` vectors (~30 per frame, Full only, not touched), `Ocean::record` / `Water::replace` (both modes).
+
+**Exactness** (private copy `risen-test-vk-ws15`, instance 15, lock `rvk-ws15`, test baseline `native.owned_check=10`, `native.picture_check=true`, `RVK_LIGHTS_VERIFY=1`, `freeze_wait=1500`): pub_interior / harbour_docks / jungle: `enh: lights: verify ... DIFFERING 0` in every window (the uncached reference walk every 8th build against the new read), owned vegetation check frames DIFFERING 0 (harbour 4,232 per window, jungle 4,592), no `DIFFERING [1-9]` / `MISS [1-9]` / `FAILED` anywhere, jungle's last picture window `ok`, pub_interior and harbour_docks windows `UNRELIABLE (the scene moves)` / `NO DATA` exactly as in 14.55 (no verdict at these two spots, with or without the change). `rvk_rtwalk` (`load=0`, a fresh copy `risen-test-vk-ws15f`) PASS 4 checks, `rvk_spells` PASS 4 checks (also after the last edits), `rvk_tests` 356 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors (no GPU-address code touched). Players run `owned_check=0`: the changes have no cache that a check frame heals.
+
+**Effect.** In-session A/B `perf-ab -Key lightsfast -CommandTemplate 'debug lightsfast {0}' -A 0 -B 1 -Pairs 5` (shared copy + lock, other agents' games ran: pub_interior windows 1.9 +- 0.7 / 2.4 +- 1.0 ms = no resolution; harbour_docks CPU engine+HAL 2.448 +- 0.064 -> 2.388 +- 0.071, **-0.060 ms**, z -0.9, includes the veg allocation change in both arms).
+
+**perf-ab Full vs Wrapper (final, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults -Pairs 3`, shared copy + lock, RisenTest.exe, CPU engine+HAL mean +- sd of 3 windows; 14.55's delta in brackets; stage states of every window match their arm):**
+
+| scene | Wrapper | Full | delta |
+|---|---|---|---|
+| pub_interior | 1.317 +- 0.396 | 1.190 +- 0.036 | -0.13 (+0.25; the Wrapper windows were disturbed by another agent's game: 14.55's Wrapper was 0.997 +- 0.021, against that Full is +0.19) |
+| harbour_docks | 2.030 +- 0.056 | 2.263 +- 0.021 | **+0.23** (+0.26) |
+| hold | 6.997 +- 0.156 | 5.947 +- 0.021 | **-1.05** (-1.22) |
+| jungle | 14.8 +- 13.6 (one window of the disturbed machine) | 6.223 +- 0.099 | not usable (14.55: -0.76) |
+
+GPU frame ms (Wrapper -> Full): pub_interior 0.525 -> 1.163, harbour_docks 2.253 -> 2.518, hold 3.19 -> 2.45. The goal (Full <= Wrapper in every scene) is NOT reached at harbour_docks (+0.23) and not demonstrably at pub_interior (+0.19 against the clean 14.55 Wrapper number): this item took -0.03 (pub, collect) / -0.06 (harbour, collect + veg allocations) of the +0.25 / +0.26; the remaining gap is per-op / per-unit cost spread over the effect units, the owned ops' validity reads, the RT GPU build rows and the light table (see "Left").
+
+
+**WS13's one-time main-menu stall at pub_interior** (a Full session whose new game never reached the spot): not seen again in ~12 Full pub_interior sessions of this work (profiles, exactness, toggles, perf-ab); nothing to collect.
+
+**Not built.** Lazy / persistent per-pass setup (the fixed part is ~8 us per pass: -0.015 / -0.03 ms at best); skipping the per-frame re-read of far lights (a light's range / position can change in place: the read is the detector); the own-post group copy and `Device::inject` formats (WS14 / `-Perf` only); `f10x` vectors (30 allocations, ~2 us).
+
+**Left.** The per-op validity reads of the owned hand-over (14.51: device generation counters on Texture / Buffer / variant modules + engine events would be needed to skip an unchanged pass), the effect units (WS14), the RT GPU build rows, `composeFx` / `composeParticle` (real per-emitter work).
+
+### 14.56 WS14: the effect units' draw path measured: a packet memo / pass merging would save ~0.01 - 0.03 ms per frame, not built (2026-11-14, branch `worktree-agent-a369289c07027cfdd` on main c862ad8; docs only, no code change kept)
+
+**Question.** 14.47 / 14.55 named a dedicated draw path for the composed effect units (per-unit packet memo that skips `prepareDraw`'s pipeline-key hashing and state diffing) and merging the dynamic-rendering scopes of consecutive units as the next step. Is there enough in it to justify the exactness machinery (check-frame packet compare, sync validation, D3D12)?
+
+**Measured first** (temporary QPC probes in `Device::drawIndexedPrimitive` / `prepareDraw`, active only inside `EffectOps::drawComposed` under `RVK_FX_TIME=1`; removed again, nothing of it is in the branch). pub_interior + harbour_docks, Full, player defaults, private copy `risen-test-vk-ws14`, one session each, 240-frame windows (an earlier window on a loaded machine read ~1.6x higher everywhere; the numbers below are from the quiet one; per-unit values divide by 29 units, per-draw by 13):
+* **29 units but only 13 composed draws per frame** (pub 3120 draws / 240 frames; harbour the same): the other 16 units are held by the own-post groups (their draws are the S-7 kernels' work, not a device draw).
+* Whole unit 11.2 us (pub) / 11.6 us (harbour) = .325 / .337 ms per frame. The 13 draws cost **prepareDraw 4.3 us + the rest of the draw (submitPacket, intern vi / dyn, packet recording) 2.6 us each = .09 ms per frame (28 % of the units)**.
+* Inside `prepareDraw`, per frame (x29 units, us): tap + shader checks + classify 2.9, observers + replacers 5.0, `prepareTextures` 7.2, **`beginRendering` 18** (a scope that is not open yet), variants + `PipelineDesc` + `computeVertexInput` 7.2, pipeline lookup 2.0, `computeDynamicState` 2.6, `uploadConstants` 2.3, draw block 4.1, record 3.6. **What a packet memo could skip is the variants / `PipelineDesc` / vertex input / pipeline lookup / dynamic state = ~12 us per frame = 0.012 ms**; the tap, observers, replacers, texture preparation, constants upload and the record have to run for every draw (the observers and the tap decide per draw, constants and textures change per frame). That is 4 % of the gap to Wrapper (+0.25 / +0.26 ms) and inside the run-to-run noise (+-0.1 ms), for a bypass that has to stay equal to `prepareDraw` for the own-post ports, mask / SSAO chain, PSSM and GUI.
+* **Scope merging is already there where it is possible**: 1200 of the 3120 draws per window (38 %) find the rendering scope of the previous unit still open (the lean frames leave the device as the last pass set it, nothing restores the engine's target between units; `setRenderTarget` ends a scope only when the target differs). The other 8 scopes per frame begin on a different target than the unit before (the chain ping-pongs: SSAO -> BlurSSAO x 2 -> Blur, the mask cascades, bloom / glow); their begin is 2.3 us each (0.018 ms per frame) plus the end and the colour-attachment barrier of the target the next unit samples. Merging scopes of different targets is not possible, so there is nothing for a "same target / compatible load-store" merge to take.
+* The sampled profile of the units (`-CpuProfile`, pub_interior) agrees with 14.47 / 14.55: no line of the units over 0.35 % of the engine thread; the largest are `applyDevice`'s two register-diff lines (350 / 351: 480 `same16` compares per unit, 0.6 % together) and `composeEffect`. A register diff limited to the registers `applyPass` wrote (`vsRegsWritten` is already tracked) would save ~0.5 us per unit = 0.015 ms per frame but is only valid while the device's register file equals the one captured at composition (not after `flushLum`'s late `issueOne`), which needs a device write epoch: not worth it either.
+
+**Verdict.** The effect units are +0.04 .. +0.1 ms over Wrapper's `detourExecuteEffect` + its draws, and what a draw fast path, a packet memo and scope merging can take from the 13 draws per frame adds up to ~0.03 - 0.04 ms. The remaining +0.25 / +0.26 ms at pub / harbour is not in the units; it sits in the owned hand-over (`StaticOps::opEnter` .175 / .545 ms: WS15), the light table / collect and the operator-new share (14.55). Nothing was built or merged for WS14; the probes were reverted. If the units are revisited, the larger per-unit items are the parameter objects (2.3 us per unit = 0.07 ms per frame: one engine block read per object, scattered engine memory) and the held units' composition (16 of 29 units are composed only to feed the kernels: their `applyPass` + captured 10 KB register file + group copy ~3 us each = 0.05 ms): a kernel input path that reads the engine's parameter values directly for the held group units, without composing an `EffectDraw`, is the structural change with the largest remaining effect (~0.1 ms), and needs `own_post=compare` per group as its exactness gate.
+
+### 14.58 WS16: the held own-post units measured: the "direct kernel input path" of 14.56 is worth ~0.01 - 0.04 ms, not 0.1 ms; not built (2026-11-14, branch `worktree-agent-af08565696a1b95c3` on main 59ca2e2; only diagnostics added: `RVK_FX_TIME=1` prints the held units on their own)
+
+**Question.** 14.56 named the 16 held own-post group units (luminance 8, bloom 4, DoF middle 4: composed into a full `EffectDraw` only so the group kernels can read their inputs) as the largest remaining structural lever (~0.1 ms): read exactly the engine values each kernel needs, once per frame per group, without composing.
+
+**Measured first** (new: `RVK_FX_TIME=1` splits the unit timer for the held group units: `native: effect units CPU held (5 s)` + `held parts`; pub_interior / harbour_docks, Full, player defaults, private copy `risen-test-vk-ws16`, instance 16, lock `rvk-ws16`, 240-frame windows, 5 s lines of 3,840 - 3,904 held units = 16 per frame):
+
+| per held unit (us) | pub_interior | harbour_docks |
+|---|---|---|
+| whole unit (`effectBegin`) | 7.5 - 8.4 | 8.0 - 8.2 |
+| = ms per frame (16 units) | 0.120 - 0.135 | 0.128 - 0.131 |
+| parameter objects (engine reads) | 1.8 | 1.9 - 2.0 |
+| device capture + target / `applyPass` + visual / rest of compose | 0.45 / 0.82 / 0.37 | 0.44 / 0.85 / 0.42 |
+| names + group bookkeeping + the kernels' recording (`runGroup`, 3 per frame) | 2.7 - 3.0 | 3.1 |
+| predict / adopt / `applyDevice` | 0.07 / 0.14 / 0.92 | 0.08 / 0.14 / 0.9 |
+
+* **The 10 KB group copy (`*slot = *draws_[0]`) is 0.25 us per held unit (0.004 ms per frame), not ~3 us.** A temporary variant that swapped the composed record into the group slot instead (exact: nothing reads `draws_[0]` after a lean unit) measured 0.022 us per unit in the same session (in-session A/B on an overlay switch, 5 pairs x 2 scenes, held timer lines): saves 0.004 ms per frame, CPU engine+HAL pub_interior 1.290 -> 1.272 (z -0.8), harbour_docks 2.402 -> 2.364 (z -0.5): inside the noise. Not kept (complexity for 0.004 ms).
+* **What a direct input path could skip** is device capture + target (0.45), `applyPass` + visual (0.82, already the WS5 register cache's hits), the rest of the composition (0.37) and `applyDevice` (0.9) = ~2.5 us x 16 = 0.04 ms at the very best. It cannot skip the parameter objects (1.8: the engine values are the detector of change, and the effect's store `unitValues_` / textures / technique that the lean path adopts after every unit is exactly those values), the kernels' recording (the replacement of the units' GPU work), and the **device state a unit leaves behind**: the lean check's "after" compares every register / stage / sampler row / shader / stream with the engine's state after its code ran, and unwritten registers carry from one unit to the next (the next unit's `captureDevice` base). Producing that state without composing the unit means replaying the unit's writes (the `vsRegsWritten` / `psRegsWritten` / `rsWritten` masks, shaders, stage textures, sampler rows) = the composition's own work; skipping `applyDevice` for the non-final units of a group (base from the previous record) would save 0.9 us x 13 = 0.012 ms and needs the carried-state argument above proven on every register class.
+* So the lever is ~0.02 - 0.04 ms at the limit, with a three-way exactness obligation (kernel inputs, effect store, device after-state) and no check-frame-free proof for the carried device state: **not built**. Nothing in the picture, the lean check, `own_post=compare` or the effect store changed (the branch only adds timers read under `RVK_FX_TIME`; rvk_tests 356 / 0).
+
+**perf-ab Full vs Wrapper with this branch** (`-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults -Pairs 3`, run in the private copy under another agent's load: the Wrapper arms had sd 0.58 / 5.7 / 3.7 ms at pub / harbour / hold, so only jungle is resolved): CPU engine+HAL Wrapper -> Full pub_interior 1.313 +- 0.577 -> 1.277 +- 0.015, harbour_docks 6.22 +- 5.74 -> 2.82 +- 0.61, hold 9.80 +- 3.75 -> 6.00 +- 0.24, jungle 7.13 +- 0.09 -> 6.33 +- 0.09 (-0.79, z -8.7). No code that changes a frame is in the branch, so the table of 14.55 (+0.25 / +0.26 at pub / harbour) stands. Logs `rvk-work/scratch/ws16/`.
+
+**Where the remaining +0.25 / +0.26 ms is** (14.55 / 14.56 / this item): not in the units (the 29 units cost 0.30 - 0.33 ms per frame against Wrapper's `detourExecuteEffect` + draws, +0.04 .. +0.1), but in the owned hand-over (`StaticOps::opEnter`, WS15), the light table `collect` re-read (0.045 - 0.085 ms), the decals / fx / particle passes over unchanged inputs and the operator-new share.
+
+### 14.60 WS18: where the small scenes' remaining GPU gap sits: the table lighting and its lamp shadows, not a fixed Full cost (2026-11-14, branch `worktree-agent-af92fb6aaf13d87d2` on main 59ca2e2; measurement only, no code change kept)
+
+**Method.** `scripts/perf-ab.ps1 ... -Pairs 3 -PlayerDefaults` with both arms equal (`-A true -B true`: 6 windows of 240 frames of ONE session per configuration), `harbour_docks` + `pub_interior`, Vulkan (7900 XTX, shared GPU, RisenTest.exe), configurations interleaved (W, F0, F1, W, F0 ...); every figure = mean of the pass over the session's windows, ms. Session-to-session spread of one configuration: 0.05 - 0.07 ms on a single pass, 0.03 - 0.07 ms in the sum (W 2.221 / 2.294, F0 2.539 / 2.483 at harbour), so only differences > 0.1 ms are read. A session switched to Full at run time (`renderer.mode` A/B) is NOT a Full session (no z pass, depth_z 0.05, `native.picture_check` pass): in-session mode switching does not measure Full. Two perf-ab batches started at once do not exclude each other (they ran as two games, instances 2 / 3, and spoiled both): run batches one after the other.
+
+**Per-pass table, harbour_docks, Vulkan (W = Wrapper; F0 = Full player defaults; F1 `lighting.clustered=false`; F5 `lighting.enabled=false` (table code in the shaders, no lookup, no lamp passes); F4 `lighting.light_shadows=off`):**
+
+| pass (role) | W | F0 | F4 | F5 | F1 |
+|---|---|---|---|---|---|
+| main colour (solid + alpha; W = 97 pass + the (100) alpha pass 0.078) | 0.632 + 0.078 | 0.887 | 0.837 / 0.765 | 0.723 | 0.745 |
+| z (W: inside the colour passes; Full: depth-only pass, 440 draws) + depth_z | 0 | 0.060 + 0.008 | 0.057 + 0.008 | 0.068 + 0.008 | 0.071 + 0.008 |
+| water.rt | 0.854 | 0.877 | 0.838 | 0.808 | 0.832 |
+| water.ocean | 0.216 | 0.260 | 0.211 | 0.204 | 0.214 |
+| rt.scene (after depth) | 0.058 | 0.083 | 0.067 | 0.073 | 0.072 |
+| post (W: 800x450 + 400x225 + 309x210 + luminance chain; Full: post.lum + bloom + dofmid + the 37-format kernels) | ~0.115 | 0.12 - 0.16 | | | |
+| barriers / copies / inline uploads (incl. the compaction dispatches) | 0.044 | 0.026 | 0.011 | 0.018 | 0.018 |
+| shadow cascades (2048x2048) | 0.048 | 0.041 | | | |
+| sum without `light.cluster` / `light.shadow` passes | 2.221 / 2.294 | 2.539 / 2.483 | 2.327 / 2.252 | 2.195 | 2.259 |
+
+pub_interior: W 0.476 / 0.513, F0 0.755 / 0.728, F4 0.671 / 0.754, F5 0.560 / 0.564, F1 0.558; main colour W 0.143 + 0.020, F0 0.413, F4 0.342 / 0.398, F5 0.230, F1 0.216, X2 below 0.264. D3D12 (one clean session each; F1's session was disturbed by another agent, discarded): harbour sum W 2.168, F0 2.354, F5 2.045; main colour 0.864 + 0.085 / 1.058 / 0.842; pub W 0.718, F0 0.891, F5 0.766.
+
+**Reading.**
+1. **Full without the table lighting is at Wrapper's level or below** at harbour_docks on both APIs (F1 2.259 vs W 2.22 - 2.29; F5 2.195 Vulkan, 2.045 vs 2.168 D3D12) and +0.05 - 0.08 ms at pub_interior (main colour +0.07, the z pass 0.025 that Wrapper folds into its colour pass, rt.scene +0.01; barriers / uploads give 0.02 - 0.06 back). The shader form (the table code compiled into the ubershader variants) costs nothing: F5 = F1. Nothing fixed per frame was found in Full: the compaction dispatches + their two barriers per frame are inside `barriers / copies / inline uploads`, which is LOWER in Full (0.011 - 0.026 vs 0.044 harbour, 0.012 vs 0.028 pub; D3D12 0.014 vs 0.043 / 0.077); `native.depth_z` 0.008 - 0.010; `rt_gpu_build` on / off: no difference (harbour 4 + 4 windows, pub 4 + 4: all passes within the spread); `native.cluster_cull` off: sum +0.0 (harbour 2.464 vs 2.539, z pass 0.081 vs 0.060: the cull saves 0.02 in z); `native.depth_z` off: z folded, sum 2.387 (session spread); no G-buffer / motion pass exists in these scenes.
+2. **The whole gap is the table lighting** (the lamp feature, `lighting.clustered` + its RT shadows): harbour F0 - F1 = +0.28 (main colour +0.14, ocean +0.045, rt.scene +0.01, post.lum +0.03 (it waits for the lamp compute), `light.cluster` itself 0.09 excluded), pub F0 - F1 = +0.20 (main colour +0.20 of which `light.shadow` sampling +0.07 (F4 0.342 / 0.398 vs F0 0.413)). `lighting.light_shadows=off` (F4) gives back 0.21 at harbour (ocean 0.260 -> 0.211 = Wrapper's 0.216: the ocean / water.rt passes carry the lamp compute's drain time, not shading work: the water shaders have no cluster code), 0.08 at pub. The per-pixel table walk without shadows (F4 - F5): harbour 0.05 - 0.11 (noise-bound), pub 0.11 - 0.17; the empty-cluster path alone (X2: no count load, always the empty path; X3: count load kept, always the empty path) costs 0.03 - 0.05 above F5 in both scenes, the rest is the walk of pixels with a non-empty cluster (pub). The cluster count lookup (viewZ, log slice, count load) is therefore ~0.01 - 0.03, below the spread.
+3. **The indirect-command overhead is not the cause**: with vertex pull the buckets are per pipeline x state x index binding already (harbour: main z 4 commands per flush for 88 items, main solid 20 commands for 54 items, 1 index binding; `native: vertex pull` line), so "one call per pipeline" is what runs; the per-item cost inside a command was 0.1 ms in 14.50 and is part of the `full_lit` draw ownership (F6 `lighting.full_lit=false`: main 0.771 vs 0.887 at harbour).
+4. Lead for the lamp feature owners (not built, would be a GPU-address design): a per-draw "no table light reaches the bounds" flag (computed in the compaction job, which already evaluates the cluster bounds) would skip the per-pixel lookup for the draws of lamp-free areas (harbour by day: nearly all); the pub's cost is the walk itself.
+
+**By design / accepted with the lamp passes:** main-pass table walk, lamp-shadow sampling, the ocean / water.rt / post.lum drain time behind `light.cluster` / `light.shadow`; the split z pass (0.06 + 0.008) that Wrapper folds into its colour pass is paid back by the cheaper uploads. Raw logs: `B:\DevDrive\rvk-work\scratch\ws18\b1 .. b6` (`cmp.py`, `passes.py` there).
+
+### 14.59 WS17: "special lighting" / "no record" / "no template" in the owned tree pass: static-SH trees, batch-first buckets, draws-nothing ops (2026-11-14, branch `worktree-agent-a2aebedbd63d7d840` on main 59ca2e2; no setting, overlay command `debug treeown <mask 0..7>`, env `RVK_TREE_OWN_MASK`)
+
+**Question.** The acceptance of b9bdd67 showed a steady `composed late` count in the Full arm's `native: owned trees [main view]` lines, reason "special lighting" (harbour_docks, jungle, torch_hero) plus "no record": which trees, why can the pass not own them, and can it draw them exactly as the composition does?
+
+**Cause.** The line now splits "special lighting" into `[no list N / static SH N, dynamic lights N, lights unknown N, not table lit N, holds all N, no entry N]`; in all three scenes it was ONE reason: `static SH` (illumination +0x90 != 0 = a baked ambient SH on the tree's illumination object).
+`treePlan` refused every instance with static SH (`why = 5`), so the whole op was composed late every frame: harbour_docks 1 op per owned main view, jungle 2, torch_hero 4 (per 5 s: 240 / 480 / 960 ops). The refusal dated from 14.36: the composition's batch rule cuts a batch around such an instance (`planTreeBatches` tableMerge: `t.staticSh || prevStaticSh`)
+and the plan did not read the flag, so it could not mirror the batches. The lighting side needed nothing new: an owned instance's lighting entry comes from its illumination record, and `illum_compose.h composeLighting` already adds the static SH to the ambient (`ambientSh(..., hasStatic ? staticSh : nullptr)`); the entry's params (table lit, 3 lights, holdsAll false) are the template's, as for every tree.
+Dynamic lights of the list, an illumination without a list and unknown static lights (counted separately) never occurred in the three scenes. "No template" (jungle 480 per window) and part of "no record" had two further causes, below.
+
+**Built (`src/native/static_ops_trees_owned.cpp`; three parts, bits of `d3d9::treeOwnMask()`, default 7):**
+1. **bit 0, static SH owned.** `treePlan` keeps the instance (`Inst::staticSh`); `treeLightBatches` hands the flag to `planTreeBatches` like `readLight` does in the composition: the instance is cut into a batch of its own, `lightIllum` = itself, the pass takes its entry from its own illumination.
+   The `RVK_TREE_LIGHT_CUTS` semantics of 14.36 are unchanged (the light signature cuts the same way in both paths; a merged batch is lit by its LAST instance's lamp registers).
+2. **bit 1, batch-first buckets ("no template").** The engine draws a whole branches / fronds batch with its FIRST instance's start index (`composeTree`: `treeRange(b.strip, b.start)`); the plan gave each instance its own LOD start (7.25: counted as `per-instance LOD start differs`), so an instance whose start no composed batch began with found no template and its op was composed late
+   every frame (jungle: 2 ops a frame). `treeLightBatches` now batches the z passes too (`light = false` = `planTreeBatches(byLight = false)` as `composeTree` does) and gives every member of a branches / fronds batch the first member's bucket key: the owned draw equals the composed one (`per-instance LOD start differs` counts 0; it was 480 per window in jungle). Leaves are batched per LOD with one start already.
+3. **bit 2, ops that draw nothing keep a record ("no record").** `treeCompEnd` erased the record of an op whose composition drew nothing, so every frame's op was composed again (acceptance: jungle 1,440, harbour_docks / harbour_night 480 per 5 s: queues whose instances have no LOD this frame, fronds of species without fronds = strip 0).
+   When the plan made at the op's entry agrees (no instance, or fronds with strip 0 only) the record (`OpRec::noDraw`) keeps stamp, view stamp and touches; the pass runs the slot's side effects (queue sort, MaskReference, touches) and plans the op again: nothing to draw = taken out of the list; a LOD that arrived = composed late (`no template`) and the composition makes a normal record.
+   The check frames compare the composed instance count with the plan's (`DIFFERING ... counts`). A drawing record of the same stamp stays instead of being replaced.
+Also: `Stats::specBy[]` + the line's breakdown; `RVK_TREE_OWN_MASK=<n>` at start; `debug treeown <mask>` in the overlay for the in-session A/B (`perf-ab -Key native.owned_trees -CommandTemplate 'debug treeown {0}' -A 0 -B 7`).
+
+**Shares (main view, 5 s windows of 240 owned views, Full, steady state).**
+
+| scene | composed late before (special + no template) | no record before | after (mask 7) |
+|---|---|---|---|
+| harbour_docks | 240 (240 + 0) | 480 | 0 late, 0 no record |
+| jungle | 960 (480 + 480) | 1,440 | 0 / 0 |
+| torch_hero | 960 (960 + 0) | 0 | 0 / 0 |
+| harbour_night | 0 | 480 | 0 / 0 |
+
+(Windows around a spot change still show 5 - 480 late ops while records are made, the first window of a scene thousands of `no record` = the cold start; `template refused` 20 - 40 at LOD swaps is unchanged.)
+
+**Perf** (perf-ab, `debug treeown 0 -> 7` inside one session per scene, player defaults, Full, RisenTest.exe, shared copy + lock, other agents' games on the machine; CPU engine+HAL, medians of the windows).
+Run 1 (5 pairs): harbour_docks 2.28 -> 2.23 ms (-0.05, z -1.0), jungle 6.11 -> 6.03 (-0.08; mean +0.01), torch_hero 9.38 -> 7.20 (mean -1.06, sd 2.2: the scene drifts with the machine's load; B <= A in 5 of 5 pairs).
+Run 2 (6 pairs): harbour_docks 2.28 -> 2.23 (-0.05, mean -0.10), jungle 6.15 -> 6.21 (+0.065, mean -0.035), torch_hero 11.5 -> 12.9 (mean +0.6, sd 1.5: load). GPU frame unchanged (+-0.03). **So the CPU gain is ~0.05 ms where it can be resolved (harbour_docks, 1 op a frame) and not resolvable at jungle (4 ops a frame) and torch_hero** under this machine's load: an owned small tree op costs about what composing it did
+(plan reads of the engine's tree objects, lighting entry, template per pass); what the change buys is that no composed tree op is left in the three scenes (`composed late` 0, `no record` 0) and the engine-side composition (opEnter, record collection) is gone from those frames.
+
+**Exactness.** `rvk_tests` 356 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors. Private copy `risen-test-vk-ws17`, instance 37, lock `rvk-ws17`; test baseline (`owned_check = 10`, `picture_check`), jungle, harbour_night, torch_hero, harbour_docks (`freeze_wait` 2000, Full): owned trees check frames DIFFERING 0 (rows 0, lighting 0, counts 0, templates 0) and MISS 0 in 95 + 98 + 42 windows
+of three runs (the second with GPU-AV `GPU_BASED_GPU_ASSISTED`: 0 validation lines), picture check 24 ok / 15 UNRELIABLE (scene moves) / 6 NO DATA / 0 FAILED. Player defaults (`owned_check = 0`, no composed reference, so no picture check): 96 windows DIFFERING 0 (counters only exist on check frames, but
+the pass derives everything per frame from the engine's objects: plan, keys, lighting entry through the illumination's poll, batch light; a noDraw record only stands while the plan is empty). Screenshots, the same four spots, mask 0 vs 7 in two sessions (baseline and player defaults): 1.7 - 2.8 % of the pixels over 6/255 at harbour_night, 1.4 - 2.0 % torch_hero, 0.3 % docks, 6 - 8 % jungle,
+located on wind-swayed foliage, the torch flame and particles (two sessions differ there with nothing changed), the torch-lit bush at torch_hero and the foreground bush at harbour_night read the same (`rvk-work\scratch\ws17\crop_*.png`, `diff*.png`). D3D12 (`-Api d3d12`, same four spots, baseline): 103 windows DIFFERING 0 (per-instance LOD start differs 0), picture check 29 ok / 12 UNRELIABLE / 7 NO DATA / 0 FAILED. WS11's layout reuse (210 of 240 z passes served, 0 DIFFERING) and the RT scene's tree cover (scripts replayed 86 %, 0 differing) are unchanged.
+
+**Left.** Dynamic-light lists on tree illuminations, an illumination without a list and static lights the table does not know are still composed late (counted, 0 in all scenes; the composition draws them with another pass structure = another template per bucket). The CPU win of the tree pass sits in the big z / shadow views (14.54), not in these few ops.

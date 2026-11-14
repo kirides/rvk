@@ -2680,9 +2680,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "With native.owned_static: every N-th frame (and the frame before it) no op leaves the lists: the old path composes and draws them and the record-derived "
-                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never.",
+                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never "
+                       "(the player default: the check frames cost ~2 ms CPU + ~1 ms GPU per frame; scripts/run.ps1's test baseline pins 10).",
         .type = Type::Int,
-        .defaultValue = 10,
+        .defaultValue = 0,
         .min = 0,
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,
@@ -2840,6 +2841,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_ordered", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeOwnedDelta = &reg.add({
+        .key = "native.owned_delta",
+        .label = "Native frame: owned path work by change",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, with owned static draws (frame-ownership.md 14.51, WS9): the owned path's per-op work follows what changed: a record the owned path refuses "
+                       "as out of date (made while its scene forms were pending, a module or variant moved since) is remade at its op's late composition instead of only on a check "
+                       "frame (or, for a record made before its draw's scene form existed, as soon as its composition draws a scene draw). Off = such records are remade on "
+                       "check frames only (with native.owned_check = 0: never). rvk.log `native: owned static (5 s)` ... `records out of date`, `native: stages` owned_delta.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_static", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnedBillboards = &reg.add({

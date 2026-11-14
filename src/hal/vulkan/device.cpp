@@ -396,6 +396,7 @@ void HalDevice::applyStaticOps() {
             staticOps_->setOwnedOrdered(ordered);
             dev_.setOrderedBulk(on(rs.nativeOrderedBulk));  // 14.44: the ordered draws to the observers in bulk
         }
+        staticOps_->setOwnedDelta(on(rs.nativeOwnedDelta) && ownedStatic);  // 14.51 (WS9): the owned path's per-op work by change
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -805,7 +806,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOrderedBulk, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords, rs.nativeRtGpuBuild}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOrderedBulk, rs.nativeOwnedDelta, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords, rs.nativeRtGpuBuild}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1941,6 +1942,7 @@ void HalDevice::updateMenuPacing() {
     const auto& rs = settings::renderer();
     const auto* menuFps = rs.menuFps;
     dev_.setUnpaced(st.state == engine::menu::State::Loading);
+    dev_.setBackgroundFree(st.state != engine::menu::State::Game);  // WS12: the background compiles run on every thread outside the world, on few in it
     // frame generation: the world only (Unknown = the GUI is not up yet: the world), not paused (app state 1)
     if (framegen_) framegen_->setGameState(st.state == engine::menu::State::Game || st.state == engine::menu::State::Unknown, st.appState == 1);
     dev_.setMenuCap(st.state == engine::menu::State::Menu && menuFps != nullptr ? menuFps->value() : 0.0);

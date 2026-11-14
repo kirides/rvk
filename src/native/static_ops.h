@@ -99,6 +99,8 @@ public:
     void viewEnd();
     // true = lean (O2a): the op was composed and issued and its side effects done, the engine's slot is not to be run
     bool opEnter(const Op& op);
+    // WS6: the tap's completion of a taken op's deferred resolve (Op::lazy), called before the op is composed late
+    void setOpResolver(void (*fn)(void*, Op&), void* self) { opResolveFn_ = fn; opResolveSelf_ = self; }
     // eCDecalAdmin::RenderDecals / eCBillboardAdmin::RenderBillboards of the main view begins (inside its draw tag, before the
     // engine's code) / either ends; true = lean (the original not to be called)
     bool decalsBegin(void* admin, void* db);
@@ -196,6 +198,7 @@ public:
     void ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs);
     // BeginZPass / DoBeginRenderSolid of the main view returned: the pass's owned ops are drawn; returns the draws made (owned + late compositions)
     std::uint32_t ownedPass(bool solid);
+    std::size_t ownedPending(bool solid) const { return ownedOps_[solid ? 1 : 0].size(); }  // WS15 diagnostics
     // native.owned_billboards (frame-ownership.md 7.17, F4-1): the tree billboard ops retained as records, compared / drawn from them (needs owned windows, lighting images, scene draws)
     void setOwnedBillboards(bool on);
     // native.owned_vegetation (frame-ownership.md 7.40, F7-1): the vegetation ops' instance streams are retained per op in a persistent GPU buffer (valid while the op's
@@ -1088,6 +1091,7 @@ private:
         std::uint64_t drawWhy[3][4] = {};   // a draw refused: ownedDrawOpPersistent's fallback (0 view, 1 materials, 2 object window, 3 a draw refused)
         std::uint64_t devWhy[3][24] = {};   // ... of the refused draws: the device's derivation codes (ownedReplayStats::why)
         std::uint64_t observer[3] = {}, tableFull[3] = {}, notRetained[3] = {};
+        std::uint64_t notScene[3][128] = {};  // WS7: the first draw without a scene form of an op composed for 'not a scene draw': kind | ordered << 5 | no v2 pipeline << 6
         std::uint64_t runs = 0, lostDraws = 0, flushNs = 0, validNs = 0, prepNs = 0, drawNs = 0, sideNs = 0;
         std::uint64_t bulkNs = 0;  // (14.44: the ordered bulk observers' delivery per op)
         std::uint64_t ns = 0;
@@ -1191,14 +1195,54 @@ private:
     std::chrono::steady_clock::time_point late1sAt_{}, lateStart_{};
     void lateSecondReport();
     d3d9::Device::OwnedReplayStats ownedDevLast_{};
-    std::unordered_map<std::uint64_t, bool> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
+    // WS9 (frame-ownership.md 14.51): a per-pass memo without allocations (the unordered_maps it replaces were cleared every pass and re-allocated a node per key:
+    // the owned path's heap calls). clear() is O(1) (a generation); a full probe window only drops the memo entry (the caller computes it again): exact
+    template <class V, std::size_t N>
+    class PassMemo {
+        static_assert((N & (N - 1)) == 0);
+        struct E {
+            std::uint64_t key = 0;
+            std::uint32_t gen = 0;
+            V v{};
+        };
+        std::vector<E> e_;
+        std::uint32_t gen_ = 1;
+        static std::size_t at(std::uint64_t k) { return static_cast<std::size_t>((k * 0x9E3779B97F4A7C15ull) >> 40) & (N - 1); }
+    public:
+        void clear() {
+            if (++gen_ == 0) {
+                for (E& x : e_) x.gen = 0;
+                gen_ = 1;
+            }
+        }
+        const V* get(std::uint64_t k) const {
+            if (e_.empty()) return nullptr;
+            for (std::size_t i = at(k), n = 0; n < 8; ++n, i = (i + 1) & (N - 1)) {
+                const E& x = e_[i];
+                if (x.gen != gen_) return nullptr;
+                if (x.key == k) return &x.v;
+            }
+            return nullptr;
+        }
+        void put(std::uint64_t k, const V& v) {
+            if (e_.empty()) e_.resize(N);
+            for (std::size_t i = at(k), n = 0; n < 8; ++n, i = (i + 1) & (N - 1)) {
+                E& x = e_[i];
+                if (x.gen != gen_ || x.key == k) {
+                    x = {k, gen_, v};
+                    return;
+                }
+            }
+        }
+    };
+    PassMemo<bool, 1024> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
     std::vector<std::uint64_t> ownedPolled_;                  // material slot -> frame + 1 of the last poll made for an owned op
     std::uint32_t ownedLogged_ = 0;
     std::uint64_t ownedIndirectLast_ = 0;
     struct OwnedWinCache {  // per pass: the material windows of a slot, the lighting window base of a (slot, params)
         std::uint64_t frame = ~0ull;
         std::unordered_map<std::uint32_t, d3d9::OwnedWindows> mat;
-        std::unordered_map<std::uint64_t, std::uint32_t> light;
+        PassMemo<std::uint32_t, 1024> light;
     } ownedCache_;
     bool ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, bool viewWinOk, int& why);
     // F2c-4a (static_ops_owned.cpp)
@@ -1230,8 +1274,20 @@ private:
     std::vector<d3d9::Device::OwnedItem> ownedItems_;
     std::vector<std::uint32_t> ownedItemOp_;
     std::vector<const orec::OpRecord*> ownedRecPtrs_;
+    void (*opResolveFn_)(void*, Op&) = nullptr;  // WS6: FrameTap::resolveLate
+    void* opResolveSelf_ = nullptr;
     d3d9::Device::OwnedArena ownedArena_;
     bool ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, std::uint32_t viewSlot, std::uint64_t epoch, std::uint32_t scrubStride, std::uint32_t scrubPhase, int& why);
+    // WS9 (frame-ownership.md 14.51): records the owned path refused as out of date are remade at their op's late composition (orec::OpRecord::stale)
+    static bool rebuildStaleOff();
+    bool ownedDelta_ = true;  // native.owned_delta (14.51)
+    std::uint64_t deltaPassesW_ = 0;  // (owned passes with the delta work on, 5 s: the stages line)
+public:
+    void setOwnedDelta(bool on) { ownedDelta_ = on; }
+    bool ownedDeltaOn() const { return ownedDelta_; }
+private:
+    void markStale(const orec::OpRecord& rec, int late);
+    std::uint64_t staleMarked_ = 0, staleRebuilds_ = 0;  // (run totals; the owned static line prints them)
     void ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw);
     bool ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p);
     void ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in);
@@ -1396,7 +1452,7 @@ private:
     void treeCompBatch(std::size_t drawsBefore, std::uint64_t key);
     void treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, const std::uint8_t* lightIllum, std::uint64_t key, bool sun, std::uint32_t slot);
     void treeCompEnd(const Op& op);
-    void treeLightBatches(std::vector<tro::Inst>& out, const std::vector<std::uint64_t>& sigs, std::size_t first, std::size_t end, std::uint8_t limit, bool byStrip);
+    void treeLightBatches(std::vector<tro::Inst>& out, const std::vector<std::uint64_t>& sigs, std::size_t first, std::size_t end, std::uint8_t limit, bool byStrip, bool light);
     bool treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why);
     bool treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass);
     int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase, tro::Stats& W, std::uint64_t& scrubTick, const char* what);
