@@ -1090,6 +1090,7 @@ private:
         std::uint64_t drawWhy[3][4] = {};   // a draw refused: ownedDrawOpPersistent's fallback (0 view, 1 materials, 2 object window, 3 a draw refused)
         std::uint64_t devWhy[3][24] = {};   // ... of the refused draws: the device's derivation codes (ownedReplayStats::why)
         std::uint64_t observer[3] = {}, tableFull[3] = {}, notRetained[3] = {};
+        std::uint64_t notScene[3][128] = {};  // WS7: the first draw without a scene form of an op composed for 'not a scene draw': kind | ordered << 5 | no v2 pipeline << 6
         std::uint64_t runs = 0, lostDraws = 0, flushNs = 0, validNs = 0, prepNs = 0, drawNs = 0, sideNs = 0;
         std::uint64_t bulkNs = 0;  // (14.44: the ordered bulk observers' delivery per op)
         std::uint64_t ns = 0;
@@ -1285,7 +1286,7 @@ public:
     bool ownedDeltaOn() const { return ownedDelta_; }
 private:
     void markStale(const orec::OpRecord& rec, int late);
-    std::uint64_t staleMarked_ = 0, staleRebuilds_ = 0, staleSceneRebuilds_ = 0;  // (run totals; the owned static line prints them)
+    std::uint64_t staleMarked_ = 0, staleRebuilds_ = 0;  // (run totals; the owned static line prints them)
     void ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw);
     bool ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p);
     void ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in);

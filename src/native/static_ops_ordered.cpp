@@ -124,7 +124,14 @@ int StaticOps::orderedValid(const Op& op, const orec::OpRecord& rec) {
     }
     if (recLiveWhy(rec) >= 0) return kOwLive;
     for (const orec::DrawRec& r : rec.draws) {
-        if (!r.scene || r.cd == nullptr || !r.cd->valid) return kOwNotScene;
+        if (!r.scene || r.cd == nullptr || !r.cd->valid) {
+            const std::size_t li = op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2;
+            const std::size_t c = r.cd == nullptr ? 127
+                                                  : std::min<std::size_t>(static_cast<std::size_t>(r.cd->kind), 31) | (r.cd->ordered ? 32u : 0u) |
+                                                        (r.cd->scenePipeline2 == d3d9::GamePipeline::None ? 64u : 0u);
+            ++ordW_.notScene[li][c];
+            return kOwNotScene;
+        }
     }
     return -1;
 }
@@ -397,6 +404,15 @@ void StaticOps::orderedReport() {
         }
         for (std::size_t k = 1; k < std::size(kDev); ++k) {
             if (w.devWhy[l][k] != 0) why += std::format(" <{} {}>", kDev[k], w.devWhy[l][k]);
+        }
+        {
+            std::string ns;
+            for (std::size_t k = 0; k < 128; ++k) {
+                if (w.notScene[l][k] == 0) continue;
+                ns += std::format(" [{} {}{}: {}]", k == 127 ? "no cd" : d3d9::draws::name(static_cast<d3d9::draws::Kind>(k & 31)), (k & 32) != 0 ? "ordered" : "unordered",
+                                  (k & 64) != 0 ? ", no v2 pipeline" : "", w.notScene[l][k]);
+            }
+            if (!ns.empty()) why += " {not scene, first draw:" + ns + "}";
         }
         if (w.observer[l] != 0) why += std::format(" <observer wanted a capture {}>", w.observer[l]);
         if (w.tableFull[l] != 0) why += std::format(" <record table full {}>", w.tableFull[l]);

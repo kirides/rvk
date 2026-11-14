@@ -105,13 +105,12 @@ void StaticOps::stagesReport() {
     }
     {
         // 14.51 (WS9, native.owned_delta): acted = owned passes run with the delta work in the window (+ what it did)
-        static std::uint64_t lastMarked = 0, lastRemade = 0, lastScene = 0;
+        static std::uint64_t lastMarked = 0, lastRemade = 0;
         line += stage("owned_delta", settingOn(rs.nativeOwnedDelta), ownedStatic_ && ownedDelta_, deltaPassesW_,
-                      std::format("{} passes, {} records marked out of date, {} remade, {} remade for a scene form", deltaPassesW_, staleMarked_ - lastMarked, staleRebuilds_ - lastRemade, staleSceneRebuilds_ - lastScene),
+                      std::format("{} passes, {} records marked out of date, {} remade", deltaPassesW_, staleMarked_ - lastMarked, staleRebuilds_ - lastRemade),
                       needsOf(rs.nativeOwnedDelta, {rs.nativeSceneDraws, rs.nativeOwnedStatic}), gateMain);
         lastMarked = staleMarked_;
         lastRemade = staleRebuilds_;
-        lastScene = staleSceneRebuilds_;
         deltaPassesW_ = 0;
     }
     line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained), needsOf(rs.nativeOwnedVegetation, {}));

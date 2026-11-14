@@ -814,6 +814,7 @@ public:
     // state (render thread)
     void setRenderState(std::uint32_t rs, std::uint32_t value);
     std::uint32_t renderState(std::uint32_t rs) const { return rs < RS_COUNT ? rs_[rs] : 0; }
+    const std::uint32_t* renderStateArray() const { return rs_.data(); }  // RS_COUNT entries (native/effect_ops: the bulk capture / compare)
     void setSamplerState(std::uint32_t sampler, std::uint32_t ss, std::uint32_t value);  // sampler: 0..15, 257..260
     std::uint32_t samplerState(std::uint32_t sampler, std::uint32_t ss) const;
     void setTexture(std::uint32_t sampler, Texture* texture);
