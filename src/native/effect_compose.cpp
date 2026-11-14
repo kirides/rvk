@@ -8,6 +8,8 @@
 #include <format>
 #include <memory>
 
+#include <spdlog/spdlog.h>
+
 #include "d3d9/defs.h"
 
 namespace rvk::native::fxc {
@@ -107,7 +109,13 @@ void gatherParams(const fx::Effect& e, const fx::ConstantTable& t, std::vector<s
     }
 }
 
-bool sameRegs(const fx::ConstantRegisters& a, const fx::ConstantRegisters& b) { return a.f == b.f && a.i == b.i && a.b == b.b; }
+template <class V>
+bool sameBits(const V& a, const V& b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(typename V::value_type)) == 0);
+}
+
+// (bitwise: a NaN register is the same register)
+bool sameRegs(const fx::ConstantRegisters& a, const fx::ConstantRegisters& b) { return sameBits(a.f, b.f) && sameBits(a.i, b.i) && sameBits(a.b, b.b); }
 
 const fx::ConstantRegisters& constantsFor(const fx::Effect& e, const fx::Shader& shader, const fx::ParameterValues& values) {
     if (slowPaths()) {
@@ -148,6 +156,22 @@ const fx::ConstantRegisters& constantsFor(const fx::Effect& e, const fx::Shader&
             return c.regs;
         }
         ++g_cstats.differing;
+        if (g_cstats.differing <= 6) {
+            std::string why;
+            const auto first = [&](const char* kind, const auto& x, const auto& y) {
+                if (sameBits(x, y)) return;
+                std::size_t i = 0;
+                while (i < x.size() && i < y.size() && x[i] == y[i]) ++i;
+                why += std::format(" {}[{}] cached {} fresh {} (sizes {} / {});", kind, i, i < x.size() ? static_cast<double>(x[i]) : -1.0,
+                                   i < y.size() ? static_cast<double>(y[i]) : -1.0, x.size(), y.size());
+            };
+            first("f", c.regs.f, c.fresh.f);
+            first("i", c.regs.i, c.fresh.i);
+            first("b", c.regs.b, c.fresh.b);
+            spdlog::info("native: effect constants cache: a cached evaluation differs from the fresh one: shader {} of {} ({}), preshader {}, {} parameters read:{}",
+                         static_cast<std::size_t>(&shader - e.shaders.data()), e.shaders.size(), shader.stage == shader::Stage::Vertex ? "vs" : "ps", shader.preshader,
+                         c.params.size(), why);
+        }
         std::swap(c.regs, c.fresh);
         return c.regs;
     }
