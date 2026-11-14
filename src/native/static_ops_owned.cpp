@@ -689,6 +689,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     bool viewOk = view_.valid;
     if (!viewOk && ownedView_.admin != nullptr) viewOk = composeView(ownedView_.admin);
     const auto tPrep = tnow();
+    g_passPhaseNs[0] += ns(t0, tPrep);
     ++opSerial_;  // (the sampler snapshot of the polls is read afresh)
     // the view's stamp as the admin is now (the pass's state: the admin's type / mode bytes differ between the z and the solid pass)
     const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
@@ -734,6 +735,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         }
         if (!viewWinOk) viewWinOk = gpuscene::windowtables().fillViews(dev_, viewWin, mirror_.adminVs + 12, 0x7ffffu, mirror_.adminVs, mirror_.adminPs);
     }
+    const auto tView = tnow();
+    g_passPhaseNs[1] += ns(tPrep, tView);
     // the device state to give back: shaders, tag, the register file (loaded for the observers that read material constants)
     static float savedVs[d3d9::kVsFloatConsts][4], savedPs[d3d9::kPsFloatConsts][4];
     std::memcpy(savedVs, dev_.vsConstants(), sizeof(savedVs));
@@ -743,6 +746,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
     W.prepNs += ns(tPrep, tnow());
+    const auto tSave = tnow();
+    g_passPhaseNs[2] += ns(tView, tSave);
     ownedAmbient_.clear();
     ownedCache_.mat.clear();
     ownedCache_.light.clear();
@@ -793,6 +798,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
             }
         }
     }
+    const auto tLoop = tnow();
+    g_passPhaseNs[3] += ns(tSave, tLoop);
     // an owned op composed where the engine's slot would have run it (the record is rebuilt from this composition)
     const auto composeLate = [&](Op& op, int why) {
         ++W.fallback[why];
@@ -925,6 +932,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         }
     }
     flushItems();
+    const auto tLoopEnd = tnow();
+    g_passPhaseNs[4] += ns(tLoop, tLoopEnd);
     if (persistent && mainView) {
         const auto tb = tnow();
         dev_.ownedBulkFlush(true);  // F2c-4b: the end of the pass (the left list)
@@ -948,6 +957,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         m.maxDrawsPerPass[k] = std::max<std::uint64_t>(m.maxDrawsPerPass[k], drawn);
         m.maxOpsPerPass[k] = std::max<std::uint64_t>(m.maxOpsPerPass[k], opsInPass);
     }
+    g_passPhaseNs[5] += ns(tLoopEnd, tnow());
+    ++g_passPhaseCount[0];
+    g_passPhaseCount[1] += persistent ? 1 : 0;
+    g_passPhaseCount[2] += opsInPass;
     const std::uint64_t total = ns(t0, tnow());
     const std::uint64_t sub = (W.submitNs - submit0) + (W.sideNs - side0) + (W.matNs - mat0);
     W.buildNs += total > sub ? total - sub : 0;

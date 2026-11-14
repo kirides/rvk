@@ -127,6 +127,44 @@ int readStaticLight(const void* payload, const void* ptfv, const void* ambfv, fl
     return 2;
 }
 
+// WS15: the per-call re-read of the kept static lights (2,500 at pub_interior, every frame) in ONE guarded region instead of one SEH call + 120-byte copy per light: the same
+// fields, the same arithmetic, the same filter as readStaticLight + `reaches`, written to `out` (capacity n). Plain data only (a function holding a __try cannot unwind objects).
+// -1 = a read faulted somewhere (a freed light: the caller redoes the whole list with the per-light guarded reads, which skip the unreadable ones as before)
+std::atomic<bool> g_fastStaticOffA{false};
+int readStaticLightsFast(const char* const* payloads, std::size_t n, const void* ptfv, const void* ambfv, float scale, const float center[3], float radius, WorldLight* out) {
+    int kept = 0;
+    __try {
+        for (std::size_t i = 0; i < n; ++i) {
+            const char* p = payloads[i];
+            if (p == nullptr) continue;
+            const void* vt = *reinterpret_cast<const void* const volatile*>(p);
+            if (vt != ptfv && vt != ambfv) continue;
+            const float intensity = *reinterpret_cast<const volatile float*>(p + kLightIntensity);
+            const float range = *reinterpret_cast<const volatile float*>(p + kLightRange);
+            const float k = intensity * scale * kDrawShare;
+            if (!(range > 0.0f && range < 1e6f && k > 0.0f && std::isfinite(k))) continue;
+            const volatile float* rgb = reinterpret_cast<const volatile float*>(p + kLightRgb);
+            const volatile float* pos = reinterpret_cast<const volatile float*>(p + (vt == ptfv ? kPointPos : kAmbientPos));
+            WorldLight& l = out[kept];
+            l.pos[0] = pos[0];
+            l.pos[1] = pos[1];
+            l.pos[2] = pos[2];
+            l.range = range;
+            l.ambient = vt == ambfv;
+            l.dynamic = false;
+            l.col[0] = rgb[0] * k;
+            l.col[1] = rgb[1] * k;
+            l.col[2] = rgb[2] * k;
+            const float dx = l.pos[0] - center[0], dy = l.pos[1] - center[1], dz = l.pos[2] - center[2];
+            const float reach = radius + l.range;
+            if (dx * dx + dy * dy + dz * dz <= reach * reach) ++kept;
+        }
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        return -1;
+    }
+    return kept;
+}
+
 void walkStatics(const char* admin, const float center[3], float radius, StaticCache& c) {
     c.lights.clear();
     c.walkStats = {};
@@ -190,6 +228,8 @@ void walkStatics(const char* admin, const float center[3], float radius, StaticC
 
 }  // namespace
 
+void setFastStatic(bool on) { g_fastStaticOffA.store(!on, std::memory_order_relaxed); }
+
 bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
     out.clear();
     stats = {};
@@ -241,11 +281,22 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
             _mm_prefetch(payload, _MM_HINT_T0);
             _mm_prefetch(payload + 64, _MM_HINT_T0);
         }
-        for (const char* payload : c.lights) {
-            WorldLight l;
-            if (readStaticLight(payload, ptfv, ambfv, scale, l) != 2 || !reaches(l.pos, l.range)) continue;
-            ++stats.staticNear;
-            out.push_back(l);
+        static thread_local std::vector<WorldLight> fast;
+        int kept = -1;
+        if (!g_fastStaticOffA.load(std::memory_order_relaxed) && !c.lights.empty()) {
+            if (fast.size() < c.lights.size()) fast.resize(c.lights.size());
+            kept = readStaticLightsFast(c.lights.data(), c.lights.size(), ptfv, ambfv, scale, center, radius, fast.data());
+        }
+        if (kept >= 0) {
+            stats.staticNear += static_cast<std::uint32_t>(kept);
+            out.insert(out.end(), fast.begin(), fast.begin() + kept);
+        } else {
+            for (const char* payload : c.lights) {
+                WorldLight l;
+                if (readStaticLight(payload, ptfv, ambfv, scale, l) != 2 || !reaches(l.pos, l.range)) continue;
+                ++stats.staticNear;
+                out.push_back(l);
+            }
         }
     }
 

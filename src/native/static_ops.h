@@ -198,6 +198,7 @@ public:
     void ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs);
     // BeginZPass / DoBeginRenderSolid of the main view returned: the pass's owned ops are drawn; returns the draws made (owned + late compositions)
     std::uint32_t ownedPass(bool solid);
+    std::size_t ownedPending(bool solid) const { return ownedOps_[solid ? 1 : 0].size(); }  // WS15 diagnostics
     // native.owned_billboards (frame-ownership.md 7.17, F4-1): the tree billboard ops retained as records, compared / drawn from them (needs owned windows, lighting images, scene draws)
     void setOwnedBillboards(bool on);
     // native.owned_vegetation (frame-ownership.md 7.40, F7-1): the vegetation ops' instance streams are retained per op in a persistent GPU buffer (valid while the op's
