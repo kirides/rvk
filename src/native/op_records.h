@@ -248,6 +248,9 @@ struct OpRecord {
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;
+    // WS10 (frame-ownership.md 14.50): the owned path refused a draw of this record for a reason that makes it stale (stale module, variant, binding, texture, scene form / no v2
+    // form); the op is composed late, and that composition remakes the record (recDraw) - with native.owned_check = 0 no check frame ever did. builtFrame (set when the record is made) rate-limits the remake.
+    mutable bool ownedRefused = false;
     mutable std::uint64_t lastSeen = 0;            // F3-1: the frame the op was last looked at (a shadow view's records age out: a cascade sees different ops as the camera moves)
     // F2e-1 (frame-ownership.md 7.30): event-driven validity. `deps` = the engine objects the stamp's engine reads hang on (the LOD resource, the covered sub-meshes' materials,
     // the lightmap images, the illumination PS), registered in the DepIndex (object -> records); an engine event on one marks `dirty` and the next look re-verifies the full stamp

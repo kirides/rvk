@@ -599,6 +599,20 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
             }
         }
     }
+    // WS10 (frame-ownership.md 14.50): the owned path refused a draw of this record as out of date (stale module / variant / binding / texture / scene form: it flags the record) and
+    // this composition is that op's late one: remake the record from it, not at a check frame that owned_check = 0 never has. At most once per kWs10Gap frames per record (a refusal that
+    // persists after a remake - a texture still not sampleable - must not rebuild every frame)
+    {
+        static const bool ws10Off = GetEnvironmentVariableA("RVK_WS10_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour)
+        constexpr std::uint64_t kWs10Gap = 20;
+        if (!ws10Off && !R.refused && R.cur->ownedRefused && !R.cur->actor) {
+            if (dev_.stats().frames - R.cur->builtFrame >= kWs10Gap) {
+                R.cur->ownedRefused = false;
+                R.refused = true;
+                ++R.stats(R.key.view != 0).refused[9];
+            }
+        }
+    }
     // 7.27: the derivation + compare of a valid record is verification: check frames only (the record's validity is the stamps' job, the audit's net and the
     // owned path's own derivation; a refused derive on another frame remakes the record at the next check frame)
     if (!gpuscene::verifyFrame() && !(R.key.view != 0 && ownedShadowCheck_)) return;  // (F3-1: a cascade's check view is decided by the cascades' own frame count)

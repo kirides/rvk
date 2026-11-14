@@ -77,6 +77,9 @@ constexpr const char* kLateNames[] = {"other", "material stamp / poll", "view wi
 static_assert(std::size(kLateNames) == kLateCount);
 static_assert(kLateCount <= 20);  // (StaticOps::OwnedStats::kLate)
 
+// WS10: a refusal that says the record's retained draw is out of date (stale module, variant gate, binding, texture, scene form, no v2 form): the record is remade by the next composition
+bool staleRefusal(int rc) { return rc == 1 || rc == 4 || rc == 6 || rc == 7 || rc == 9 || rc == 16; }
+
 // a derivation's refusal code (Device::replayOwned / ownedDerive) -> Late
 int lateOfCode(const d3d9::Device& dev, const d3d9::Device::CachedDraw& c, int rc) {
     switch (rc) {
@@ -660,6 +663,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         if (rc != 0) {
             why = kFbRefused;
             lateDetail_ = lateOfCode(dev_, cd, rc);
+            if (staleRefusal(rc)) rec.ownedRefused = true;  // (WS10: the composition of the op remakes the record)
             tag = baseTag;
             return false;
         }
@@ -1214,6 +1218,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             restoreTag();
             why = kFbRefused;
             lateDetail_ = (cd.vs != nullptr && cd.ps != nullptr && cd.vs->module == cd.vsModule && cd.ps->module == cd.fsModule) ? kLateNotAllowed : kLateModule;
+            if (lateDetail_ == kLateModule) rec.ownedRefused = true;  // (WS10)
             return false;
         }
         bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig && P.viewSlot == viewSlot;
@@ -1241,6 +1246,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
                 restoreTag();
                 why = kFbRefused;
                 lateDetail_ = lateOfCode(dev_, cd, rc);
+                if (staleRefusal(rc)) rec.ownedRefused = true;  // (WS10)
                 return false;
             }
             if (scrub) {
