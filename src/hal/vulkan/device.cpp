@@ -851,6 +851,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     enh::setPbrVariants(!packRoots.empty() || (clusterLights && rs.lightingStyle != nullptr && rs.lightingStyle->asEnum() == "physical"));
     if (rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && !clusterLights) spdlog::info("enh: lights: lighting.clustered applies in Full mode only");
     enh::setClusterVariants(clusterLights);
+    enh::setOccupancyCompareVariants(clusterLights && rs.lightingOccupancy != nullptr && rs.lightingOccupancy->asEnum() == "compare");
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (!packRoots.empty()) {
