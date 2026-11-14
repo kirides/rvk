@@ -781,7 +781,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
         for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtRange, rs.rtShadowSync, rs.shadowsEnabled, rs.shadowsFilter,
-                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.rtReflectionTweaks}) {
+                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsFit, rs.rtReflectionTweaks}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
@@ -1294,6 +1294,7 @@ void HalDevice::applyShadows() {
     const float metres = rs.shadowsRange->asFloat();
     o.range = metres > 0.0f ? metres * 100.0f : (s.enabled ? 10000.0f : 0.0f);
     o.splitFactor = o.range > 0.0f ? frozen::kShadowSplit : -1.0f;
+    o.fit = s.enabled && rs.shadowsFit != nullptr && rs.shadowsFit->asEnum() == "sphere" ? 1 : 0;
     engine::shadowmaps::setOverrides(o);
     spdlog::info("hal: settings: shadow cascades: map size {}, range {}, split factor {}", o.mapSize > 0 ? std::to_string(o.mapSize) : "game",
                  o.range > 0.0f ? std::format("{:.0f} m", o.range / 100.0f) : std::string("game"),

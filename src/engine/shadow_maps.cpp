@@ -1,15 +1,19 @@
 #include "engine/shadow_maps.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 
+#include <windows.h>
+
 #include <spdlog/spdlog.h>
 
 #include "core/hooks.h"
 #include "d3d9/device.h"
+#include "engine/memread.h"
 #include "engine/scene_hooks.h"
 #include "engine/symbols.h"
 
@@ -32,6 +36,10 @@ std::atomic<bool> g_sunKnown{false};
 std::atomic<float> g_trueSun[3]{};
 std::atomic<bool> g_trueSunKnown{false};
 std::atomic<const void*> g_cascadeObject{nullptr};
+std::atomic<int> g_fit{0};
+std::atomic<bool> g_fitActive{false};
+FitInfo g_lastFit[4];
+float g_loggedSide[4]{};
 
 // the throttle's memory (render thread): the camera (inverse view: rows 0..2 the axes, row 3 the position) of the last real update
 struct Throttle {
@@ -97,6 +105,108 @@ void detourLightUpdate(void* self) {
 }
 
 std::atomic<void (*)(void*)> g_fitTap{nullptr};
+
+// ---- the fit override (shadows.md 8): a pre-hook of eCShadowMapDirectionalLight2::UpdateCamera (0x5a13e0) rewrites the split's light
+// box (+0xe0: min xyz, +0xec: max xyz, in the split's light view +0x60) before the engine builds its camera, projection (with its own
+// texel snap) and texture matrix from it, so every consumer (cascade draws, mask, RT shadows, owned cascades) sees one consistent
+// fit. The caster-cull beam (+0x100: the slice frustum, swept along the light by the beam tree) does not depend on the box and stays
+// valid: our box lies inside the engine's cube.
+constexpr std::uint32_t kUpdateCameraRva = 0x5a13e0, kCascadeVtableRva = 0x9a29e0;
+constexpr std::size_t kSplitStride = 0x168;
+
+using UpdateCameraFn = bool (*)(void* self, int face);
+Hook<UpdateCameraFn> g_updateCamera;
+const std::uint8_t* g_engineBase = nullptr;
+
+using Mat = std::array<double, 16>;  // row-major, row vectors (D3D / bCMatrix)
+
+bool invert(const float* m, Mat& out) {
+    double a[16];
+    for (int i = 0; i < 16; ++i) a[i] = m[i];
+    double inv[16];
+    inv[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
+    inv[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
+    inv[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
+    inv[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
+    inv[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
+    inv[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
+    inv[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
+    inv[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
+    inv[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
+    inv[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
+    inv[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
+    inv[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
+    inv[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
+    inv[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
+    inv[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
+    inv[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
+    const double det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    if (!(std::fabs(det) > 1e-30)) return false;
+    for (std::size_t i = 0; i < 16; ++i) out[i] = inv[i] / det;
+    return true;
+}
+
+void transformPoint(const Mat& m, const double p[3], double out[3]) {
+    for (std::size_t c = 0; c < 3; ++c) out[c] = p[0] * m[c] + p[1] * m[4 + c] + p[2] * m[8 + c] + m[12 + c];
+}
+
+bool detourUpdateCamera(void* self, int face) {
+    const int mode = g_fit.load(std::memory_order_relaxed);
+    void* cascade = const_cast<void*>(g_cascadeObject.load(std::memory_order_relaxed));
+    bool done = false;
+    if (mode > 0 && self != nullptr && cascade != nullptr && g_engineBase != nullptr && sym().appInstancePtr != nullptr) {
+        std::uintptr_t vt = 0;
+        std::memcpy(&vt, self, sizeof vt);
+        const auto* splits = field<std::uint8_t*>(cascade, 0x30);
+        const int count = field<int>(cascade, kSplitCount);
+        auto* me = static_cast<std::uint8_t*>(self);
+        const std::ptrdiff_t off = splits != nullptr ? me - splits : -1;
+        const std::ptrdiff_t stride = static_cast<std::ptrdiff_t>(kSplitStride);
+        if (vt == reinterpret_cast<std::uintptr_t>(g_engineBase + kCascadeVtableRva) && off >= 0 && off % stride == 0 && off / stride < count && count <= 4) {
+            const int idx = static_cast<int>(off / stride);
+            const float n = field<float>(self, 0x160);
+            const float f = idx + 1 < count ? field<float>(const_cast<std::uint8_t*>(splits) + (idx + 1) * stride, 0x160) : field<float>(cascade, kMaxDistance);
+            const std::uint8_t* appObj = nullptr;
+            std::memcpy(&appObj, sym().appInstancePtr, sizeof appObj);
+            const std::uint8_t* cam = nullptr;
+            if (appObj != nullptr) {
+                safeRead(appObj + 0x38, &cam, sizeof cam);
+                if (cam == nullptr) safeRead(appObj + 0xc8, &cam, sizeof cam);
+            }
+            float proj[16], view[16], light[16], box[6];
+            if (cam != nullptr && n >= 0.0f && f > n && safeRead(cam + 0x50, proj, sizeof proj) && safeRead(cam + 0x10, view, sizeof view) &&
+                safeRead(me + 0x60, light, sizeof light) && safeRead(me + 0xe0, box, sizeof box) && std::fabs(proj[0]) > 1e-6f && std::fabs(proj[5]) > 1e-6f) {
+                const SliceSphere ss = minimalSphere(1.0f / std::fabs(proj[0]), 1.0f / std::fabs(proj[5]), n, f);
+                Mat invV, invL;
+                if (invert(view, invV) && invert(light, invL) && ss.radius > 0.0f) {
+                    const double c[3] = {0.0, 0.0, static_cast<double>(ss.centreZ)};
+                    double w[3], l[3];
+                    transformPoint(invV, c, w);
+                    transformPoint(invL, w, l);
+                    // GD3D11: the radius rounded up to 1/16, so float noise of the projection never rescales the map
+                    const float r = std::ceil(ss.radius * 16.0f) / 16.0f;
+                    const float engineSide = box[3] - box[0];
+                    const float nb[6] = {static_cast<float>(l[0]) - r, static_cast<float>(l[1]) - r, box[2], static_cast<float>(l[0]) + r, static_cast<float>(l[1]) + r,
+                                         static_cast<float>(l[2]) + r};
+                    if (std::isfinite(nb[0]) && std::isfinite(nb[5]) && 2.0f * r <= engineSide * 1.001f) {
+                        std::memcpy(me + 0xe0, nb, sizeof nb);
+                        done = true;
+                        const int size = field<int>(self, 0xc);
+                        g_lastFit[idx] = FitInfo{engineSide, 2.0f * r, size};
+                        if (std::fabs(g_loggedSide[idx] - 2.0f * r) > 0.01f * r) {
+                            g_loggedSide[idx] = 2.0f * r;
+                            spdlog::info("enh: shadows: fit sphere: cascade {} {:.0f} .. {:.0f}: box side {:.1f} (engine {:.1f}) cm, {:.3f} cm per texel (engine {:.3f}) at {}^2, x{:.2f}",
+                                         idx, n, f, 2.0f * r, engineSide, 2.0f * r / static_cast<float>(std::max(size, 1)), engineSide / static_cast<float>(std::max(size, 1)),
+                                         size, engineSide / (2.0f * r));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (done) g_fitActive.store(true, std::memory_order_relaxed);
+    return g_updateCamera.original(self, face);
+}
 
 bool detourRender(void* self) {
     if (self != nullptr) {
@@ -195,6 +305,12 @@ void setOverrides(const Overrides& o) {
     g_size.store(o.mapSize, std::memory_order_relaxed);
     g_range.store(o.range, std::memory_order_relaxed);
     g_factor.store(o.splitFactor, std::memory_order_relaxed);
+    const int fit = std::clamp(o.fit, 0, 1);
+    if (fit != g_fit.exchange(fit, std::memory_order_relaxed)) {
+        if (fit == 0) g_fitActive.store(false, std::memory_order_relaxed);
+        for (float& v : g_loggedSide) v = 0.0f;
+        spdlog::info("enh: shadows: cascade fit {}", fit == 0 ? "engine" : "sphere");
+    }
 }
 
 bool sunVector(float out[3]) {
@@ -209,6 +325,21 @@ bool trueSunVector(float out[3]) {
     return true;
 }
 
+SliceSphere minimalSphere(float tanX, float tanY, float n, float f) {
+    SliceSphere s;
+    const float k = tanX * tanX + tanY * tanY;
+    float zc = 0.5f * (f + n) * (1.0f + k);  // the depth where the near and far corners are equally far
+    zc = std::clamp(zc, n, f);
+    const float rn = std::sqrt((zc - n) * (zc - n) + n * n * k), rf = std::sqrt((f - zc) * (f - zc) + f * f * k);
+    s.centreZ = zc;
+    s.radius = std::max(rn, rf);
+    return s;
+}
+
+bool fitOverridden() { return g_fit.load(std::memory_order_relaxed) > 0 && g_fitActive.load(std::memory_order_relaxed); }
+
+FitInfo lastFit(int cascade) { return cascade >= 0 && cascade < 4 ? g_lastFit[cascade] : FitInfo{}; }
+
 void setFitTap(void (*tap)(void* cascadeObject)) { g_fitTap.store(tap, std::memory_order_release); }
 
 bool install() {
@@ -219,6 +350,18 @@ bool install() {
     }
     g_setSize = reinterpret_cast<SetIntFn>(s.cascadeSetShadowMapSize);
     g_setCount = reinterpret_cast<SetIntFn>(s.cascadeSetSplitCount);
+    g_engineBase = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(L"Engine.dll"));
+    if (g_engineBase != nullptr) {
+        // the cascade splits' vtable slot +0x160 must be UpdateCamera: the pre-hook is only valid for this function
+        std::uintptr_t slot = 0;
+        std::memcpy(&slot, g_engineBase + kCascadeVtableRva + 0x160, sizeof slot);
+        if (slot == reinterpret_cast<std::uintptr_t>(g_engineBase + kUpdateCameraRva)) {
+            g_updateCamera.install("eCShadowMapDirectionalLight2::UpdateCamera",
+                                   reinterpret_cast<UpdateCameraFn>(const_cast<std::uint8_t*>(g_engineBase) + kUpdateCameraRva), &detourUpdateCamera);
+        } else {
+            spdlog::warn("engine: eCShadowMapDirectionalLight2::UpdateCamera is not where it was verified: shadows.fit has no effect");
+        }
+    }
     if (s.cascadeRenderShadowMaps == nullptr) {
         spdlog::warn("engine: eCCascadeShadowMap::RenderShadowMaps not found: shadow map size / range settings have no effect");
         return false;

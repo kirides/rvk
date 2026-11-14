@@ -1523,6 +1523,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
+    r.shadowsFit = &reg.add({
+        .key = "shadows.fit",
+        .label = "Shadow map fit",
+        .category = "Shadows",
+        .description = "How tightly the sun's shadow maps are fitted around what the camera sees. Tight: a smaller, steadier fit "
+                       "(sharper shadows at the same resolution, or the same sharpness at a lower one). Game: the game's own fit.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"engine", "sphere"},
+        .optionLabels = {"Game", "Tight"},
+        .flags = Flag::Advanced,
+        .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
+    });
     r.shadowsRt = &reg.add({
         .key = "shadows.rt",
         .label = "Ray-traced shadows",

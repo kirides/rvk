@@ -22,6 +22,29 @@ TEST(shadows_engine_split_formula) {
     CHECK(std::fabs(sm::splitStart(5000.0f, 0.65f, 2, 3) - 2269.0f) < 2.0f);
 }
 
+TEST(shadows_minimal_sphere_covers_slice) {
+    namespace sm = engine::shadowmaps;
+    for (float tx : {0.6f, 1.0f, 1.8f}) {
+        for (float ty : {0.5f, 0.75f, 1.0f}) {
+            const float n = 1.0f, f = 1347.0f;
+            const sm::SliceSphere s = sm::minimalSphere(tx, ty, n, f);
+            CHECK(s.centreZ >= n && s.centreZ <= f);
+            // every corner of the slice lies inside the sphere, and the farthest sits ON it
+            float maxd = 0.0f;
+            for (float z : {n, f})
+                for (float sx : {-1.0f, 1.0f})
+                    for (float sy : {-1.0f, 1.0f}) {
+                        const float dx = sx * tx * z, dy = sy * ty * z, dz = z - s.centreZ;
+                        maxd = std::fmax(maxd, std::sqrt(dx * dx + dy * dy + dz * dz));
+                    }
+            CHECK(std::fabs(maxd - s.radius) < 1e-3f * s.radius);
+            // never larger than the sphere around the far plane's centre
+            const float k = tx * tx + ty * ty;
+            CHECK(s.radius <= std::fmax(f * std::sqrt(k), std::sqrt((f - n) * (f - n) + n * n * k)) + 1e-3f);
+        }
+    }
+}
+
 TEST(shadows_hardware_z_to_depth_map) {
     // a D3D left-handed perspective projection, near 25, far 60000 (High): z' = (z f / (f - n) - n f / (f - n)) / z
     d3d9::scene::Mat4 p{};
