@@ -393,7 +393,11 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     // light in reach no slot is refilled, no kept slot has a table twin (no physical ratio, no shadow id), no lamp shadow darkens the baked light, and an
     // unkept slot's colour is zero already. Debug views keep the full path (they show its bookkeeping).
     const float4 occP = f.params[8];  // kFrameParamLightOcc: z mode (0 off, 1 on, 2 compare)
+#ifdef RVK_MV_OCC_COMPARE
     const uint occMode = uint(occP.z + 0.5);
+#else
+    const uint occMode = min(uint(occP.z + 0.5), 1u);  // (compare needs its code compiled in: its counter writes are side effects that switch off the early depth test)
+#endif
     const bool shortcut = occMode != 0u && ctl.z < 0.5 && !rvkLightClusterOccupied(base, cid);
     if (shortcut && occMode == 1u) {
         rvk_clCount = 0u;
@@ -543,6 +547,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     }
     // lighting.occupancy = compare: the full path ran for a pixel the shortcut would take; its slots must be what the shortcut leaves (src 0, factor 1, or an
     // unkept slot whose colour is zero), no shadow / bake state, count 0
+#ifdef RVK_MV_OCC_COMPARE
     if (shortcut) {
         uint bad = cnt != 0u ? 2u : 0u;
         if (cnt != 0u) bad |= 0x100u;
@@ -564,6 +569,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
             }
         }
     }
+#endif
 }
 #endif
 

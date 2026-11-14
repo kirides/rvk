@@ -16,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/caps.h"
+#include "enh/material_variant.h"
 #include "enh/rhi_scope.h"
 #include "gpuscene/verify.h"
 #include "enh/rt_scene.h"
@@ -332,7 +333,10 @@ void LightTable::setOccupancy(int mode) {
     if (failed_) return;
     std::uint32_t ref[2]{};
     if (occMode_ == 2) {
-        if (dev_.rhi() == nullptr || dev_.rhi()->caps().backend != rhi::Backend::Vulkan) {
+        if (!occupancyCompareVariants()) {
+            spdlog::warn("enh: lights: lighting.occupancy compare needs a session started with it (the compare code is only compiled into the variants then): using on");
+            occMode_ = 1;
+        } else if (dev_.rhi() == nullptr || dev_.rhi()->caps().backend != rhi::Backend::Vulkan) {
             spdlog::warn("enh: lights: lighting.occupancy compare needs Vulkan: using on");
             occMode_ = 1;
         } else if (!occCmp_) {

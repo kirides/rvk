@@ -14,11 +14,14 @@ using d3d9::Semantic;
 namespace {
 bool g_pbr = false;
 bool g_cluster = false;
+bool g_occCompare = false;
 }
 void setPbrVariants(bool on) { g_pbr = on; }
 bool pbrVariants() { return g_pbr; }
 void setClusterVariants(bool on) { g_cluster = on; }
 bool clusterVariants() { return g_cluster; }
+void setOccupancyCompareVariants(bool on) { g_occCompare = on; }
+bool occupancyCompareVariants() { return g_occCompare; }
 
 std::string materialVariantTag(std::string_view base) {
     std::uint64_t h = 1469598103934665603ull;
@@ -28,7 +31,7 @@ std::string materialVariantTag(std::string_view base) {
             h *= 1099511628211ull;
         }
     }
-    return std::format("{}{}{}{:08x}", base, g_pbr ? "-pbr" : "", g_cluster ? "-cl" : "", static_cast<std::uint32_t>(h ^ (h >> 32)));
+    return std::format("{}{}{}{}{:08x}", base, g_pbr ? "-pbr" : "", g_cluster ? "-cl" : "", g_cluster && g_occCompare ? "-oc" : "", static_cast<std::uint32_t>(h ^ (h >> 32)));
 }
 
 bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o, GbufferOutputs outputs) {
@@ -66,6 +69,7 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
         defines += std::format("#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG {}\n#define RVK_MV_CL_COUNT {}\n#define RVK_MV_CL_PARAM {}\n", pntLights.reg, clCount,
                                shader::abi::kFrameParamLights);
     }
+    if (cluster && g_occCompare) defines += "#define RVK_MV_OCC_COMPARE 1\n";
     if (gbuffer) defines += "#define RVK_MV_GBUFFER 1\n";
     if (outNormal) defines += "#define RVK_MV_GB_NORMAL 1\n";
     if (outMotion) defines += "#define RVK_MV_GB_MOTION 1\n";
