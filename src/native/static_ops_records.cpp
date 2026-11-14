@@ -333,7 +333,12 @@ void StaticOps::recEnter(const Op& op) {
         recAudit(op);
     }
     R.wantOwnable = ownedStatic_ && R.cur != nullptr && !R.cur->ownable;
-    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable;
+    if (R.cur != nullptr && R.cur->stale && ownedDelta_ && !rebuildStaleOff()) {
+        // WS9: the owned path found the record out of date (orec::OpRecord::stale): remade from this composition
+        R.refused = true;
+        ++staleRebuilds_;
+    }
+    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable || R.refused;
     recCollect_ = ownedStatic_;  // (the touches / stream 3 lists of every composed eligible op: a record can be made from any composition)
     if (R.building) {
         R.readLog = {};
@@ -582,6 +587,13 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     R.probes[k] = R.probe;
     R.pkeys[k] = pkey;
     if (R.cur == nullptr || k >= R.cur->draws.size()) return;
+    // WS9 (14.51): a record whose draw was not a scene draw when it was made (its scene form still being built) while the composition's draw is one now: out of date, remade
+    // from this composition (the check frames' derivation below finds the same: "scene form: derived false vs composed true"; without check frames, a player's
+    // native.owned_check = 0, such a record kept its op on the engine path for the whole session). No derivation needed: the probe says it
+    if (!R.cur->draws[k].scene && R.probe.valid && !R.refused && ownedDelta_ && !rebuildStaleOff()) {
+        R.refused = true;
+        ++staleSceneRebuilds_;
+    }
     // 7.27: the derivation + compare of a valid record is verification: check frames only (the record's validity is the stamps' job, the audit's net and the
     // owned path's own derivation; a refused derive on another frame remakes the record at the next check frame)
     if (!gpuscene::verifyFrame() && !(R.key.view != 0 && ownedShadowCheck_)) return;  // (F3-1: a cascade's check view is decided by the cascades' own frame count)

@@ -254,6 +254,10 @@ struct OpRecord {
     // (clean again when it still holds). `shaders` = the covered shaders with their field fingerprint (no event exists for a shader's property fields: polled once per shader and
     // frame). `lightEpoch` = depevents::lightEpoch when the stamp was last verified (a changed light set re-verifies every record once).
     mutable bool dirty = false;
+    // WS9 (frame-ownership.md 14.51): the owned path refused a draw of this record for a reason a fresh composition removes (its retained packet was made while the
+    // scene forms were pending, a module / variant moved since): the op's late composition remakes the record (recEnter), as a check frame's refused derivation
+    // would. Without it a player (native.owned_check = 0: no check frames) kept such records for the whole session and composed their ops late every frame
+    mutable bool stale = false;
     std::uint64_t lightEpoch = 0;
     std::vector<const void*> deps;
     std::vector<std::pair<const void*, std::uint64_t>> shaders;
