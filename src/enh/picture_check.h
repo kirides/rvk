@@ -78,6 +78,11 @@ private:
         std::uint64_t worstFrame = 0;  // the worst owned view: its frame, colour / depth pixels, box
         std::uint32_t worstColor = 0, worstDepth = 0;
         std::uint32_t box[4] = {};
+        // 16.14: the cycle's youngest compared owned view (the smallest age): an OPEN cycle (no closing control: the reference was replaced after a camera move, a
+        // light change, a frame jump) is judged by it, not by its worst view: a scene change the pairing cannot see (rvkcompare un-hiding the NPCs at the unfreeze,
+        // set_game_time, streaming after a teleport) shows in the later views only, while an ownership difference is there from the first view on
+        std::uint64_t firstFrame = 0;
+        std::uint32_t firstPixels = 0, firstFrom = 0;
     };
     void record(d3d9::PassContext& ctx);
     void collect();
@@ -120,6 +125,8 @@ private:
     std::uint64_t skippedNoRef_ = 0, skippedCamera_ = 0, skippedLight_ = 0, skippedOther_ = 0, skippedSettle_ = 0, droppedSkips_ = 0, composedFrames_ = 0, ownedFrames_ = 0;
     std::uint64_t jumps_ = 0;                                       // frame-value jumps this window
     std::uint64_t cyclesJudged_ = 0, cyclesFailed_ = 0, cyclesOpenJudged_ = 0;  // this window
+    std::uint64_t openLater_ = 0;   // 16.14: open cycles whose first view passed but a later one would have failed (a scene change in the cycle: no verdict), this window
+    bool openWorst_ = false;        // RVK_PICTURE_OPEN_WORST=1: open cycles judged by their worst view (the rule before 16.14)
     double failWorst_ = 0.0, failControl_ = 0.0;                    // the worst failed cycle: its owned share and its control's
     std::uint64_t okWindows_ = 0, failedWindows_ = 0, ownedTotal_ = 0, ownedTotalDiffering_ = 0, windows_ = 0;
     double lastReport_ = 0.0;

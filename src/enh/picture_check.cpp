@@ -53,6 +53,7 @@ PictureCheck::PictureCheck(d3d9::Device& device) : dev_(device) {
     }
     if (GetEnvironmentVariableA("RVK_PICTURE_DUMP_MIN", buf, sizeof(buf)) != 0) dumpMin_ = std::atof(buf);
     ignoreLight_ = GetEnvironmentVariableA("RVK_PICTURE_IGNORE_LIGHT", nullptr, 0) != 0;
+    openWorst_ = GetEnvironmentVariableA("RVK_PICTURE_OPEN_WORST", nullptr, 0) != 0;
     if (GetEnvironmentVariableA("RVK_PICTURE_FAKE_OWNED", buf, sizeof(buf)) != 0) fakeOwned_ = static_cast<std::uint32_t>(std::max(0, std::atoi(buf)));
     if (GetEnvironmentVariableA("RVK_PICTURE_TRACE", buf, sizeof(buf)) != 0) traceLeft_ = std::max(0, std::atoi(buf));
     dumpEver_ = dumpLeft_ > 0 || dumpTo_ != 0;
@@ -332,15 +333,28 @@ void PictureCheck::collect() {
 }
 
 void PictureCheck::judge(const Cycle& c, double controlShare, bool closed) {
-    const double share = c.worstFrom != 0 ? static_cast<double>(c.worstPixels) / static_cast<double>(c.worstFrom) : 0.0;
+    const double worst = c.worstFrom != 0 ? static_cast<double>(c.worstPixels) / static_cast<double>(c.worstFrom) : 0.0;
+    // (16.14: a closed cycle's control spans its whole age; an open cycle has no composed pair over its time, so only its youngest view is judged)
+    const double first = c.firstFrom != 0 ? static_cast<double>(c.firstPixels) / static_cast<double>(c.firstFrom) : 0.0;
+    const double share = closed || openWorst_ ? worst : first;
     ++(closed ? cyclesJudged_ : cyclesOpenJudged_);
-    if (share > kShareTol && share > 3.0 * controlShare) {
+    const auto fails = [&](double s) { return s > kShareTol && s > 3.0 * controlShare; };
+    if (!closed && !openWorst_ && !fails(first) && fails(worst)) {
+        ++openLater_;
+        if (failLines_++ < 8) {
+            spdlog::info("native: owned picture check: open cycle of reference frame {}: first owned view frame {} (age {}) {:.4f} %, a later one frame {} (age {}) {:.4f} % against the "
+                         "window's control {:.4f} %: a scene change during the cycle, no verdict",
+                         c.ref, c.firstFrame, c.firstFrame - c.ref, 100.0 * first, c.worstFrame, c.worstFrame - c.ref, 100.0 * worst, 100.0 * controlShare);
+        }
+    }
+    if (fails(share)) {
         ++cyclesFailed_;
         if (failLines_++ < 8) {
             spdlog::info("native: owned picture check: FAILED cycle of reference frame {}: worst owned view frame {} (age {}) {} pixels = {:.4f} % (colour {}, depth {}), box [{},{}..{},{}], "
-                         "{} owned views; its control {:.4f} % ({})",
-                         c.ref, c.worstFrame, c.worstFrame - c.ref, c.worstPixels, 100.0 * share, c.worstColor, c.worstDepth, c.box[0], c.box[1], c.box[2], c.box[3], c.views,
-                         100.0 * controlShare, closed ? "the closing control" : "the window's worst control");
+                         "{} owned views; its control {:.4f} % ({}){}",
+                         c.ref, c.worstFrame, c.worstFrame - c.ref, c.worstPixels, 100.0 * worst, c.worstColor, c.worstDepth, c.box[0], c.box[1], c.box[2], c.box[3], c.views,
+                         100.0 * controlShare, closed ? "the closing control" : "the window's worst control",
+                         closed || openWorst_ ? std::string() : std::format("; judged by its first view, frame {} (age {}): {:.4f} %", c.firstFrame, c.firstFrame - c.ref, 100.0 * first));
         }
         if (share > failWorst_) {
             failWorst_ = share;
@@ -387,6 +401,11 @@ void PictureCheck::collectSlot(Slot& s) {
         auto it = std::ranges::find_if(cycles_, [&](const Cycle& c) { return c.ref == ref; });
         if (it == cycles_.end()) it = cycles_.insert(cycles_.end(), Cycle{ref});
         ++it->views;
+        if (it->firstFrame == 0 || frame < it->firstFrame) {
+            it->firstFrame = frame;
+            it->firstPixels = any;
+            it->firstFrom = s.pixels;
+        }
         if (any >= it->worstPixels) {
             it->worstPixels = any;
             it->worstFrom = s.pixels;
@@ -481,17 +500,17 @@ void PictureCheck::report() {
     spdlog::info("native: owned picture check (5 s): {}: owned views {} compared ({} differing; skipped: camera moved {}, global light changed {}, no reference {}, other {}, settling after a frame jump {} "
                  "({} jumps), draw skips {}), differing pixels {} (colour {}, depth {}), "
                  "worst view {} of {} = {:.4f} %, max colour {:.3f}, max depth {:.4f}, box {}; control (composed vs composed) views {}, differing {}, worst {} pixels = {:.4f} %, max colour {:.3f}, "
-                 "max depth {:.4f}; cycles judged {} by their closing control + {} by the window's, failed {}{}; frames: {} owned, {} composed; windows ok {}, FAILED {} of {}; "
+                 "max depth {:.4f}; cycles judged {} by their closing control + {} by the window's (their first view; scene changed in {}), failed {}{}; frames: {} owned, {} composed; windows ok {}, FAILED {} of {}; "
                  "total owned views {} ({} differing)",
                  verdict, owned_.views, owned_.differingViews, skippedCamera_, skippedLight_, skippedNoRef_, skippedOther_, skippedSettle_, jumps_, droppedSkips_, owned_.pixels, owned_.colorPixels,
                  owned_.depthPixels, owned_.worstPixels, owned_.worstFrom, 100.0 * ownedShare, owned_.maxColor, owned_.maxDepth, box(owned_), control_.views, control_.differingViews,
-                 control_.worstPixels, 100.0 * controlShare, control_.maxColor, control_.maxDepth, cyclesJudged_, cyclesOpenJudged_, cyclesFailed_,
+                 control_.worstPixels, 100.0 * controlShare, control_.maxColor, control_.maxDepth, cyclesJudged_, cyclesOpenJudged_, openLater_, cyclesFailed_,
                  cyclesFailed_ != 0 ? std::format(" (worst {:.4f} % against its control {:.4f} %)", 100.0 * failWorst_, 100.0 * failControl_) : std::string(), ownedFrames_,
                  composedFrames_, okWindows_, failedWindows_, windows_, ownedTotal_, ownedTotalDiffering_);
     owned_ = {};
     control_ = {};
     skippedNoRef_ = skippedCamera_ = skippedLight_ = skippedOther_ = skippedSettle_ = droppedSkips_ = jumps_ = ownedFrames_ = composedFrames_ = 0;
-    cyclesJudged_ = cyclesOpenJudged_ = cyclesFailed_ = 0;
+    cyclesJudged_ = cyclesOpenJudged_ = cyclesFailed_ = openLater_ = 0;
     failWorst_ = failControl_ = 0.0;
 }
 
