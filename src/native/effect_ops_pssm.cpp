@@ -157,7 +157,7 @@ bool EffectOps::packedVisual(void* maskPtr, void* mapPtr, bool ok) {
     } else {
         // the parameters OnUpdateOutput sets before the loop (as the parameter objects' Set receives them)
         const auto bytes = [&](const char* name, const void* data, std::size_t n) {
-            Override& o = overrides_[name];
+            Override& o = setOverride(name);
             o.bytes.assign(static_cast<U8*>(data), static_cast<U8*>(data) + n);
             o.isImage = false;
         };
@@ -181,7 +181,7 @@ bool EffectOps::packedVisual(void* maskPtr, void* mapPtr, bool ok) {
         const float offset[4] = {k_.negHalf / fs, k_.negHalf / fs, k_.half / fs, k_.half / fs};
         const float scale[2] = {fs, fs};
         bytes("DizzerKernelSize", &kernel, 4);
-        Override& tex = overrides_["ShadowTexture"];
+        Override& tex = setOverride("ShadowTexture");
         tex.image = ptr(map, 0x18);
         tex.isImage = true;
         bytes("PCFFilterOffset", offset, 16);

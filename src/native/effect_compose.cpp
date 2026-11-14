@@ -1,6 +1,9 @@
 #include "native/effect_compose.h"
 
+#include <windows.h>
+
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -59,7 +62,7 @@ void applySamplers(const fx::Effect& e, const fx::Shader& shader, std::uint32_t 
     for (const auto& c : shader.constants.constants) {
         if (c.registerSet != fx::RegisterSet::Sampler) continue;
         // (WS5: the constant's parameter index is cached like fillConstants does: the name scan ran per sampler per pass per unit)
-        std::uint32_t pi = c.paramIndexCache;
+        std::uint32_t pi = slowPaths() ? fx::Constant::kUnresolved : c.paramIndexCache;
         if (pi == fx::Constant::kUnresolved) {
             pi = e.parameterIndex(c.name);
             c.paramIndexCache = pi;
@@ -107,6 +110,11 @@ void gatherParams(const fx::Effect& e, const fx::ConstantTable& t, std::vector<s
 bool sameRegs(const fx::ConstantRegisters& a, const fx::ConstantRegisters& b) { return a.f == b.f && a.i == b.i && a.b == b.b; }
 
 const fx::ConstantRegisters& constantsFor(const fx::Effect& e, const fx::Shader& shader, const fx::ParameterValues& values) {
+    if (slowPaths()) {
+        static thread_local fx::ConstantRegisters regs;
+        fx::evaluateShaderConstants(e, shader, values, regs);
+        return regs;
+    }
     if (!shader.evalCache) shader.evalCache = std::make_shared<ConstantsCache>();
     auto& c = *static_cast<ConstantsCache*>(shader.evalCache.get());
     if (!c.gathered) {
@@ -179,6 +187,11 @@ void setState(EffectDraw& d, std::uint32_t rs, std::uint32_t v) {
 }
 
 }  // namespace
+
+bool slowPaths() {
+    static const bool v = GetEnvironmentVariableA("RVK_FX_SLOW", nullptr, 0) != 0;
+    return v;
+}
 
 ConstantsStats takeConstantsStats() {
     const ConstantsStats s = g_cstats;

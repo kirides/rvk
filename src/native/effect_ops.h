@@ -34,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -76,6 +77,12 @@ public:
     void maskBegin(void* illum) override;
     void maskEnd() override;
     bool effectBegin(void* filter) override;
+    bool effectBeginImpl(void* filter);
+    std::uint64_t timeTicks_ = 0, timeUnits_ = 0, timeFrame_ = 0;  // RVK_FX_TIME
+    std::array<std::uint64_t, 11> timeParts_{};
+    long long timeLast_ = 0;
+    bool timing_ = false;
+    void lap(int slot);
     void effectEnd(void* filter) override;
     void copyBegin(void* filter) override;
     void copyEnd(void* filter) override;
@@ -130,7 +137,9 @@ private:
         std::vector<std::uint8_t> bytes;
         const void* image = nullptr;
         bool isImage = false;
+        bool live = false;  // set since the mask's last begin (WS5: the entries persist across masks, no node allocations)
     };
+    Override& setOverride(std::string_view name);
 
     bool verify();
     const Live& liveOf(const d3d9::Shader* s);
@@ -479,7 +488,7 @@ private:
     std::vector<std::string> plan_;        // the mask filter's ExecuteEffect calls in order (techniques)
     std::vector<std::int32_t> planCascade_;
     std::size_t planNext_ = 0;
-    std::map<std::string, Override> overrides_;
+    std::map<std::string, Override, std::less<>> overrides_;
     float r_[16]{};                        // depth -> view space -> world (inv(V) x inv(diag(P11, P22, 1)) x far)
     std::uint64_t blurFrame_ = ~0ull;
     std::uint32_t blurIndex_ = 0;
@@ -577,8 +586,11 @@ private:
         std::string tech, filterName, postName, fullName;
         Stats* stats = nullptr;
         LeanStats* leanStats = nullptr;
+        int grp = -1, grpIdx = -1;  // OwnPost::groupUnit of the post name
+        PostUnit pu = PostUnit::None;  // OwnPost::unitOf of the technique
     };
     std::vector<NameEntry> nameCache_;
+    NameEntry slowName_;  // RVK_FX_SLOW
     fxc::ConstantsStats cstatsTotal_;
     const NameEntry& unitNames(Unit unit, const std::uint8_t* filter);
     LeanStats* leanStats_ = nullptr;

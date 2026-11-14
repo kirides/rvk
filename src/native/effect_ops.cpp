@@ -67,6 +67,7 @@ constexpr std::uint32_t kParamImage = 0x9ee900;      // eSImageEffectParamImage 
 constexpr std::size_t kIllumSsao = 0x430, kIllumBlurSsao1 = 0x438, kIllumBlurSsao2 = 0x440, kIllumMask = 0x448, kIllumDepthCopy = 0x450,
                       kIllumBlur = 0x458, kIllumTerrain = 0x358;
 
+constexpr std::size_t kParamBlock = 0x98;  // a parameter object's header (+0x50 technique mask, +0x58 value, up to a 64-byte matrix)
 constexpr const char* kUnitNames[] = {"-", "chain", "mask", "terrain blur", "copy", "post", "gui", "pssm"};
 
 }  // namespace
@@ -251,11 +252,12 @@ void EffectOps::captureDevice(fxc::EffectDraw& out) const {
         out.streams[i] = {s.buffer, s.offset, s.stride, s.freq};
     }
     out.indices = d.indexBuffer();
-    for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) out.rs[rs] = d.renderState(rs);
+    static_assert(fxc::kRenderStates == d3d9::RS_COUNT);
+    std::memcpy(out.rs.data(), d.renderStateArray(), sizeof(std::uint32_t) * fxc::kRenderStates);
     for (std::uint32_t st = 0; st < fxc::kStages; ++st) {
         out.textures[st] = d.stageTexture(st);
         const std::uint32_t* row = d.samplerStateRow(st);
-        for (std::uint32_t s = 1; s < fxc::kSamplerStates; ++s) out.ss[st][s] = row[s];
+        std::memcpy(out.ss[st].data() + 1, row + 1, sizeof(std::uint32_t) * (fxc::kSamplerStates - 1));
     }
     std::memcpy(out.vsF, d.vsConstants(), sizeof(out.vsF));
     std::memcpy(out.psF, d.psConstants(), sizeof(out.psF));
@@ -309,14 +311,23 @@ void EffectOps::applyDevice(const fxc::EffectDraw& d) {
         if (dev_.streamSource(i).freq != s.freq) dev_.setStreamSourceFreq(i, s.freq);
     }
     dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(d.indices)));
-    for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) {
-        if (dev_.renderState(rs) != d.rs[rs]) dev_.setRenderState(rs, d.rs[rs]);
+    {
+        // (WS5: one block compare, the states that differ are set one by one as before)
+        const std::uint32_t* cur = dev_.renderStateArray();
+        if (std::memcmp(cur, d.rs.data(), sizeof(std::uint32_t) * fxc::kRenderStates) != 0) {
+            for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) {
+                if (cur[rs] != d.rs[rs]) dev_.setRenderState(rs, d.rs[rs]);
+            }
+        }
     }
     static constexpr std::uint32_t kAllSs[fxc::kSamplerStates - 1] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
     for (std::uint32_t st = 0; st < fxc::kStages; ++st) {
         if (dev_.stageTexture(st) != d.textures[st]) dev_.setStageTexture(st, const_cast<Texture*>(static_cast<const Texture*>(d.textures[st])));
         // (one call per stage; it changes only the differing states)
-        dev_.setSamplerStates(st, kAllSs, d.ss[st].data() + 1, fxc::kSamplerStates - 1);
+        // (WS5: the compare first, the call only for a stage whose states differ)
+        if (std::memcmp(dev_.samplerStateRow(st) + 1, d.ss[st].data() + 1, sizeof(std::uint32_t) * (fxc::kSamplerStates - 1)) != 0) {
+            dev_.setSamplerStates(st, kAllSs, d.ss[st].data() + 1, fxc::kSamplerStates - 1);
+        }
     }
     // the float registers that differ, written as ranges (O1)
     // (WS5: one inline 128-bit compare per register, was a memcmp call each: 480 per unit)
@@ -361,6 +372,13 @@ void EffectOps::applyDevice(const fxc::EffectDraw& d) {
 
 // ---- the mask -------------------------------------------------------------------------------------------------------------------
 
+EffectOps::Override& EffectOps::setOverride(std::string_view name) {
+    auto it = overrides_.find(name);
+    if (it == overrides_.end()) it = overrides_.emplace(std::string(name), Override{}).first;
+    it->second.live = true;
+    return it->second;
+}
+
 void EffectOps::maskBegin(void* illum) {
     if (illum != nullptr) illum_ = static_cast<U8*>(illum);  // also for the setup (the working buffers)
     if (verified_ <= 0 || !maskOn()) return;
@@ -368,7 +386,7 @@ void EffectOps::maskBegin(void* illum) {
     inMask_ = true;
     ++masks_;
     maskDepth_ = dev_.depthStencil();
-    overrides_.clear();
+    for (auto& kv : overrides_) kv.second.live = false;
     plan_.clear();
     planCascade_.clear();
     planNext_ = 0;
@@ -449,12 +467,12 @@ bool EffectOps::maskStep(std::size_t step, std::string& technique) {
     U8* terrain = ptr(mask, 0x120);
     U8* cam = camera();
     const auto bytes = [&](const char* name, const void* data, std::size_t n) {
-        Override& o = overrides_[name];
+        Override& o = setOverride(name);
         o.bytes.assign(static_cast<U8*>(data), static_cast<U8*>(data) + n);
         o.isImage = false;
     };
     const auto image = [&](const char* name, const void* img) {
-        Override& o = overrides_[name];
+        Override& o = setOverride(name);
         o.image = img;
         o.isImage = true;
     };
@@ -511,6 +529,22 @@ const EffectOps::NameEntry& EffectOps::unitNames(Unit unit, const U8* filter) {
     // the key: the filter, the unit kind, the technique name, the filter's name text pointer; every 64th frame (and any miss) rebuilt from the
     // engine's strings and compared with the entry, so a recycled filter address with another name is caught
     const auto* text = ptr(filter, 0x10);
+    // the unit's group / port classification: a function of the names only
+    const auto classify = [](NameEntry& n) {
+        n.grp = n.grpIdx = -1;
+        if (!OwnPost::groupUnit(n.postName, n.grp, n.grpIdx)) n.grp = n.grpIdx = -1;
+        n.pu = OwnPost::unitOf(n.tech);
+    };
+    if (fxc::slowPaths()) {
+        // the pre-WS5 names: built per unit, the stats nodes found by name
+        NameEntry& n = slowName_;
+        n.postName = unit == Unit::Post ? engine::readCString(filter + 0x10) + (unitTechName_.empty() ? std::string() : " " + unitTechName_) : unitTechName_;
+        n.fullName = std::string(kUnitNames[static_cast<std::size_t>(unit)]) + (n.postName.empty() ? std::string() : " " + n.postName);
+        n.stats = &window_[n.fullName];
+        n.leanStats = &leanWindow_[n.fullName];
+        classify(n);
+        return n;
+    }
     const bool recheck = (dev_.stats().frames & 63u) == 0;
     for (NameEntry& n : nameCache_) {
         if (n.filter != filter || n.unit != unit || n.text != text || n.tech != unitTechName_) continue;
@@ -527,6 +561,7 @@ const EffectOps::NameEntry& EffectOps::unitNames(Unit unit, const U8* filter) {
     n.fullName = std::string(kUnitNames[static_cast<std::size_t>(unit)]) + (n.postName.empty() ? std::string() : " " + n.postName);
     n.stats = &window_[n.fullName];
     n.leanStats = &leanWindow_[n.fullName];
+    classify(n);
     for (NameEntry& old : nameCache_) {
         if (old.filter == filter && old.unit == unit && old.tech == n.tech) {
             old = std::move(n);
@@ -539,6 +574,31 @@ const EffectOps::NameEntry& EffectOps::unitNames(Unit unit, const U8* filter) {
 }
 
 bool EffectOps::effectBegin(void* filterPtr) {
+    // WS5: RVK_FX_TIME=1 times every unit's composition + issue (QPC; rvk.log `native: effect units CPU` line); RVK_FX_SLOW=1 = the pre-WS5 paths
+    // (no register cache, string-built names, scanned sampler indices) for an A/B in one build
+    static const bool timing = GetEnvironmentVariableA("RVK_FX_TIME", nullptr, 0) != 0;
+    if (!timing) return effectBeginImpl(filterPtr);
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    timeLast_ = t0.QuadPart;
+    timing_ = true;
+    const bool r = effectBeginImpl(filterPtr);
+    timing_ = false;
+    QueryPerformanceCounter(&t1);
+    timeTicks_ += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart);
+    ++timeUnits_;
+    return r;
+}
+
+void EffectOps::lap(int slot) {
+    if (!timing_) return;
+    LARGE_INTEGER n;
+    QueryPerformanceCounter(&n);
+    timeParts_[static_cast<std::size_t>(slot)] += static_cast<std::uint64_t>(n.QuadPart - timeLast_);
+    timeLast_ = n.QuadPart;
+}
+
+bool EffectOps::effectBeginImpl(void* filterPtr) {
     if (verified_ <= 0 || !(maskOn() || postOn())) return false;
     auto* filter = static_cast<U8*>(filterPtr);
     fxc::setConstantsVerify(gpuscene::periodic(dev_.stats().frames, 10));  // (WS5: the per-shader register cache against a fresh evaluation, every 10th frame)
@@ -588,7 +648,9 @@ bool EffectOps::effectBegin(void* filterPtr) {
         technique.clear();  // the filter's own (set at configuration: SSAO, BlurSSAO, Blur; the post filters' from the graph data)
     }
     finishOwnCompare();  // (S-7c: a compared unit whose effectEnd did not come)
+    lap(0);
     const Skip s = composeEffect(filter, technique, input0, target, screen);
+    lap(1);
     unitTechName_ = unitName_;
     // (WS5: the unit's names and stats nodes cached per filter + technique: the strings were rebuilt and two string-keyed map lookups made per unit)
     const NameEntry& names = unitNames(unit, filter);
@@ -596,7 +658,8 @@ bool EffectOps::effectBegin(void* filterPtr) {
     // S-7 / S-7b: a unit of one of the scene graph's groups (the luminance chain, the bloom chain, the DoF middle; own_post on: composed in the engine's order)
     int grp = -1, grpIdx = -1;
     if (unit == Unit::Post && s == Skip::None && drawCount_ == 1 && ownLumActive() && postGraph_.rfind("scene", 0) == 0) {
-        if (!OwnPost::groupUnit(unitName_, grp, grpIdx)) grp = grpIdx = -1;
+        grp = names.grp;
+        grpIdx = names.grpIdx;
     }
     unitName_ = names.fullName;
     stats_ = names.stats;
@@ -649,7 +712,7 @@ bool EffectOps::effectBegin(void* filterPtr) {
     // S-7c: the single draw units on our pixel shaders; a unit that samples the held ToneMap image and cannot fold it gets it drawn first
     ownSwap_ = false;
     {
-        const PostUnit pu = unit == Unit::Post && grp < 0 && drawCount_ == 1 && ownLumActive() ? OwnPost::unitOf(unitTechName_) : PostUnit::None;
+        const PostUnit pu = unit == Unit::Post && grp < 0 && drawCount_ == 1 && ownLumActive() ? names.pu : PostUnit::None;
         if (tmHeldValid_ && pu != PostUnit::DofDown && pu != PostUnit::Dof) {
             const d3d9::Texture* held = tmHeld_ && tmHeld_->rt0 != nullptr ? static_cast<const d3d9::Surface*>(tmHeld_->rt0)->texture() : nullptr;
             for (std::size_t k = 0; k < drawCount_ && tmHeldValid_; ++k) {
@@ -663,13 +726,17 @@ bool EffectOps::effectBegin(void* filterPtr) {
         }
         if (pu != PostUnit::None) ownUnitBegin(pu, hold);
     }
+    lap(2);
     fxCompareBegin();  // S-7d (Compare): the unit's draws on the ports into a scratch copy of its target, before the engine's
     if (unitTake_) {
         predictAfter(false);
+        lap(3);
         if (leanUnit()) {
             // O3 lean: the engine's ExecuteEffect is not run
             issueLean(!hold);
+            lap(4);
             adoptAfter();
+            lap(5);
             taken_ = true;
             leanSkipped_ = true;
             return true;
@@ -908,22 +975,37 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     for (std::int32_t k = 0; k < params; ++k) {
         U8* obj = ptr(paramArray, 8 * static_cast<std::size_t>(k));
         if (obj == nullptr) continue;
-        if ((get<std::uint32_t>(obj, 0x50) >> tech & 1u) == 0) {
+        // (WS5: the object's header + value area read once; the guarded loads were one call each, ~10 per parameter object)
+        std::uint8_t blk[kParamBlock];
+        const bool have = !fxc::slowPaths() && engine::safeReadN<kParamBlock>(obj, blk);
+        const auto rd32 = [&](std::size_t off) {
+            std::uint32_t v;
+            if (have) std::memcpy(&v, blk + off, 4);
+            else v = get<std::uint32_t>(obj, off);
+            return v;
+        };
+        const auto rdp = [&](std::size_t off) -> U8* {
+            U8* v;
+            if (have) std::memcpy(&v, blk + off, 8);
+            else v = ptr(obj, off);
+            return v;
+        };
+        if ((rd32(0x50) >> tech & 1u) == 0) {
             ++unusedParams_;
             continue;
         }
-        const std::uint32_t pi = info->parameterOf(ptr(obj, 0x10));
+        const std::uint32_t pi = info->parameterOf(rdp(0x10));
         if (pi == fx::kNone || pi >= e.parameters.size()) return Skip::Unreadable;
         auto& data = values.data[pi];
         const fx::Parameter& param = e.parameters[pi];
-        const auto vt = static_cast<std::uint32_t>(static_cast<U8*>(ptr(obj, 0)) - engine_);
+        const auto vt = static_cast<std::uint32_t>(rdp(0) - engine_);
         // O3: OnResetParams' Reset (+0x30) of eSImageEffectParamTexture 0x2897f0 / Image 0x2893d0: SetTexture(handle, null)
         if (vt == kParamTexture || vt == kParamImage) resetTextures_.push_back(pi);
         // (WS5: the string-keyed lookup only for the mask's own filter: the only one with overrides)
         const Override* ov = nullptr;
-        if (!overrides_.empty() && unitFilter_ == ptr(illum_, kIllumMask)) {
-            const auto it = overrides_.find(param.name);
-            if (it != overrides_.end()) ov = &it->second;
+        if (unitFilter_ == ptr(illum_, kIllumMask)) {
+            const auto it = overrides_.find(std::string_view(param.name));
+            if (it != overrides_.end() && it->second.live) ov = &it->second;
         }
         const auto store = [&](const void* src, std::size_t n) { std::memcpy(data.data(), src, std::min(n, data.size())); };
         if (ov != nullptr) ++nativeParams_;
@@ -970,10 +1052,10 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
             const float wh[2] = {static_cast<float>(get<std::uint32_t>(img, 0x18)), static_cast<float>(get<std::uint32_t>(img, 0x1c))};
             store(wh, 8);
         } else if (vt == kParamTexture) {
-            const std::int32_t mode = get<std::int32_t>(obj, 0x60);
+            const std::int32_t mode = static_cast<std::int32_t>(rd32(0x60));
             const void* img = nullptr;
             if (ov != nullptr && ov->isImage) img = ov->image;
-            else if (mode == 0) img = ptr(obj, 0x58);
+            else if (mode == 0) img = rdp(0x58);
             else if (mode == 1 || mode == 2) img = ptr(materialAdmin_(), mode == 1 ? 0x268 : 0x290);
             paramTextures[pi] = img != nullptr ? textureOfImage(img) : nullptr;
         } else {
@@ -1000,6 +1082,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
             std::uint8_t buf[64];
             const std::size_t bytes = n < 0 ? 64u : static_cast<std::size_t>(n);
             if (ov != nullptr && !ov->isImage && ov->bytes.size() == bytes) std::memcpy(buf, ov->bytes.data(), bytes);
+            else if (have) std::memcpy(buf, blk + 0x58, bytes);
             else if (!safeRead(obj + 0x58, buf, bytes)) return Skip::Unreadable;
             if (n < 0) {
                 float m[16], t[16];
@@ -1018,6 +1101,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
         if (!inputImage(k, img)) return Skip::Input;
         paramTextures[pi] = img != nullptr ? textureOfImage(img) : nullptr;
     }
+    lap(6);
     // the visual (+0xb0) and its quad
     // (N5.8 the PSSM pass: the mask's packed visual +0x138, the pyramids of UpdatePackedShadowMapVisual)
     const bool pssm = unit_ == Unit::Pssm;
@@ -1065,6 +1149,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     const fxc::Masters masters = hal_.visualMasters();
     const auto& passes = e.techniques[tech].passes;
     const auto& dc = prim->drawDesc();
+    lap(7);
     // the PSSM pass: per cell (base vertex 5 c) every pass, the stencil set before each ExecuteEffectPass, the visual's cull / depth
     // func written per pass (fxc::pssmPass)
     const std::size_t cells = pssm ? pssmIntersects_.size() : 1;
@@ -1115,6 +1200,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
         if (d.unsupported) return Skip::Technique;
         drawCount_ = n + 1;
     }
+    lap(8);
     // O3: what the engine's code leaves in the effect (EffectOps::predictAfter): OnSetParams' values, the textures with
     // OnResetParams' detaches (every input with a handle: SetTexture(handle, null)), the technique of SetTechnique(gfx effect +0x20)
     for (std::int32_t k = 0; k < inputs; ++k) {
@@ -1337,6 +1423,25 @@ void EffectOps::report() {
             spdlog::info("native: effect constants cache (5 s): registers reused {}, evaluated {}; check frames: {} compared with a fresh evaluation, {} DIFFERING (total {} differing)", cs.hits,
                          cs.misses, cs.verified, cs.differing, cstatsTotal_.differing);
         }
+    }
+    if (timeUnits_ != 0) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        const std::uint64_t frames = std::max<std::uint64_t>(dev_.stats().frames - timeFrame_, 1);
+        const double sec = static_cast<double>(timeTicks_) / static_cast<double>(f.QuadPart);
+        spdlog::info("native: effect units CPU (5 s): {} units, {:.2f} us per unit, {:.3f} ms per frame ({} frames)", timeUnits_,
+                     1e6 * sec / static_cast<double>(timeUnits_), 1e3 * sec / static_cast<double>(frames), frames);
+        spdlog::info("native: effect units CPU parts (us per unit): before compose {:.2f}, compose {:.2f}, names + groups + own {:.2f}, predict {:.2f}, issue {:.2f}, adopt {:.2f}",
+                     1e6 * static_cast<double>(timeParts_[0]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[1]) / f.QuadPart / timeUnits_,
+                     1e6 * static_cast<double>(timeParts_[2]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[3]) / f.QuadPart / timeUnits_,
+                     1e6 * static_cast<double>(timeParts_[4]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[5]) / f.QuadPart / timeUnits_);
+        spdlog::info("native: effect units CPU compose parts (us per unit): parameter objects {:.2f}, device capture + target {:.2f}, passes (applyPass, visual) {:.2f}; issue: applyDevice {:.2f}, drawComposed {:.2f}",
+                     1e6 * static_cast<double>(timeParts_[6]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[7]) / f.QuadPart / timeUnits_,
+                     1e6 * static_cast<double>(timeParts_[8]) / f.QuadPart / timeUnits_, 1e6 * static_cast<double>(timeParts_[9]) / f.QuadPart / timeUnits_,
+                     1e6 * static_cast<double>(timeParts_[10]) / f.QuadPart / timeUnits_);
+        timeParts_.fill(0);
+        timeTicks_ = timeUnits_ = 0;
+        timeFrame_ = dev_.stats().frames;
     }
     outsideDrawsTotal_ += outsideDraws_;
     if (maskOn()) spdlog::info("native: effect draws (5 s): {} shadow masks ({} with point-light cells), engine draws outside the units {} (total {}), "
