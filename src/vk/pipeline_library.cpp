@@ -298,6 +298,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize, bool compil
 
 void PipelineCache::optimizer() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline optimizer");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);  // (WS12: background work, the engine thread keeps its core)
     std::unique_lock lock(optMutex_);
     for (;;) {
         optCv_.wait(lock, [&] { return optQuit_ || !optQueue_.empty(); });

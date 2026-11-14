@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -704,6 +705,21 @@ void testOwnGuiRecords(Fixture& f) {
     for (auto& t : tex) f.dev.release(std::move(t));
 }
 
+// WS12: the translated expansion form is built by the shader workers; the engine's caller asks again at its next emission, the test waits for it
+static rvk::d3d9::Shader* particleVsReady(rvk::d3d9::Device& dev, rvk::d3d9::Shader& vs, int kind, const rvk::d3d9::VertexDecl* decl, const char** why) {
+    for (int i = 0; i < 6000; ++i) {
+        const char* w = nullptr;
+        rvk::d3d9::Shader* s = dev.particleVs(vs, kind, decl, &w);
+        if (s != nullptr || w == nullptr || std::strstr(w, "building") == nullptr) {
+            if (why != nullptr) *why = w;
+            return s;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (why != nullptr) *why = "still building after 60 s";
+    return nullptr;
+}
+
 // F11 (frame-ownership.md 14.26, native.own_particles): particle records expanded by the GPU (Device::particleVs = a translated particle-style vertex shader whose
 // inputs rvkParticleExpand builds from the instance record + VS c232..c247) against the same particles expanded on the CPU by the C++ twin
 // (d3d9::particle::expand) and drawn through the input assembler with the engine's vertex layout. Five ops: every orientation mode, entity coordinates with a
@@ -754,7 +770,7 @@ mov oT3, v3
     };
     auto edecl = f.dev.createVertexDecl(engineDecl);
     const char* why = nullptr;
-    Shader* pvs = f.dev.particleVs(*vs, pt::kKindParticle, edecl.get(), &why);
+    Shader* pvs = particleVsReady(f.dev, *vs, pt::kKindParticle, edecl.get(), &why);
     VertexDecl* pdecl = f.dev.particleDecl(pt::kKindParticle);
     if (pvs == nullptr || pdecl == nullptr) {
         std::printf("  FAIL own particles: the expansion form: %s\n", why != nullptr ? why : "no declaration");
@@ -923,7 +939,7 @@ mov oT0.xy, v2
         };
         auto sdecl = f.dev.createVertexDecl(skyDecl);
         const char* swhy = nullptr;
-        Shader* spvs = svs ? f.dev.particleVs(*svs, pt::kKindSkyBillboard, sdecl.get(), &swhy) : nullptr;
+        Shader* spvs = svs ? particleVsReady(f.dev, *svs, pt::kKindSkyBillboard, sdecl.get(), &swhy) : nullptr;
         VertexDecl* spdecl = f.dev.particleDecl(pt::kKindSkyBillboard);
         if (spvs == nullptr || !sps || spdecl == nullptr) {
             std::printf("  FAIL own particles: the sky billboard form: %s\n", swhy != nullptr ? swhy : "shaders");
@@ -1022,7 +1038,7 @@ mov oT1.xy, v3
         };
         auto tdecl = f.dev.createVertexDecl(stripDecl);
         const char* twhy = nullptr;
-        Shader* tpvs = tvs ? f.dev.particleVs(*tvs, pt::kKindStrip, tdecl.get(), &twhy) : nullptr;
+        Shader* tpvs = tvs ? particleVsReady(f.dev, *tvs, pt::kKindStrip, tdecl.get(), &twhy) : nullptr;
         VertexDecl* tpdecl = f.dev.particleDecl(pt::kKindStrip);
         if (tpvs == nullptr || !tps || tpdecl == nullptr) {
             std::printf("  FAIL own particles: the strip form: %s\n", twhy != nullptr ? twhy : "shaders");

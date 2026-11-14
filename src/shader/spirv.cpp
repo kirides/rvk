@@ -18,7 +18,7 @@ SpirvResult compileHlsl(Stage stage, std::string_view hlsl, std::string_view nam
     r.entry = stage == Stage::Vertex ? "VSMain" : "PSMain";
     r.profile = stage == Stage::Vertex ? "vs_6_6" : "ps_6_6";
     r.optLevel = 1;
-    r.cache = false;
+    r.cache = true;
     r.half16 = half16;
     r.debugInfo = debugInfo();
     dxc::Result c = dxc::compile(r);
@@ -27,7 +27,7 @@ SpirvResult compileHlsl(Stage stage, std::string_view hlsl, std::string_view nam
     return result;
 }
 
-DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view name, bool half16) {
+DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view name, bool half16, bool refresh) {
     DxilResult result;
     dxc::Request r;
     r.file = std::string(name);
@@ -36,9 +36,11 @@ DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view 
     r.profile = stage == Stage::Vertex ? "vs_6_6" : "ps_6_6";
     r.target = dxc::Target::Dxil;
     r.optLevel = 1;
-    r.cache = false;
+    r.cache = true;
     r.half16 = half16;
+    r.refresh = refresh;
     dxc::Result c = dxc::compile(r);
+    result.fromCache = c.fromCache;
     result.bytes = std::move(c.bytes);
     result.log = std::move(c.log);
     return result;

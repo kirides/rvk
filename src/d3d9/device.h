@@ -328,6 +328,8 @@ public:
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
     std::array<std::atomic<rhi::ShaderModule>, kVariantSlots> variants{};  // (VariantSlot::Count)
     std::array<std::atomic<std::uint8_t>, kVariantSlots> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::array<std::atomic<std::uint32_t>, kVariantSlots> variantDemand{};  // WS12: draws that asked for variants[i] while it was queued (the workers build the most asked-for first)
+    std::atomic<std::uint32_t> variantUrgent{0};  // WS12: bit i = a draw asked for variants[i] while it was queued: moved ahead of the background (known-key) requests, once
     std::atomic<std::uint32_t> uberSlots{0};  // S-1a: bit i = variants[i] was built from the HLSL ubershader (not the translated bytecode)
 };
 
@@ -1208,6 +1210,10 @@ public:
     // thread that presents, one present after each load step; docs/research/menu-fps.md 3): at most 30 frames a second
     // are shown, the others are rendered but not presented
     void setUnpaced(bool unpaced) { unpaced_ = unpaced; }
+    // WS12 (frame-ownership.md 14.52): the engine is not in the world (loading screen, menu, GUI not up yet): the background compile workers (variants, pipeline
+    // prewarm) may use every thread at their normal low priority; in the world they run on few threads at the lowest one
+    void setBackgroundFree(bool free);
+    bool backgroundFree() const { return backgroundFree_.load(std::memory_order_relaxed); }
     bool unpaced() const { return unpaced_; }
     // Exclusive fullscreen (docs/research/window-mode.md 8). `monitor` != null: the swapchain is built with the exclusive
     // structures for that monitor (re-created now when this changes); `hold`: the window is in front, take the exclusive
@@ -2085,6 +2091,8 @@ private:
     bool gbufferLit() const;                                                        // ... that test
     BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
+    unsigned variantLimit() const;         // WS12: workers allowed to build at once: all while the engine is not in the world (loading / menu), a few while it is
+    void promoteVariant(const ShaderRef& s, VariantSlot slot);  // WS12: a draw needs a queued variant: it goes ahead of the known-key (background) requests
     static unsigned variantThreadCount();  // 14.26: the variant workers (all hardware threads but four, 3..12; RVK_VARIANT_THREADS)
     struct VariantTimes {
         std::atomic<std::uint64_t> n{0}, moduleUs{0}, prewarmUs{0};
@@ -2107,9 +2115,11 @@ private:
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
     std::unordered_map<std::uint64_t, std::shared_ptr<Shader>> particleVs_;  // F11: (engine vertex shader, kind, declaration) -> its expansion form (null: refused)
     std::unordered_map<std::uint64_t, const char*> particleVsWhy_;
+    std::unordered_map<const Shader*, std::shared_future<rhi::ShaderModule>> lodBuild_;  // WS12: the billboard fade forms being built by the shader workers (render thread)
+    std::unordered_map<std::uint64_t, std::shared_future<rhi::ShaderModule>> particleBuild_;  // WS12: the expansion forms being built by the shader workers (render thread)
     std::unordered_set<const Shader*> particlePorted_;  // 14.28 addendum: the expansion forms that are a port
     std::unique_ptr<VertexDecl> particleDecl_[3];
-    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash, bool half16 = false);
+    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::string& label, std::uint64_t hash, bool half16 = false);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag, bool* viaUber = nullptr);
     void resetUberVariants();  // S-1a: debug.ubershader toggled at run time: every material pixel shader's variants are built again in the new form
     rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
@@ -2744,6 +2754,7 @@ private:
     struct VariantJob {
         std::shared_ptr<Shader> shader;
         VariantSlot slot;
+        bool urgent = false;  // WS12: a draw asked for it (ahead of the known-key requests)
     };
     std::mutex variantMutex_;
     std::condition_variable variantCv_, variantIdleCv_;
@@ -2753,6 +2764,9 @@ private:
     int uberFailLogged_ = 0;
     std::atomic<std::uint64_t> uberLateSource_{0}, uberLateReset_{0};  // 14.22: variants rebuilt because the engine's request arrived during / after their build
     std::deque<VariantJob> variantJobs_;
+    std::size_t variantUrgentJobs_ = 0;  // WS12: the jobs at the front of variantJobs_ that a draw asked for (variantMutex_)
+    std::atomic<bool> backgroundFree_{true};
+    std::atomic<std::uint64_t> variantPromoted_{0}, variantLimited_{0};
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
     mutable std::mutex shaderJobMutex_;
     std::condition_variable shaderJobCv_;

@@ -596,6 +596,9 @@ public:
     virtual bool pipelineContains(const PipelineDesc& desc) = 0;
     // builds `desc` on a background thread unless it exists (pipelines known from earlier runs)
     virtual void prewarmPipeline(const PipelineDesc& desc) = 0;
+    // WS12: at most `n` background builds (prewarmPipeline) run at once (0 = no limit), at the lowest thread priority when `low` (else below normal). Draw-time requests (prewarmOnce) are
+    // never limited and keep normal priority
+    virtual void setPipelineBackgroundLimit(unsigned n, bool low) { (void)n; (void)low; }
     // the same for descriptions that repeat every frame until the pipeline exists: queued once
     virtual void prewarmOncePipeline(const PipelineDesc& desc) = 0;
     // with pipeline libraries: compiles the shader's pre-rasterization / fragment library now (any thread)
