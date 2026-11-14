@@ -75,6 +75,7 @@ Key rules from those files (the details are there):
 - Every run writes the test baseline `bin/rvk/settings.toml` (`-PlayerDefaults` = shipped defaults, `-KeepSettings` keeps the file); `-Setting k=v` takes lowercase `true` / `false`.
 - Full mode FAILs `monastery_hall`, `crystal_cave`, `pub_interior` in refcompare by design (table lighting); judge against Wrapper.
 - Never read the frame ring back on the CPU (write-combined); per-frame history keys on `GameDevice::memoryEpoch`, not `frameValue() + 1`.
+- No buffer writes / atomics / UAV stores in material pixel shaders outside a compile-time define that only debug sessions set (frame-ownership.md: the WS20 compare block disabled early depth for every material draw, jungle main colour 1 -> 8 ms; a run-time switch hides it from in-session A/Bs). After a merge wave, rerun a Full-vs-Wrapper perf-ab (`-Key renderer.mode -Restart`): in-session toggles cannot see cross-merge regressions.
 
 **GPU safety in test runs** (a device loss = a driver timeout on the user's desktop): new code that handles GPU addresses needs CPU null guards, an `rvk_d3d9test` / `rvk_rhitest` case through the same path run with `--validation`, and a first short game run with `-Validation -Environment 'VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED=GPU_BASED_GPU_ASSISTED'` before any longer or unvalidated run.
 
