@@ -69,7 +69,7 @@ end
 
 -- the orbit camera of a spot (rvkcompare's spec)
 local function aim(sp, p)
-    return risen.camera.set { target = { p[1], p[2] + 170, p[3] }, yaw = sp.cam.yaw, pitch = sp.cam.pitch, distance = sp.cam.distance, instant = true }
+    return risen.camera.set { target = { sp.x, sp.y + 170, sp.z }, yaw = sp.cam.yaw, pitch = sp.cam.pitch, distance = sp.cam.distance, instant = true }
 end
 
 local function start_burst(tag)
@@ -96,9 +96,11 @@ T.run(function()
     local p = place(spot)
     hide()
     aim(spot, p)
-    T.sleep_frames(settle)
-    hide()
-    aim(spot, p)
+    for _ = 1, math.max(1, math.floor(settle / 30)) do
+        T.sleep_frames(30)
+        hide()
+        aim(spot, p)
+    end
     T.sleep_frames(30)
     local c = risen.camera.get()
     T.eq("placed", c and c.type or "nil", "cam_cinema")
@@ -121,6 +123,7 @@ T.run(function()
         local total = lead + burst * interval + 30
         while n < total do
             look(n * step, math.sin(n * pstep * 0.5) * 0.3)
+            if n % 15 == 0 then risen.hud.set_visible(false) end
             if n == lead then tag = start_burst(name) end
             n = n + 1
             T.sleep_frames(1)
@@ -133,6 +136,7 @@ T.run(function()
         pin_clock = false
         local tag
         while n < seconds * fps do
+            if n % 15 == 0 then risen.hud.set_visible(false) end
             t = t + rate / fps
             local h = (t / 60) % 24
             risen.world.set_time(math.floor(h), math.floor((h % 1) * 60))
@@ -150,7 +154,10 @@ T.run(function()
         risen.world.set_weather(other.weather, { thunder = false })
         ps[2] = place(other)
         hide(); aim(other, ps[2])
-        T.sleep_frames(settle)
+        for _ = 1, math.max(1, math.floor(settle / 30)) do
+            T.sleep_frames(30)
+            hide(); aim(other, ps[2])
+        end
         local tags = {}
         for i = 1, cuts do
             local k = (i % 2) + 1   -- 2 = other first, then back to the first spot
