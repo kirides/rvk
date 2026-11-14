@@ -449,7 +449,19 @@ static std::int32_t vegetationState(const Op& op, void* (*vegAdmin)()) {
     return bits;
 }
 
-void FrameTap::resolve(Op& op) {
+void FrameTap::setStaticOps(StaticOps* ops) {
+    statics_ = ops;
+    if (ops != nullptr) ops->setOpResolver(&FrameTap::resolveLate, this);
+}
+
+void FrameTap::resolveLate(void* self, Op& op) {
+    static_cast<FrameTap*>(self)->resolve(op, false);
+}
+
+// deferHeavy (the ops compactOwned takes): a Mesh op's state and its sub-mesh / material / shader chain are not read (6 dependent loads of engine memory per op);
+// a taken op that is composed late completes them first (StaticOps::composeLate -> resolveLate)
+void FrameTap::resolve(Op& op, bool deferHeavy) {
+    op.lazy = false;
     const void* ctx = op.raw.context;
     if (ctx == nullptr || !readAt(ctx, 0, op.vtable) || op.vtable == nullptr) return;
     readAt(ctx, 0x10, op.entity);
@@ -470,7 +482,13 @@ void FrameTap::resolve(Op& op) {
     if (op.kind == OpKind::Mesh || op.kind == OpKind::Animation) {
         std::uint32_t flags = 0;
         if (readAt(op.entity, 0x28, flags)) op.overlay = flags & 0xe00000u;
-        if (op.kind == OpKind::Mesh) op.state = meshState(ctx, op.raw.desc);
+        if (op.kind == OpKind::Mesh) {
+            if (deferHeavy) {
+                op.lazy = true;
+                return;
+            }
+            op.state = meshState(ctx, op.raw.desc);
+        }
     } else if (op.kind == OpKind::SpeedTreeBB) {
         // the billboard mesh (eCSpeedTreeBBMesh_PS +0x30 = its eCMeshResource2): eCMeshResource2::RenderZPass / Render need it
         // cached (eCResource2 +0x38 == 3)
@@ -765,7 +783,7 @@ bool FrameTap::compactOwned(void* db, List list, const std::uint8_t*& data, std:
             Op& op = v.emplace_back();
             op.raw = raw_[selSorted_[k].i];
             op.list = list;
-            resolve(op);  // (the sub-mesh / material / shader the late composition of a refused op needs)
+            resolve(op, true);  // (the sub-mesh / material / shader the late composition of a refused op needs: read then, resolveLate)
             op.index = 0;
         }
     }

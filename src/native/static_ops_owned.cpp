@@ -350,15 +350,15 @@ bool StaticOps::ownedSelect(const Op& op) {
         ~T() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
     } selTimer{W.selectNs};
     const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), ownedViewKey_};
-    const auto it = recs_->map.find(key);
-    if (it == recs_->map.end()) {
+    orec::OpRecord* const recp = recs_->lookup(key, !gpuscene::checksOff());
+    if (recp == nullptr) {
         // (not a candidate: the first reason it is not eligible, for the counters)
         const orec::Excl ex = recExclusion(op);
         if (ex != orec::Excl::Count) ++W.leftExcl[static_cast<std::size_t>(ex)];
         else ++W.leftNoRecord;
         return false;
     }
-    const orec::OpRecord& rec = *it->second;
+    const orec::OpRecord& rec = *recp;
     rec.lastSeen = dev_.stats().frames;
     if (rec.ordered) {
         ++W.leftOrdered;  // F9 (native.owned_ordered): an order-dependent op stays in the list; its slot draws it from its records at its place (orderedPlace)
@@ -405,7 +405,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
         int d = orec::firstDifference(a, st);
-        if (d == 4 && rec.actor && actorPickSwap(*it->second, st.lightmaps)) {  // (F6-2: an actor's morph pick seen before: its draws swapped in)
+        if (d == 4 && rec.actor && actorPickSwap(*recp, st.lightmaps)) {  // (F6-2: an actor's morph pick seen before: its draws swapped in)
             a = rec.stamp;
             a.view = a.materials = 0;
             d = orec::firstDifference(a, st);
@@ -761,10 +761,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         for (std::size_t i = 0; i < ops.size(); ++i) {
             if (!recs_) break;
             const Op& o = ops[i];
-            const auto it = recs_->map.find(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), ownedViewKey_});
-            if (it != recs_->map.end()) {
-                ownedRecPtrs_[i] = it->second.get();
-                bound += static_cast<std::uint32_t>(it->second->draws.size());
+            const orec::OpRecord* const rp = recs_->lookup(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), ownedViewKey_}, !gpuscene::checksOff());
+            if (rp != nullptr) {
+                ownedRecPtrs_[i] = rp;
+                bound += static_cast<std::uint32_t>(rp->draws.size());
             }
         }
         if (ownedPersistent_ && viewWinOk && viewWin.viewSlot != d3d9::OwnedWindows::kNoView && gpuscene::drawrecords().ready() && bound != 0) {
@@ -805,6 +805,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
             lateDetail_ = kLateOther;
         }
         dev_.setSceneIssue(false);
+        if (op.lazy && opResolveFn_ != nullptr) opResolveFn_(opResolveSelf_, op);
         tag = savedTag;
         tag.source = op.kind == OpKind::Animation ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
         tag.context = op.raw.context;

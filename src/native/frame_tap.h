@@ -34,7 +34,7 @@ public:
     // native.frame_tap (its report); the tap also runs while the static ops (N5.1) use it
     void apply(bool on);
     bool enabled() const { return on_; }
-    void setStaticOps(class StaticOps* ops) { statics_ = ops; }
+    void setStaticOps(class StaticOps* ops);
     void setStaticOpsActive(bool on);
     // N5.5c: the effect draws (native/effect_ops) take the draws of their units first
     void setEffectOps(class EffectOps* ops) { effects_ = ops; }
@@ -81,7 +81,8 @@ private:
     void beginView(void* db, void* desc, ViewKind kind, void* shadowMap, std::int32_t cascade);
     ViewKind shadowKind(const void* shadowMap, std::int32_t& cascade);
     VtableInfo& vtableInfo(const void* vtable);
-    void resolve(Op& op);
+    void resolve(Op& op, bool deferHeavy = false);
+    static void resolveLate(void* self, Op& op);  // (StaticOps' hook: the deferred part of resolve, for a taken op composed late)
     void logOps() const;
 
     void update();

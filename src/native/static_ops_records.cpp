@@ -1090,6 +1090,11 @@ void StaticOps::recReport() {
     orec::Stats& w = R.window;
     R.total.add(w);
     R.shadowTotal.add(R.shadowWindow);
+    if (R.memoHits + R.memoMisses != 0) {
+        // WS6: the record lookup memo of the owned path (hits = lookups answered without the hash map; checked = compared with the map on check frames; BAD must stay 0)
+        spdlog::info("native: record memo (5 s): {} hits, {} misses, {} checked on check frames, {} BAD{}", R.memoHits, R.memoMisses, R.memoChecked, R.memoBad, R.memoOff ? " (memo OFF)" : "");
+        R.memoHits = R.memoMisses = R.memoChecked = 0;
+    }
     if (R.shadowWindow.differing != 0) {
         std::string why = "draws DIFFERING on the check frames";
         for (std::size_t f = 0; f < orec::kFieldCount; ++f) {

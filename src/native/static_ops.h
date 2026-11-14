@@ -99,6 +99,8 @@ public:
     void viewEnd();
     // true = lean (O2a): the op was composed and issued and its side effects done, the engine's slot is not to be run
     bool opEnter(const Op& op);
+    // WS6: the tap's completion of a taken op's deferred resolve (Op::lazy), called before the op is composed late
+    void setOpResolver(void (*fn)(void*, Op&), void* self) { opResolveFn_ = fn; opResolveSelf_ = self; }
     // eCDecalAdmin::RenderDecals / eCBillboardAdmin::RenderBillboards of the main view begins (inside its draw tag, before the
     // engine's code) / either ends; true = lean (the original not to be called)
     bool decalsBegin(void* admin, void* db);
@@ -1230,6 +1232,8 @@ private:
     std::vector<d3d9::Device::OwnedItem> ownedItems_;
     std::vector<std::uint32_t> ownedItemOp_;
     std::vector<const orec::OpRecord*> ownedRecPtrs_;
+    void (*opResolveFn_)(void*, Op&) = nullptr;  // WS6: FrameTap::resolveLate
+    void* opResolveSelf_ = nullptr;
     d3d9::Device::OwnedArena ownedArena_;
     bool ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, std::uint32_t viewSlot, std::uint64_t epoch, std::uint32_t scrubStride, std::uint32_t scrubPhase, int& why);
     void ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw);
