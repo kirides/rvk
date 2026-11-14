@@ -582,6 +582,23 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     R.probes[k] = R.probe;
     R.pkeys[k] = pkey;
     if (R.cur == nullptr || k >= R.cur->draws.size()) return;
+    // WS7 (frame-ownership.md 14.49): a record built while the draw's scene form was still being made (draws[k].scene false: the op is composed every frame, "not a scene
+    // draw") is out of date as soon as the composition has the form: remade from this composition now, not at some later check frame
+    static const bool ws7Off = GetEnvironmentVariableA("RVK_WS7_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour, remade at a check frame at best)
+    if (!ws7Off && !R.refused && !R.cur->actor && pkey != 0) {
+        const orec::DrawRec& cur = R.cur->draws[k];
+        // the owned path's own tests of a retained draw (ownedDerive / deriveScene / orderedValid): a scene draw with its v2 pipeline, not made while a form was pending
+        const auto ownable = [](const d3d9::Device::CachedDraw& c) {
+            return c.valid && c.scenePipeline2 != d3d9::GamePipeline::None && c.v.sceneActive && !c.v.scenePending && (c.packet.batchable || c.ordered);
+        };
+        if (!cur.scene || cur.cd == nullptr || !ownable(*cur.cd)) {
+            const auto pit = packets_.find(pkey);
+            if (pit != packets_.end() && ownable(pit->second.cd)) {
+                R.refused = true;
+                ++R.stats(R.key.view != 0).refused[9];
+            }
+        }
+    }
     // 7.27: the derivation + compare of a valid record is verification: check frames only (the record's validity is the stamps' job, the audit's net and the
     // owned path's own derivation; a refused derive on another frame remakes the record at the next check frame)
     if (!gpuscene::verifyFrame() && !(R.key.view != 0 && ownedShadowCheck_)) return;  // (F3-1: a cascade's check view is decided by the cascades' own frame count)

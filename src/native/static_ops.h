@@ -1090,6 +1090,7 @@ private:
         std::uint64_t drawWhy[3][4] = {};   // a draw refused: ownedDrawOpPersistent's fallback (0 view, 1 materials, 2 object window, 3 a draw refused)
         std::uint64_t devWhy[3][24] = {};   // ... of the refused draws: the device's derivation codes (ownedReplayStats::why)
         std::uint64_t observer[3] = {}, tableFull[3] = {}, notRetained[3] = {};
+        std::uint64_t notScene[3][128] = {};  // WS7: the first draw without a scene form of an op composed for 'not a scene draw': kind | ordered << 5 | no v2 pipeline << 6
         std::uint64_t runs = 0, lostDraws = 0, flushNs = 0, validNs = 0, prepNs = 0, drawNs = 0, sideNs = 0;
         std::uint64_t bulkNs = 0;  // (14.44: the ordered bulk observers' delivery per op)
         std::uint64_t ns = 0;
