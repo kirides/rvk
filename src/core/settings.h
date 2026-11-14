@@ -422,6 +422,8 @@ struct RendererSettings {
     Setting* shadowsDebug = nullptr;      // shadows.debug: "off", "cascades"
     Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
     Setting* shadowsFit = nullptr;        // shadows.fit: the cascade fit, engine | sphere | sdsm (docs/research/shadows.md 8)
+    Setting* shadowsSoft = nullptr;       // shadows.soft: off | pcss (PCSS + temporal / spatial denoise, docs/research/shadows.md 8.10)
+    Setting* shadowsSoftSize = nullptr;   // shadows.soft_size: the sun's cone half angle (degrees)
     Setting* shadowsRange = nullptr;     // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
     Setting* shadowsRt = nullptr;         // shadows.rt: "off", "near", "extended" (ray-traced sun shadows near the camera, enh/rt_shadows)
     Setting* shadowsRtQuality = nullptr;  // shadows.rt_quality: "low", "medium", "high"

@@ -367,7 +367,7 @@ TEST(shadows_block_hlsl_matches_cpp) {
                {"maps", offsetof(B, maps)}, {"res", offsetof(B, res)}, {"vsm", offsetof(B, vsm)},
                {"vsmParams", offsetof(B, vsmParams)}, {"params", offsetof(B, params)}, {"target", offsetof(B, target)},
                {"mode", offsetof(B, mode)}, {"rt", offsetof(B, rt)}, {"rtParams", offsetof(B, rtParams)},
-               {"depthRemap", offsetof(B, depthRemap)}},
+               {"depthRemap", offsetof(B, depthRemap)}, {"soft", offsetof(B, soft)}, {"softR", offsetof(B, softR)}},
               "ShadowBlock");
     // the old bug: the vertex shader read DrawBlock.posFix from this block; a ShadowBlock member must never sit where a DrawBlock's posFix does unless it is the remap itself
     CHECK(offsetof(B, depthRemap) != offsetof(abi::DrawBlock, posFix));

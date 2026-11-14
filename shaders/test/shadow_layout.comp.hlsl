@@ -9,7 +9,7 @@
 void CSMain(uint3 id : SV_DispatchThreadID) {
     ShadowBlock b = rvkShadowBlock().Get();
     uint v = asuint(b.cascade[0].x + b.split.x + b.texel[0].x + b.vsm[0].x + b.vsmParams.x + b.params.x + b.target.x +
-                    b.rtParams.x + b.depthRemap.x) +
+                    b.rtParams.x + b.depthRemap.x + b.soft.x + b.softR.x) +
              b.maps.x + b.res.x + b.mode.x + b.rt.x;
     sink[int2(0, 0)] = v;
 }

@@ -783,7 +783,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
         for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtRange, rs.rtShadowSync, rs.shadowsEnabled, rs.shadowsFilter,
-                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsFit, rs.rtReflectionTweaks}) {
+                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsFit, rs.shadowsSoft, rs.shadowsSoftSize, rs.rtReflectionTweaks}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
@@ -1272,6 +1272,8 @@ void HalDevice::applyShadows() {
     s.blend = frozen::kShadowBlend;
     s.fade = frozen::kShadowFade;
     s.bias = rs.shadowsBias->asFloat();
+    s.soft = rs.shadowsSoft != nullptr && rs.shadowsSoft->asEnum() == "pcss";
+    if (rs.shadowsSoftSize != nullptr) s.softSize = rs.shadowsSoftSize->asFloat();
     const std::string_view dbg = rs.shadowsDebug->asEnum();
     s.debug = dbg == "cascades" ? 1 : dbg == "cascade_term" ? 2 : dbg == "terrain_term" ? 3 : dbg == "rt_term" ? 4 : dbg == "rt_coverage" ? 5 : 0;
     shadows_->apply(s);

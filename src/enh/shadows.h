@@ -14,9 +14,11 @@
 
 #include <array>
 #include <cstdint>
+#include <future>
 #include <memory>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 
 namespace rvk::enh {
 
@@ -31,18 +33,34 @@ struct ShadowBlock {
     float vsmParams[4];    // x MinVariance, y MinLightBleeding, z 1 / (1 - MinLightBleeding)
     float params[4];       // x blend band, y fade band, z constant bias (texels), w receiver slope limit (tan)
     float target[4];       // x 1 / width, y 1 / height, z width, w height
-    std::uint32_t mode[4];  // x taps per axis, y debug view
-    std::uint32_t rt[4];    // x the ray-traced visibility (bindless t2D, enh/rt_shadows; 0 = none)
+    std::uint32_t mode[4];  // x taps per axis, y debug view, z soft filter taps, w frame index
+    std::uint32_t rt[4];    // x the ray-traced visibility (bindless t2D, enh/rt_shadows; 0 = none), y the soft shadow trace's result (0 = none)
     float rtParams[4];      // x range (depth-map units), y blend band
     // the vertex shader's depth remap (Device::depthRemap: x, y added to the quad's z = w = 1; 0 without reversed depth). The mask
     // draw replaces the draw's DrawBlock with this block, so it must carry the remap itself (shadow_mask.vert)
     float depthRemap[4];
+    float soft[4];          // shadows.soft (PCSS): x penumbra width per unit of blocker distance (2 tan of the sun's half angle), y smallest filter radius (texels)
+    float softR[4];         // xyz: the blocker search radius of each cascade (texels)
 };
-static_assert(sizeof(ShadowBlock) == 28 * 16);
+static_assert(sizeof(ShadowBlock) == 30 * 16);
 
 // The view depth (in units of `engineFar`, the depth map's) of a hardware depth `z` under a D3D perspective projection
 // (row-vector convention: z' = (z * m22 + m32) / z); false when the projection is not perspective or z is at infinity
 bool viewDepthOfHardwareZ(const d3d9::scene::Mat4& projection, float z, float engineFar, float& depthMapUnits);
+
+// PCSS parameters (shadows.soft = pcss; docs/research/shadows.md 8.10), pure: the sun's cone half angle (degrees) and the world size of a
+// texel of each cascade give the penumbra width per unit of blocker distance (2 tan of the half angle: the blocker dz above the
+// receiver blurs the edge over scale * dz) and the blocker search radius of each cascade in texels (the widest penumbra a caster of
+// kSoftCasterHeight units can throw, half width, within [kSoftSearchMin, kSoftSearchMax])
+struct SoftParams {
+    float scale = 0.0f;
+    float minRadius = 0.0f;  // smallest filter radius (texels of the nearest cascade)
+    float searchRadius[3]{};
+};
+inline constexpr float kSoftCasterHeight = 1500.0f;  // 15 m (engine units: 1 = 1 cm)
+inline constexpr float kSoftSearchMin = 3.0f, kSoftSearchMax = 14.0f;
+inline constexpr float kSoftMinRadius = 0.6f;
+SoftParams softParams(float halfAngleDegrees, const float texelWorld[3]);
 
 class RtShadows;
 
@@ -59,6 +77,8 @@ public:
         int debug = 0;          // shadows.debug: 0 off, 1 cascades (the mask shows the cascade: 25 / 50 / 75 %, lit beyond),
                                 // 2 the cascade term only, 3 the terrain term only, 4 the ray-traced term only, 5 its coverage
         float rtBlend = 0.25f;  // fraction of the ray-traced range blended out to the cascades
+        bool soft = false;      // shadows.soft = pcss: PCSS + temporal / spatial denoise instead of the PCF grid (taps: 2..4 rotated taps)
+        float softSize = 0.6f;  // shadows.soft_size: the sun's cone half angle in degrees (the real sun: 0.27)
     };
 
     explicit Shadows(d3d9::Device& device);
@@ -83,6 +103,12 @@ private:
         d3d9::Texture* map = nullptr;
     };
     bool ensureShaders();
+    // shadows.soft: the trace + temporal + spatial passes of this frame's mask draw (run at the draw: the cascade matrices are the draw's);
+    // returns the bindless slot of the denoised cascade term, 0 = none (the PCF grid draws)
+    std::uint32_t runSoft(d3d9::Device& device, const rhi::RingAlloc& block, d3d9::Texture* depth, std::uint32_t w, std::uint32_t h, std::array<d3d9::Texture*, 3> maps, int cascades);
+    void startSoftBuild();
+    bool softPipelinesReady();
+    void releaseSoft();
     void destroyShaders();
     // the mask draw over everything left in the stencil (the frame's captured cascades; `variance` from the current draw)
     void drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int varianceReg, int minVarianceReg, int minBleedingReg,
@@ -101,6 +127,15 @@ private:
     bool drawn_ = false;
     bool skipFrame_ = false;  // the frame's draws stay the engine's (no camera, unknown layout)
     bool loggedFirst_ = false;
+    // shadows.soft (built on first use; off = none of it exists)
+    bool softBuilt_ = false, softFailed_ = false, softRg8_ = false;
+    std::unique_ptr<rhi::Pipeline> softPipe_[3];
+    std::future<std::unique_ptr<rhi::Pipeline>> softBuilding_[3];
+    std::uint32_t softHistory_ = 0;
+    bool softHistoryValid_ = false;
+    std::uint64_t softLastFrame_ = ~0ull;  // the device frame the history was written in
+    std::uint32_t softW_ = 0, softH_ = 0;
+    std::uint64_t softFrames_ = 0, softSkipped_ = 0;
 };
 
 }  // namespace rvk::enh

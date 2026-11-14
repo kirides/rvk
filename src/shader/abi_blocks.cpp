@@ -303,11 +303,11 @@ END(WaterBlockData, Ptr, enh::WaterBlock)
 
 BLOCK(ShadowBlock, Ptr, enh::ShadowBlock)
 F(float4, cascade, 12) F(float4, split, 1) F(float4, texel, 3) F(uint4, maps, 1) F(uint4, res, 1) F(float4, vsm, 3) F(float4, vsmParams, 1) F(float4, params, 1)
-F(float4, target, 1) F(uint4, mode, 1) F(uint4, rt, 1) F(float4, rtParams, 1) F(float4, depthRemap, 1)
+F(float4, target, 1) F(uint4, mode, 1) F(uint4, rt, 1) F(float4, rtParams, 1) F(float4, depthRemap, 1) F(float4, soft, 1) F(float4, softR, 1)
 END(ShadowBlock, Ptr, enh::ShadowBlock)
 
 BLOCK(RtShadowParams, Ptr, enh::RtShadowParams)
-F(uint4, tex, 1) F(uint4, info, 1) F(uint4, mode, 1) F(float4, sun, 1) F(float4, range, 1)
+F(uint4, tex, 1) F(uint4, info, 1) F(uint4, mode, 1) F(float4, sun, 1) F(float4, range, 1) F(uint4, aux, 1)
 END(RtShadowParams, Ptr, enh::RtShadowParams)
 
 BLOCK(RvkLight, Ptr, enh::GpuLight)
