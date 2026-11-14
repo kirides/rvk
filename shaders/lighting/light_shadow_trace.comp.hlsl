@@ -11,10 +11,13 @@
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
-    int2 q = int2(id.xy);
+    // the raw image is half resolution (misc.z bit 0): texel h traces the full-resolution pixel 2h (gpu-scene.md 9.14)
+    const bool halfRes = (pc.misc.z & 1u) != 0u;
+    const uint2 rext = halfRes ? (pc.tex.zw + 1u) / 2u : pc.tex.zw;
+    int2 q = halfRes ? int2(id.xy) * 2 : int2(id.xy);
     // a push block that does not describe a valid depth map / extent never reaches a descriptor or the image (a mis-laid-out block must not fault the GPU)
     if (pc.tex.x == 0u || pc.tex.x >= 65536u || pc.tex.z == 0u || pc.tex.w == 0u || pc.tex.z > 16384u || pc.tex.w > 16384u) return;
-    if (q.x >= int(pc.tex.z) || q.y >= int(pc.tex.w)) return;
+    if (id.x >= rext.x || id.y >= rext.y) return;
     float4 result = float4(0.0, 0.0, 0.0, 0.0);
     RvkFrame f = rvkLoadFrame(pc.frame);
     float d = lsDepth(q);
@@ -96,5 +99,5 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             result[e] = lsEncode(sid, vis);
         }
     }
-    outRaw[q] = result;
+    outRaw[int2(id.xy)] = result;
 }
