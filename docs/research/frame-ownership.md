@@ -4447,3 +4447,56 @@ moves to two runs); its first step is the exact float32 position stream for the 
 **Limits.** One run per scene (5 s windows, frozen spots), the actors' exclusion reasons and the grass split under frame generation not resolved, the CPU profile in a private
 copy (other agents' load), the sampler hides entries below ~1.5 % (particles, sky, GUI composition are below it), 680M numbers are the 14.3 model, no new counter was added
 (the existing stage lines were enough; the `uber ... failed` reading is proven by the control run c4).
+
+### 14.48 WS6: the owned hand-over's CPU (2026-11-14, branch `worktree-agent-a3d31af7630495a12` on main e1221d0; no new setting, no new env knob)
+
+Question: the profile census WS4 (14.47-era, `-CpuProfile`) put `FrameTap::passBegin` -> `StaticOps::ownedPass` at .147 / .615 / 2.63 / 3.07 ms inclusive (pub_interior / harbour_docks / hold / jungle), with `compactOwned`
+.028 / .10 / .42 / .42, `beginView` .042 / .12 / .45 / .47. What of the hand-over (compaction, view snapshot, record lookup) can go?
+
+**Built (all exact, no behaviour change; every item is an allocation / lookup / read that produced the same bytes before):**
+1. `FrameTap::compactOwned`: one selection pass (the `Op` is only built for candidates, selected ops are an index + kind), the three classes (mesh / actor, trees, vegetation) are
+   counting-partitioned and each sorted with the engine comparator by `std::sort` with the raw position as tie-break (= the former `stable_sort` of the whole list followed by two `stable_partition`s: a
+   stable sort of a subsequence is the subsequence of the stable sort), the `Op`s are built once in their final vectors (persistent scratch `ownedOps_ / treeOps_ / vegOps_`, `reserve`d), and
+   `StaticOps::ownedTake / treeTake / vegTake` now `swap` instead of move-assigning, so the vectors' capacity goes back and forth and no frame allocates the op lists again (the old code moved a
+   freshly grown vector into StaticOps every pass: ~log2(n) reallocations of 250-byte `Op`s per list and view = the `operator new` of the census). The chrono calls of the function are the owned stage timers' (`tnow()`: none unless `RVK_OWNED_TIMERS` / `RVK_F2C4_MEASURE`).
+2. `FrameTap::vtableInfo`: a 16-entry direct-mapped cache in front of the `unordered_map` (a view meets ~6 context classes over thousands of ops).
+3. `beginView`: the kept ops are built in place in `desc_.ops` (`emplace_back` + `reserve`, no 250-byte copy per op).
+4. Lazy resolve of taken Mesh ops (`Op::lazy`): a taken op's `meshState` and its sub-mesh / material / shader chain (5 dependent loads of engine memory per op) are read only when the op is composed
+   late (`StaticOps::composeLate` -> `FrameTap::resolveLate` = the same `resolve()`), nothing else reads them (checked: the owned files use `op.shader` only in the late composition, which falls back to the pointer chain anyway).
+5. `orec::Store::lookup` (`op_records.h`): the per-op record lookup of `ownedSelect` and `ownedPass` (two `unordered_map::find` per owned op and view, ~60 ns each) behind a direct-mapped memo of the
+   hits (`g_recMemo`, 32,768 x 8 bytes); a record erases its own slot in `~OpRecord`, a hit also checks `rec->key == key`, so a hit is the map's own answer. A first version with one global
+   generation bumped by every destroyed record hit only 38 % (hold rebuilds ~2.4 records per frame: it wiped the memo every frame), the per-slot erase hits 90 - 100 %. Check: every 64th hit is compared with
+   `map.find` (the owned views never run on a check frame, so a per-check-frame compare would not execute; off with `native.owned_check=0`), rvk.log `native: record memo (5 s): hits, misses, checked, BAD`
+   (BAD must stay 0, a mismatch switches the memo off).
+
+**Measured** (shared copy + lock, Full, `-PlayerDefaults`, `RVK_OWNED_TIMERS=1`, `native: owned static (5 s)` "CPU per main view: compaction" = compaction of all views incl. cascades per main view,
+median of the 5 s windows after the first two; builds Base = e1221d0, Lazy = items 1-4, Memo = + item 5; one run per cell: this machine is shared with other agents and the windows vary 1.5 - 2x inside one run (min vs median), so only the compaction column is comparable):
+
+| scene | compaction Base | Lazy | Memo | select (stamp / record checks) Base -> Memo |
+|---|---|---|---|---|
+| hold | 376 us | 321 | 320 | 200 -> 201 |
+| jungle | 329 | 277 | 256 | 152 -> 140 |
+
+That is -55 .. -73 us per frame (-15 .. -22 % of the compaction), i.e. 0.05 - 0.07 ms: **the target (-0.1 .. -0.15 small, -0.5 at hold / jungle) was not reached**. A CPU-profile comparison
+against the WS4 logs is not possible (the machine's speed moved 1.3x between sessions: harbour_docks interval 3.4 -> 4.5 ms with the same code path), an in-session A/B of two DLLs (`-Config`) is what the table is.
+
+**Where the rest is (facts for the next step):** per main view at hold, with the timers on: select 200 us (666 ops looked at per view incl. cascades = 300 ns per op: the stamp / `depFast` polls and the engine-memory
+loads of the record's anchors, the map find was only ~60 of it), `ownedPass` build 1.2 ms (the per-draw part: `ownedDrawOpPersistent`, the texture-prep loop `ownedTextureNeedsPrep` per texture of every draw (reads
+`rt_` surfaces + the texture's layout per call), `tag = savedTag`, side effects 1.15 M touches per 5 s), compaction rewrite / sort / resolve ~120 us. The fixed per-pass part (2 x 7 KiB register save, view table set) is ~1 us:
+not worth a window-wise save. What would move hold / jungle by 0.5 ms is not the hand-over but the per-op / per-draw work: a retained per-view op list (skip select for unchanged ops by event: needs the engine's own list-building takeover, `native.own_collection`) and a per-pass memo of
+texture-ready checks.
+
+**Gates** (private copy `risen-test-vk-ws6`, instance 6, lock `rvk-ws6`, test baseline: `native.owned_check=10`, `native.picture_check=true`; jungle / harbour_docks / pub_interior, `freeze_wait=2000`): `native: owned static / owned shadows / owned persistent` DIFFERING 0 /
+MISS 0, `owned picture check`: 19 windows ok, FAILED 0 of 29 (the rest NO DATA / UNRELIABLE while the camera moves), `native: record memo`: 345 checked, 0 BAD; `rvk_tests` 354 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors,
+`rvk_rtwalk` (load=0) PASS 4 checks, `rvk_spells` PASS 4 checks, no device loss. No GPU-address code changed (no GPU-AV run). No new cache needs a check-frame image compare: the memo has its own sampled compare, the vtable cache is immutable, the lazy resolve calls the same function.
+
+**perf-ab Full vs Wrapper** (`-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults`, 3 pairs, 240-frame windows, `-Perf` adds a per-draw timer to Wrapper only, ~0.07 - 0.26 ms; the lock queue made the runs interleave with other agents' games):
+
+| scene | CPU engine+HAL Wrapper | Full | delta | interval p50 delta |
+|---|---|---|---|---|
+| pub_interior | 0.97 | 1.41 | +0.44 | +0.43 |
+| harbour_docks | 1.99 | 2.85 | +0.86 | +0.64 |
+| hold | 6.97 | 11.66 +- 4.5 (one noisy window) | +4.7 (not significant) | +4.1 |
+| jungle | 7.01 | 7.81 | +0.80 | +0.57 |
+
+Full is still slower than Wrapper on the CPU in every scene (the WS4 deltas were of the same size): WS6 alone does not close it.
