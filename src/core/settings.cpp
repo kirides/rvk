@@ -1909,6 +1909,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Clustered lights",
     });
+    r.lightingClusterBuild = &reg.add({
+        .key = "lighting.cluster_build",
+        .label = "Light cluster build kernel",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer switch: \"Columns\" = one group per screen-tile column culls each light once (GD3D11's scheme), \"Threads\" = the legacy one thread per cluster kernel "
+                       "(A/B), \"Compare\" (Vulkan) runs the legacy kernel on the columns' output and counts differing clusters (rvk.log \"cluster build compare\", must be 0).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"columns", "threads", "compare"},
+        .optionLabels = {"Columns", "Threads (legacy)", "Compare"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}},
+        .page = "Debug", .section = "Clustered lights",
+    });
     r.lightingOccupancy = &reg.add({
         .key = "lighting.occupancy",
         .label = "Light table occupancy shortcut",

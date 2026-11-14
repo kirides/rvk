@@ -398,3 +398,26 @@ Goal: Full at least as fast as Wrapper; Full's table lighting + `lighting.light_
 | harbour_night Vulkan | 4 | 3.741 | 3.750 | +0.009 (z 0.0, no change: lamps everywhere) |
 
 `light.cluster` itself: unchanged (0.065 - 0.09; the bit set is a groupshared OR + two stores per group). The gain is the empty-cluster share: open daylight (jungle, harbour by day); a lamp-lit scene gets nothing and pays the one bit test. The remaining gap of WS18 (the walk of pixels in occupied clusters, the lamp-shadow sampling at pub) is the table lighting's price and not touched.
+
+### 9.16 Column-wise light cluster build (WS21, 2026-11-14, `lighting.cluster_build`, default `columns`)
+
+**Goal.** Make the Full-only lamp lighting's build pass cheaper without changing a single list: `light.cluster` was 126 groups of 64 threads, every thread testing all <= 1,024 table lights against its own cluster box (0.063 - 0.068 ms Vulkan, 0.08 ms D3D12 on the 7900 XTX).
+**Design (`shaders/lighting/light_cluster_col.comp.hlsl`; GD3D11's `D3D12/LightCull.hlsl` scheme on our grid).** One group of 64 threads per screen-tile column of a level (16 x 9 + 32 x 18 = 720 groups; dispatch `kColumns0 + kColumns1`):
+1. Thread per slice computes the slice's box with the legacy kernel's own arithmetic (corner slopes from the inverse projection, `exp` slice planes) into groupshared; every thread folds the column box (union of the slice boxes).
+2. Each light (staged 64 at a time, view-space centre + range as before) is tested ONCE against the column box (sphere vs box); survivors map `[z - r, z + r]` to the slice span through `ln(z / near) * slices / ln(far / near)` with one slice of margin each side, run the legacy per-cluster box test on those slices only and set one bit per (slice, light) in a groupshared mask (24 slices x 32 words = 3 KB; + 3 KB prefix, 0.6 KB boxes).
+3. Thread per slice: exclusive prefix of the 32 words' populations, the count word (`min(n, 63)`), the occupancy bit (an atomic add of the single bit into a word the host cleared with `fillBuffer` before the dispatch: every cluster is written by exactly one group, add = or). Then the lists are written word by word, bit by bit (ascending light index = the legacy order, first 63 kept).
+The header and the lights' copy are done by the first groups (t < count). Push block unchanged (128 bytes), no ABI block change; DXIL-checked (3 + 3 KB groupshared, atomics through `rvkBufAdd`).
+**Why the contents are the legacy ones.** The per-cluster test is the legacy code (same expressions on the same inputs); the column test is a sphere-vs-box test against a box that contains every slice box (a monotone superset: a sphere reaching a slice box reaches the union); the slice span only skips slices whose z range cannot meet the light's (+/- 1 slice for log rounding); order and cap are by construction. A frustum-plane column test (GD3D11's) is tighter than the AABB-of-corners box and would change contents (lights that only graze the box corner), so the exact box test stays as the second stage. Not a "looser/tighter, same material result" argument: identical lists.
+**Compare mode** (`lighting.cluster_build=compare`, Vulkan; env-free registry setting, Debug): after the column build the legacy kernel (`light_cluster.comp.hlsl` built with `RVK_CLUSTER_COMPARE`) recomputes every cluster and compares count word, every list index and the occupancy words against the buffer the columns wrote, every 2nd build; counters in a readback buffer, rvk.log `enh: lights: cluster build compare: N builds, M clusters compared, DIFFERING d (o occupancy words)` every 2 s. `threads` = the legacy kernel as the build (A/B), built in the background on first use.
+**Exactness evidence (Full, Vulkan, 7900 XTX, table at its 1,024-light cap in every scene; 1,400 - 2,050 builds = 11 - 16.5 x 10^6 clusters compared per scene):** harbour_docks, pub_interior, torch_hero, harbour_night, jungle, monastery_hall, crystal_cave, `point` (rvk_pointshadow, dynamic lights), and the `rvk_rtwalk` walk (load=0 hour=23, 40 s): **DIFFERING 0, 0 occupancy words** in all. (`scratch\ws21\cmp_*`, `walk_*`.)
+**GPU (perf-ab `-Mode full -Key lighting.cluster_build -A threads -B columns`, 4 pairs, shared copy + lock; ms).**
+
+| scene | `light.cluster` Vulkan | `light.cluster` D3D12 | main submission Vulkan | main submission D3D12 |
+|---|---|---|---|---|
+| jungle | 0.0675 -> 0.0109 | 0.0826 -> 0.0162 | 10.112 -> 10.072 (-0.04) | 11.795 -> 11.739 (-0.06) |
+| pub_interior | 0.0627 -> 0.0107 | 0.0793 -> 0.0161 | 1.324 -> 1.279 (-0.045) | 1.408 -> 1.341 (-0.067) |
+| crystal_cave | 0.0662 -> 0.0116 | 0.0830 -> 0.0188 | 3.798 -> 3.754 (-0.043) | 3.986 -> 3.925 (-0.061) |
+| harbour_night | 0.0664 -> 0.0115 | 0.0830 -> 0.0185 | 5.100 -> 5.090 (-0.01, noisy arm) | 5.571 -> 5.512 (-0.06) |
+
+The pass drops by 80 %; the pass is cheap in absolute terms, the gain is ~0.05 - 0.065 ms of GPU per frame (about the submission delta). Why: 720 groups instead of 126 (the old build used a seventh of the GPU), each light is read and transformed 720 times in parallel instead of 126 x 64 box tests per thread, and a light touches 1 - 3 slices of a column instead of every cluster.
+Gates: `rvk_shadertool dxil-check embedded` 0 failures, `rvk_vktest --passes`, rvk_tests (settings count 168).
