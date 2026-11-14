@@ -1560,7 +1560,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "How wide the soft shadow edges grow with the distance from the object (the apparent size of the sun, in degrees). "
                        "The real sun is 0.27; higher is softer.",
         .type = Type::Float,
-        .defaultValue = 0.6,
+        .defaultValue = 0.15,
         .min = 0.1,
         .max = 2,
         .format = "%.2f",

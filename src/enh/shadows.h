@@ -78,7 +78,7 @@ public:
                                 // 2 the cascade term only, 3 the terrain term only, 4 the ray-traced term only, 5 its coverage
         float rtBlend = 0.25f;  // fraction of the ray-traced range blended out to the cascades
         bool soft = false;      // shadows.soft = pcss: PCSS + temporal / spatial denoise instead of the PCF grid (taps: 2..4 rotated taps)
-        float softSize = 0.6f;  // shadows.soft_size: the sun's cone half angle in degrees (the real sun: 0.27)
+        float softSize = 0.15f;  // shadows.soft_size: the sun's cone half angle in degrees (the real sun: 0.27)
     };
 
     explicit Shadows(d3d9::Device& device);
