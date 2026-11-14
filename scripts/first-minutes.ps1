@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    The first minutes of a session in one cache state (docs/research/frame-ownership.md 14.52): a new game + a walk (mods/rvk_rtwalk, load=0) in a private test copy,
+    The first minutes of a session in one cache state (docs/research/frame-ownership.md 14.53): a new game + a walk (mods/rvk_rtwalk, load=0) in a private test copy,
     with the shader caches of the chosen state, Full or Wrapper, and a noise record of the machine (other agents' builds / games).
 
 .DESCRIPTION

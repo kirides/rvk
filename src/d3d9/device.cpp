@@ -2450,7 +2450,7 @@ void Device::promoteVariant(const ShaderRef& s, VariantSlot slot) {
     }
 }
 
-// WS12: how many variant workers build at once, and at what priority. Measured (frame-ownership.md 14.52): the engine thread's cost while forms are pending (30 ms a frame, 10 when
+// WS12: how many variant workers build at once, and at what priority. Measured (frame-ownership.md 14.53): the engine thread's cost while forms are pending (30 ms a frame, 10 when
 // they are ready) does not depend on the number of workers (12 or 4: the same per-frame cost, the pending phase just lasted 2x longer with 4), so by default every worker runs in the
 // world as well; they run at the lowest thread priority there (below normal outside it), so on a machine with few threads the engine / render / record threads keep their cores.
 // RVK_VARIANT_GAMEPLAY=n limits the workers building at once in the world, RVK_PREWARM_GAMEPLAY=n the plain pipeline prewarm builds (experiments)

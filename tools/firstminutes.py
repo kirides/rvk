@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""First minutes of a session (docs/research/frame-ownership.md 14.52): loading screens, frame intervals per 5 s window after the world appeared (clean = no other
+"""First minutes of a session (docs/research/frame-ownership.md 14.53): loading screens, frame intervals per 5 s window after the world appeared (clean = no other
 agent's load, from the <tag>_cpu.csv next to the log that scripts/first-minutes.ps1 writes), the engine thread's CPU per frame, variant queue, owned share.
 
   python tools/firstminutes.py <rvk.log> [--rows]

@@ -1210,7 +1210,7 @@ public:
     // thread that presents, one present after each load step; docs/research/menu-fps.md 3): at most 30 frames a second
     // are shown, the others are rendered but not presented
     void setUnpaced(bool unpaced) { unpaced_ = unpaced; }
-    // WS12 (frame-ownership.md 14.52): the engine is not in the world (loading screen, menu, GUI not up yet): the background compile workers (variants, pipeline
+    // WS12 (frame-ownership.md 14.53): the engine is not in the world (loading screen, menu, GUI not up yet): the background compile workers (variants, pipeline
     // prewarm) may use every thread at their normal low priority; in the world they run on few threads at the lowest one
     void setBackgroundFree(bool free);
     bool backgroundFree() const { return backgroundFree_.load(std::memory_order_relaxed); }
