@@ -134,7 +134,8 @@ StaticOps::Skip StaticOps::nonOpPasses(const std::uint8_t* shader, const std::ui
     in.combi = combi;
     in.instanced = false;
     in.switchValue = switchValue;
-    std::vector<sc::Pass> passes;
+    static thread_local std::vector<sc::Pass> passes;  // (WS15: capacity kept: one allocation per decal record and frame before; passDraw does not come back here)
+    passes.clear();
     const std::uint8_t* version = nullptr;
     if (const Skip k = shaderPasses(shader, in, version, passes); k != Skip::None) return k;
     if (version == nullptr) return Skip::None;

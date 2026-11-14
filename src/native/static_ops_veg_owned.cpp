@@ -1031,7 +1031,8 @@ std::uint32_t StaticOps::vegPass(bool solid) {
             struct RecKey {
                 std::uint32_t plan, entry, rec;
             };
-            std::vector<RecKey> recKeys;
+            static thread_local std::vector<RecKey> recKeys;  // (WS15: capacity kept across passes)
+            recKeys.clear();
             for (const std::uint32_t ri : order) {
                 Run& run = runs[ri];
                 tro::Tpl& tpl = *run.tpl;
