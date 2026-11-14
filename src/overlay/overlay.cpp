@@ -457,6 +457,14 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         d3d9::treeReuse().store(w[2] == "1");
         return ok(std::format("owned tree reuse {}", w[2] == "1" ? "on" : "off"));
     }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "treeown") {
+        // frame-ownership.md 14.59 (WS17): the owned tree pass's additions (bit 0 static-SH instances, bit 1 batch-first keys, bit 2 empty-op records) inside one run
+        std::uint32_t m = 0;
+        const auto r = std::from_chars(w[2].data(), w[2].data() + w[2].size(), m);
+        if (r.ec != std::errc() || m > 7) return fail("debug treeown <mask 0..7>");
+        d3d9::treeOwnMask().store(m);
+        return ok(std::format("owned tree additions mask {}", m));
+    }
     if (w[0] == "debug" && w.size() == 3 && w[1] == "lightskip") {
         // frame-ownership.md 14.55 (WS13): the light table's unchanged-build skip on / off inside one run
         if (w[2] != "0" && w[2] != "1") return fail("debug lightskip 0|1");

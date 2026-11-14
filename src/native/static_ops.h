@@ -1451,7 +1451,7 @@ private:
     void treeCompBatch(std::size_t drawsBefore, std::uint64_t key);
     void treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, const std::uint8_t* lightIllum, std::uint64_t key, bool sun, std::uint32_t slot);
     void treeCompEnd(const Op& op);
-    void treeLightBatches(std::vector<tro::Inst>& out, const std::vector<std::uint64_t>& sigs, std::size_t first, std::size_t end, std::uint8_t limit, bool byStrip);
+    void treeLightBatches(std::vector<tro::Inst>& out, const std::vector<std::uint64_t>& sigs, std::size_t first, std::size_t end, std::uint8_t limit, bool byStrip, bool light);
     bool treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why);
     bool treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass);
     int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase, tro::Stats& W, std::uint64_t& scrubTick, const char* what);

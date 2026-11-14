@@ -73,6 +73,9 @@ std::atomic<std::uint32_t>& pullViewMask();
 // WS11 (frame-ownership.md 14.52): the owned tree pass's reuse (the z passes' kept layout, the observers' covers of no-op / unchanged tree runs); default on, `debug treereuse 0|1`
 // (overlay command) switches it inside one run for the A/B of perf-ab.ps1 (-CommandTemplate)
 std::atomic<bool>& treeReuse();
+// WS17 (frame-ownership.md 14.59): the owned tree pass's three additions as a bit mask, default 7, overlay command `debug treeown <mask>` (A/B inside one run): bit 0 = solid ops with
+// static-SH instances, bit 1 = branch / fronds instances take their batch's first start (no "no template"), bit 2 = ops that draw nothing keep a record (no "no record")
+std::atomic<std::uint32_t>& treeOwnMask();
 
 class Device;
 

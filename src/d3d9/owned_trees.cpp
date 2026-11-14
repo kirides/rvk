@@ -5,6 +5,8 @@
 // positions p .. p + n - 1 draws as ONE indirect command with instanceCount n and firstInstance p: the ref stream (instance-rate: record index, view slot)
 // repeats the run's record index n times, and the tree vertex shader's own instance-rate stream 1 (our identity ramp, element p + i = p + i) picks the row.
 
+#include <windows.h>
+
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -20,6 +22,15 @@ namespace rvk::d3d9 {
 std::atomic<bool>& treeReuse() {
     static std::atomic<bool> on{true};
     return on;
+}
+
+std::atomic<std::uint32_t>& treeOwnMask() {
+    static std::atomic<std::uint32_t> mask{[] {
+        char b[8] = {};  // RVK_TREE_OWN_MASK=<0..7> at start
+        if (GetEnvironmentVariableA("RVK_TREE_OWN_MASK", b, sizeof(b)) != 0 && b[0] >= '0' && b[0] <= '7') return static_cast<std::uint32_t>(b[0] - '0');
+        return 7u;
+    }()};
+    return mask;
 }
 
 std::uint64_t Device::treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok) {
