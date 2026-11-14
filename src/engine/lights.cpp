@@ -1,6 +1,7 @@
 #include "engine/lights.h"
 
 #include <windows.h>
+#include <xmmintrin.h>
 
 #include <atomic>
 #include <cmath>
@@ -234,6 +235,12 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
         const float scale = staticScale();
         const void* ptfv = s.staticPointLightVftable;
         const void* ambfv = s.staticAmbientLightVftable;
+        // (WS13: the lights are separate heap objects: the loads below were one cache miss after the other; every light's two lines are requested first, so the
+        // misses overlap. A prefetch of an unmapped address does not fault; the values read are the same)
+        for (const char* payload : c.lights) {
+            _mm_prefetch(payload, _MM_HINT_T0);
+            _mm_prefetch(payload + 64, _MM_HINT_T0);
+        }
         for (const char* payload : c.lights) {
             WorldLight l;
             if (readStaticLight(payload, ptfv, ambfv, scale, l) != 2 || !reaches(l.pos, l.range)) continue;
