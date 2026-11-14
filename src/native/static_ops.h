@@ -211,6 +211,7 @@ public:
     bool ownFoliageOn() const { return ownFoliage_; }
     struct FoliageStats {
         std::uint64_t ops = 0, instances = 0, changed = 0, removed = 0;
+        std::uint64_t viewUnset = 0;  // 16.14: thinning decided before the op composed the view (the camera read from the database, as composeView reads it)
     };
     const FoliageStats& foliageTotal() const { return foliageTotal_; }
     // native.owned_vegetation_ops (frame-ownership.md 7.42, F7-2; static_ops_veg_owned.cpp): the main view's vegetation z / solid ops retained as templates per (type, pass, sun) bucket,
@@ -1526,7 +1527,7 @@ private:
     // S-5 (native.own_foliage)
     bool ownFoliage_ = false;
     FoliageStats foliageW_, foliageTotal_;
-    sc::GrassThin grassThinOf(float gridEnd) const;  // off unless own_foliage acts in this view (main view, no engine compare)
+    sc::GrassThin grassThinOf(float gridEnd);  // off unless own_foliage acts in this view (main view, no engine compare)
     void foliageCount(const sc::GrassThin& t, std::size_t instances, std::uint32_t changed, std::uint32_t removed);
     void foliageReport();
     std::uint32_t ownInstCursor_ = 0;
