@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <format>
 #include <string>
 
@@ -41,8 +42,10 @@ std::atomic<bool> g_trueSunKnown{false};
 std::atomic<const void*> g_cascadeObject{nullptr};
 std::atomic<int> g_fit{0};
 std::atomic<bool> g_fitActive{false};
-FitInfo g_lastFit[4];
-float g_loggedSide[4]{};
+FitInfo g_lastFit[4];  // guarded by g_lastFitMutex (written on the render thread, read by lastFit() anywhere)
+std::mutex g_lastFitMutex;
+float g_loggedSide[4]{};  // render thread only; setOverrides asks for a reset through g_resetLog
+std::atomic<bool> g_resetLog{false};
 
 // ---- SDSM state (render thread; the pure parts are in sdsm::, shadow_maps.h) ----
 std::atomic<std::uint64_t> g_counter{0};  // cascade updates so far (RenderShadowMaps calls)
@@ -52,7 +55,7 @@ std::atomic<float> g_playerRange{0.0f};   // the shadow range before the visible
 constexpr int kSdsmCalmFrames = 90;       // an extent shrinks after this many frames below its grid value
 constexpr float kSdsmMaxAge = 3.0f;       // cascade updates a reduction may be old (counter difference)
 constexpr double kSdsmMaxSeconds = 0.25;
-constexpr float kSdsmMinAspect = 0.5f;    // a box side is at least this fraction of the other (texels stay within 2:1)
+
 double steadySeconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -75,6 +78,8 @@ struct SdsmState {
     std::uint64_t ageSum = 0, ageCount = 0, cuts = 0;
     double lastReport = 0.0;
     float loggedSide[4][2]{};
+    std::uint64_t ageMin = ~0ull, ageMax = 0, ageHist[8]{};  // the reduction's age at its uses (cascade updates; 7 = 7 or more)
+    double marginSum = 0.0;  // margin / slice far end, summed over the fits
 };
 SdsmState g_sdsm;
 
@@ -243,66 +248,71 @@ bool sdsmFit(int idx, float n, float f, const Mat& invL, int size, float nb[6], 
     };
     if (!sdsmDataUsable(g_counter.load(std::memory_order_relaxed), why)) return fail(why);
     if (!g.camValid) return fail(kNoData);
-    for (int k = 0; k < 9; ++k)
-        if (std::fabs(d.lightA[k] - static_cast<float>(invL[(k / 3) * 4 + k % 3])) > 2e-4f) return fail(kChanged);  // the sun turned since the reduction
-    if (std::fabs(d.tanX - g.tan[0]) > 0.01f * g.tan[0] || std::fabs(d.tanY - g.tan[1]) > 0.01f * g.tan[1]) return fail(kChanged);  // the field of view changed
-    const float dx = g.pos[0] - d.pos[0], dy = g.pos[1] - d.pos[1], dz = g.pos[2] - d.pos[2];
-    const float dp = std::sqrt(dx * dx + dy * dy + dz * dz);
-    const float angle = sdsm::axesAngle(d.axes, g.axes);
-    if (dp > 400.0f || angle > 0.35f) return fail(kMotion);
-    const sdsm::Bounds b = sdsm::merge(d, n, f);
-    if (!b.any) return fail(kEmpty);
-    // the light space of the reduction -> this frame's (the origin moved with the camera)
-    const float shiftX = static_cast<float>(invL[12]) - d.lightT[0], shiftY = static_cast<float>(invL[13]) - d.lightT[1];
+    sdsm::FitIn in;
+    in.data = &d;
+    in.n = n;
+    in.f = f;
+    for (int k = 0; k < 9; ++k) in.lightA[k] = static_cast<float>(invL[(k / 3) * 4 + k % 3]);
+    for (int k = 0; k < 3; ++k) in.lightT[k] = static_cast<float>(invL[12 + k]);
+    std::memcpy(in.pos, g.pos, sizeof in.pos);
+    std::memcpy(in.axes, g.axes, sizeof in.axes);
+    in.tanX = g.tan[0];
+    in.tanY = g.tan[1];
+    in.size = size;
+    in.sphereLo[0] = nb[0];
+    in.sphereLo[1] = nb[1];
+    in.sphereHi[0] = nb[3];
+    in.sphereHi[1] = nb[4];
     // cascades are redrawn only every n-th frame while the camera drifts little (the throttle): its drift allowance goes into the margin
     const bool throttled = !g_everyFrame.load(std::memory_order_relaxed) && g_stride.load(std::memory_order_relaxed) > 1;
-    const float drift = throttled ? kSdsmMoveLimit + kSdsmTurnLimit * f : 0.0f;
-    const float m = sdsm::margin(dp, angle, f, 30.0f + drift, 0.01f);
-    const float x0 = b.minX + shiftX - m, x1 = b.maxX + shiftX + m, y0 = b.minY + shiftY - m, y1 = b.maxY + shiftY + m;
-    const float needX = x1 - x0, needY = y1 - y0;
-    if (!(needX > 0.0f && needY > 0.0f) || !std::isfinite(needX + needY + x0 + y0)) return fail(kEmpty);
-    // texels stay within 2:1 (the mask's filter is sized from the x axis)
-    const float ax = std::max(needX, kSdsmMinAspect * needY), ay = std::max(needY, kSdsmMinAspect * needX);
-    const float slack = 1.0f + 3.0f / static_cast<float>(std::max(size, 1));  // the engine's own snap and ours move the box by up to 1.5 texels
-    const float sphereSide = nb[3] - nb[0];
-    const float e[2] = {ax * slack, ay * slack};
-    const float lo[2] = {x0, y0}, hi[2] = {x1, y1};
-    float out[2][2] = {{nb[0], nb[3]}, {nb[1], nb[4]}};  // per axis: min, max
-    for (int a = 0; a < 2; ++a) {
-        const float ext = sdsm::step(g.ext[idx][a], std::min(e[a], sphereSide), kSdsmCalmFrames);
-        if (ext >= sphereSide || e[a] >= sphereSide) continue;  // no gain on this axis: the sphere's
-        const float texel = ext / static_cast<float>(std::max(size, 1));
-        const float c = sdsm::snap(0.5f * (lo[a] + hi[a]), texel);
-        out[a][0] = c - 0.5f * ext;
-        out[a][1] = c + 0.5f * ext;
+    in.driftCm = throttled ? kSdsmMoveLimit : 0.0f;
+    in.driftRad = throttled ? kSdsmTurnLimit : 0.0f;
+    sdsm::FitOut out;
+    if (!sdsm::fit(in, g.ext[idx], kSdsmCalmFrames, out)) {
+        return fail(out.fail == sdsm::FitFail::Empty ? kEmpty : out.fail == sdsm::FitFail::Motion ? kMotion : kChanged);
     }
-    nb[0] = out[0][0];
-    nb[3] = out[0][1];
-    nb[1] = out[1][0];
-    nb[4] = out[1][1];
+    nb[0] = out.lo[0];
+    nb[3] = out.hi[0];
+    nb[1] = out.lo[1];
+    nb[4] = out.hi[1];
     sideY = nb[4] - nb[1];
     ++g.fits[idx];
-    g.ageSum += g_counter.load(std::memory_order_relaxed) - d.counter;
+    const std::uint64_t age = g_counter.load(std::memory_order_relaxed) - d.counter;
+    g.ageSum += age;
     ++g.ageCount;
+    g.ageMin = std::min(g.ageMin, age);
+    g.ageMax = std::max(g.ageMax, age);
+    ++g.ageHist[std::min<std::uint64_t>(age, 7)];
+    g.marginSum += out.margin / std::max(f, 1.0f);
     return true;
 }
 
 bool detourUpdateCamera(void* self, int face) {
+    if (g_resetLog.exchange(false, std::memory_order_relaxed)) {
+        for (float& v : g_loggedSide) v = 0.0f;
+    }
     const int mode = g_fit.load(std::memory_order_relaxed);
     void* cascade = const_cast<void*>(g_cascadeObject.load(std::memory_order_relaxed));
     bool done = false;
     if (mode > 0 && self != nullptr && cascade != nullptr && g_engineBase != nullptr && sym().appInstancePtr != nullptr) {
+        // self first: the engine calls this on a live object, but g_cascadeObject (refreshed only in RenderShadowMaps) may be gone (Shadow Quality change, world
+        // change): every read of it is guarded, and only a split of the object we hold counts
         std::uintptr_t vt = 0;
-        std::memcpy(&vt, self, sizeof vt);
-        const auto* splits = field<std::uint8_t*>(cascade, 0x30);
-        const int count = field<int>(cascade, kSplitCount);
+        const std::uint8_t* splits = nullptr;
+        int count = 0;
         auto* me = static_cast<std::uint8_t*>(self);
-        const std::ptrdiff_t off = splits != nullptr ? me - splits : -1;
         const std::ptrdiff_t stride = static_cast<std::ptrdiff_t>(kSplitStride);
-        if (vt == reinterpret_cast<std::uintptr_t>(g_engineBase + kCascadeVtableRva) && off >= 0 && off % stride == 0 && off / stride < count && count <= 4) {
+        std::ptrdiff_t off = -1;
+        if (safeRead(self, &vt, sizeof vt) && vt == reinterpret_cast<std::uintptr_t>(g_engineBase + kCascadeVtableRva) &&
+            safeRead(static_cast<const std::uint8_t*>(cascade) + 0x30, &splits, sizeof splits) && safeRead(static_cast<const std::uint8_t*>(cascade) + kSplitCount, &count, sizeof count) &&
+            splits != nullptr)
+            off = me - splits;
+        if (off >= 0 && off % stride == 0 && off / stride < count && count <= 4) {
             const int idx = static_cast<int>(off / stride);
-            const float n = field<float>(self, 0x160);
-            const float f = idx + 1 < count ? field<float>(const_cast<std::uint8_t*>(splits) + (idx + 1) * stride, 0x160) : field<float>(cascade, kMaxDistance);
+            float n = -1.0f, f = 0.0f;
+            const bool read = safeRead(me + 0x160, &n, sizeof n) &&
+                              (idx + 1 < count ? safeRead(splits + (idx + 1) * stride + 0x160, &f, sizeof f) : safeRead(static_cast<const std::uint8_t*>(cascade) + kMaxDistance, &f, sizeof f));
+            if (!read) n = -1.0f;
             float proj[16], view[16], light[16], box[6];
             if (n >= 0.0f && f > n && readEngineCamera(view, proj) && safeRead(me + 0x60, light, sizeof light) && safeRead(me + 0xe0, box, sizeof box)) {
                 const SliceSphere ss = minimalSphere(1.0f / std::fabs(proj[0]), 1.0f / std::fabs(proj[5]), n, f);
@@ -318,7 +328,8 @@ bool detourUpdateCamera(void* self, int face) {
                     float nb[6] = {static_cast<float>(l[0]) - r, static_cast<float>(l[1]) - r, box[2], static_cast<float>(l[0]) + r, static_cast<float>(l[1]) + r,
                                    static_cast<float>(l[2]) + r};
                     if (std::isfinite(nb[0]) && std::isfinite(nb[5]) && 2.0f * r <= engineSide * 1.001f) {
-                        const int size = field<int>(self, 0xc);
+                        int size = 0;
+                        safeRead(me + 0xc, &size, sizeof size);
                         float sideY = 2.0f * r;
                         bool sdsmUsed = false;
                         if (mode == 2) {
@@ -334,7 +345,10 @@ bool detourUpdateCamera(void* self, int face) {
                         std::memcpy(me + 0xe0, nb, sizeof nb);
                         done = true;
                         const float sideX = nb[3] - nb[0];
-                        g_lastFit[idx] = FitInfo{engineSide, sideX, size, sideY, sdsmUsed};
+                        {
+                            const std::lock_guard lock(g_lastFitMutex);
+                            g_lastFit[idx] = FitInfo{engineSide, sideX, size, sideY, sdsmUsed};
+                        }
                         float* logged = g_sdsm.loggedSide[idx];
                         if (std::fabs(g_loggedSide[idx] - sideX) > 0.01f * r || (mode == 2 && std::fabs(logged[1] - sideY) > 0.05f * sideY)) {
                             g_loggedSide[idx] = sideX;
@@ -392,13 +406,29 @@ void sdsmBeginUpdate() {
                 line += std::format("{}c{}: {} sdsm / fallback none {} old {} sun-fov {} motion {} empty {}", line.empty() ? "" : "; ", i, g.fits[i], g.fallback[i][0], g.fallback[i][1],
                                     g.fallback[i][2], g.fallback[i][3], g.fallback[i][4]);
             }
-            spdlog::info("enh: shadows: sdsm (5 s): {}; reduction age {:.2f} updates, cuts {}, range {:.0f}", line, g.ageCount > 0 ? static_cast<double>(g.ageSum) / static_cast<double>(g.ageCount) : 0.0,
-                         g.cuts, g.range.cur);
+            // the reduction's age in cascade updates (frames; min / median / max, histogram 0..6, 7+) and the margin as a share of the slice's far end
+            std::uint64_t half = (g.ageCount + 1) / 2, acc = 0;
+            int median = 0;
+            for (int k = 0; k < 8; ++k) {
+                acc += g.ageHist[k];
+                if (acc >= half) {
+                    median = k;
+                    break;
+                }
+            }
+            spdlog::info("enh: shadows: sdsm (5 s): {}; reduction age {:.2f} updates (min {} median {} max {}; hist {} {} {} {} {} {} {} {}+), margin {:.1f} % of the slice, cuts {}, range {:.0f}", line,
+                         g.ageCount > 0 ? static_cast<double>(g.ageSum) / static_cast<double>(g.ageCount) : 0.0, g.ageCount > 0 ? g.ageMin : 0, median, g.ageMax, g.ageHist[0], g.ageHist[1],
+                         g.ageHist[2], g.ageHist[3], g.ageHist[4], g.ageHist[5], g.ageHist[6], g.ageHist[7], g.ageCount > 0 ? 100.0 * g.marginSum / static_cast<double>(g.ageCount) : 0.0, g.cuts,
+                         g.range.cur);
         }
         g.lastReport = now;
         std::memset(g.fits, 0, sizeof g.fits);
         std::memset(g.fallback, 0, sizeof g.fallback);
         g.ageSum = g.ageCount = g.cuts = 0;
+        g.ageMin = ~0ull;
+        g.ageMax = 0;
+        std::memset(g.ageHist, 0, sizeof g.ageHist);
+        g.marginSum = 0.0;
     }
 }
 
@@ -531,7 +561,7 @@ void setOverrides(const Overrides& o) {
     const int fit = std::clamp(o.fit, 0, 2);
     if (fit != g_fit.exchange(fit, std::memory_order_relaxed)) {
         if (fit == 0) g_fitActive.store(false, std::memory_order_relaxed);
-        for (float& v : g_loggedSide) v = 0.0f;
+        g_resetLog.store(true, std::memory_order_relaxed);
         g_sdsmReset.store(true, std::memory_order_relaxed);
         spdlog::info("enh: shadows: cascade fit {}", fit == 0 ? "engine" : fit == 1 ? "sphere" : "sdsm");
     }
@@ -562,7 +592,10 @@ SliceSphere minimalSphere(float tanX, float tanY, float n, float f) {
 
 bool fitOverridden() { return g_fit.load(std::memory_order_relaxed) > 0 && g_fitActive.load(std::memory_order_relaxed); }
 
-FitInfo lastFit(int cascade) { return cascade >= 0 && cascade < 4 ? g_lastFit[cascade] : FitInfo{}; }
+FitInfo lastFit(int cascade) {
+    const std::lock_guard lock(g_lastFitMutex);
+    return cascade >= 0 && cascade < 4 ? g_lastFit[cascade] : FitInfo{};
+}
 
 void setFitTap(void (*tap)(void* cascadeObject)) { g_fitTap.store(tap, std::memory_order_release); }
 
@@ -607,8 +640,12 @@ bool sdsmWanted() { return g_fit.load(std::memory_order_relaxed) == 2; }
 bool sdsmSetup(SdsmSetup& out) {
     void* cascade = const_cast<void*>(g_cascadeObject.load(std::memory_order_relaxed));
     if (cascade == nullptr) return false;
-    const auto* splits = field<std::uint8_t*>(cascade, 0x30);
-    if (splits == nullptr || field<int>(cascade, kSplitCount) < 1) return false;
+    // (the object may be gone: refreshed only by RenderShadowMaps)
+    const std::uint8_t* splits = nullptr;
+    int count = 0;
+    if (!safeRead(static_cast<const std::uint8_t*>(cascade) + 0x30, &splits, sizeof splits) || !safeRead(static_cast<const std::uint8_t*>(cascade) + kSplitCount, &count, sizeof count) ||
+        splits == nullptr || count < 1)
+        return false;
     float light[16];
     Mat invL;
     if (!safeRead(splits + 0x60, light, sizeof light) || !invert(light, invL)) return false;
@@ -689,6 +726,47 @@ float axesAngle(const float a[9], const float b[9]) {
         worst = std::max(worst, std::acos(std::clamp(d, -1.0f, 1.0f)));
     }
     return worst;
+}
+
+bool fit(const FitIn& in, Axis ext[2], int calmFrames, FitOut& out) {
+    const SdsmFrame& d = *in.data;
+    const auto fail = [&](FitFail r) {
+        out.fail = r;
+        return false;
+    };
+    out = FitOut{};
+    for (int k = 0; k < 9; ++k)
+        if (std::fabs(d.lightA[k] - in.lightA[k]) > 2e-4f) return fail(FitFail::Sun);  // the sun turned since the reduction
+    if (std::fabs(d.tanX - in.tanX) > 0.01f * in.tanX || std::fabs(d.tanY - in.tanY) > 0.01f * in.tanY) return fail(FitFail::Fov);
+    const float dx = in.pos[0] - d.pos[0], dy = in.pos[1] - d.pos[1], dz = in.pos[2] - d.pos[2];
+    out.dp = std::sqrt(dx * dx + dy * dy + dz * dz);
+    out.angle = axesAngle(d.axes, in.axes);
+    if (out.dp > 400.0f || out.angle > 0.35f) return fail(FitFail::Motion);
+    const Bounds b = merge(d, in.n, in.f);
+    if (!b.any) return fail(FitFail::Empty);
+    // the light space of the reduction -> this frame's (the origin moved with the camera)
+    const float shift[2] = {in.lightT[0] - d.lightT[0], in.lightT[1] - d.lightT[1]};
+    out.margin = margin(out.dp, out.angle, in.f, 30.0f + in.driftCm + in.driftRad * in.f, 0.01f);
+    const float lo[2] = {b.minX + shift[0] - out.margin, b.minY + shift[1] - out.margin};
+    const float hi[2] = {b.maxX + shift[0] + out.margin, b.maxY + shift[1] + out.margin};
+    const float need[2] = {hi[0] - lo[0], hi[1] - lo[1]};
+    if (!(need[0] > 0.0f && need[1] > 0.0f) || !std::isfinite(need[0] + need[1] + lo[0] + lo[1])) return fail(FitFail::Empty);
+    // texels stay within 2:1 (the mask's filter is sized from the x axis)
+    const float aspect[2] = {std::max(need[0], kMinAspect * need[1]), std::max(need[1], kMinAspect * need[0])};
+    const float slack = 1.0f + 3.0f / static_cast<float>(std::max(in.size, 1));  // the engine's own snap and ours move the box by up to 1.5 texels
+    for (int a = 0; a < 2; ++a) {
+        out.lo[a] = in.sphereLo[a];
+        out.hi[a] = in.sphereHi[a];
+        const float sphereSide = in.sphereHi[a] - in.sphereLo[a];
+        const float e = aspect[a] * slack;
+        const float extent = step(ext[a], std::min(e, sphereSide), calmFrames);
+        if (extent >= sphereSide || e >= sphereSide) continue;  // no gain on this axis: the sphere's
+        const float texel = extent / static_cast<float>(std::max(in.size, 1));
+        const float c = snap(0.5f * (lo[a] + hi[a]), texel);
+        out.lo[a] = c - 0.5f * extent;
+        out.hi[a] = c + 0.5f * extent;
+    }
+    return true;
 }
 
 }  // namespace sdsm

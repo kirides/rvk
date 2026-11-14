@@ -121,6 +121,25 @@ float snap(float c, float texel);
 float margin(float translation, float angle, float farZ, float fixedCm, float relative);
 // the largest angle between corresponding camera axes (rows of two row-major 3x3 axis sets), rad
 float axesAngle(const float a[9], const float b[9]);
+// The whole fit of one cascade from plain inputs (no engine access, no globals: written to be ported 1:1 to a compute shader; shadows.md 8.9): the reduction, the
+// slice, the current light view's inverse and camera, the sphere box (fallback and cap) and the per-axis extent state. False = keep the sphere's box (out.fail)
+inline constexpr float kMinAspect = 0.5f;  // a box side is at least this fraction of the other (texels stay within 2:1)
+enum class FitFail : std::uint8_t { None, Sun, Fov, Motion, Empty };
+struct FitIn {
+    const SdsmFrame* data = nullptr;
+    float n = 0.0f, f = 0.0f;                  // the slice's view depths
+    float lightA[9]{}, lightT[3]{};            // the current light view's inverse (world -> light)
+    float pos[3]{}, axes[9]{}, tanX = 0.0f, tanY = 0.0f;  // the current camera
+    int size = 0;                              // the cascade map's texels per side
+    float sphereLo[2]{}, sphereHi[2]{};        // the minimal sphere's x / y box
+    float driftCm = 0.0f, driftRad = 0.0f;     // the camera's allowed drift while the cascades are not redrawn (the throttle)
+};
+struct FitOut {
+    float lo[2]{}, hi[2]{};                    // the box's x / y
+    FitFail fail = FitFail::None;
+    float margin = 0.0f, dp = 0.0f, angle = 0.0f;
+};
+bool fit(const FitIn& in, Axis ext[2], int calmFrames, FitOut& out);
 }  // namespace sdsm
 
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing

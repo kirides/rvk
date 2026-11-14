@@ -2,6 +2,7 @@
 // the hardware depth of a cascade's quad back to depth-map units.
 
 #include <cmath>
+#include <cstring>
 
 #include "d3d9/scene.h"
 #include "engine/shadow_maps.h"
@@ -144,6 +145,63 @@ TEST(sdsm_extent_steps_and_hysteresis) {
     float last = 0.0f;
     for (int i = 0; i < 40; ++i) last = sm::sdsm::step(w, i % 3 == 0 ? 990.0f : 700.0f, 6);
     CHECK(last >= 990.0f);
+}
+
+TEST(sdsm_fit_whole_cascade) {
+    namespace sm = engine::shadowmaps;
+    sm::SdsmFrame d = emptySdsm();
+    for (int i = 0; i < 3; ++i) d.lightA[i * 4] = 1.0f;  // identity basis
+    d.tanX = 1.0f;
+    d.tanY = 0.6f;
+    d.axes[0] = d.axes[4] = d.axes[8] = 1.0f;
+    float* b = d.bounds[binOf(d, 500.0f)];
+    b[0] = -300.0f;
+    b[1] = 200.0f;
+    b[2] = -100.0f;
+    b[3] = 400.0f;
+    sm::sdsm::FitIn in;
+    in.data = &d;
+    in.n = 1.0f;
+    in.f = 1347.0f;
+    std::memcpy(in.lightA, d.lightA, sizeof in.lightA);
+    std::memcpy(in.axes, d.axes, sizeof in.axes);
+    in.tanX = d.tanX;
+    in.tanY = d.tanY;
+    in.size = 4096;
+    in.sphereLo[0] = in.sphereLo[1] = -2000.0f;
+    in.sphereHi[0] = in.sphereHi[1] = 2000.0f;
+    sm::sdsm::Axis ext[2];
+    sm::sdsm::FitOut out;
+    CHECK(sm::sdsm::fit(in, ext, 90, out));
+    // the box contains the visible bounds plus the margin and is smaller than the sphere's
+    CHECK(out.lo[0] <= -300.0f - 30.0f && out.hi[0] >= 200.0f + 30.0f && out.lo[1] <= -100.0f - 30.0f && out.hi[1] >= 400.0f + 30.0f);
+    CHECK(out.hi[0] - out.lo[0] < 4000.0f && out.hi[1] - out.lo[1] < 4000.0f);
+    // the sides are within 2:1 and the centre sits on whole texels of the extent
+    const float sx = out.hi[0] - out.lo[0], sy = out.hi[1] - out.lo[1];
+    CHECK(sx >= sm::sdsm::kMinAspect * sy * 0.999f && sy >= sm::sdsm::kMinAspect * sx * 0.999f);
+    const float texel = sx / 4096.0f, c = 0.5f * (out.lo[0] + out.hi[0]);
+    CHECK(std::fabs(c / texel - std::round(c / texel)) < 1e-2f);
+    // the same inputs give the same box (the grid does not walk), a camera that moved widens it
+    sm::sdsm::FitOut again;
+    CHECK(sm::sdsm::fit(in, ext, 90, again) && again.lo[0] == out.lo[0] && again.hi[1] == out.hi[1]);
+    in.pos[0] = 100.0f;
+    sm::sdsm::FitOut moved;
+    CHECK(sm::sdsm::fit(in, ext, 90, moved) && moved.margin > out.margin);
+    // fallbacks: a turned sun, another field of view, a camera that jumped, an empty slice
+    in.pos[0] = 0.0f;
+    sm::sdsm::FitIn sun = in;
+    sun.lightA[1] = 0.01f;
+    CHECK(!sm::sdsm::fit(sun, ext, 90, out) && out.fail == sm::sdsm::FitFail::Sun);
+    sm::sdsm::FitIn fov = in;
+    fov.tanX = 1.2f;
+    CHECK(!sm::sdsm::fit(fov, ext, 90, out) && out.fail == sm::sdsm::FitFail::Fov);
+    sm::sdsm::FitIn jump = in;
+    jump.pos[2] = 1000.0f;
+    CHECK(!sm::sdsm::fit(jump, ext, 90, out) && out.fail == sm::sdsm::FitFail::Motion);
+    sm::sdsm::FitIn empty = in;
+    empty.n = 3000.0f;
+    empty.f = 9000.0f;
+    CHECK(!sm::sdsm::fit(empty, ext, 90, out) && out.fail == sm::sdsm::FitFail::Empty);
 }
 
 TEST(sdsm_snap_and_margin) {
