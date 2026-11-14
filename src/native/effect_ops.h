@@ -550,6 +550,8 @@ private:
     int unitTech_ = -1;
     std::uint32_t unitPasses_ = 0;
     int leanVerified_ = 0;
+    std::vector<const void*> composeTextures_, composeShaders_;  // composeEffect's scratch (WS5: capacity kept across units)
+    std::vector<std::uint8_t> semBytes_, composeArr_;
     std::vector<std::uint32_t> resetTextures_;  // the technique's Texture / Image parameters (their Reset detaches them)
     bool spriteExecuted_ = false, spriteBlendSet_ = false;   // the flush's batches attached an image / set a blend
     std::uint32_t spriteEndStart_ = 0, spriteEndCount_ = 0;  // the mesh ring after the flush
@@ -568,6 +570,17 @@ private:
         void add(const LeanStats& o);
     };
     std::map<std::string, LeanStats> leanWindow_, leanTotal_;
+    struct NameEntry {
+        const void* filter = nullptr;
+        Unit unit = Unit::None;
+        const void* text = nullptr;
+        std::string tech, filterName, postName, fullName;
+        Stats* stats = nullptr;
+        LeanStats* leanStats = nullptr;
+    };
+    std::vector<NameEntry> nameCache_;
+    fxc::ConstantsStats cstatsTotal_;
+    const NameEntry& unitNames(Unit unit, const std::uint8_t* filter);
     LeanStats* leanStats_ = nullptr;
     std::uint32_t afterLogged_ = 0;
     void reportLean();

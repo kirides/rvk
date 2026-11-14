@@ -58,7 +58,12 @@ void applySamplers(const fx::Effect& e, const fx::Shader& shader, std::uint32_t 
                    std::span<const void* const> paramTextures, EffectDraw& d) {
     for (const auto& c : shader.constants.constants) {
         if (c.registerSet != fx::RegisterSet::Sampler) continue;
-        const std::uint32_t pi = e.parameterIndex(c.name);
+        // (WS5: the constant's parameter index is cached like fillConstants does: the name scan ran per sampler per pass per unit)
+        std::uint32_t pi = c.paramIndexCache;
+        if (pi == fx::Constant::kUnresolved) {
+            pi = e.parameterIndex(c.name);
+            c.paramIndexCache = pi;
+        }
         if (pi == fx::kNone) continue;
         const fx::Parameter& sp = e.parameters[pi];
         const std::uint32_t reg = base + c.registerIndex;
@@ -74,10 +79,86 @@ void applySamplers(const fx::Effect& e, const fx::Shader& shader, std::uint32_t 
     }
 }
 
+// WS5: the registers of a shader are a pure function of the values of the top-level parameters its constant table and its preshader's inputs name
+// (fx::evaluateShaderConstants: fillConstants + the preshader VM). The post chain's and the mask's parameters hardly change from frame to frame, so the
+// last evaluation is kept per shader (Shader::evalCache) together with the bytes it read; a unit whose bytes are equal takes the registers as they are.
+struct ConstantsCache {
+    bool gathered = false, valid = false;
+    std::vector<std::uint32_t> params;  // the parameters read, unique
+    std::vector<std::uint32_t> sizes;   // their value sizes at the evaluation
+    std::vector<std::byte> key;         // the values, concatenated
+    fx::ConstantRegisters regs, fresh;
+};
+
+ConstantsStats g_cstats;
+bool g_cverify = false;
+
+void gatherParams(const fx::Effect& e, const fx::ConstantTable& t, std::vector<std::uint32_t>& out) {
+    for (const fx::Constant& c : t.constants) {
+        std::uint32_t idx = c.paramIndexCache;
+        if (idx == fx::Constant::kUnresolved) {
+            idx = e.parameterIndex(c.name);
+            c.paramIndexCache = idx;
+        }
+        if (idx != fx::kNone && std::find(out.begin(), out.end(), idx) == out.end()) out.push_back(idx);
+    }
+}
+
+bool sameRegs(const fx::ConstantRegisters& a, const fx::ConstantRegisters& b) { return a.f == b.f && a.i == b.i && a.b == b.b; }
+
+const fx::ConstantRegisters& constantsFor(const fx::Effect& e, const fx::Shader& shader, const fx::ParameterValues& values) {
+    if (!shader.evalCache) shader.evalCache = std::make_shared<ConstantsCache>();
+    auto& c = *static_cast<ConstantsCache*>(shader.evalCache.get());
+    if (!c.gathered) {
+        gatherParams(e, shader.constants, c.params);
+        if (shader.preshader != fx::kNone && shader.preshader < e.preshaders.size()) gatherParams(e, e.preshaders[shader.preshader].inputs, c.params);
+        c.gathered = true;
+    }
+    const auto valueOf = [&](std::uint32_t idx) -> const std::vector<std::byte>& {
+        static const std::vector<std::byte> none;
+        return idx < values.data.size() ? values.data[idx] : none;
+    };
+    bool same = c.valid;
+    if (same) {
+        std::size_t off = 0;
+        for (std::size_t k = 0; k < c.params.size() && same; ++k) {
+            const auto& v = valueOf(c.params[k]);
+            same = v.size() == c.sizes[k] && off + v.size() <= c.key.size() && (v.empty() || std::memcmp(c.key.data() + off, v.data(), v.size()) == 0);
+            off += v.size();
+        }
+    }
+    if (same) {
+        if (!g_cverify) {
+            ++g_cstats.hits;
+            return c.regs;
+        }
+        // a check frame: the cached registers against a fresh evaluation
+        ++g_cstats.verified;
+        fx::evaluateShaderConstants(e, shader, values, c.fresh);
+        if (sameRegs(c.fresh, c.regs)) {
+            ++g_cstats.hits;
+            return c.regs;
+        }
+        ++g_cstats.differing;
+        std::swap(c.regs, c.fresh);
+        return c.regs;
+    }
+    ++g_cstats.misses;
+    fx::evaluateShaderConstants(e, shader, values, c.regs);
+    c.sizes.resize(c.params.size());
+    c.key.clear();
+    for (std::size_t k = 0; k < c.params.size(); ++k) {
+        const auto& v = valueOf(c.params[k]);
+        c.sizes[k] = static_cast<std::uint32_t>(v.size());
+        c.key.insert(c.key.end(), v.begin(), v.end());
+    }
+    c.valid = true;
+    return c.regs;
+}
+
 // HalEffect::applyConstants: the registers from c0 (float, int, bool)
 void applyConstants(const fx::Effect& e, const fx::Shader& shader, bool vertex, const fx::ParameterValues& values, EffectDraw& d) {
-    static thread_local fx::ConstantRegisters regs;
-    fx::evaluateShaderConstants(e, shader, values, regs);
+    const fx::ConstantRegisters& regs = constantsFor(e, shader, values);
     const auto nf = static_cast<std::uint32_t>(regs.f.size() / 4);
     const auto ni = static_cast<std::uint32_t>(regs.i.size() / 4);
     const auto nb = static_cast<std::uint32_t>(regs.b.size());
@@ -98,6 +179,14 @@ void setState(EffectDraw& d, std::uint32_t rs, std::uint32_t v) {
 }
 
 }  // namespace
+
+ConstantsStats takeConstantsStats() {
+    const ConstantsStats s = g_cstats;
+    g_cstats = {};
+    return s;
+}
+
+void setConstantsVerify(bool on) { g_cverify = on; }
 
 void applyPass(const fx::Effect& e, const fx::Pass& pass, const fx::ParameterValues& values, std::span<const void* const> paramTextures,
                std::span<const void* const> shaders, EffectDraw& d) {

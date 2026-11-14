@@ -282,11 +282,12 @@ private:
     };
 
     const Handle* handleOf(void* h) const {
+        // (WS5: pointer arithmetic into the handle table, was a scan per call: parameterOf runs per parameter object per unit)
         const auto* p = static_cast<const Handle*>(h);
-        for (const auto& x : params_) {
-            if (&x == p) return p;
-        }
-        return nullptr;
+        const auto* b = params_.data();
+        if (p == nullptr || p < b || p >= b + params_.size()) return nullptr;
+        if ((reinterpret_cast<std::uintptr_t>(p) - reinterpret_cast<std::uintptr_t>(b)) % sizeof(Handle) != 0) return nullptr;
+        return p;
     }
     Handle* elementHandle(std::uint32_t param, std::uint32_t element) {
         for (auto& x : params_) {

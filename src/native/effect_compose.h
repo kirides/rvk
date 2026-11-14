@@ -76,6 +76,13 @@ struct Masters {
     bool fill = false, cull = false, depthFunc = false, depthWrite = false;
 };
 
+// WS5: the per-shader register cache of applyPass (counters since the last take; `differing` = a check frame's fresh evaluation disagreed: must stay 0)
+struct ConstantsStats {
+    std::uint64_t hits = 0, misses = 0, verified = 0, differing = 0;
+};
+ConstantsStats takeConstantsStats();
+void setConstantsVerify(bool on);  // the cached registers are compared with a fresh evaluation (a check frame)
+
 // HalEffect::applyPass for `pass` with the parameter `values`; `paramTextures[i]` = the texture top-level parameter i names (null:
 // none), `shaders[k]` = our device shader of the effect's shader k
 void applyPass(const fx::Effect& effect, const fx::Pass& pass, const fx::ParameterValues& values, std::span<const void* const> paramTextures,
