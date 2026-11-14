@@ -333,7 +333,12 @@ void StaticOps::recEnter(const Op& op) {
         recAudit(op);
     }
     R.wantOwnable = ownedStatic_ && R.cur != nullptr && !R.cur->ownable;
-    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable;
+    if (R.cur != nullptr && R.cur->stale && ownedDelta_ && !rebuildStaleOff()) {
+        // WS9: the owned path found the record out of date (orec::OpRecord::stale): remade from this composition
+        R.refused = true;
+        ++staleRebuilds_;
+    }
+    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable || R.refused;
     recCollect_ = ownedStatic_;  // (the touches / stream 3 lists of every composed eligible op: a record can be made from any composition)
     if (R.building) {
         R.readLog = {};
@@ -586,8 +591,8 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     // draw") is out of date as soon as the composition has the form: remade from this composition now, not at some later check frame
     static const bool ws7Off = GetEnvironmentVariableA("RVK_WS7_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour, remade at a check frame at best)
     // WS10: actor records too (an actor record built while its forms were pending - a cold shader cache - was "not a scene draw" for good with owned_check = 0: actors 0 % owned;
-    // RVK_WS10_BASELINE=1 keeps WS7's exclusion)
-    static const bool ws10ActorsOff = GetEnvironmentVariableA("RVK_WS10_BASELINE", nullptr, 0) != 0;
+    // RVK_WS10_ACTORS_OFF=1 keeps WS7's exclusion)
+    static const bool ws10ActorsOff = GetEnvironmentVariableA("RVK_WS10_ACTORS_OFF", nullptr, 0) != 0;
     if (!ws7Off && !R.refused && (!R.cur->actor || !ws10ActorsOff) && pkey != 0) {
         const orec::DrawRec& cur = R.cur->draws[k];
         // the owned path's own tests of a retained draw (ownedDerive / deriveScene / orderedValid): a scene draw with its v2 pipeline, not made while a form was pending
@@ -597,20 +602,6 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         if (!cur.scene || cur.cd == nullptr || !ownable(*cur.cd)) {
             const auto pit = packets_.find(pkey);
             if (pit != packets_.end() && ownable(pit->second.cd)) {
-                R.refused = true;
-                ++R.stats(R.key.view != 0).refused[9];
-            }
-        }
-    }
-    // WS10 (frame-ownership.md 14.50): the owned path refused a draw of this record as out of date (stale module / variant / binding / texture / scene form: it flags the record) and
-    // this composition is that op's late one: remake the record from it, not at a check frame that owned_check = 0 never has. At most once per kWs10Gap frames per record (a refusal that
-    // persists after a remake - a texture still not sampleable - must not rebuild every frame)
-    {
-        static const bool ws10Off = GetEnvironmentVariableA("RVK_WS10_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour)
-        constexpr std::uint64_t kWs10Gap = 20;
-        if (!ws10Off && !R.refused && R.cur->ownedRefused) {
-            if (dev_.stats().frames - R.cur->builtFrame >= kWs10Gap) {
-                R.cur->ownedRefused = false;
                 R.refused = true;
                 ++R.stats(R.key.view != 0).refused[9];
             }

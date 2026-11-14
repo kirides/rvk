@@ -1194,14 +1194,54 @@ private:
     std::chrono::steady_clock::time_point late1sAt_{}, lateStart_{};
     void lateSecondReport();
     d3d9::Device::OwnedReplayStats ownedDevLast_{};
-    std::unordered_map<std::uint64_t, bool> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
+    // WS9 (frame-ownership.md 14.51): a per-pass memo without allocations (the unordered_maps it replaces were cleared every pass and re-allocated a node per key:
+    // the owned path's heap calls). clear() is O(1) (a generation); a full probe window only drops the memo entry (the caller computes it again): exact
+    template <class V, std::size_t N>
+    class PassMemo {
+        static_assert((N & (N - 1)) == 0);
+        struct E {
+            std::uint64_t key = 0;
+            std::uint32_t gen = 0;
+            V v{};
+        };
+        std::vector<E> e_;
+        std::uint32_t gen_ = 1;
+        static std::size_t at(std::uint64_t k) { return static_cast<std::size_t>((k * 0x9E3779B97F4A7C15ull) >> 40) & (N - 1); }
+    public:
+        void clear() {
+            if (++gen_ == 0) {
+                for (E& x : e_) x.gen = 0;
+                gen_ = 1;
+            }
+        }
+        const V* get(std::uint64_t k) const {
+            if (e_.empty()) return nullptr;
+            for (std::size_t i = at(k), n = 0; n < 8; ++n, i = (i + 1) & (N - 1)) {
+                const E& x = e_[i];
+                if (x.gen != gen_) return nullptr;
+                if (x.key == k) return &x.v;
+            }
+            return nullptr;
+        }
+        void put(std::uint64_t k, const V& v) {
+            if (e_.empty()) e_.resize(N);
+            for (std::size_t i = at(k), n = 0; n < 8; ++n, i = (i + 1) & (N - 1)) {
+                E& x = e_[i];
+                if (x.gen != gen_ || x.key == k) {
+                    x = {k, gen_, v};
+                    return;
+                }
+            }
+        }
+    };
+    PassMemo<bool, 1024> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
     std::vector<std::uint64_t> ownedPolled_;                  // material slot -> frame + 1 of the last poll made for an owned op
     std::uint32_t ownedLogged_ = 0;
     std::uint64_t ownedIndirectLast_ = 0;
     struct OwnedWinCache {  // per pass: the material windows of a slot, the lighting window base of a (slot, params)
         std::uint64_t frame = ~0ull;
         std::unordered_map<std::uint32_t, d3d9::OwnedWindows> mat;
-        std::unordered_map<std::uint64_t, std::uint32_t> light;
+        PassMemo<std::uint32_t, 1024> light;
     } ownedCache_;
     bool ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, bool viewWinOk, int& why);
     // F2c-4a (static_ops_owned.cpp)
@@ -1237,6 +1277,16 @@ private:
     void* opResolveSelf_ = nullptr;
     d3d9::Device::OwnedArena ownedArena_;
     bool ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, std::uint32_t viewSlot, std::uint64_t epoch, std::uint32_t scrubStride, std::uint32_t scrubPhase, int& why);
+    // WS9 (frame-ownership.md 14.51): records the owned path refused as out of date are remade at their op's late composition (orec::OpRecord::stale)
+    static bool rebuildStaleOff();
+    bool ownedDelta_ = true;  // native.owned_delta (14.51)
+    std::uint64_t deltaPassesW_ = 0;  // (owned passes with the delta work on, 5 s: the stages line)
+public:
+    void setOwnedDelta(bool on) { ownedDelta_ = on; }
+    bool ownedDeltaOn() const { return ownedDelta_; }
+private:
+    void markStale(const orec::OpRecord& rec, int late);
+    std::uint64_t staleMarked_ = 0, staleRebuilds_ = 0;  // (run totals; the owned static line prints them)
     void ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw);
     bool ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p);
     void ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in);

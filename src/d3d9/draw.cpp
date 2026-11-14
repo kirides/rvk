@@ -238,11 +238,13 @@ bool Device::prepareTextures() {
 // F15-1 (frame-ownership.md 14.20): the same per-texture step as prepareTextures, for an owned draw's texture (no draw is being prepared: the record's own texture)
 bool Device::ownedTextureNeedsPrep(const Texture* t) const {
     if (t == nullptr || t->isNull()) return false;
+    // WS9: the common answer first (a sampleable texture needs nothing; the bound-target test below only turns a "needs" into "no")
+    if (!t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
     for (Surface* s : rt_) {
         if (s != nullptr && s->texture() == t) return false;  // (a feedback loop: the derivation refuses it, as before)
     }
     if (ds_ != nullptr && ds_->texture() == t) return false;
-    return t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return true;
 }
 
 void Device::ownedPrepTexture(Texture* t) {

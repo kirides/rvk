@@ -4637,3 +4637,85 @@ MISS 0, `owned picture check`: 19 windows ok, FAILED 0 of 29 (the rest NO DATA /
 | jungle | 7.01 | 7.81 | +0.80 | +0.57 |
 
 Full is still slower than Wrapper on the CPU in every scene (the WS4 deltas were of the same size): WS6 alone does not close it.
+
+### 14.51 WS9: the owned frame's per-op work by change (2026-11-14, branch `worktree-agent-a02f9ebabf91b1b2e` on main cf62f0b, merged main f4f0cf5; one Debug setting `native.owned_delta`, Full, run time, default on; settings count 166; env `RVK_WS9_STALE_OFF=1`)
+
+Question: 14.48 ended with "a retained per-view op list (skip select for unchanged ops by event) and a per-pass memo of texture-ready checks" as what would move hold / jungle by 0.5 ms. What of the owned
+path's per-op cost can follow what CHANGED instead of what is visible, exactly?
+
+**First finding (CPU profile, savegame hold, player defaults = `native.owned_check=0`): the biggest per-op cost was not the checks but ops that should have been owned and were composed every frame.**
+`native: composed late (1 s)` said "forms pending at the record's composition" for 16 main-view ops per frame at t+65 s with an empty variant queue (WS6's logs: hold 28 / view, jungle 25 + 10 per
+cascade view, harbour 1); ~13 more per view were left as "not a scene draw". Cause: an op record keeps the CachedDraw its composition took from the packet cache; built while the draw's scene forms were
+still being made (cold start, a variant / module that arrived later), its draw is refused by the owned path (`ownedDerive` rc 16: no v2 pipeline) and the op is composed late; the composition replays the
+REFRESHED packet but the record stays valid by its stamps, and only a check frame's derivation (`recDraw`, 7.27) remade it. Players have no check frames since 14.46: such records lived for the
+session. Built:
+1. `OpRecord::stale` (op_records.h): `ownedDrawOpPersistent` marks the record when it refuses a draw for a reason a fresh composition removes (late reason "forms pending at the record's composition",
+   "shader module changed", "variant module arrived since", "variant decision moved"; not texture / env / table reasons: remaking changes nothing there), `recEnter` treats a marked record as refused
+   (remade from this composition, its read log taken). Gated by `native.owned_delta`; `RVK_WS9_STALE_OFF=1` = the old behaviour. Counters: `native: owned static (5 s)` ... `records out of date (run): N
+   marked, M remade`, stages line `owned_delta=active(P passes, N marked, M remade)`.
+2. The "not a scene draw" half (a record made before its draw was a scene draw): WS9 remade it in `recDraw` when the composition's probe was a scene draw; WS7 (14.49) fixed the same class in the same
+   place in parallel, wider (any record whose retained packet was not ownable while the replayed packet is), so the merge keeps WS7's block and WS9 keeps (1) for the refusals the owned path sees.
+   Hold before / after (same build otherwise): owned share 90.7 % -> 99.5 %, composed late 16 -> 0 ops per view in the steady state; `StaticOps::opEnter` (the compositions) 2.52 -> 1.32 ms per
+   frame in the profile (cross-session, includes item 3). The marks settle to 0 per window once the variants are built (gate run: 566 / 242 / ... / 0 per 5 s after the warm-up, again a few hundred at a
+   spot change): no rebuild loop.
+
+**The engine-side cost of a hash nobody suspected:** `hashBytes` (d3d9/scene_hash.h, FNV byte by byte) behind `hashVi` / `hashDyn` was 0.43 ms per frame at hold (self time of `hashVi` + its 4 KiB page
+in the profile): every composed scene draw hashes its interned vertex input (`toScenePacket`'s probe, `deriveScene`) and every owned tree / grass template its bucket key per pass
+(`ownedBucketKey`). Now eight bytes per step (multiply + xor-shift, the byte loop only for the tail): 0.43 -> 0.04 ms. The hashes are only compared within the process (bucket keys, probe vs
+derivation); the bucket keys keep their 1-in-8 exact check in `ownedFlush` (bucketKeyClash). `hashDyn` is still 0.09 ms (cold `c.dyn` lines of `ownedPullKey` per pulled item: a key per OwnedItem
+would remove it; not done).
+
+**Per-pass memos without allocations:** the owned path's per-pass caches (`ownedAmbient_`: lighting key -> ambient registers non-zero; `ownedCache_.light`: lighting key -> lighting entry) were
+`std::unordered_map`s cleared every pass and re-allocating one node per key (the profile's `RtlAllocateHeap` under `ownedAmbientLit`). `StaticOps::PassMemo<V, N>` (static_ops.h): a direct-mapped table
+with 8-entry probing, O(1) clear by generation, a full probe window drops the memo entry (the caller computes it again): exact by construction (the key is compared). RtlAllocateHeap + RtlFreeHeap self
+0.23 -> 0.17 ms, `ownedAmbientLit` + `ownedBuildWindows` 0.14 -> 0.10 ms per frame at hold.
+
+**Texture-ready checks** (task item 2): `Device::ownedTextureNeedsPrep` answers "ready" (not pending, SHADER_READ_ONLY) before the render-target loop (the loop could only turn a "needs" into "no"):
+the same answer, one load of the texture instead of five compares first. A per-texture-per-frame memo would NOT be exact: a late composition / `ownedPrepTexture` in the same pass changes the layout;
+the check reads the texture's own two fields, which is what a memo would read too.
+
+**Side-effect touches** (task item 3): already once per resource and frame (`StaticOps::touchNow` + `sc::TouchSet`, 7.21 / F2c-4-0 item 5): the 1.15 M "touches" of 14.48 are the calls into the dedupe,
+`RequestData(res, 1)` itself runs once per resource per frame. Engine semantics (verified in F2c-4-0 item 5, Engine.dll `eCResource2::RequestData` 0x684100 -> resident: LRU touch 0x6843e0 = relink at the
+head + stamp `res + 0x20 = cache + 0x28`, the frame's epoch; loading / not loaded: 0x6852d0 queues once): a second touch in a frame changes only the LRU position among the frame's touched resources,
+which the eviction (tail first, untouched for a frame) never looks at. Nothing more to deduplicate; batching would only move the same calls.
+
+**Instance coalescing in the GPU compaction (orchestrator lead, WS8 14.50): built, measured, NOT kept.** `owned_compact.comp.hlsl` wrote consecutive plain entries of a bucket chunk with equal
+(indexCount, firstIndex, vertexOffset) as one record with instanceCount = their number (instance i reads the ref stream at firstInstance + i = its own entry; job flag z bit 1; check frames' CPU
+expectation merged the same way; `rvk_d3d9test` case with a NEVER-alpha slot before / after / twice next to a quad: pictures equal, 3 coalesced records, Vulkan + D3D12, 0 validation errors; GPU-AV
+jungle run clean; picture check FAILED 0). In game only 8 - 10 % of the checked records coalesced (jungle 490 of 4,960 = 1,410 instances; harbour 40 of 430): the F2f instance draws of one op are
+mostly different meshes / LODs, not repeats. In-session A/B (`perf-ab -Key native.owned_delta`, 3 pairs, private copy): colour pass hold 0.6956 vs 0.6946 ms, jungle 1.0301 vs 1.0266, harbour 0.8586 vs
+0.8792 (water.rt of the same windows moved +0.04 / +0.05): no measurable GPU gain, so the shader / flush changes were reverted (patch: `rvk-work/scratch/ws9/coalesce_patch/coalesce.patch`). The
+command count is not what costs the colour pass.
+
+**Not built: the retained per-view draw list (task item 1).** What an owned op's validity needs every frame, by source: the stamp polls of `depFast` (LOD resource, entity, flags, illumination +
+light list words, fade, switch, scene-table slot, shader fingerprints: polled because the engine has no event for them, 7.30), the material structure versions (`pollOwned`, per material slot and
+frame), the object record (`serveFast`: the scene-table signals; it also marks the slot served), and per draw `ownedDrawSig`'s inputs: the variant modules' build state, the stream / index buffers'
+current GPU binding (`Buffer::gpu`, which moves for dynamic buffers), each sampled texture's readiness / bindless slot, the pack stamp, the bone forms, the four window bases (the lighting entry follows
+the lights). A pass whose op list is unchanged still has to read every one of these to stay exact: none of them raises an event today, and their reads ARE the per-op cost (cache misses on engine
+contexts, entities, textures, buffers; ~300 ns select + ~1.5 us build per op at hold). A list skip needs device-side generation counters on Texture (layout / pending / slot), Buffer (binding),
+the variant modules and the lighting entries, plus engine events for the polled stamp fields: a change on both sides, not a cache. The bulk observers (RT scene, object motion) already skip unchanged
+records themselves (`RtScene::observeOwned`'s OwnedCover). Item 4 (skip the engine's Request for owned elements, F10-1) was not reached.
+
+**Exactness / gates** (private copy `risen-test-vk-ws9`, instance 19, lock `rvk-ws9`, test baseline `native.owned_check=10`, `native.picture_check=true`): jungle / harbour_docks / pub_interior
+(`freeze_wait=2000`) before and after the main merge: check frames DIFFERING 0, every MISS 0, EVENT MISS 0, picture check FAILED 0 of 29 / 31 (settled windows); pub_idle + hero_idle with
+`show_actors=1`: FAILED 0 of 20, PASS; `rvk_rtwalk` (load=0, fresh copy) PASS 4 checks, placeholder binds as on main (273 in the load window, 0 - 12 after: WS6's run 273 / 8); `rvk_spells` PASS 4
+checks; `rvk_tests` 354 / 0, `rvk_d3d9test --validation` 0 failures 0 validation errors, `rvk_shadertool dxil-check embedded` 185 / 185; GPU-AV jungle run (with the coalescing build) clean. No new
+cache skips work, so there is no fault-injection knob: the stale marks only ADD remakes (a missed mark = the old behaviour), PassMemo compares its keys, the hash change keeps every key's exact
+check; the A/B knobs are `native.owned_delta` / `RVK_WS9_STALE_OFF=1`.
+
+**perf-ab Full vs Wrapper after the merge** (shared copy + lock, `-Key renderer.mode -A wrapper -B full -Mode wrapper -Restart -PlayerDefaults`, 3 pairs, 240-frame windows; `-Perf` adds a per-draw timer
+to Wrapper only, ~0.07 - 0.26 ms; one warm-up session per scene first: the first attempt ran with the shared copy's variant cache cold after main's shader changes (variant queue 300+ at t+50 s, owned
+74 %: Full +3.1 / +10.7 ms, invalid), the second with every owned stage at 100 % / 98.9 %; medians of the windows because single windows of both arms jumped 2x (hold A 13.47, jungle B 15.64)):
+
+| scene | CPU engine+HAL Wrapper (windows) | Full (windows) | delta of the medians | 14.48 (WS6) delta |
+|---|---|---|---|---|
+| pub_interior | 0.97 / 1.03 / 1.01 | 1.36 / 1.39 / 1.30 | +0.35 | +0.44 |
+| harbour_docks | 2.18 / 2.16 / 2.28 | 2.68 / 2.66 / 2.69 | +0.50 | +0.86 |
+| hold | 6.85 / 6.92 / 13.47 | 7.71 / 6.77 / 7.75 | +0.79 | ~+0.8 (not significant) |
+| jungle | 7.40 / 7.44 / 7.22 | 7.46 / 15.64 / 7.27 | +0.06 | +0.80 |
+
+These include WS7's (14.49) remake of non-ownable records merged in the same build; WS9's own share is what the profiles above attribute (compositions -0.3 .. -0.9 ms at hold with the stale records
+of both kinds, hashes -0.4 ms, allocations -0.1 ms). Full is still slower than Wrapper on the CPU in pub_interior, harbour_docks and hold; jungle is level.
+
+**Left:** the per-op validity reads (the retained list above needs device generations + engine events), the tree pass (0.9 - 1.3 ms per frame: `ownedTreeObserve` shows every tree instance to
+the observers per frame, the RT scene has no cover for SpeedTree draws), `hashDyn` in `ownedPullKey` per pulled item (0.09 ms), the engine's own list building (F10-1 extension, 15.5).

@@ -508,6 +508,7 @@ struct RendererSettings {
     Setting* nativeClusterCullShadows = nullptr;  // native.cluster_cull_shadows: the cull of the owned draws of clustered meshes in the sun cascades (frame-ownership.md 7.37, F3-2)
     Setting* nativeOwnedInstances = nullptr;  // native.owned_instances: instance lists + hardware batches owned (frame-ownership.md 14.19, F2f)
     Setting* nativeOwnedOrdered = nullptr;  // native.owned_ordered: the order-dependent ops (blended terrain layers, alpha / refracted lists) owned at their place (frame-ownership.md 14.20, F9 + F14)
+    Setting* nativeOwnedDelta = nullptr;   // native.owned_delta: the owned path's per-op work by change (frame-ownership.md 14.51)
     Setting* nativeOrderedBulk = nullptr;  // native.ordered_bulk: the ordered owned draws to the observers in bulk (frame-ownership.md 14.44)
     Setting* nativeOwnedActors = nullptr;  // native.owned_actors: skinned actor ops owned (frame-ownership.md 7.40, F6-1)
     Setting* nativeOwnedShadows = nullptr;  // native.owned_shadows: the sun cascades' static mesh z ops owned (frame-ownership.md 7.36, F3-1)
