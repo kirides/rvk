@@ -216,6 +216,10 @@ private:
     engine::lights::Stats compareStats_;
     std::uint64_t workerBuilds_ = 0, workerCompared_ = 0, workerDiffering_ = 0;
     std::string workerFirst_;
+    std::uint32_t backstopCounter_ = 0;                                  // builds seen: every 64th compares the statics with a fresh uncached walk
+    std::uint64_t backstopChecks_ = 0, backstopMismatch_ = 0, backstopMismatchLogged_ = 0;
+    double backstopUs_ = 0.0;
+    std::uint64_t backstopWindowMismatch() { const std::uint64_t d = backstopMismatch_ - backstopMismatchLogged_; backstopMismatchLogged_ = backstopMismatch_; return d; }
     bool verify_ = false;  // RVK_LIGHTS_VERIFY=1
     std::vector<engine::lights::WorldLight> verifyDyn_, verifyDrawn_;
     std::uint64_t verifyBuilds_ = 0, verifyDiffering_ = 0;

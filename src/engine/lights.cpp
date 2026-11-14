@@ -92,6 +92,7 @@ namespace {
 // radius (same lights, same order as a walk with that radius: the walk visits in tree order and only prunes).
 struct StaticCache {
     std::vector<const char*> lights;  // the payload of every static light within `radius` of `center` at walk time; its values are re-read on every call
+    std::vector<float> pos;           // each kept light's position at walk time (3 floats): the identity check of a payload pointer (a static light never moves; freed memory reused by another light shows another position)
     float center[3]{};
     float radius = 0.0f;             // the walk's radius (query radius + margin)
     std::uint64_t sig[3]{};
@@ -102,6 +103,9 @@ struct StaticCache {
 };
 StaticCache g_cache;
 std::mutex g_cacheMutex;
+thread_local bool t_lightWorker = false;     // the light worker thread (the only one that waits for g_cacheMutex)
+std::atomic<std::uint64_t> g_cacheBusy{0}, g_staleRewalks{0};  // (g_staleRewalks: a cached payload whose position changed: rewalked)
+std::atomic<bool> g_invalidateCache{false};                     // the light table's backstop found the cache differing from a fresh walk: the next collect rewalks   // collects that found the cache locked by the worker and walked privately
 constexpr std::uint32_t kRewalkCalls = 150;
 constexpr float kWalkMargin = 4000.0f;
 
@@ -131,9 +135,9 @@ int readStaticLight(const void* payload, const void* ptfv, const void* ambfv, fl
 
 // WS15: the per-call re-read of the kept static lights (2,500 at pub_interior, every frame) in ONE guarded region instead of one SEH call + 120-byte copy per light: the same
 // fields, the same arithmetic, the same filter as readStaticLight + `reaches`, written to `out` (capacity n). Plain data only (a function holding a __try cannot unwind objects).
-// -1 = a read faulted somewhere (a freed light: the caller redoes the whole list with the per-light guarded reads, which skip the unreadable ones as before)
+// -2 = a payload's position differs from the walk's (the pointer is stale: the caller rewalks). -1 = a read faulted somewhere (a freed light: the caller redoes the whole list with the per-light guarded reads, which skip the unreadable ones as before)
 std::atomic<bool> g_fastStaticOffA{false};
-int readStaticLightsFast(const char* const* payloads, std::size_t n, const void* ptfv, const void* ambfv, float scale, const float center[3], float radius, WorldLight* out) {
+int readStaticLightsFast(const char* const* payloads, const float* walkPos, std::size_t n, const void* ptfv, const void* ambfv, float scale, const float center[3], float radius, WorldLight* out) {
     int kept = 0;
     __try {
         for (std::size_t i = 0; i < n; ++i) {
@@ -151,6 +155,7 @@ int readStaticLightsFast(const char* const* payloads, std::size_t n, const void*
             l.pos[0] = pos[0];
             l.pos[1] = pos[1];
             l.pos[2] = pos[2];
+            if (l.pos[0] != walkPos[3 * i] || l.pos[1] != walkPos[3 * i + 1] || l.pos[2] != walkPos[3 * i + 2]) return -2;  // not the light the walk saw (a stale payload)
             l.range = range;
             l.ambient = vt == ambfv;
             l.dynamic = false;
@@ -169,6 +174,7 @@ int readStaticLightsFast(const char* const* payloads, std::size_t n, const void*
 
 void walkStatics(const char* admin, const float center[3], float radius, StaticCache& c) {
     c.lights.clear();
+    c.pos.clear();
     c.walkStats = {};
     Stats& stats = c.walkStats;
     const auto& s = sym();
@@ -215,7 +221,10 @@ void walkStatics(const char* admin, const float center[3], float radius, StaticC
                             ++stats.unknown;
                         } else {
                             ++stats.staticTotal;
-                            if (r == 2 && reaches(l.pos, l.range)) c.lights.push_back(static_cast<const char*>(payload));
+                            if (r == 2 && reaches(l.pos, l.range)) {
+                                c.lights.push_back(static_cast<const char*>(payload));
+                                c.pos.insert(c.pos.end(), l.pos, l.pos + 3);
+                            }
                         }
                     }
                 } else if (std::isfinite(sphere[0]) && std::isfinite(sphere[3])) {
@@ -229,6 +238,8 @@ void walkStatics(const char* admin, const float center[3], float radius, StaticC
 }
 
 }  // namespace
+
+void invalidateStaticCache() { g_invalidateCache.store(true, std::memory_order_relaxed); }
 
 void setFastStatic(bool on) { g_fastStaticOffA.store(!on, std::memory_order_relaxed); }
 
@@ -245,15 +256,31 @@ bool collectStatics(const float center[3], float radius, std::vector<WorldLight>
         return dx * dx + dy * dy + dz * dz <= reach * reach;
     };
 
-    // static lights: the sphere tree (walked only when it changed, see StaticCache)
+    // static lights: the sphere tree (walked only when it changed, see StaticCache).
+    // WS22 review: only the light worker may wait for the cache's mutex. Every other caller (the engine thread's inline fallback, the GI) try-locks and, when the worker holds it
+    // (a below-normal thread preempted mid-walk under a compile storm = a priority inversion on the render thread), walks into a private cache of its own: same lights, same order.
+    std::unique_lock<std::mutex> lock(g_cacheMutex, std::defer_lock);
+    StaticCache privateCache;
+    bool usePrivate = false;
+    if (t_lightWorker) {
+        lock.lock();
+    } else if (!lock.try_lock()) {
+        usePrivate = true;
+        g_cacheBusy.fetch_add(1, std::memory_order_relaxed);
+    }
     {
-        const std::lock_guard lock(g_cacheMutex);
-        StaticCache& c = g_cache;
+        StaticCache& c = usePrivate ? privateCache : g_cache;
         const char* tree = admin + kAdminTree;
         std::uint64_t sig[3]{};
         readAt(tree, kTreeRoot, sig[0]);
         readAt(tree, kTreeNodes, sig[1]);
         readAt(tree, 0x38, sig[2]);
+        // (a payload that stopped being the light the walk saw rewalks once and reads again; the light table's backstop can also demand a rewalk)
+        if (!usePrivate && g_invalidateCache.exchange(false, std::memory_order_relaxed)) c.valid = false;
+        for (int attempt = 0;; ++attempt) {
+        out.clear();
+        stats = {};
+        stats.adminSeen = true;
         const float dx = center[0] - c.center[0], dy = center[1] - c.center[1], dz = center[2] - c.center[2];
         const bool inside = c.valid && std::sqrt(dx * dx + dy * dy + dz * dz) + radius <= c.radius;
         const bool reuse = inside && std::memcmp(sig, c.sig, sizeof(sig)) == 0 && c.calls < kRewalkCalls;
@@ -287,18 +314,31 @@ bool collectStatics(const float center[3], float radius, std::vector<WorldLight>
         int kept = -1;
         if (!g_fastStaticOffA.load(std::memory_order_relaxed) && !c.lights.empty()) {
             if (fast.size() < c.lights.size()) fast.resize(c.lights.size());
-            kept = readStaticLightsFast(c.lights.data(), c.lights.size(), ptfv, ambfv, scale, center, radius, fast.data());
+            kept = readStaticLightsFast(c.lights.data(), c.pos.data(), c.lights.size(), ptfv, ambfv, scale, center, radius, fast.data());
         }
+        bool stale = kept == -2;
         if (kept >= 0) {
             stats.staticNear += static_cast<std::uint32_t>(kept);
             out.insert(out.end(), fast.begin(), fast.begin() + kept);
-        } else {
-            for (const char* payload : c.lights) {
+        } else if (!stale) {
+            for (std::size_t i = 0; i < c.lights.size(); ++i) {
                 WorldLight l;
-                if (readStaticLight(payload, ptfv, ambfv, scale, l) != 2 || !reaches(l.pos, l.range)) continue;
+                if (readStaticLight(c.lights[i], ptfv, ambfv, scale, l) != 2) continue;
+                if (l.pos[0] != c.pos[3 * i] || l.pos[1] != c.pos[3 * i + 1] || l.pos[2] != c.pos[3 * i + 2]) {
+                    stale = true;
+                    break;
+                }
+                if (!reaches(l.pos, l.range)) continue;
                 ++stats.staticNear;
                 out.push_back(l);
             }
+        }
+        if (stale && attempt == 0) {
+            g_staleRewalks.fetch_add(1, std::memory_order_relaxed);
+            c.valid = false;
+            continue;
+        }
+        break;
         }
     }
     return true;
@@ -475,6 +515,7 @@ double nowUs() {
 }
 
 void workerMain() {
+    t_lightWorker = true;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     if (const auto set = reinterpret_cast<HRESULT(WINAPI*)(HANDLE, PCWSTR)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")); set != nullptr) {
         set(GetCurrentThread(), L"rvk light collect");
@@ -593,7 +634,9 @@ bool asyncTake(const float center[3], float radius, std::uint64_t frame, std::ve
 }
 
 AsyncCounters asyncCountersTake() {
-    const AsyncCounters c = g_ctr;
+    AsyncCounters c = g_ctr;
+    c.cacheBusy = g_cacheBusy.exchange(0, std::memory_order_relaxed);
+    c.staleRewalks = g_staleRewalks.exchange(0, std::memory_order_relaxed);
     g_ctr = {};
     return c;
 }
