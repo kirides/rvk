@@ -35,6 +35,26 @@ struct Stats {
 // not known yet. Cheap enough per frame (the tree walk is pruned by the spheres)
 bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats);
 
+// collect() in its two halves (the static half only reads the engine's light tree and payloads; the dynamic half calls the engine's AddToLightList and must stay on the
+// engine thread): `collect` = collectStatics then collectDynamics (appended after the statics, same order, same stats)
+bool collectStatics(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats);
+bool collectDynamics(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats);
+
+// WS22 (frame-ownership.md 16.8): collectStatics on a persistent worker thread, kicked when the scene job starts (the previous frame's camera position + a margin; the take filters to the real centre) and taken by the light table at EndZPass. Engine thread only (kick /
+// take / configure); exact: the take succeeds only for the same frame, centre and radius, otherwise the caller runs the inline path.
+using StaticsHashFn = std::uint64_t (*)(const WorldLight* lights, std::size_t count);  // run on the worker over the statics it collected (the light table's signature chain)
+void asyncConfigure(bool on, float radius, StaticsHashFn hash);
+bool asyncActive();
+void asyncKick(const float center[3], std::uint64_t frame);
+// true: `out` / `stats` hold collectStatics' result and `hash` the StaticsHashFn's value; false: nothing taken, run collect()
+bool asyncTake(const float center[3], float radius, std::uint64_t frame, std::vector<WorldLight>& out, Stats& stats, std::uint64_t& hash);
+struct AsyncCounters {
+    std::uint64_t kicks = 0, hits = 0, waits = 0, timedOut = 0, notStarted = 0, noKick = 0, mismatch = 0, discarded = 0, kickBusy = 0, refiltered = 0;
+    double waitUs = 0.0, waitMaxUs = 0.0, workerUs = 0.0;  // the take's waits for a running job; the worker's time of the taken jobs
+};
+AsyncCounters asyncCountersTake();  // reads and resets (engine thread)
+void asyncShutdown();               // joins the worker (graceful exit); a later kick needs asyncConfigure(on) again
+
 // The uncached static walk (the version before the cache), for RVK_LIGHTS_VERIFY: appends the static lights within `radius` of `center` to `out` (cleared first)
 bool collectStaticsReference(const float center[3], float radius, std::vector<WorldLight>& out);
 

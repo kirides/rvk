@@ -2,6 +2,7 @@
 #include "core/stall_sampler.h"
 
 #include "core/hooks.h"
+#include "core/log.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -187,6 +188,7 @@ using ExitProcessFn = void(NTAPI*)(LONG);  // ntdll!RtlExitUserProcess (kernel32
 Hook<ExitProcessFn> g_exitProcess;
 
 void NTAPI detourExitProcess(LONG code) {
+    log::flushSync();  // (the logger thread dies with the process: every line so far written first)
     if (!g_exiting.exchange(true)) {
         g_exitCode = static_cast<unsigned>(code);
         g_mainThread = GetCurrentThreadId();
@@ -216,6 +218,7 @@ std::atomic<bool> g_closing{false};      // the game window got WM_CLOSE (the pl
 LONG NTAPI detourTerminate(HANDLE process, LONG code) {
     const bool self = process == nullptr || process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId();
     if (self) {
+        log::flushSync();
         // (also when the window was closed and the device's shutdown has not begun yet: the test harness's terminate thread (risen-spass exit_on_finish, 1.5 s after
         // the scenario's result) came before the engine released the device)
         const DWORD shut = g_shutdownThread.load(std::memory_order_acquire);
@@ -238,6 +241,7 @@ LONG NTAPI detourTerminate(HANDLE process, LONG code) {
 }
 
 LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* info) {
+    log::flushSync();
     std::string report;
     try {
         report = crashReport(info->ExceptionRecord, *info->ContextRecord);

@@ -14,6 +14,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/log.h"
 #include "core/ws19_small.h"
 #include "api/capture.h"
 #include "core/caps.h"
@@ -559,6 +560,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     engine::window::onModeSet(p.window, p.windowed, o.width, o.height, p.refreshRate);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
                  o.vsync, rhi::d3dFormatName(o.depthFormat));
+    log::startAsync();  // WS22 (frame-ownership.md 16.8): the log's writes + flushes on their own thread from here on (no thread in DllMain)
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report

@@ -1,6 +1,7 @@
 #include "engine/lights.h"
 
 #include <windows.h>
+#include <emmintrin.h>
 #include <xmmintrin.h>
 
 #include <atomic>
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 #include <spdlog/spdlog.h>
 
@@ -230,7 +232,7 @@ void walkStatics(const char* admin, const float center[3], float radius, StaticC
 
 void setFastStatic(bool on) { g_fastStaticOffA.store(!on, std::memory_order_relaxed); }
 
-bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
+bool collectStatics(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
     out.clear();
     stats = {};
     char* admin = static_cast<char*>(g_admin.load(std::memory_order_relaxed));
@@ -299,7 +301,18 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
             }
         }
     }
+    return true;
+}
 
+bool collectDynamics(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
+    char* admin = static_cast<char*>(g_admin.load(std::memory_order_relaxed));
+    if (admin == nullptr) return false;
+    const auto& s = sym();
+    const auto reaches = [&](const float p[3], float r) {
+        const float dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
+        const float reach = radius + r;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    };
     // dynamic lights: the engine's own light list entry of each (flicker / effects included)
     const void* pfv = s.pointLightVftable;
     const auto add = reinterpret_cast<AddFn>(s.pointLightAddToLightList);
@@ -335,6 +348,10 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
         }
     }
     return true;
+}
+
+bool collect(const float center[3], float radius, std::vector<WorldLight>& out, Stats& stats) {
+    return collectStatics(center, radius, out, stats) && collectDynamics(center, radius, out, stats);
 }
 
 // The pre-cache static walk, verbatim (RVK_LIGHTS_VERIFY compares the cached path against it)
@@ -413,6 +430,183 @@ bool collectStaticsReference(const float center[3], float radius, std::vector<Wo
     }
 
     return true;
+}
+
+// ---- WS22: the static half of collect() on a persistent worker (frame-ownership.md 16.8) ----------------------------------------------------------------------
+//
+// Shared variables and their synchronisation (the whole protocol; the engine thread = the thread that kicks / takes, the worker = `rvk light collect`):
+//  * g_state (atomic<uint32>): Idle -> Pending (engine, CAS, release; the job's inputs are written before) -> Running (worker, CAS acquire) -> Done (worker, CAS release;
+//    the job's outputs are written before) -> Idle (engine, CAS, after it consumed or discarded the outputs). Pending -> Idle is the engine's cancel (CAS: it loses to the
+//    worker's Running). Quit (engine, exchange) is terminal: every other transition is a CAS from a named state, so nothing leaves it. The worker sleeps in atomic::wait(g_state)
+//    (WaitOnAddress: no spinning); the kick notifies.
+//  * g_job.{center, radius, frame, hash} are written by the engine thread only while the state is Idle / Done and read by the worker only while it is Running; g_job.{out, stats,
+//    hash value, workerUs, ok} are written by the worker only while it is Running and read / swapped by the engine thread only after it observed Done (acquire).
+//  * g_on / g_radius / g_hashFn: configuration written and read by the engine thread (the light table's configure / the BeginZPass detour); relaxed atomics for the overlay command.
+//  * everything the worker reads in the engine's memory (the light tree, the payloads) is read under SEH guards; the evidence that no engine thread writes it inside the kick -> take
+//    window is in engine-gfx.md (WS22). The worker never calls the engine: collectStatics only reads (the dynamic half, which calls AddToLightList, stays on the engine thread).
+//  * the static cache (g_cache) is behind g_cacheMutex as before; the worker takes it like any other caller.
+namespace {
+constexpr float kAsyncMargin = 2000.0f, kAsyncMoveMax = 1500.0f;  // the kick's centre is the previous frame's camera: the walk reaches kAsyncMargin further, the take accepts a move up to kAsyncMoveMax
+enum : std::uint32_t { kIdle = 0, kPending = 1, kRunning = 2, kDone = 3, kQuit = 4 };
+struct Job {
+    float center[3]{};
+    float radius = 0.0f;
+    std::uint64_t frame = 0;
+    StaticsHashFn hash = nullptr;
+    std::vector<WorldLight> out;
+    Stats stats;
+    std::uint64_t hashValue = 0;
+    double workerUs = 0.0;
+    bool ok = false;
+};
+std::atomic<std::uint32_t> g_state{kIdle};
+Job g_job;
+std::atomic<bool> g_on{false};
+std::atomic<float> g_radius{96000.0f};
+std::atomic<StaticsHashFn> g_hashFn{nullptr};
+std::thread* g_thread = nullptr;  // created on the first kick, leaked unless asyncShutdown() joins it (a joinable std::thread in a static would terminate at DLL unload)
+AsyncCounters g_ctr;               // engine thread only
+
+double nowUs() {
+    static const double freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart); }();
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<double>(t.QuadPart) * 1e6 / freq;
+}
+
+void workerMain() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    if (const auto set = reinterpret_cast<HRESULT(WINAPI*)(HANDLE, PCWSTR)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")); set != nullptr) {
+        set(GetCurrentThread(), L"rvk light collect");
+    }
+    for (;;) {
+        std::uint32_t s = g_state.load(std::memory_order_acquire);
+        if (s == kQuit) return;
+        if (s == kPending) {
+            if (!g_state.compare_exchange_strong(s, kRunning, std::memory_order_acq_rel)) continue;
+            const double t0 = nowUs();
+            Job& j = g_job;
+            j.ok = collectStatics(j.center, j.radius, j.out, j.stats);
+            j.hashValue = j.ok && j.hash != nullptr ? j.hash(j.out.data(), j.out.size()) : 0;
+            j.workerUs = nowUs() - t0;
+            std::uint32_t r = kRunning;
+            g_state.compare_exchange_strong(r, kDone, std::memory_order_acq_rel);  // (fails only after asyncShutdown's Quit)
+            continue;
+        }
+        g_state.wait(s, std::memory_order_acquire);
+    }
+}
+}  // namespace
+
+void asyncConfigure(bool on, float radius, StaticsHashFn hash) {
+    g_radius.store(radius, std::memory_order_relaxed);
+    g_hashFn.store(hash, std::memory_order_relaxed);
+    g_on.store(on, std::memory_order_relaxed);
+}
+
+bool asyncActive() { return g_on.load(std::memory_order_relaxed); }
+
+void asyncKick(const float center[3], std::uint64_t frame) {
+    if (!g_on.load(std::memory_order_relaxed)) return;
+    std::uint32_t s = g_state.load(std::memory_order_acquire);
+    if (s != kIdle && g_job.frame == frame) return;  // kicked in this frame already (a second scene job)
+    if (s == kDone) {  // an outcome nobody took (the table did not run in that frame): discarded
+        if (!g_state.compare_exchange_strong(s, kIdle, std::memory_order_acq_rel)) return;
+        ++g_ctr.discarded;
+    } else if (s != kIdle) {
+        ++g_ctr.kickBusy;  // the previous job is still pending / running (a stalled worker): this frame runs inline
+        return;
+    }
+    if (g_thread == nullptr) g_thread = new std::thread(workerMain);
+    Job& j = g_job;
+    std::memcpy(j.center, center, sizeof(j.center));
+    j.radius = g_radius.load(std::memory_order_relaxed) + kAsyncMargin;  // (a superset: the take filters it to the real centre / radius, same predicate and order)
+    j.frame = frame;
+    j.hash = g_hashFn.load(std::memory_order_relaxed);
+    std::uint32_t idle = kIdle;
+    if (!g_state.compare_exchange_strong(idle, kPending, std::memory_order_acq_rel)) return;
+    ++g_ctr.kicks;
+    g_state.notify_one();
+}
+
+bool asyncTake(const float center[3], float radius, std::uint64_t frame, std::vector<WorldLight>& out, Stats& stats, std::uint64_t& hash) {
+    std::uint32_t s = g_state.load(std::memory_order_acquire);
+    if (s == kIdle || s == kQuit) {
+        ++g_ctr.noKick;
+        return false;
+    }
+    if (s == kPending) {  // the worker never got to it: cancel and run inline
+        if (g_state.compare_exchange_strong(s, kIdle, std::memory_order_acq_rel)) {
+            ++g_ctr.notStarted;
+            return false;
+        }
+    }
+    if (s != kDone) {
+        // running: it needs tens of microseconds; wait a bounded time (the engine thread has nothing else to do with this build), then give up
+        const double t0 = nowUs();
+        while ((s = g_state.load(std::memory_order_acquire)) == kRunning && nowUs() - t0 < 150.0) _mm_pause();
+        const double w = nowUs() - t0;
+        g_ctr.waitUs += w;
+        g_ctr.waitMaxUs = std::max(g_ctr.waitMaxUs, w);
+        ++g_ctr.waits;
+        if (s != kDone) {
+            ++g_ctr.timedOut;
+            return false;
+        }
+    }
+    // Done
+    Job& j = g_job;
+    const float mx = center[0] - j.center[0], my = center[1] - j.center[1], mz = center[2] - j.center[2];
+    const bool same = j.ok && j.frame == frame && j.radius == radius + kAsyncMargin && mx * mx + my * my + mz * mz <= kAsyncMoveMax * kAsyncMoveMax;
+    if (same) {
+        // the worker's list holds every static light that reaches the kick's centre with margin; the true query keeps those that reach `center` (the predicate of readStaticLightsFast),
+        // in the same order. When all of them do (radius 96,000 covers the island) the list and its hash are used as they are.
+        std::size_t kept = 0;
+        for (const WorldLight& l : j.out) {
+            const float dx = l.pos[0] - center[0], dy = l.pos[1] - center[1], dz = l.pos[2] - center[2];
+            const float reach = radius + l.range;
+            if (dx * dx + dy * dy + dz * dz <= reach * reach) ++kept;
+        }
+        out.swap(j.out);
+        stats = j.stats;
+        hash = j.hashValue;
+        if (kept != out.size()) {
+            std::size_t w = 0;
+            for (const WorldLight& l : out) {
+                const float dx = l.pos[0] - center[0], dy = l.pos[1] - center[1], dz = l.pos[2] - center[2];
+                const float reach = radius + l.range;
+                if (dx * dx + dy * dy + dz * dz <= reach * reach) out[w++] = l;
+            }
+            out.resize(w);
+            hash = j.hash != nullptr ? j.hash(out.data(), out.size()) : 0;
+            ++g_ctr.refiltered;
+        }
+        stats.staticNear = static_cast<std::uint32_t>(out.size());
+        g_ctr.workerUs += j.workerUs;
+        ++g_ctr.hits;
+    } else {
+        ++g_ctr.mismatch;
+    }
+    std::uint32_t d = kDone;
+    g_state.compare_exchange_strong(d, kIdle, std::memory_order_acq_rel);
+    return same;
+}
+
+AsyncCounters asyncCountersTake() {
+    const AsyncCounters c = g_ctr;
+    g_ctr = {};
+    return c;
+}
+
+void asyncShutdown() {
+    g_on.store(false, std::memory_order_relaxed);
+    if (g_thread == nullptr) return;
+    g_state.store(kQuit, std::memory_order_release);
+    g_state.notify_all();
+    if (g_thread->joinable()) g_thread->join();
+    delete g_thread;
+    g_thread = nullptr;
+    g_state.store(kIdle, std::memory_order_release);
 }
 
 bool install() {

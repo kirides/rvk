@@ -6,6 +6,7 @@
 #include <cmath>
 #include <atomic>
 #include <cstring>
+#include <format>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -14,6 +15,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/caps.h"
 #include "enh/rhi_scope.h"
 #include "gpuscene/verify.h"
 #include "enh/rt_scene.h"
@@ -52,7 +54,33 @@ struct DrawnLight {
 std::vector<DrawnLight> g_drawn;  // lights of the lists drawn lately (kept while re-noted: replayed packets do not note again), merged into every build
 std::uint64_t g_buildCounter = 0;
 constexpr std::uint64_t kDrawnKeep = 900;  // builds
+
+// WS22: the build signature's light part: one FNV chain over every light's fields (statics first, then the dynamic ones). A chain is sequential, so the value over [statics, dynamics] equals
+// the chain over the dynamics continued from the statics' value: the worker hashes the statics it collected, the engine thread continues with the dynamic lights.
+constexpr std::uint64_t kLightsSeed = 0xcbf29ce484222325ull;
+std::uint64_t lightsChain(std::uint64_t sig, const engine::lights::WorldLight* lights, std::size_t n) {
+    const auto mix = [&sig](std::uint64_t w) { sig = (sig ^ w) * 0x100000001b3ull; sig ^= sig >> 31; };
+    const auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return std::uint64_t{u}; };
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& w = lights[i];
+        mix(bits(w.pos[0]) | bits(w.pos[1]) << 32);
+        mix(bits(w.pos[2]) | bits(w.range) << 32);
+        mix(bits(w.col[0]) | bits(w.col[1]) << 32);
+        mix(bits(w.col[2]) | static_cast<std::uint64_t>(w.ambient ? 1u : 0u) << 32 | static_cast<std::uint64_t>(w.dynamic ? 1u : 0u) << 33);
+    }
+    return sig;
+}
+std::uint64_t staticsHashFn(const engine::lights::WorldLight* lights, std::size_t n) { return lightsChain(kLightsSeed, lights, n); }
+// the worker: allowed by the player's debug command / RVK_LIGHT_WORKER (0 off, 1 on, default auto = on except on integrated GPUs, where it has to pay first)
+std::atomic<int> g_workerMode{2};
 }  // namespace
+
+void setLightCollectWorker(int mode) { g_workerMode.store(mode, std::memory_order_relaxed); }
+
+bool LightTable::workerAllowed() const {
+    const int m = g_workerMode.load(std::memory_order_relaxed);
+    return m == 1 || (m == 2 && !caps::current().integratedGpu);
+}
 
 std::atomic<bool>& lightBuildSkip() {
     static std::atomic<bool> on{true};
@@ -185,6 +213,8 @@ LightTable::LightTable(d3d9::Device& device) : dev_(device) {
         verify_ = GetEnvironmentVariableA("RVK_LIGHTS_VERIFY", v, sizeof(v)) != 0 && v[0] == '1';
         char w[8]{};
         if (GetEnvironmentVariableA("RVK_LIGHTS_SKIP_OFF", w, sizeof(w)) != 0 && w[0] == '1') lightBuildSkip().store(false);
+        char x[8]{};
+        if (GetEnvironmentVariableA("RVK_LIGHT_WORKER", x, sizeof(x)) != 0 && (x[0] == '0' || x[0] == '1')) g_workerMode.store(x[0] - '0');
         if (verify_) spdlog::info("enh: lights: RVK_LIGHTS_VERIFY: every 8th build is compared with the uncached reference");
     }
     rhi::Device* rdev = dev_.rhi();
@@ -220,6 +250,7 @@ LightTable::LightTable(d3d9::Device& device) : dev_(device) {
 LightTable::~LightTable() {
     shadow_.mode = 0;
     configure(false, 0, 0);
+    engine::lights::asyncShutdown();  // (the worker joined: graceful exit)
     for (auto& b : shadowBuilding_) {
         if (b.valid()) b.get();
     }
@@ -377,6 +408,7 @@ void LightTable::configure(bool enabled, int style, int debug, float defaultRoug
         spdlog::info("enh: lights: light table off");
     }
     enabled_ = enabled;
+    if (!enabled) engine::lights::asyncConfigure(false, collectRadius_, &staticsHashFn);
     applyShadowHold();
 }
 
@@ -553,7 +585,41 @@ void LightTable::record(d3d9::PassContext& ctx) {
         return;
     }
     // the world's lights within the grid's reach, nearest first when there are more than the table holds
-    if (!engine::lights::collect(cam.position.data(), collectRadius_, scratch_, stats_)) {
+    // WS22: the static half was collected (and hashed) by the worker the BeginZPass detour kicked; the dynamic half (engine calls) always runs here. Not done / not the same
+    // inputs = the inline path (the result is the same function of the same inputs either way: check builds compare the two)
+    {
+        const bool wantWorker = enabled_ && workerAllowed();
+        if (wantWorker != engine::lights::asyncActive()) engine::lights::asyncConfigure(wantWorker, collectRadius_, &staticsHashFn);
+    }
+    const bool checkCollect = verify_ || gpuscene::periodic(dev_.stats().frames, 10);
+    std::uint64_t staticsHash = 0;
+    bool haveStaticsHash = false, collected = false;
+    if (engine::lights::asyncActive() && engine::lights::asyncTake(cam.position.data(), collectRadius_, dev_.stats().frames, scratch_, stats_, staticsHash)) {
+        if (checkCollect) {
+            // the worker's statics against a fresh inline collection (same engine memory, now): the light fields, the counters, the hash
+            engine::lights::collectStatics(cam.position.data(), collectRadius_, compareScratch_, compareStats_);
+            bool same = compareScratch_.size() == scratch_.size() && compareStats_.nodes == stats_.nodes && compareStats_.staticTotal == stats_.staticTotal &&
+                        compareStats_.staticNear == stats_.staticNear && compareStats_.unknown == stats_.unknown &&
+                        staticsHashFn(compareScratch_.data(), compareScratch_.size()) == staticsHash;
+            for (std::size_t i = 0; same && i < scratch_.size(); ++i) {
+                const auto& a = scratch_[i];
+                const auto& b = compareScratch_[i];
+                same = std::memcmp(a.pos, b.pos, sizeof(a.pos)) == 0 && a.range == b.range && std::memcmp(a.col, b.col, sizeof(a.col)) == 0 && a.ambient == b.ambient &&
+                       a.dynamic == b.dynamic;
+            }
+            ++workerCompared_;
+            if (!same) {
+                ++workerDiffering_;
+                if (workerFirst_.empty()) workerFirst_ = std::format("build {}: worker {} statics, inline {}", passes_, scratch_.size(), compareScratch_.size());
+            }
+        }
+        collected = engine::lights::collectDynamics(cam.position.data(), collectRadius_, scratch_, stats_);
+        haveStaticsHash = true;
+        if (collected) ++workerBuilds_;
+    } else {
+        collected = engine::lights::collect(cam.position.data(), collectRadius_, scratch_, stats_);
+    }
+    if (!collected) {
         registryNoteComplete(false);
         ++skipped_;
         return;
@@ -591,12 +657,9 @@ void LightTable::record(d3d9::PassContext& ctx) {
         mix(stats_.staticNear);
         mix(bits(collectRadius_));
         mix((shadowHeld_ ? 1u : 0u) | (static_cast<std::uint64_t>(shadow_.mode) << 1));
-        for (const auto& w : scratch_) {
-            mix(bits(w.pos[0]) | bits(w.pos[1]) << 32);
-            mix(bits(w.pos[2]) | bits(w.range) << 32);
-            mix(bits(w.col[0]) | bits(w.col[1]) << 32);
-            mix(bits(w.col[2]) | static_cast<std::uint64_t>(w.ambient ? 1u : 0u) << 32 | static_cast<std::uint64_t>(w.dynamic ? 1u : 0u) << 33);
-        }
+        // the lights: one chain over statics + dynamics; with the worker's statics hash only the dynamic lights are chained here
+        const std::size_t nStat = std::min<std::size_t>(stats_.staticNear, scratch_.size());
+        mix(haveStaticsHash ? lightsChain(staticsHash, scratch_.data() + nStat, scratch_.size() - nStat) : lightsChain(kLightsSeed, scratch_.data(), scratch_.size()));
     }
     const bool sigMatch = haveSig_ && sig == buildSig_;
     const bool checkBuild = doVerify || gpuscene::periodic(dev_.stats().frames, 10);
@@ -1073,6 +1136,16 @@ void LightTable::logStats() {
                  fullLitActive() ? "on" : "off");
     if (verify_ && verifyBuilds_ > 0) {
         spdlog::info("enh: lights: verify (5 s): {} builds compared, DIFFERING {}{}{}", verifyBuilds_, verifyDiffering_, verifyFirst_.empty() ? "" : "; first: ", verifyFirst_);
+    }
+    {
+        const auto c = engine::lights::asyncCountersTake();
+        if (c.kicks + workerBuilds_ + workerCompared_ > 0 || engine::lights::asyncActive()) {
+            spdlog::info("enh: lights: collect worker (5 s): {} kicks, {} taken ({} builds), worker {:.1f} us per taken job, take waited {} x ({:.1f} us total, max {:.1f}), "
+                         "inline fallbacks: {} not started, {} timed out, {} other inputs, {} no kick, {} busy, {} discarded, {} refiltered; checks {} DIFFERING {}{}{}",
+                         c.kicks, c.hits, workerBuilds_, c.hits != 0 ? c.workerUs / static_cast<double>(c.hits) : 0.0, c.waits, c.waitUs, c.waitMaxUs, c.notStarted, c.timedOut,
+                         c.mismatch, c.noKick, c.kickBusy, c.discarded, c.refiltered, workerCompared_, workerDiffering_, workerFirst_.empty() ? "" : "; first: ", workerFirst_);
+            workerBuilds_ = 0;
+        }
     }
     if (skipHits_ + skipChecks_ > 0) {
         spdlog::info("enh: lights: unchanged builds (5 s): skipped {}, uploads skipped {}, full builds with an unchanged signature compared {} DIFFERING {}{}{}", skipHits_, uploadsSkipped_, skipChecks_,

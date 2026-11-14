@@ -106,6 +106,9 @@ void setFullLitActive(bool on);
 bool fullLitSkipsReads();   // lighting.trust_table: lit draws skip their own point-light reads when the table verifiably holds every light of the object
 bool fullLitTreeMerge();
 void setFullLitOptions(bool skipReads, bool treeMerge);
+// WS22 (frame-ownership.md 16.8): the static half of the light collection on a worker thread; 0 off, 1 on, 2 auto (default: on, except on integrated GPUs); `debug lightworker 0|1|2`
+// (overlay command, perf-ab.ps1 -CommandTemplate), RVK_LIGHT_WORKER=0|1 at start
+void setLightCollectWorker(int mode);
 
 class RtScene;
 
@@ -207,6 +210,11 @@ private:
     std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0, lastNear_ = 0, lastNearStatic_ = 0, lastNearAny_ = 0;
     double lastLog_ = -1e9;
     void verifyReference(const float cam[3]);
+    bool workerAllowed() const;
+    std::vector<engine::lights::WorldLight> compareScratch_;  // the check builds' inline collection (WS22)
+    engine::lights::Stats compareStats_;
+    std::uint64_t workerBuilds_ = 0, workerCompared_ = 0, workerDiffering_ = 0;
+    std::string workerFirst_;
     bool verify_ = false;  // RVK_LIGHTS_VERIFY=1
     std::vector<engine::lights::WorldLight> verifyDyn_, verifyDrawn_;
     std::uint64_t verifyBuilds_ = 0, verifyDiffering_ = 0;

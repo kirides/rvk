@@ -561,7 +561,7 @@ void onProcessDetach(bool processTerminating) {
     if (!processTerminating) {
         hooks::shutdown();
     }
-    log::shutdown();
+    log::shutdown(processTerminating);
 }
 
 }  // namespace rvk::bootstrap
