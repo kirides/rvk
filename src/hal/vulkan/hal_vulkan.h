@@ -251,6 +251,9 @@ private:
     eCGfxShared::eSGfxDrawCallDesc draw_{};
 };
 
+// WS24: the engine thread's last PreprocessShader result (the text of a bCString, or null), noted for the Compile of the same request (resources.cpp: the D3DX bytecode disk cache)
+void noteShaderPreprocess(const void* src, const char* text);
+
 class HalHLSLShader final : public StubHLSLShader {
 public:
     explicit HalHLSLShader(HalDevice& dev);

@@ -1442,7 +1442,10 @@ bEResult HalDevice::GetFVFSize(unsigned long a0, unsigned long* a1) {
 bEResult HalDevice::PreprocessShader(eCGfxShared::eSGfxHLSLShaderSrc const& a0, bCString& a1) {
     using Fn = bEResult (*)(void*, const eCGfxShared::eSGfxHLSLShaderSrc*, bCString*);
     const Fn fn = dx9<Fn>("?PreprocessShader@eCDX9Device@@UEAA?AW4bEResult@@AEBUeSGfxHLSLShaderSrc@eCGfxShared@@AEAVbCString@@@Z");
-    return fn != nullptr ? fn(dx9Standin_, &a0, &a1) : bEResult_False;
+    const bEResult r = fn != nullptr ? fn(dx9Standin_, &a0, &a1) : bEResult_False;
+    // (WS24: the preprocessed text keys the D3DX bytecode cache of the Compile that follows for this request; bCString = a pointer to the text)
+    noteShaderPreprocess(&a0, r == bEResult_Ok ? *reinterpret_cast<const char* const*>(&a1) : nullptr);
+    return r;
 }
 
 bEResult HalDevice::CompileEffect(eCGfxShared::eSGfxEffectSource const& a0, void** a1, void** a2) {

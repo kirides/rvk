@@ -4,11 +4,15 @@
 #include <unordered_set>
 #include <atomic>
 #include <cstring>
+#include <filesystem>
+#include <format>
+#include <fstream>
 
 #include <spdlog/spdlog.h>
 
 #include "api/capture.h"
 #include "core/exports.h"
+#include "core/paths.h"
 #include "engine/memread.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/buffer_lookup.h"
@@ -614,10 +618,155 @@ Dx9ShaderCompiler g_compiler;
 
 }  // namespace
 
+// WS24 (frame-ownership.md 16.11): the engine's runtime D3DX compile of a material permutation missing from its pool runs on the engine thread (20 - 45 ms each; Full's table
+// lighting asks for permutations the shipped pool lacks: 40 - 250 of them in the first seconds at a new place, a hitch each, the 8 s `diag: hang` of a pub_interior load). The result
+// is kept on disk, keyed by the engine's own preprocessed text of the request (PreprocessShader runs before every pool lookup; its text is hashed per thread, matched to the
+// Compile that follows by the request's address) + entry + profile + flags: the next session reads the bytecode (~0.1 ms) instead of compiling it.
+namespace {
+
+struct PreprocessNote {
+    const void* src = nullptr;
+    std::uint64_t hash = 0;
+};
+thread_local PreprocessNote t_preprocess;
+
+std::uint64_t fnv64(const void* data, std::size_t size, std::uint64_t h = 0xcbf29ce484222325ull) {
+    const auto* p = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < size; ++i) h = (h ^ p[i]) * 0x100000001b3ull;
+    return h;
+}
+
+bool dx9CacheOn() {
+    static const bool on = [] {
+        char v[8];
+        const DWORD len = GetEnvironmentVariableA("RVK_DX9CACHE", v, sizeof v);
+        return !(len > 0 && len < sizeof v && v[0] == '0');
+    }();
+    return on;
+}
+
+std::filesystem::path dx9CacheFile(std::uint64_t key) {
+    return paths::dataDir() / "cache" / "dx9" / std::format("{:016x}.bin", key);
+}
+
+constexpr std::uint32_t kDx9CacheMagic = 0x39445844;  // "DXD9"
+
+bool dx9CacheLoad(std::uint64_t key, std::vector<std::uint32_t>& code, std::uint32_t& type) {
+    std::ifstream f(dx9CacheFile(key), std::ios::binary);
+    if (!f) return false;
+    std::uint32_t head[4] = {};
+    f.read(reinterpret_cast<char*>(head), sizeof head);
+    if (!f || head[0] != kDx9CacheMagic || head[2] == 0 || head[2] > (1u << 22) || head[3] != static_cast<std::uint32_t>(key ^ (key >> 32))) return false;
+    code.resize(head[2]);
+    f.read(reinterpret_cast<char*>(code.data()), static_cast<std::streamsize>(code.size() * 4));
+    if (!f) return false;
+    type = head[1];
+    return true;
+}
+
+void dx9CacheStore(std::uint64_t key, const std::vector<std::uint32_t>& code, std::uint32_t type) {
+    std::error_code ec;
+    const auto file = dx9CacheFile(key);
+    std::filesystem::create_directories(file.parent_path(), ec);
+    const auto tmp = file.parent_path() / std::format("{:016x}.{}.tmp", key, GetCurrentThreadId());
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        const std::uint32_t head[4] = {kDx9CacheMagic, type, static_cast<std::uint32_t>(code.size()), static_cast<std::uint32_t>(key ^ (key >> 32))};
+        f.write(reinterpret_cast<const char*>(head), sizeof head);
+        f.write(reinterpret_cast<const char*>(code.data()), static_cast<std::streamsize>(code.size() * 4));
+        if (!f) return;
+    }
+    std::filesystem::rename(tmp, file, ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+}
+
+std::atomic<std::uint32_t> g_dx9Hits{0}, g_dx9Stores{0}, g_dx9Unkeyed{0}, g_dx9Mismatch{0};
+
+}  // namespace
+
+void noteShaderPreprocess(const void* src, const char* text) {
+    if (!dx9CacheOn()) return;
+    t_preprocess.src = src;
+    t_preprocess.hash = 0;
+    if (text == nullptr) return;
+    int len = 0;
+    std::memcpy(&len, text - 8, sizeof len);  // (bCString: the length sits at text - 8)
+    if (len <= 0 || len > (1 << 26)) return;
+    t_preprocess.hash = fnv64(text, static_cast<std::size_t>(len)) ^ (static_cast<std::uint64_t>(len) << 40);
+}
+
 bEResult HalHLSLShader::Compile(eCGfxShared::eSGfxHLSLShaderSrc const& a0) {
     std::vector<std::uint32_t> code;
     std::uint32_t type = 0;
-    if (!g_compiler.compile(a0, code, type)) {
+    // the cache key: the preprocessed text noted for THIS request by the PreprocessShader call just before (address must match), + entry, profile, flags
+    std::uint64_t key = 0;
+    if (dx9CacheOn()) {
+        const std::string entry = engine::readCString(reinterpret_cast<const std::uint8_t*>(&a0) + 0x10);
+        if (t_preprocess.src == &a0 && t_preprocess.hash != 0 && !entry.empty()) {
+            key = fnv64(entry.data(), entry.size(), t_preprocess.hash);
+            key = fnv64(&a0.profile, sizeof a0.profile, key);
+            key = fnv64(&a0.flags, sizeof a0.flags, key);
+            key ^= 0x5744533234ull;  // (format tag)
+        } else {
+            g_dx9Unkeyed.fetch_add(1, std::memory_order_relaxed);
+        }
+        t_preprocess = {};
+    }
+    if (key != 0 && dx9CacheLoad(key, code, type)) {
+        static const bool check = [] {
+            char v[8];
+            const DWORD len = GetEnvironmentVariableA("RVK_DX9CACHE_CHECK", v, sizeof v);
+            return len > 0 && len < sizeof v && v[0] == '1';
+        }();
+        if (check) {
+            // verification: compile anyway and compare the bytecode (frame-ownership.md 16.11)
+            std::vector<std::uint32_t> ref;
+            std::uint32_t refType = 0;
+            if (!g_compiler.compile(a0, ref, refType) || ref != code || refType != type) {
+                g_dx9Mismatch.fetch_add(1, std::memory_order_relaxed);
+                spdlog::error("hal: dx9 shader cache: MISMATCH for key {:016x} (cached {} words, compiled {})", key, code.size(), ref.size());
+                code = std::move(ref);
+                type = refType;
+            }
+        }
+        const auto n = g_dx9Hits.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3 || n % 100 == 0) {
+            spdlog::info("hal: dx9 shader cache: {} hits, {} compiled + stored, {} requests without a key, {} mismatches", n, g_dx9Stores.load(), g_dx9Unkeyed.load(),
+                         g_dx9Mismatch.load());
+        }
+        return create(std::move(code), type) ? bEResult_Ok : bEResult_False;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool compiled = g_compiler.compile(a0, code, type);
+    if (compiled && key != 0) {
+        dx9CacheStore(key, code, type);
+        g_dx9Stores.fetch_add(1, std::memory_order_relaxed);
+    }
+    // a runtime D3DX compile (a pool miss) runs on the engine thread: one line each (count + ms), the file / entry name the request
+    {
+        static std::atomic<int> n{0};
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const int k = n.fetch_add(1) + 1;
+        if (k <= 200) {
+            const auto* p = reinterpret_cast<const std::uint8_t*>(&a0);
+            // (the macros: eSGfxHLSLShaderSrc +8 -> {name, value} pairs of 16 bytes, a null name ends: the permutation)
+            std::string macros;
+            const std::uint8_t* mp = nullptr;
+            if (engine::readAtSafe(p, 8, mp) && mp != nullptr) {
+                for (std::size_t i = 0; i < 64; ++i) {
+                    const char* name = nullptr;
+                    const char* value = nullptr;
+                    if (!engine::readAtSafe(mp, i * 16, name) || name == nullptr) break;
+                    engine::readAtSafe(mp, i * 16 + 8, value);
+                    macros += std::string(name).substr(0, 40) + '=' + (value != nullptr ? std::string(value).substr(0, 24) : std::string()) + ' ';
+                }
+            }
+            spdlog::info("hal: HLSL shader compiled from source on the engine thread #{}: {:.1f} ms, file '{}' entry '{}' ({}) key {:016x} macros {}", k, ms,
+                         engine::readCString(p + 0x00), engine::readCString(p + 0x10), compiled ? "ok" : "FAILED", key, macros.substr(0, 300));
+        }
+    }
+    if (!compiled) {
         spdlog::warn("hal: HLSL compile failed");
         return bEResult_False;
     }
