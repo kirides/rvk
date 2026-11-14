@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // The engine's sun cascades (eCCascadeShadowMap, docs/research/shadows.md 3): player overrides of the cascade map size, the
 // shadow range (MaxDistance) and the split factor (LogSplitFactor), applied in a pre-hook of RenderShadowMaps, which fits and
 // renders every cascade each frame. The game's own values (its Shadow Quality: High = 1024, 75 m, 0.4) are tracked, so
@@ -11,7 +13,8 @@ struct Overrides {
     int mapSize = 0;            // texels per side, 0 = the game's
     float range = 0.0f;         // world units (cm), 0 = the game's
     float splitFactor = -1.0f;  // 0 (logarithmic) .. 1 (uniform) splits, < 0 = the game's
-    int fit = 0;                // the cascade fit (shadows.fit): 0 = the engine's (bounding sphere merged from the slice's corners), 1 = the minimal sphere
+    int fit = 0;                // the cascade fit (shadows.fit): 0 = the engine's (bounding sphere merged from the slice's corners), 1 = the minimal sphere,
+                                // 2 = sdsm (the visible pixels' bounds, sphere where there is no usable reduction)
 };
 
 // any thread; applies at the next RenderShadowMaps
@@ -57,8 +60,68 @@ bool fitOverridden();
 struct FitInfo {
     float engineSide = 0.0f, side = 0.0f;
     int size = 0;
+    float sideY = 0.0f;   // the box's y side (sdsm: not square)
+    bool sdsm = false;    // the last fit of this cascade came from the reduction (false: the sphere's)
 };
 FitInfo lastFit(int cascade);
+
+// ---- SDSM (shadows.fit = sdsm; shadows.md 8.9) ----
+// enh/sdsm reduces the main view's depth into SdsmFrame::kBins view-depth bins (log spaced zMin .. zMax) holding the light-space x / y bounds of the
+// visible pixels; the frame arrives one or two frames late (a read-back that completed) through submitSdsm. The UpdateCamera pre-hook merges the bins
+// of a cascade's slice, widens them by the camera's motion since the reduction and a safety margin, quantises the extent (steps, shrink only after a
+// calm window) and snaps the centre to whole texels. Everything below the hook is pure (unit-tested).
+struct SdsmFrame {
+    static constexpr int kBins = 128;
+    std::uint64_t counter = 0;  // renderCounter() of the frame the reduction ran in
+    double time = 0.0;          // the device's seconds at that frame
+    float zMin = 10.0f, zMax = 10000.0f;  // bin i covers zMin * r^i .. zMin * r^(i+1), r = (zMax / zMin)^(1 / kBins)
+    float tanX = 0.0f, tanY = 0.0f;       // the projection's half extents per unit depth
+    float lightA[9]{};          // the light view's inverse (world -> light): l = w * A + t, A row-major 3x3
+    float lightT[3]{};
+    float pos[3]{};             // camera position and axes (inverse view rows 0..2) at the reduction
+    float axes[9]{};
+    float bounds[kBins][4]{};   // per bin: min x, max x, min y, max y (light space of that frame); min > max = empty bin
+};
+// render thread: the newest completed reduction (older than the one held is dropped)
+void submitSdsm(const SdsmFrame& frame);
+// enh/sdsm's poll, called at the top of every cascade update while the fit is sdsm (collects completed read-backs, calls submitSdsm); null = none
+void setSdsmPoll(void (*poll)());
+// The numbers enh/sdsm needs to record a reduction (render thread, valid after the cascades were updated this frame): the light view's inverse
+// rows (world -> light, 3x4: A row-major + t), the shadow range, the counter (increments at every cascade update). False before the first update
+struct SdsmSetup {
+    float lightA[9]{}, lightT[3]{};
+    float range = 0.0f;
+    std::uint64_t counter = 0;
+};
+bool sdsmSetup(SdsmSetup& out);
+// true while the fit is sdsm (enh/sdsm records its pass only then)
+bool sdsmWanted();
+
+namespace sdsm {
+struct Bounds {
+    float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f;
+    float zLo = 0.0f, zHi = 0.0f;  // the depth range of the bins merged (their edges)
+    bool any = false;
+};
+float binEdge(const SdsmFrame& f, int i);  // lower edge of bin i (i = kBins: zMax)
+// the bounds of the visible pixels whose view depth lies in [n, f] (whole bins that overlap: conservative), any = false when none
+Bounds merge(const SdsmFrame& frame, float n, float f);
+// the smallest value of the grid 2^(k / 16) not below v (v > 0): the extent steps (4.4 %)
+float quantUp(float v);
+// the extent of one box axis: grows at once to the grid value above `need`, shrinks to the grid value above the largest need of the last `calm` frames
+struct Axis {
+    float cur = 0.0f, peak = 0.0f;
+    int calm = 0;
+};
+float step(Axis& a, float need, int calmFrames);
+// c snapped to a whole texel
+float snap(float c, float texel);
+// the widening of a box for motion: the camera moved `translation` cm and turned `angle` rad since the reduction (the slice far end swings with the
+// angle), plus a fixed margin and one proportional to the slice
+float margin(float translation, float angle, float farZ, float fixedCm, float relative);
+// the largest angle between corresponding camera axes (rows of two row-major 3x3 axis sets), rad
+float axesAngle(const float a[9], const float b[9]);
+}  // namespace sdsm
 
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();

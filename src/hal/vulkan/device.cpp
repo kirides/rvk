@@ -467,6 +467,7 @@ HalDevice::~HalDevice() {
     matPack_.reset();    // joins its loader, frees the pack textures
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
+    sdsm_.reset();
     shadows_.reset();
     rtShadows_.reset();  // removes its pass, releases the RT scene
     lightTable_.reset(); // its destructor releases the RT scene (lamp shadows hold it): before the scene goes
@@ -777,6 +778,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     // enhanced sun shadows (enh/shadows.h, docs/research/shadows.md): a draw replacer for the shadow mask, live settings
     shadows_ = std::make_unique<enh::Shadows>(dev_);
+    sdsm_ = std::make_unique<enh::Sdsm>(dev_);
     rtShadows_ = std::make_unique<enh::RtShadows>(dev_, rtScene_.get());
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
@@ -1294,8 +1296,10 @@ void HalDevice::applyShadows() {
     const float metres = rs.shadowsRange->asFloat();
     o.range = metres > 0.0f ? metres * 100.0f : (s.enabled ? 10000.0f : 0.0f);
     o.splitFactor = o.range > 0.0f ? frozen::kShadowSplit : -1.0f;
-    o.fit = s.enabled && rs.shadowsFit != nullptr && rs.shadowsFit->asEnum() == "sphere" ? 1 : 0;
+    const std::string_view fit = s.enabled && rs.shadowsFit != nullptr ? rs.shadowsFit->asEnum() : std::string_view("engine");
+    o.fit = fit == "sdsm" ? 2 : fit == "sphere" ? 1 : 0;
     engine::shadowmaps::setOverrides(o);
+    if (sdsm_) sdsm_->setEnabled(o.fit == 2);
     spdlog::info("hal: settings: shadow cascades: map size {}, range {}, split factor {}", o.mapSize > 0 ? std::to_string(o.mapSize) : "game",
                  o.range > 0.0f ? std::format("{:.0f} m", o.range / 100.0f) : std::string("game"),
                  o.splitFactor >= 0.0f ? std::format("{:.2f}", o.splitFactor) : std::string("game"));

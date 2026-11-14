@@ -18,6 +18,7 @@
 #include "enh/rt_debug.h"
 #include "enh/rt_gpu_build.h"
 #include "enh/rt_shadows.h"
+#include "enh/sdsm.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
 #include "enh/water_rt.h"
@@ -101,6 +102,10 @@ BLOCK(GbufferPush, Push, enh::GbufferPush)
 PH F(uint, depthTex, 1) F(uint, normalTex, 1) F(uint, motionTex, 1) F(uint, aoTex, 1) F(uint, historyTex, 1) F(uint, linearSampler, 1) F(uint, width, 1) F(uint, height, 1)
 F(float, radius, 1) F(float, falloff, 1) F(float, strength, 1) F(float, blend, 1) F(uint, frameIndex, 1) F(uint, flags, 1) F(uint, mode, 1) F(uint, pad, 1)
 END(GbufferPush, Push, enh::GbufferPush)
+
+BLOCK(SdsmPush, Push, enh::SdsmPush)
+PH F(uint, depthTex, 1) F(uint, width, 1) F(uint, height, 1) F(uint, stride, 1) F(uint2, bins, 1) F(uint2, pad, 1) F(float4, range, 1) F(float4, lx, 1) F(float4, ly, 1)
+END(SdsmPush, Push, enh::SdsmPush)
 
 BLOCK(GiPush, Push, enh::GiPush)
 PH F(uint2, params, 1) F(uint2, pad, 1)
@@ -351,7 +356,7 @@ std::span<const Block> blocks() {
 #define REG(HL, KIND, CPPT) Block{#HL, #CPPT, Kind::KIND, static_cast<std::uint32_t>(sizeof(CPPT)), b_##HL::kF, std::size(b_##HL::kF)},
     static const Block kBlocks[] = {
         REG(RvkDrawPush, Push, abi::PushConstants) REG(RvkScenePush, Push, abi::ScenePush) REG(BlitPush, Push, abi::BlitPush)
-        REG(DebugViewPush, Push, enh::DebugViewPush) REG(PictureCheckPush, Push, enh::PictureCheckPush) REG(DepthZPush, Push, enh::DepthZPush) REG(FramegenPush, Push, abi::FramegenDebugPush) REG(GbufferPush, Push, enh::GbufferPush)
+        REG(DebugViewPush, Push, enh::DebugViewPush) REG(PictureCheckPush, Push, enh::PictureCheckPush) REG(DepthZPush, Push, enh::DepthZPush) REG(FramegenPush, Push, abi::FramegenDebugPush) REG(GbufferPush, Push, enh::GbufferPush) REG(SdsmPush, Push, enh::SdsmPush)
         REG(GiPush, Push, enh::GiPush) REG(LightingComposePush, Push, abi::LightingComposePush) REG(OwnedCompactPush, Push, abi::OwnedCompactPush)
         REG(LightClusterPush, Push, enh::LightClusterPush) REG(LightShadowPush, Push, enh::LightShadowPush) REG(MaterialRtPush, Push, enh::MaterialRtPush)
         REG(MaterialRtCompositePush, Push, enh::MaterialRtCompositePush) REG(PostLumPush, Push, native::PostLumPush) REG(PostBrightPush, Push, native::PostGroupPush)
