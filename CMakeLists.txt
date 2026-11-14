@@ -305,6 +305,8 @@ add_library(rvk_core STATIC
     src/enh/ocean_spectrum.h
     src/enh/sea_floor.cpp
     src/enh/sea_floor.h
+    src/enh/sdsm.cpp
+    src/enh/sdsm.h
     src/enh/shadows.cpp
     src/enh/shadows.h
     src/enh/shore_field.cpp

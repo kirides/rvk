@@ -21,6 +21,7 @@
 #include "enh/debug_view.h"
 #include "enh/picture_check.h"
 #include "enh/depth_z.h"
+#include "enh/sdsm.h"
 #include "enh/framegen.h"
 #include "enh/gbuffer.h"
 #include "enh/material_pack.h"
@@ -618,6 +619,7 @@ private:
     std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)
     std::unique_ptr<enh::RtShadows> rtShadows_;  // shadows.rt* (ray-traced sun shadows near the camera; the mask takes them)
+    std::unique_ptr<enh::Sdsm> sdsm_;            // shadows.fit = sdsm: the depth reduction (shadows.md 8.9)
     std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
     std::unique_ptr<native::FrameTap> frameTap_;          // native.frame_tap (N5.0: the main view's ops + draw attribution)
     std::unique_ptr<native::StaticOps> staticOps_;        // native.static_ops (N5.1: the static mesh ops composed / drawn by us)
