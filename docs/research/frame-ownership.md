@@ -4331,6 +4331,56 @@ Profile (`-CpuProfile`, inclusive ms per frame, window-share x 5 s / main views;
 **Left (measured, not cut).** (1) The ordered path itself is a flat tail: per frame at hold ~87 ops, ~0.55 ms at the ops (stamps 0.04, setup 0.03 + 0.1 per list pass, draws 0.22, side effects 0.04) + 0.18 ms in 6 - 12 run flushes; every self time is < 0.15 ms (`ownedDrawSig` 0.10, `ownedFlush` 0.09, RtlAllocateHeap 0.15 total over the whole frame). (2) `decalsBegin` at harbour_docks: 0.12 - 0.18 ms vs 0.03 for Wrapper's detour: the per-frame `composeDecals` pass runs even with an unchanged decal set (owned_decals hits). (3) Instance-list ops stay composed (no v2 form for `InstancedMesh`).
 
 
+### 14.52 WS10: audit of check-frame-only healing with `owned_check = 0` (2026-11-14, branch `worktree-agent-a933f6f459014b910` on main f4f0cf5; no new setting, `RVK_WS10_BASELINE=1` = the old behaviour for A/B, `RVK_NCLOG=1` = diagnostics)
+
+**Question.** 14.49 found that op records built while a draw's scene form was pending stayed un-ownable until a check frame remade them. Is there any other state that is (re)built, refreshed, re-validated, recovered or switched back on only on check / warm-up frames (`verifyFrame()`, `periodic()`, `leanFrameKind` check / warm-up, the composed check views) and so never heals with `owned_check = 0`? Method: read every site of `verifyFrame` / `periodic` / `checksOff` / `leanFrameKind` / `ownedCheck_` / `ownedShadowCheck_`, then measure the owned shares per stage per 5 s window with the player defaults (`owned_check` 0) against `owned_check=10` (`scratch/ws10/shares.py`: static / shadows / ordered solid + alpha / actors main z + cascades / trees cascades / instances / decals; steady = last 6 windows), cold (fresh private copy: empty shader / pipeline caches) and warm.
+
+**Audit table** (heals without check frames: yes / no / fixed):
+
+| stage / cache | what only a check / warm-up frame did | heals with 0 |
+|---|---|---|
+| op records (static, ordered, instances, cascades) | `recDraw`'s derive + compare set `R.refused` for stale module / variant / binding / texture / scene form | **no -> fixed (a)**: the owned path flags the record when its derivation is refused for those reasons, the late composition remakes it |
+| op records of skinned actors | same (+ WS7's packet-ready rule excluded actor records) | **no -> fixed (b)**: cold start: actors 0 % owned for ever |
+| tree templates (`owned_trees`) / vegetation templates (`owned_vegetation_ops`) | none: `treeCompEnd` / veg replace a template that is `stale` (set by the owned derive's rc 1 / 4 / 6 / 7), `scenePending`, `windStale`, texture moved, material slot re-allocated | yes (event driven already) |
+| packet cache entries (retained draws: variant decision, `clusterWait`, `boneObs`, `replayStale_`) | `verify_10` only compares; every replay refusal with code 0 / 5 / 6 / 7 / 10 / 11 sets `replayStale_` and the composition captures again | yes |
+| `ret::` retained entries (lean pools, non-op groups) | `retValid` (read log) per use; the check kind only compares | yes |
+| actor bone table images, morph pick sets, instance rows, object / row / view / window tables | written per use; `kVerifyEvery` only adds read-backs (`periodic`) | yes (verify only) |
+| cascade + shadow-view records (`owned_shadows` / `owned_shadow_views`) | the cascades' own check view (`ownedShadowCheck_`) = a derive + compare | yes after (a); their `lastSeen` / `builtFrame` ageing is not check driven |
+| sky / gui owned records, non-op records, decals | the record is rewritten on every composition (`rec->desc = d`); the check only compares; decals: keyed content, scrub only compares | yes |
+| rt_records scripts | `kRecordRelearn` re-observes independently of checks; `kRecordCheck` only compares | yes |
+| F10 own_collection / own_extract / request | interval 0 = Lean; the compare views are verification; `g_trippedMode` only after a DIFFERING (which cannot happen unchecked) | yes |
+| tables / lighting images / owned compaction / RT scene / tint, lean check | read-backs, compares, rolling scrubs (all `checksOff()`) | yes (verify only) |
+| stages that turn themselves off (owned static / actors / shadows / trees / vegetation draws "turned off") | only on a DIFFERING / MISS, which needs checks; once tripped they stay off by design (a bug signal) | n/a |
+| "created only during the composed start-up frames" | `g_verifyFrame` is cleared by `setVerifyInterval(0)` before the first frame; nothing is built only there | yes |
+
+**(a) Cold / refused records.** Census, hold with a cold copy (`hold_c0_cold`, `owned_check` 0, shader variant queue 0 after 125 s): `owned ordered` solid **21 %**, alpha **44 %**, `owned static` 88 %, shadows 94.9 %, for the whole rest of the run (30 windows), every window "composed (a draw refused [derive / signature] <variant 31752>), records built 0": the owned path refused the draws (the record's retained `CachedDraw` named a variant / module the device had since replaced) and the composition that follows re-used the record untouched, since `recDraw`'s derive (the only thing that set `R.refused` for rc 1 / 4 / 6 / 7 / 9) runs on check frames only. Warm (cache populated) the same defect showed in smaller form: hold 2,178 ops per 5 s composed late ("forms pending at the record's composition"), harbour_docks 3,819 ("variant module arrived since"), jungle 5,957 (same), all with a stable set of ops (never remade), and 0 with `owned_check=10`.
+Change: `OpRecord::ownedRefused` (mutable) is set by the owned path where a draw's derivation is refused for the reasons `recDraw` would have remade the record for (`staleRefusal(rc)`: rc 1 stale module, 4 variant, 6 binding, 7 texture, 9 scene form, 16 no v2 form; and `ownedDrawSig`'s module case) in `replayOwned`'s path and `ownedDrawOpPersistent` (the ordered path shares it; three one-line edits, nothing restructured). `recDraw` (every composed draw) remakes a flagged record (`R.refused`, counted in the "scene form" refusal column) at most once per 20 frames per record (`builtFrame`), so a refusal that persists after a remake (a texture still not sampleable) cannot rebuild every frame; no per-frame re-derivation, the flag is an event of the owned path.
+
+**(b) Actor records.** Cold copy after (a): actors **0 %** (main z, solid; cascades 0 - 8 %) for the whole run; `native: actor census`: "record refused at selection 9212" per window (`owned static`: "not a scene draw 18424"): the actor's record was built while the forms were pending (`DrawRec::scene` false) and WS7's rule (14.49) excluded actor records, the check frame's derive was the only remake. The same remake rule now applies to actor records (WS7's packet-ready test, `RVK_WS10_BASELINE=1` restores the exclusion) and the flag of (a).
+
+**Result** (player defaults, `owned_check` 0 unless stated; steady shares, 5 s windows; `fix` = this branch, `base` = `RVK_WS10_BASELINE=1` or the pre-fix run):
+
+| scene | stage | before (0) | after (0) | `owned_check=10` |
+|---|---|---|---|---|
+| hold, cold copy | ordered solid / alpha | 21 / 44 % | 100 / 87.8 % | 100 / 87.8 % |
+| | static / shadows | 88 / 94.9 % | 99.5 / 100 % | 99.5 / 100 % |
+| | actors main z / cascades | 0 / 0 % | 100 / 100 % | 100 / 100 % |
+| hold, warm | static composed late (ops per 5 s) | 2,178 | 0 | 0 |
+| harbour_docks, warm | static composed late | 3,819 (root: variant module arrived since) | 0 | 0 |
+| jungle, warm | static composed late | 5,957 (same) | 0 | 0 |
+| pub_interior / walk (load=0, 120 s) / night walk | all stages | not run on base | 100 % each (ordered alpha 0 / 93.5 / 93.5, no ordered alpha ops indoors) | same |
+
+Between two identical sessions the shares are equal (hold warm, three fix sessions: ordered solid 100 / 100 / 100 %, static 99.5 / 99.5 / 99.5 %, static_late 0).
+
+**Exactness (test baseline `owned_check=10`, fix build):** hold, harbour_docks, jungle, pub_interior, walk, night walk: `check frames DIFFERING 0 draws`, no `DIFFERING [1-9]` / `MISS [1-9]` / `turned off` / `[error]` / device loss in any run, `rvk_tests` 354 / 0, `rvk_d3d9test --validation` PASS (no GPU address / record index change: the change decides only which op composes late and when a CPU record is remade).
+
+**decalsBegin (the small item).** `native: owned decals (5 s)` times `composeDecals` alone: hold 46 us per pass, jungle 74 us, harbour_docks 90 us (32 records per pass, every one a persistent hit: `nonOpPasses` per record is the cost, not the queue / key / hash), i.e. 60 - 70 % of the 0.12 - 0.18 ms WS7 measured for `decalsBegin` at harbour_docks. Skipping the pass when the decal set (keys) is unchanged exactly needs the per-record `DrawDesc`s to be retained across frames (their lighting / illumination entry / material slot are per frame inputs): that is the retained-op machinery of the packet cache for a non-op group, a design of its own and in WS9's area; not done here.
+
+Also run with the final build: `rvk_spells` (c0 and `owned_check=10`: PASS 4 checks, static 99.1 - 100 %, actors 100 %, DIFFERING / MISS 0), hold warm c0 (static 99.5, ordered 100 / 87.8, actors 100, shadows 100: the same as `owned_check=10`) and c10 (exact), harbour_docks warm c0 (actors z 100 %, cascades 91 - 100 %, static 100 %, ordered 100 / 60, static_late 0), GPU-AV first run (`-Validation`, `GPU_BASED_GPU_ASSISTED`, hold, `owned_check=10`, shared warm copy): 0 validation messages, no device loss, DIFFERING / MISS 0.
+
+**Left.** Not audited by measurement: `rvk_pointshadow`, savegame streaming loads (only the new-game walk streams), a second `rvkcompare` spot-change sequence within one session (each spot was a session of its own). `RVK_NCLOG=1` logs the first actor draws that cannot be retained (`native: not built`) and the first not-capturable skinned draws (`d3d9: not captured`): the diagnosis of (b) went through it (the 0 % was a stuck record, not a capture failure).
+
+
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
 User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us
