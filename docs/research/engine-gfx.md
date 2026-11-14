@@ -452,5 +452,9 @@ in `gCNavigationAdmin` (`RegisterWaterZonePS` `0x8fc8d0`, `GetWaterZonePSList` `
 `0x2283b0`), `Entity::IsSwimming` `0x209060`; splash emitters `gCWaterZone_PS::CreateEmitter` `0x945550`. No engine-side underwater
 post effect found; presumably an overlay image effect (`eCImageFilterAdmin+0x98`; `post_wobble` / `post_distort`) switched by
 scripts [I].
+Resource touches: `eCResource2::RequestData(mode)` `0x684100` / `eCResourceCache2::RequestData(res, mode)` `0x687ad0` dispatch on the state dword `res + 0x38`: resident (3) = LRU touch `0x6843e0`
+(relink at the cache's list head, stamp `res + 0x20` = the cache's frame epoch `cache + 0x28`), not loaded / loading = `0x6852d0` (queues the load once, state 2); a repeated touch in one frame changes
+only the LRU order among that frame's touched resources, which the eviction (tail, untouched for a frame) never reaches: once per resource and frame is enough [C] (frame-ownership.md 7.x F2c-4-0
+item 5, 14.51; the owned path's `StaticOps::touchNow` does exactly that).
 Mesh lightmaps: `eCMeshResource2::BindLightmaps` `0x764220` (rt-albedo-facts.md); albedo slot: `eCShaderBase::GetDeclarations`
 `0x6d29b0` (rt-albedo-facts.md).

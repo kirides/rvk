@@ -333,7 +333,12 @@ void StaticOps::recEnter(const Op& op) {
         recAudit(op);
     }
     R.wantOwnable = ownedStatic_ && R.cur != nullptr && !R.cur->ownable;
-    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable;
+    if (R.cur != nullptr && R.cur->stale && ownedDelta_ && !rebuildStaleOff()) {
+        // WS9: the owned path found the record out of date (orec::OpRecord::stale): remade from this composition
+        R.refused = true;
+        ++staleRebuilds_;
+    }
+    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable || R.refused;
     recCollect_ = ownedStatic_;  // (the touches / stream 3 lists of every composed eligible op: a record can be made from any composition)
     if (R.building) {
         R.readLog = {};

@@ -2828,6 +2828,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_ordered", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedDelta = &reg.add({
+        .key = "native.owned_delta",
+        .label = "Native frame: owned path work by change",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, with owned static draws (frame-ownership.md 14.51, WS9): the owned path's per-op work follows what changed: a record the owned path refuses "
+                       "as out of date (made while its scene forms were pending, a module or variant moved since) is remade at its op's late composition instead of only on a check "
+                       "frame (or, for a record made before its draw's scene form existed, as soon as its composition draws a scene draw). Off = such records are remade on "
+                       "check frames only (with native.owned_check = 0: never). rvk.log `native: owned static (5 s)` ... `records out of date`, `native: stages` owned_delta.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_static", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedBillboards = &reg.add({
         .key = "native.owned_billboards",
         .label = "Native frame: owned tree billboards",
