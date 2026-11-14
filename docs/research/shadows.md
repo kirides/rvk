@@ -155,3 +155,46 @@ shaders read from `pc.draw`.
 ## 7. Lamp shadows (clustered lights, 2026-11-05)
 
 Point lights (candles, torches, lamps) get ray-traced shadows of their own, `lighting.light_shadows` (gpu-scene.md 9.10, rtgi.md 28): the engine's own point-light shadows (3 lights, atlas) stay for lights with a shadow channel; every other light of the table is traced by the `light.shadow` pass and scales the light's colour in the material variants. Debug view `lighting.debug=shadows`. Verified: the hero's and palm leaves' (cut-out) shadows from a spawned light (`rvk_pointshadow cast=false`), Vulkan = D3D12. Engine-owned register lights get their table twin's visibility since 2026-11-05 (rtgi.md 28; not yet seen at a walked-in lamp).
+
+## 8. Sun shadow quality roadmap: SDSM fit, multiview cascades, PCSS + temporal denoise (Stage 0 design note, 2026-11-14)
+
+Status: DESIGN ONLY (no code yet). [E] = estimate from a model (not measured in the game), [C] = from the engine notes (docs/research/engine-frame/E-shadows-lights-sky.md, README.md "The shadow views' setup", B-frustum-db.md), [I] = inferred. The per-pass in-game cost table (beach / jungle / harbour_docks / shadow_inland, Full + Wrapper, `RVK_PERF_FRAMES=24`) is still to be measured; section 5's old figures (cascades 0.16 -> 0.69 ms at 4096², mask draws ~0.27 ms, XTX) are the only numbers so far.
+
+### 8.1 What GD3D11 does (E:\git\github\GD3D11, D3D11ShadowMap.cpp)
+
+Same family as the engine, no SDSM, no multiview: per cascade the frustum slice's *minimal* bounding sphere (centre slid along the view axis until near / far radii are equal), radius rounded up to 1/16, light-space centre snapped to `floor(c / texelSize) * texelSize` on a world-origin grid; cascades rendered one DSV after the other (texture array or atlas); PCSS exists as a light-size setting in the shader (`SQ_LightSize`); no temporal filter. Reusable: the minimal-sphere fit and the grid snap.
+
+### 8.2 The engine's fit (the seam) [C]
+
+`RenderShadowMaps` 0x59f200 computes per split: the slice frustum (NDC box inverse-projected, planes 0 / 1 set to the split's start / end), a bCSphere by **incremental Merge of the 8 corners (not minimal)**, box = centre +- radius in light space (z min -100,000), stored at `split+0xe0` (box), `+0x60` (light view), `+0x100` (world slice frustum = the caster-cull beam), `+0x160` (start). Then `split vtbl+0x170` = `eCShadowMapBase::RenderShadowMap` 0x5a1070 -> `UpdateCamera` 0x5a13e0 (view = inv(L), ortho from the box, texel snap by `fmodf` of the projected translation, texture matrix `split+0xa0` = bias x P x V) -> `RenderShadowScene` -> `eCRenderSystemAdmin::RenderShadowMap` 0x66ce00 (`ExtractShadowMap` incl. `UpdateFrustumFilter` 0x5a1870 reads the beam at `+0x100`, origin `+0x80`; then the draws). The mask (and our RT shadows) read `split+0xa0` afterwards. Consequence: **a post-hook of `UpdateCamera` can rewrite camera view / projection (`split+0x58` camera `+0x10` / `+0x50`), the texture matrix `+0xa0`, and must also rewrite the beam `+0x100` (+ `+0x80`) so the caster cull matches** (otherwise casters outside the engine's box but inside ours are culled: shadows missing at the cascade edge). Open: the exact plane layout `UpdateFrustumFilter` reads (decompile 0x5a1870 first; these facts come from earlier sessions' Engine.dll notes and were not re-decompiled now); Full's owned cascade records (F3-1) read the same per-split view block, so the same hook feeds them.
+
+### 8.3 Does SDSM pay? Texel density model [E]
+
+Model script (flat ground, eye 1.7 m, fovY 50 / 65°, 16:9, pitch -6 / -25°, sun 35 / 60°, camera yaw 0 / 90 / 180° to the sun, splits 1 / 1347 / 2945 / 10000 as in "auto"): side length of the square map footprint
+* min bounding sphere (GD3D11 fit): 26 / 57 / 192 m (fovY 50), 35 / 77 / 262 m (fovY 65);
+* tight light-space box of the slice frustum: 0.86 - 1.0 x the sphere;
+* tight box of the *visible ground pixels* in each slice (the SDSM idea, ground only; casters are z-side, not receiver x/y): 1.2 - 1.8 x smaller than the sphere for cascade 0, 1.3 - 2.8 x for cascade 1, 1.6 - 4.1 x for cascade 2 (the far slice sees the ground only in a narrow band below the horizon).
+
+The measured engine texels (1.2 / 2.6 / 8.9 cm at 4096²) are ~1.9 x coarser than the min-sphere model's 0.6 / 1.4 / 4.7 cm: **the engine's incremental sphere merge is looser than a minimal sphere** (to be confirmed by logging the engine's box side). Stages by gain per risk:
+1. min-sphere fit + grid snap instead of the merge sphere (free, rotation invariant, no shimmer risk): ~1.9 x linear density (3.6 x texels) at the same map size, or the same density at 2048² (cascade cost / 4);
+2. SDSM bounds on top (visible min / max depth + light-space x / y bounds per slice): a further 1.2 - 2.8 x linear on flat ground (more in forests / interiors), but the footprint follows the view direction: it needs the quantisation below.
+
+### 8.4 Plan A (SDSM fit)
+
+* Where: an `UpdateCamera` post-hook in `engine/shadow_maps.*` (setting `shadows.fit = engine | sphere | sdsm`, Shadows page, `Spec::needs` shadows.enabled; `engine` = no hook work).
+* A1 `sphere`: minimal sphere of the slice (GD3D11's formula, radius ceil to 1/16), centre snapped on a world grid of `texelSize`; rewrite view / projection / `+0xa0` / beam. No GPU work.
+* A2 `sdsm`: compute reduction over the previous frame's scene depth (quarter resolution: min / max view depth + light-space x / y bounds per slice, workgroup reduction + atomics, ~0.03 ms [E]) into a small readback buffer (never the write-combined frame ring), consumed by the next frame's hook (one frame of lag), widened by a margin proportional to the camera's per-frame translation / rotation, reset to the sphere fit on a camera cut / loading, and quantised: extent rounded up in 1/16 steps with hysteresis (shrink only after ~30 stable frames), centre snapped to whole texels of that extent, so a rotating camera moves the box in whole-texel steps. A GPU-side fit is impossible for the engine's draws (CPU constants) and the owned cascades read the same CPU view block: one frame of lag + margin is the design.
+* Verification: slow-rotation scenario, crops of one shadow edge over 8+ frames, camera cut / quick-load; log line `enh: shadows: fit ...` (side and cm per texel per cascade).
+* Risks: caster-cull consistency (8.2), FSR jitter in the reduced depth (margin), flicker when the margin is too tight.
+
+### 8.5 Plan B (multiview cascades): expected NOT to pay [I]
+
+Full's owned cascade draws are persistent records flushed as a few indirect draws per view (14.29.1: cascades 42 -> 4 commands, 0.21 - 0.30 ms GPU on the XTX at 4096²): what is left is vertex work + rasterisation of each cascade's own casters, which multiview does not reduce (and a draw visible in one cascade would run its VS for all views unless a per-view cull in the VS / view masks is built). Multiview saves command recording / draw setup, which the indirect flush already collapsed. Seams if built: `Device::ownedFlush` per view slot (`owned_persist.cpp`, shared file), dynamic rendering `viewMask` (core 1.1), a depth array target (the mask reads three separate maps through bindless slots), D3D12 view instancing tier or `SV_RenderTargetArrayIndex` from the VS (`VPAndRTArrayIndexFromAnyShaderFeedingRasterizer` cap; fallback = today's path). Wrapper mode records the cascades through the engine's own sequential passes: no multiview there. The point-light atlas has no cubes (one 2D atlas, a pass per cell). Decision: not before A1 / A2 are measured; revisit only if the owned cascades cost > 0.3 ms CPU or VS-bound GPU at the player defaults.
+
+### 8.6 Plan C (PCSS + temporal denoise) [I]
+
+Seam: `shadow_mask.frag.hlsl` `cascadeShadow`. PCSS = blocker search (8 Vogel taps over a light-size kernel) -> penumbra -> 4-8 Vogel taps rotated per pixel (interleaved gradient noise + per frame); denoise: `rt_shadow_temporal` / `rt_shadow_spatial` (reprojection + clamp) extended to take the cascade term. **Motion vectors exist only with a G-buffer motion target (FSR / FG / native AA)**; with upscaling off the cheap source is camera-only reprojection from depth (static scene exact, actors ghost; tight neighbourhood clamp) with a spatial-only fallback (the engine's Blur follows our mask anyway). Today's 3x3 / 4x4 gather grid is 4 gathers (0.05 ms at 1600x900 on the XTX), so C is a *quality* option (`shadows.soft = off | pcss`, default off), not a cost win, unless it replaces the grid on the integrated-GPU preset. A small default light size keeps the game's look; judge on `shadow_inland_*` with `shadow-compare.ps1`.
+
+### 8.7 Order and gates
+
+A1 -> measure density + picture -> A2 -> measure -> C -> B only if justified. Per stage: rvk_tests, `dxil-check embedded`, `rvk_vktest --passes`, `rvk_rhitest --validation` (+ `--d3d12`), `rvk_d3d9test --validation`, `shadow-compare`, refcompare Full at the shadow spots, picture_check, perf-ab (`-Key shadows.fit -A engine -B sphere`) at beach / jungle / harbour_docks / hold. Shared-file edits expected: `engine/shadow_maps.*`, `enh/shadows.*`, `core/settings.cpp`; none in owned_persist / static_ops for A and C.
