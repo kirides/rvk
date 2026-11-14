@@ -4244,6 +4244,41 @@ User decision 2026-11-12: S-9 first (all owned stages on in Full, check frames a
 
 **Open.** Full is still slower than Wrapper at harbour_docks (CPU +0.95 ms, `1600x900 (97)` pass +0.2 ms) and pub_interior (table lighting: `light.shadow` +1.09 ms GPU, by design 11.2) and has +0.7 ms GPU at hold (`light.shadow` / `light.cluster`); hold CPU is only equal (the 14.43 / 14.44 numbers were 6.56 with extra settings).
 
+### 14.50 WS8: where Full's main colour pass loses 0.2 - 0.5 ms against Wrapper (2026-11-14, branch `worktree-agent-aeff013f5e559dbc1` on main e1221d0; no new setting)
+
+**Question.** WS4's census: Full's `1600x900, 1 colour (97), depth 130` pass costs more than Wrapper's (+.21 harbour_docks, +.49 hold, +.39 jungle, +.28 pub_interior ms) while its depth-only z pass is cheaper. Suspects: ubershader, vertex pulling, table lighting, depth_z, owned indirect draws.
+
+**Method.** The GPU is shared with other agents' builds / runs (absolute pass times moved up to +30 % between sessions, `water.rt` 0.79 -> 1.05 ms in a loaded one), so every figure below is compared against `pass water.rt` of the SAME session (a pass no setting here touches): "ratio" = colour pass / water.rt. One session per configuration (`scripts/perf-ab.ps1 -Key debug.ubershader -A true -B true -Setting <config>` = 6 windows of 360 frames, `-PlayerDefaults`, RisenTest.exe, 7900 XTX), in-session A/Bs where the key switches at run time.
+
+**Attribution (harbour_docks, colour pass ms / ratio / z pass ms / draws in the pass; Wrapper from the WS4 census: 0.63 - 0.64 ms, ratio 0.76, colour-z 0.077, 214 draws):**
+
+| configuration | colour | ratio | z pass | draws | reading |
+|---|---|---|---|---|---|
+| Full (player defaults), 3 sessions | 0.805 / 0.824 / 0.829 | 1.02 | 0.055 | 506 | |
+| `native.vertex_pull=false` (restart) | 0.824 | 1.02 | 0.056 | 506 | not a factor |
+| `native.depth_z=off` | 0.827 | 1.03 | 0.088 (colour z) | 506 | depth_z saves 0.033 in the z pass, nothing in the colour pass (jungle: colour +0.09 +- 0.07 with it on, z = 1.7: noise) |
+| `native.cluster_cull=false` | 0.823 | 1.02 | 0.080 | 506 | the cull saves 0.025 in z, nothing in colour |
+| `debug.ubershader` false / true, in-session (3 pairs) | harbour -0.03, jungle -0.10, pub +0.00 (hold: sd 1.1, no reading) | | | | the HLSL ubershader is as fast as the translated shader |
+| `lighting.enabled` false / true, in-session | harbour -0.05, jungle -0.33 (sd 0.24 - 1.3: noise) | | | | the per-pixel cluster lookup is not measurable in the colour pass |
+| `lighting.full_lit=false` | 0.818 | 0.91 | 0.075 | 208 | -0.09 ms: the draws fall to Wrapper's count |
+| `native.owned_persistent=false` | 0.723 | 0.92 | 0.072 | 197 | -0.10 ms: same, the owned indirect path off |
+| `lighting.clustered=false` (restart: no table, no owned stages) | 0.880 (water.rt 1.05) | 0.84 | 0.081 | 208 | ~ Wrapper's picture of the frame |
+
+So of the +0.18 ms (harbour) about **0.10 ms is the owned persistent indirect draw path** (`ownedFlush`: one indirect command per item: 506 draws / 101 scene indirect calls per view in the pass against Wrapper's 214 hardware-instanced batches; hold 2561 vs 1014, jungle 4393 vs 1275 draws; 0.13 - 0.33 us per extra command), the table lighting / rest ~0.05 - 0.08, and the colour-less z pass gives 0.02 - 0.03 back. `native.owned_persistent` off is NOT the answer (z pass +0.017, CPU cost of the composed path). **Lead for the owned hand-over work (not touched here: `ownedFlush` / `compactOwned` belong to another workstream):** coalesce consecutive items of a bucket with identical (index count, first index, vertex offset) into ONE command with `instanceCount = run length`, `firstInstance` = the first item's list position (the per-instance `ref` stream is already indexed by that position, `args[5j+4] = j`), the GPU compact path then emits runs. Items of one mesh are consecutive in the engine's op order (its hardware batches), so the command count should fall towards Wrapper's batch count.
+
+**Tried, not kept as a cost win (measured):**
+* `rvkSceneBeginPs` made wave-uniform (`WaveReadLaneFirst(rvk_sceneIdx)`, so the DrawRecord and every pixel constant are scalar loads; unsafe as an experiment: no per-lane check): colour 0.849 / 0.831 against 0.805 / 0.824, ratio 1.02 - 1.04: the record loads are not the cost. Not shipped.
+* The light-table work per pixel is cheap already (S-2b): see `lighting.enabled` above.
+
+**Shipped (shader text only, exact; `RVK_MV_CLUSTER` variants, i.e. Full's table lighting).**
+* `shaders/material/ge_default.frag.hlsl`: the point-light loop skips a slot whose diffuse + specular colour is 0 or whose pixel is out of reach (`d^2 / R^2 >= 1`): such a light adds exactly 0 to both accumulators (`CustumFragmentLight` multiplies both by the falloff), every lit draw runs the 3-light permutation and unused slots are the common case by day.
+* `shaders/include/rvk_material_variant.hlsli` `rvkMvCluster`: an EMPTY cluster (count 0: no table light reaches the pixel) returns right after the lookup with the slots the full selection would give (engine light kept: factor 1, else unused: factor 0; `rvk_clKeptState` as before) instead of the engine-light position tests, the cluster walk and the pick logic.
+* Effect (old text via `RVK_SHADER_DIR` vs new, one session each, ratio-checked): harbour_docks colour 0.835 -> 0.819 / 0.827 (-1.5 %), jungle 1.263 (2 sessions) -> 1.218 (-3.5 %); the empty-cluster path alone (cl) 0.829 at harbour: within noise. A small, safe saving, not the missing 0.2 ms.
+* Pictures: Full old text vs Full new text, 7 spots (`harbour_night`, `pub_interior`, `jungle`, `harbour_docks`, `torch_hero`, `monastery_hall`, `swamp_camp`; bursts of 3, median): the old-vs-new difference (mean abs 0.36 - 3.1 of 255, jungle's is the swaying foliage) equals the old-vs-old session-to-session difference (0.46 - 3.4); no structure in the diff images beyond foliage / water motion. (`tools/refcompare.py` needs scipy: not installed here, a numpy median diff was used.)
+* Gates: `rvk_tests` 354 / 0, `rvk_shadertool dxil-check embedded` 185 / 185, `dxil-check uber out/matsrc/census_jungle.jsonl` 1689 / 1689, `rvk_vktest --passes` PASS. `ubershader_check.py` / `vs_equiv.py` compare the plain shader without `RVK_MV_CLUSTER` (game-shaders export not in the worktree): the changed code is inside `#if defined(RVK_MV_CLUSTER)` only.
+
+**By design / not a defect:** the colour-less z pass, vertex pulling and the cluster cull do not cost colour-pass time; the per-pixel cluster lookup is below the noise at the player-default lamp counts; pub_interior's 3x colour pass (0.14 -> 0.42 ms in the census) is the table lighting at 39 draws (its absolute figure also depends on the GPU clock at 1 ms frames: sessions gave 0.16 - 0.58 ms for the same configuration), accepted with `light.shadow` / `light.cluster`.
+
 ## 15. Road to a fully owned frame (2026-11-10, census + roadmap; measurement and planning only, no feature code)
 
 User end state: **Full makes no engine-composed calls, has no fallbacks and no vertex captures**: every draw of the frame is collected, skinned, culled and drawn by us
