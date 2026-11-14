@@ -397,7 +397,8 @@ void HalDevice::applyStaticOps() {
             staticOps_->setOwnedOrdered(ordered);
             dev_.setOrderedBulk(on(rs.nativeOrderedBulk));  // 14.44: the ordered draws to the observers in bulk
         }
-        staticOps_->setOwnedDelta(on(rs.nativeOwnedDelta) && ownedStatic);  // 14.51 (WS9): the owned path's per-op work by change
+        dev_.setEventObservers(on(rs.nativeEventObservers) && ownedStatic && on(rs.nativeOwnedPersistent));  // 16.9 (WS23): observers by event
+    staticOps_->setOwnedDelta(on(rs.nativeOwnedDelta) && ownedStatic);  // 14.51 (WS9): the owned path's per-op work by change
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -807,7 +808,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOrderedBulk, rs.nativeOwnedDelta, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords, rs.nativeRtGpuBuild}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOrderedBulk, rs.nativeEventObservers, rs.nativeOwnedDelta, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords, rs.nativeRtGpuBuild}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
