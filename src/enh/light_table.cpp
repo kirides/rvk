@@ -31,6 +31,7 @@ constexpr std::uint32_t kClusters1 = kLightGrid1X * kLightGrid1Y * kLightGrid1Z;
 constexpr std::uint32_t kClusters = kClusters0 + kClusters1;
 constexpr std::uint32_t kColumns0 = kLightGridX * kLightGridY, kColumns1 = kLightGrid1X * kLightGrid1Y;  // the column build's groups (one per screen-tile column of a level)
 static_assert(kLightMax <= 1024 && kLightGridZ <= 24 && kLightGrid1Z <= 24 && kColumns0 + kColumns1 >= kLightMax / 64, "light_cluster_col.comp: 32 mask words, 24 slices, the first groups copy the lights");
+static_assert(kLightGrid1Z >= 1, "light_cluster_col.comp: a far level needs at least one slice (the shader also leaves a group whose level has none)");
 constexpr std::uint64_t kLightsOffset = kLightHeaderBytes;
 constexpr std::uint64_t kClustersOffset = kLightsOffset + std::uint64_t{kLightMax} * kLightBytes;
 constexpr std::uint64_t kClusters1Offset = kClustersOffset + std::uint64_t{kClusters0} * kLightClusterBytes;
