@@ -26,6 +26,8 @@ constexpr float kSpecularShare = 0.5f;   // specular colour = diffuse x this (th
 constexpr std::uint32_t kClusters0 = kLightGridX * kLightGridY * kLightGridZ;
 constexpr std::uint32_t kClusters1 = kLightGrid1X * kLightGrid1Y * kLightGrid1Z;
 constexpr std::uint32_t kClusters = kClusters0 + kClusters1;
+constexpr std::uint32_t kColumns0 = kLightGridX * kLightGridY, kColumns1 = kLightGrid1X * kLightGrid1Y;  // the column build's groups (one per screen-tile column of a level)
+static_assert(kLightMax <= 1024 && kLightGridZ <= 24 && kLightGrid1Z <= 24 && kColumns0 + kColumns1 >= kLightMax / 64, "light_cluster_col.comp: 32 mask words, 24 slices, the first groups copy the lights");
 constexpr std::uint64_t kLightsOffset = kLightHeaderBytes;
 constexpr std::uint64_t kClustersOffset = kLightsOffset + std::uint64_t{kLightMax} * kLightBytes;
 constexpr std::uint64_t kClusters1Offset = kClustersOffset + std::uint64_t{kClusters0} * kLightClusterBytes;
@@ -208,8 +210,8 @@ LightTable::LightTable(d3d9::Device& device) : dev_(device) {
     // the compute pipeline in the background from the start (Device::createComputePipeline is thread-safe)
     building_ = std::async(std::launch::async, [rdev]() {
         rhi::ComputePipelineDesc d;
-        d.cs.spirv = shader::embedded::spirv("lighting/light_cluster.comp");
-        d.cs.dxil = shader::embedded::dxilOnDemand("lighting/light_cluster.comp");
+        d.cs.spirv = shader::embedded::spirv("lighting/light_cluster_col.comp");
+        d.cs.dxil = shader::embedded::dxilOnDemand("lighting/light_cluster_col.comp");
         d.name = "light.cluster";
         return rdev->createComputePipeline(d);
     });
@@ -222,6 +224,8 @@ LightTable::~LightTable() {
         if (b.valid()) b.get();
     }
     if (building_.valid()) building_.get();
+    if (legacyBuilding_.valid()) legacyBuilding_.get();
+    if (compareBuilding_.valid()) compareBuilding_.get();
 }
 
 // ray-traced lamp shadows: held (RT scene, pass, pipelines) only while the table is on and the setting asks for them; off = nothing exists
@@ -316,6 +320,44 @@ void LightTable::setOccupancy(int mode) {
         }
     }
     dev_.setFrameParam(shader::abi::kFrameParamLightOcc, {std::bit_cast<float>(ref[0]), std::bit_cast<float>(ref[1]), static_cast<float>(occMode_), 0.0f});
+}
+
+void LightTable::setClusterBuild(int mode) {
+    clusterMode_ = std::clamp(mode, 0, 2);
+    if (failed_ || dev_.rhi() == nullptr) return;
+    rhi::Device* rdev = dev_.rhi();
+    if (clusterMode_ == 2 && rdev->caps().backend != rhi::Backend::Vulkan) {
+        spdlog::warn("enh: lights: lighting.cluster_build compare needs Vulkan: using columns");
+        clusterMode_ = 0;
+    }
+    if (clusterMode_ == 2 && !clusterCmp_) {
+        clusterCmp_ = rdev->createBuffer({64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "light cluster compare"});
+        if (clusterCmp_) {
+            std::memset(clusterCmp_->map(), 0, 64);
+            clusterCmp_->flush();
+        } else {
+            clusterMode_ = 0;
+        }
+    }
+    // the legacy kernels build in the background the first time a mode asks for them (a build still running = the columns' build records meanwhile)
+    if (clusterMode_ >= 1 && !legacyPipe_ && !legacyBuilding_.valid()) {
+        legacyBuilding_ = std::async(std::launch::async, [rdev]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv("lighting/light_cluster.comp");
+            d.cs.dxil = shader::embedded::dxilOnDemand("lighting/light_cluster.comp");
+            d.name = "light.cluster legacy";
+            return rdev->createComputePipeline(d);
+        });
+    }
+    if (clusterMode_ == 2 && !comparePipe_ && !compareBuilding_.valid()) {
+        compareBuilding_ = std::async(std::launch::async, [rdev]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirvVariant("lighting/light_cluster.comp", "RVK_CLUSTER_COMPARE=1");
+            d.name = "light.cluster compare";
+            return rdev->createComputePipeline(d);
+        });
+    }
+    spdlog::info("enh: lights: lighting.cluster_build {}", clusterMode_ == 0 ? "columns" : clusterMode_ == 1 ? "threads (legacy kernel)" : "compare");
 }
 
 void LightTable::configure(bool enabled, int style, int debug, float defaultRoughness) {
@@ -913,9 +955,43 @@ void LightTable::record(d3d9::PassContext& ctx) {
     }
     if (shadowHeld_ && pendingShadow_.frame == ~0ull) ++shadowSkipped_;
     cl.bufferBarrier(*device_, rhi::BufferAccess::ShaderWrite);
-    cl.bindPipeline(*pipeline_);
-    cl.setPushConstants(&push, sizeof(push));
-    cl.dispatch((kClusters + 63) / 64, 1, 1);
+    bool legacy = false;
+    if (clusterMode_ >= 1 && !legacyPipe_ && legacyBuilding_.valid() && legacyBuilding_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        legacyPipe_ = legacyBuilding_.get();
+        if (!legacyPipe_) spdlog::error("enh: lights: the legacy cluster pipeline failed: the columns' build stays");
+    }
+    if (clusterMode_ == 1 && legacyPipe_) legacy = true;
+    if (legacy) {
+        cl.bindPipeline(*legacyPipe_);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch((kClusters + 63) / 64, 1, 1);
+    } else {
+        // the columns' build adds the occupancy bits atomically into words cleared here
+        cl.fillBuffer(*device_, kOccOffset, kClusters / 8, 0);
+        cl.bufferBarrier(*device_, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*pipeline_);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(kColumns0 + kColumns1, 1, 1);
+    }
+    if (clusterMode_ == 2 && clusterCmp_ && !legacy) {
+        if (!comparePipe_ && compareBuilding_.valid() && compareBuilding_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            comparePipe_ = compareBuilding_.get();
+            if (!comparePipe_) {
+                spdlog::error("enh: lights: the cluster compare pipeline failed: compare off");
+                clusterMode_ = 0;
+            }
+        }
+        if (comparePipe_ && (clusterPasses_++ % 2) == 0) {
+            cl.bufferBarrier(*device_, rhi::BufferAccess::ShaderWrite);
+            LightClusterPush cp = push;
+            const auto cr = clusterCmp_->shaderRefRw(0);
+            cp.shadow[0] = cr[0];
+            cp.shadow[1] = cr[1];
+            cl.bindPipeline(*comparePipe_);
+            cl.setPushConstants(&cp, sizeof(cp));
+            cl.dispatch((kClusters + 63) / 64, 1, 1);
+        }
+    }
     cl.bufferBarrier(*device_, rhi::BufferAccess::ShaderRead);
     if (passes_++ == 0) {
         spdlog::info("enh: lights: first cluster build: {} lights ({} static in the tree, {} dynamic registered), {} clusters", count, stats_.staticTotal,
@@ -981,6 +1057,13 @@ void LightTable::logStats() {
         occCmp_->invalidate();
         const auto* w = static_cast<const std::uint32_t*>(occCmp_->map());
         spdlog::info("enh: lights: occupancy compare: {} empty-cluster pixels checked, {} mismatches ({} occupancy bit wrong), first mismatch kind {:#x}", w[1], w[0], w[2], w[3]);
+    }
+    if (clusterMode_ == 2 && clusterCmp_ && now - clusterLog_ >= 2.0) {
+        clusterLog_ = now;
+        clusterCmp_->invalidate();
+        const auto* w = static_cast<const std::uint32_t*>(clusterCmp_->map());
+        spdlog::info("enh: lights: cluster build compare: {} builds, {} clusters compared, DIFFERING {} ({} occupancy words), highest differing cluster {}", w[3], w[1], w[0], w[2],
+                     w[4] == 0 ? -1 : static_cast<int>(w[4]) - 1);
     }
     if (now - lastLog_ < 5.0) return;
     lastLog_ = now;

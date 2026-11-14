@@ -148,6 +148,9 @@ public:
     // lighting.occupancy: 0 off (every pixel takes the full cluster path), 1 on (pixels in a cluster without lights take the short path), 2 compare (Vulkan:
     // the short path's state is checked against the full path for every empty-cluster pixel; mismatches are counted into the compare buffer, logged)
     void setOccupancy(int mode);
+    // lighting.cluster_build (WS21, gpu-scene.md 9.16): 0 columns (one group per tile column, default), 1 threads (the legacy one thread per cluster kernel), 2 compare
+    // (Vulkan: the columns' build, then the legacy kernel reads it and counts differing clusters / occupancy words; rvk.log "cluster build compare", must be 0)
+    void setClusterBuild(int mode);
 
 private:
     void record(d3d9::PassContext& ctx);
@@ -168,6 +171,12 @@ private:
     int occMode_ = 1;
     std::unique_ptr<rhi::Buffer> occCmp_;  // compare counters (uint words: 0 mismatches, 1 empty-cluster pixels checked, 2 occupancy bit wrong, 3 first mismatch kind bits)
     double occLog_ = -1e9;
+    int clusterMode_ = 0;
+    std::unique_ptr<rhi::Pipeline> legacyPipe_, comparePipe_;  // the legacy kernel and its compare variant (built when the mode asks)
+    std::future<std::unique_ptr<rhi::Pipeline>> legacyBuilding_, compareBuilding_;
+    std::unique_ptr<rhi::Buffer> clusterCmp_;  // compare counters (uint words: 0 clusters differing, 1 compared, 2 occupancy words differing, 3 builds compared, 4 highest differing cluster + 1)
+    double clusterLog_ = -1e9;
+    std::uint64_t clusterPasses_ = 0;
     float defaultRoughness_ = 0.7f;  // the physical style's roughness of surfaces without a pack entry
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_;
