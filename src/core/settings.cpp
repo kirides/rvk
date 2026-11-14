@@ -1909,6 +1909,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Clustered lights",
     });
+    r.lightingOccupancy = &reg.add({
+        .key = "lighting.occupancy",
+        .label = "Light table occupancy shortcut",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer switch: pixels whose cluster holds no table light skip the per-pixel light selection (exact: the same colours). \"Off\" = every pixel walks the "
+                       "cluster path (A/B), \"Compare\" (Vulkan) also runs the full path on those pixels and counts differences (rvk.log \"occupancy compare\", must be 0).",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}},
+        .page = "Debug", .section = "Clustered lights",
+    });
     r.lightingShadows = &reg.add({
         .key = "lighting.light_shadows",
         .label = "Lamp shadows",

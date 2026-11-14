@@ -14,7 +14,7 @@ struct LightClusterPush {
     uint2 src;       // the CPU upload buffer's read reference: RvkLight[count] (this frame in flight's)
     uint2 dst;       // the device buffer's read-write reference
     uint4 grid;      // x tiles x, y tiles y, z slices, w light count
-    float4 zs;       // x near, y far, z slices / ln(far / near), w unused
+    float4 zs;       // x near, y far, z slices / ln(far / near), w the occupancy bit set's byte offset (uint bits; 0 = not written)
     uint4 offs;      // x lights offset, y clusters offset (bytes), z style, w flags
     uint4 shadow;    // x light shadow image slot (bindless, 0 = none this frame), y width, z height, w light count with a shadow id
     uint4 grid1;     // the far level: x tiles x, y tiles y, z slices (0 = none), w its clusters' offset (bytes)
@@ -28,10 +28,13 @@ float2 rvkClusterSlope(RvkFrame f, float2 ndc) {
 }
 
 groupshared float4 gsLight[64];
+groupshared uint gsOcc[2];
 
 [numthreads(64, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     const uint t = id.x;
+    if (gi < 2u) gsOcc[gi] = 0u;
+    GroupMemoryBarrierWithGroupSync();
     const uint count = pc.grid.w;
     const uint clusters0 = pc.grid.x * pc.grid.y * pc.grid.z;
     const uint clusters = clusters0 + pc.grid1.x * pc.grid1.y * pc.grid1.z;
@@ -49,7 +52,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         rvkBufStore(pc.dst, 32, asuint(pc.zs.x));
         rvkBufStore(pc.dst, 36, asuint(pc.zs.y));
         rvkBufStore(pc.dst, 40, asuint(pc.zs.z));
-        rvkBufStore(pc.dst, 44, 0u);
+        rvkBufStore(pc.dst, 44, asuint(pc.zs.w));  // the occupancy bit set's byte offset (0 = none)
         rvkBufStore(pc.dst, 48, pc.offs.x);
         rvkBufStore(pc.dst, 52, pc.offs.y);
         rvkBufStore(pc.dst, 56, pc.offs.z);
@@ -120,4 +123,10 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         GroupMemoryBarrierWithGroupSync();
     }
     if (active) rvkBufStore(pc.dst, outBase, n);
+    // the occupancy bit set (rvk_light_model.hlsli rvkLightClusterOccupied): bit t of the combined cluster space = the cluster holds a light; the group's 64
+    // threads are 64 consecutive clusters = two words (a group starts at a multiple of 64)
+    uint occOld;
+    if (active && n > 0u) InterlockedOr(gsOcc[gi >> 5], 1u << (gi & 31u), occOld);
+    GroupMemoryBarrierWithGroupSync();
+    if (gi < 2u && asuint(pc.zs.w) != 0u) rvkBufStore(pc.dst, asuint(pc.zs.w) + ((t - gi) / 32u + gi) * 4u, gsOcc[gi]);
 }

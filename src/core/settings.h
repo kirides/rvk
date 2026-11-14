@@ -448,7 +448,8 @@ struct RendererSettings {
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
     Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
     Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots" | "shadows"
-    Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
+    Setting* lightingOccupancy = nullptr; // lighting.occupancy (debug): "off" | "on" | "compare" (WS20: pixels in light-free clusters skip the table lookup; gpu-scene.md 9.15)
+    Setting* lightingShadows = nullptr;  // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
     Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
     // material pack (enh/material_pack, docs/research/material-pack.md)
     Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
