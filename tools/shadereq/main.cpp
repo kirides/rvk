@@ -308,7 +308,7 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
 
 }  // namespace
 
-int main(int argc, char** argv) {
+static int rvkToolMain(int argc, char** argv) {
     std::string vsPath, fsA, fsB, vsA, vsB, attrsA, attrsB, probePath;
     bool vsTestMode = false, billboardValid = false, sceneForm = false, sceneView = false;
     std::uint32_t probeCount = 0;
@@ -589,4 +589,15 @@ int main(int argc, char** argv) {
     std::printf("%s: %d of %d trials differ (worst relative difference %.3g), %u validation error(s)\n",
                 badTrials == 0 && verrors == 0 ? "EQUAL" : "DIFFERENT", badTrials, trials, worst, verrors);
     return badTrials == 0 && verrors == 0 ? 0 : 1;
+}
+
+// WS29: dxcompiler's DLL detach frees blocks of its private heap through the CRT (an access violation at process exit): the process ends here when the heap was used
+#include <cstdio>
+#include "shader/dxc.h"
+int main(int argc, char** argv) {
+    const int rc = rvkToolMain(argc, argv);
+    std::fflush(stdout);
+    std::fflush(stderr);
+    rvk::shader::dxc::terminateNow(rc);
+    return rc;
 }

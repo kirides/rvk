@@ -90,6 +90,17 @@ std::string dxilContractViolation(std::span<const std::uint8_t> dxil);
 // the size in bytes of the push constant block (the constant buffer at b0 space0) of a DXIL module, 0 without one
 std::uint32_t dxilPushBytes(std::span<const std::uint8_t> dxil);
 
+// WS29: the private heap's IMalloc (tests): Alloc / Realloc / Free / GetSize round trip, ownsBlock = whether a pointer is one of its blocks (a foreign pointer is not, and
+// is never dereferenced beyond its own page unless under SEH)
+void* privateHeapAlloc(std::size_t size);
+void* privateHeapRealloc(void* p, std::size_t size);
+void privateHeapFree(void* p);
+std::size_t privateHeapSize(void* p);
+bool privateHeapOwns(const void* p);
+// WS29: dxcompiler's statics created during a compile on the private heap are destroyed at its DLL detach through the CRT's free (an access violation at process exit).
+// A tool that used the private heap ends its process with this instead of returning from main (output flushed by the caller); it returns when the private heap was not used.
+void terminateNow(int exitCode);
+
 // Bump when the argument set or the cache layout changes (part of every cache key)
 inline constexpr std::uint32_t kArgsRevision = 4;
 

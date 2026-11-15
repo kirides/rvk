@@ -44,6 +44,44 @@ dxc::Request probeRequest() {
 
 }  // namespace
 
+// WS29: the private heap behind dxcompiler's IMalloc: its own blocks round-trip, foreign blocks (the process heap, a page-aligned VirtualAlloc block whose p - 16 is another
+// page) are recognised as foreign without faulting
+TEST(dxc_private_heap_blocks_and_foreign_pointers) {
+    unsigned char* a = static_cast<unsigned char*>(dxc::privateHeapAlloc(100));
+    CHECK(a != nullptr);
+    CHECK(dxc::privateHeapOwns(a));
+    CHECK(dxc::privateHeapSize(a) >= 100);
+    for (int i = 0; i < 100; ++i) a[i] = static_cast<unsigned char>(i);
+    unsigned char* b = static_cast<unsigned char*>(dxc::privateHeapRealloc(a, 5000));
+    CHECK(b != nullptr);
+    CHECK(dxc::privateHeapOwns(b));
+    CHECK(dxc::privateHeapSize(b) >= 5000);
+    bool same = true;
+    for (int i = 0; i < 100; ++i) same = same && b[i] == i;
+    CHECK(same);
+    unsigned char* c = static_cast<unsigned char*>(dxc::privateHeapRealloc(b, 10));  // shrink: the first 10 bytes survive
+    CHECK(c != nullptr && c[9] == 9);
+    dxc::privateHeapFree(c);
+    CHECK(dxc::privateHeapRealloc(nullptr, 8) != nullptr);
+
+    void* f = HeapAlloc(GetProcessHeap(), 0, 64);
+    CHECK(f != nullptr);
+    CHECK(!dxc::privateHeapOwns(f));
+    CHECK(dxc::privateHeapSize(f) >= 64);
+    void* g = dxc::privateHeapRealloc(f, 256);  // a foreign block stays on its own heap
+    CHECK(g != nullptr && !dxc::privateHeapOwns(g));
+    dxc::privateHeapFree(g);
+
+    // page-aligned block at the start of a mapping, the page before it reserved and unreadable: p - 16 is not mapped
+    char* region = static_cast<char*>(VirtualAlloc(nullptr, 3 * 4096, MEM_RESERVE, PAGE_NOACCESS));
+    CHECK(region != nullptr);
+    if (region != nullptr) {
+        CHECK(VirtualAlloc(region + 4096, 4096, MEM_COMMIT, PAGE_READWRITE) != nullptr);
+        CHECK(!dxc::privateHeapOwns(region + 4096));
+        VirtualFree(region, 0, MEM_RELEASE);
+    }
+}
+
 TEST(dxc_embedded_sources) {
     CHECK(!embedded::hlslSource("test/dxc_probe.comp.hlsl").empty());
     CHECK(!embedded::hlslSource("include/rvk_probe.hlsli").empty());
