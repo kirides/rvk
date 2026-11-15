@@ -7636,3 +7636,23 @@ Means A -> B: max 81.4 -> 62.9 ms, frames > 50 ms 8.3 -> 3.3 (-60 %), > 33 ms 38
 | D3D12 Wrapper, new | dn1 | 8.96 | 10.86 | 60.0 | 37 | 6 | 1 | 0 |
 
 `diag: big upload` lines per Wrapper session 75 - 77 -> 7. Frames above 25 ms: -21 / -22 per session in Wrapper (45 %), -30 / -20 in Full, -29 in D3D12: exactly the floor's 23 - 33 frames; p95 / p99 / max unchanged (the remaining hitches are engine streaming, 16.15 item 2, and Full's own items). Discarded: fb1 (Full right after the dll switch: cold-like, mean machine CPU 57 % vs 18 - 20 %, p95 22 ms) and fn1 (mean CPU 29.5 %, p95 11.3, still 38 hitch frames); the extra Full pairs fb2/fn2, fb3/fn3 were run instead; no other session had a uniform slowdown (sampler mean CPU 17 - 23 %). Picture: `water-compare` at `beach_sun`, `harbour_docks`, `sea_cliff`, `harbour_mouth` (`water.ocean=fft`, cache warm), base vs new: differences are the surf / foam run-to-run noise (base-vs-base repeat: mean abs diff 0.3 - 2.6, new-vs-base 0.4 - 3.4; same places), shore and shallows look the same. `-Validation` run of the same spots (VK_LAYER_KHRONOS_validation): no errors.
+
+### 16.13 WS25: the first seconds in the world: prewarm requests are fast-linked first (2026-11-15, branch `worktree-agent-a0c91ed775a1b4993`; env `RVK_PREWARM_LINK=0` = whole builds as before)
+
+**Cause found (warm caches).** At world entry + 6 .. 14 s the variant queue is already 0 (all modules on disk / built), yet 700 - 1,700 ops per second were composed late for "forms pending at the record's composition": the wait is the scene forms' PIPELINES. `Device::sceneDecide` requests them with `prewarmOncePipeline` -> the prewarm workers (4 threads) built each one WHOLE (`PipelineCache::build`, ~30 ms; 624 pipelines = 20 s of builder time per 5 s window), urgent requests only ahead of the key list, not faster. The draws' own pipelines already used `getNoWait` (fast link of the shaders' libraries, ~36 us).
+
+**Change.** `PipelineCache::prewarmWorker` fast-links (`link(d, false, true)`) a claimed request first when pipeline libraries are on, inserts it as a fast link and queues it to the optimizer (which makes the optimised pipeline at below-normal priority, as for the draws' own links); a request that cannot be linked builds whole. A draw therefore finds the scene form after a link instead of after a queue of whole builds; the key-list prewarm gets the same path (its optimisation moves to the optimizer thread).
+
+**Numbers (warm, Full, 3 sessions per arm alternated, walk 100 s, private copy ws25, machine shared with other agents' games / compiles: `firstminutes.py` found 0 - 1 clean windows per session, so absolute ms carry their load).**
+
+| arm | pending ops composed late (session) | owned share >= 90 % at world+ | first 60 s median p95 per window (3 sessions) | worst frame |
+|---|---|---|---|---|
+| fast-link (default now) | 967 / 45 / 0 | 9 / 10 / 5 s | 20.8 / 23.4 / 19.5 ms | 115 / 1055 (disturbed) / 78 ms |
+| whole builds (`RVK_PREWARM_LINK=0`) | 3907 / 1255 / 2636 | 12 / 12 / 10 s | 22.2 / 25.9 / 21.0 ms | 653 / 645 / 83 ms |
+| Wrapper | - | - | 43.4 / 34.0 / 24.8 ms (loaded machine) | 343 / 147 / 266 ms |
+
+Background pipeline build time in the first seconds: 1.8 s for 645 pipelines (was 20 s per window). The cleanest session (fast-link 3): median p95 19.5, worst window p95 22.6, worst frame 78 ms, CPU median 8.1 ms.
+
+**Updated state (module caches emptied, keys kept; merged with main incl. WS26, 2 sessions per arm, `rvk-work/scratch/ws25/b3`):** NO difference between fast-link and whole builds: owned share >= 90 % at world+39 / 39 s vs 38 / 39 s, first-60-s median p95 21.5 / 21.3 vs 21.0 / 21.8, CPU median 15 ms in all four, against Wrapper p95 18.3, CPU 7.3 ms. There the wait is the variant modules (DXC compiles) and the pending path's engine-thread cost, not pipelines. Loading screens unchanged (5.9 - 6.6 s in every arm). Gate (p95 <= Wrapper + margin in every window) NOT met after an update / cold; warm: met in the clean session, within noise otherwise.
+
+**Left.** The per-record "pending until a variant of this shader pair arrived" memo (14.53 Left 1: ops cost 2.3x through the tap while forms are pending: the 15 ms CPU of updated sessions), world-entry record build spreading, loading-screen building (ideas 2 - 4, not built); an unreproduced single FAIL (1 failure, 0 validation errors) of `rvk_d3d9test --validation` once right after this change (5 reruns, with and without `RVK_PREWARM_LINK=0`, passed): unidentified, possibly timing under machine load. batch 2 of this work died (machine / session), batch 3 replaced it.
