@@ -13,7 +13,7 @@ def symbolize(rvas):
         blocks = out.strip().split('\n\n')
         for r, b in zip(need, blocks):
             cache[r] = b.split('\n')[0].strip()
-    return [cache[r] for r in rvas]
+    return [cache.get(r, '?') for r in rvas]  # (WS29: an rva the symbolizer printed no block for)
 
 RULES = [
     ('water floor field upload (Water::serviceFloor)', ['Water::serviceFloor', 'uploadHalf4']),

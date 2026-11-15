@@ -3030,8 +3030,25 @@ void StaticOps::report() {
                     pktWhyPrev_[i] = st.why[i];
                     pktNcPrev_[i] = st.ncWhy[i];
                 }
-                spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}",
-                             why[0], why[1], why[2], why[3], why[4], why[5], why[6], why[7], why[8], why[9], why[10], why[11]);
+                static const bool supersededCensus = GetEnvironmentVariableA("RVK_SUPERSEDED_CENSUS", nullptr, 0) != 0;  // (diagnostic: a lookup under the cache mutex per packet)
+                if (supersededCensus) {
+                    // WS29: retained packets (and their scene forms) that still hold a fast-linked pipeline the optimiser has replaced (the draw runs the unoptimised link)
+                    std::uint64_t superseded = 0, scenes = 0, supersededScene = 0;
+                    for (const auto& [key, e] : packets_) {
+                        if (!e.cd.valid) continue;
+                        if (e.cd.packet.pipeline != d3d9::GamePipeline::None && dev_.currentPipeline(e.cd.packet.pipeline) != e.cd.packet.pipeline) ++superseded;
+                        for (const d3d9::GamePipeline sp : {e.cd.scenePipeline, e.cd.scenePipeline2, e.cd.scenePipelinePull}) {
+                            if (sp == d3d9::GamePipeline::None) continue;
+                            ++scenes;
+                            if (dev_.currentPipeline(sp) != sp) ++supersededScene;
+                        }
+                    }
+                    spdlog::info("native: retained packets holding a superseded pipeline (5 s): {} of {} packets, scene forms {} of {} (the optimised build exists, the retained draw runs the fast link)", superseded, packets_.size(), supersededScene, scenes);
+                }
+                const std::uint64_t held = st.pendingHeld - pktHeldPrev_;
+                pktHeldPrev_ = st.pendingHeld;
+                spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}; pending scene forms held (replayed without a remake) {}",
+                             why[0], why[1], why[2], why[3], why[4], why[5], why[6], why[7], why[8], why[9], why[10], why[11], held);
                 spdlog::info("native: packet cache not capturable by prepareDraw (5 s): replaced {}, tint {}, capture variant {}, variant not ready {}, gbuf write {}, custom {}, not indexed {}, replacement {}, uber {}, module {}, request {}; replayAllowed / textures (total): {}",
                              nc[0], nc[1], nc[2], nc[3], nc[4], nc[5], nc[6], nc[7], nc[8], nc[9], nc[10], st.notCaptured);
             }

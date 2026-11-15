@@ -22,6 +22,7 @@
 #include <mutex>
 #include <thread>
 
+#include <MinHook.h>
 #include <wrl/client.h>
 
 #include <directx-dxc/dxcapi.h>
@@ -43,6 +44,7 @@ using Microsoft::WRL::ComPtr;
 struct Library {
     HMODULE module = nullptr;
     DxcCreateInstanceProc create = nullptr;
+    DxcCreateInstanceProc priv = nullptr;  // WS29: DxcCreateInstance2 with the private heap's IMalloc (create after the probe)
     std::string version;
     std::string failure;
     bool ok = false;
@@ -52,6 +54,103 @@ std::mutex g_mutex;  // guards the settings below
 SourceReader g_reader;
 fs::path g_cacheDir;
 fs::path g_libraryDir;
+
+// WS29 (frame-ownership.md 16.18): dxcompiler allocates through the IMalloc it was created with. With the process heap, 12 variant workers compiling at once held the
+// heap's lock so often that the engine thread blocked in RtlAllocateHeap / RtlFreeHeap (31 % of the spike samples of an updated-cache session): DXC gets a heap of its own.
+// RVK_DXC_HEAP=0 = the process heap as before.
+class PrivateHeapMalloc final : public IMalloc {
+public:
+    PrivateHeapMalloc() : heap_(HeapCreate(0, 1u << 20, 0)) {}
+    bool ok() const { return heap_ != nullptr; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (riid == IID_IUnknown || riid == IID_IMalloc) {
+            *out = static_cast<IMalloc*>(this);
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }  // (immortal: lives for the process)
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    // Every block carries a 16 byte header with a magic: dxcompiler frees blocks it got from the CRT / CoTaskMemAlloc (before an IMalloc was set for the thread, in its static
+    // initialisers and at exit) through the same IMalloc, those go back to the process heap
+    // The header is self-checking: bytes 0..7 = kMagic, bytes 8..15 = kMagic ^ the block's own address (a foreign heap's header does not match by chance). The read of a
+    // foreign block's p - 16 can fault (a page-aligned VirtualAlloc / segment heap block): it is made under SEH unless p - 16 is on p's page.
+    static constexpr std::uint64_t kMagic = 0x52564b5844434d41ull;
+    static bool readHeader(const void* header, std::uint64_t out[2]) noexcept {
+        __try {
+            std::memcpy(out, header, 16);
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+    static bool ours(const void* p) {
+        const auto* h = static_cast<const std::uint8_t*>(p) - 16;
+        std::uint64_t w[2] = {};
+        if ((reinterpret_cast<std::uintptr_t>(p) & 0xfffu) >= 16) std::memcpy(w, h, 16);
+        else if (!readHeader(h, w)) return false;
+        return w[0] == kMagic && w[1] == (kMagic ^ reinterpret_cast<std::uintptr_t>(h));
+    }
+    void* STDMETHODCALLTYPE Alloc(SIZE_T size) override {
+        auto* b = static_cast<std::uint8_t*>(HeapAlloc(heap_, 0, size + 16));
+        if (!b) return nullptr;
+        const std::uint64_t w[2] = {kMagic, kMagic ^ reinterpret_cast<std::uintptr_t>(b)};
+        std::memcpy(b, w, 16);
+        return b + 16;
+    }
+    void* STDMETHODCALLTYPE Realloc(void* p, SIZE_T size) override {
+        if (!p) return Alloc(size);
+        if (!ours(p)) return HeapReAlloc(GetProcessHeap(), 0, p, size ? size : 1);
+        void* n = Alloc(size);
+        if (!n) return nullptr;
+        std::memcpy(n, p, std::min<SIZE_T>(size, HeapSize(heap_, 0, static_cast<std::uint8_t*>(p) - 16) - 16));
+        Free(p);
+        return n;
+    }
+    void STDMETHODCALLTYPE Free(void* p) override {
+        if (!p) return;
+        if (ours(p)) HeapFree(heap_, 0, static_cast<std::uint8_t*>(p) - 16);
+        else HeapFree(GetProcessHeap(), 0, p);
+    }
+    SIZE_T STDMETHODCALLTYPE GetSize(void* p) override {
+        if (!p) return 0;
+        return ours(p) ? HeapSize(heap_, 0, static_cast<std::uint8_t*>(p) - 16) - 16 : HeapSize(GetProcessHeap(), 0, p);
+    }
+    int STDMETHODCALLTYPE DidAlloc(void*) override { return -1; }
+    void STDMETHODCALLTYPE HeapMinimize() override {}
+
+private:
+    HANDLE heap_;
+};
+
+// (never destroyed: DXC objects that live in statics are released after this translation unit's destructors ran)
+PrivateHeapMalloc& dxcMalloc() {
+    static PrivateHeapMalloc* const m = new PrivateHeapMalloc();
+    return *m;
+}
+DxcCreateInstance2Proc g_create2 = nullptr;
+
+HRESULT WINAPI createWithPrivateHeap(REFCLSID clsid, REFIID iid, LPVOID* out) { return g_create2(&dxcMalloc(), clsid, iid, out); }
+
+// dxcompiler's statics made during a compile on the private heap are destroyed by its DLL_PROCESS_DETACH through the CRT's free: an access violation inside ExitProcess (every
+// exit that runs the detach: the game's ExitProcess path, tools returning from main). A process-exit detach (lpReserved != NULL) of dxcompiler is skipped: its entry point is
+// hooked once the library is loaded (thread attach / detach and a FreeLibrary detach run as before). The OS reclaims the memory.
+using DllEntryFn = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
+DllEntryFn g_dxcEntry = nullptr;
+BOOL WINAPI dxcEntryDetour(HINSTANCE h, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_DETACH && reserved != nullptr) return TRUE;
+    return g_dxcEntry(h, reason, reserved);
+}
+void skipDxcExitDetach(HMODULE m) {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const std::uint8_t*>(m) + dos->e_lfanew);
+    if (nt->OptionalHeader.AddressOfEntryPoint == 0) return;
+    void* entry = reinterpret_cast<std::uint8_t*>(m) + nt->OptionalHeader.AddressOfEntryPoint;
+    const MH_STATUS init = MH_Initialize();  // (already initialised by the game's hook set: MH_ERROR_ALREADY_INITIALIZED)
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) return;
+    if (MH_CreateHook(entry, reinterpret_cast<void*>(&dxcEntryDetour), reinterpret_cast<void**>(&g_dxcEntry)) == MH_OK) MH_EnableHook(entry);
+}
 
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};
@@ -239,6 +338,18 @@ Library loadLibrary() {
         lib.failure = "dxcompiler.dll has no DxcCreateInstance";
         return lib;
     }
+    {
+        char v[8];
+        const DWORD len = GetEnvironmentVariableA("RVK_DXC_HEAP", v, sizeof v);
+        const bool off = len > 0 && len < sizeof v && v[0] == '0';
+        g_create2 = reinterpret_cast<DxcCreateInstance2Proc>(GetProcAddress(lib.module, "DxcCreateInstance2"));
+        // (taken into use after the probe in library(): dxcompiler's own statics (LLVM's managed statics, tables) are made by the first compile, with the plain allocator, because
+        // they are destroyed at DLL detach by whatever allocator the exiting thread has: a block of the private heap freed there crashed rvk_tests at exit)
+        if (!off && g_create2 != nullptr && dxcMalloc().ok()) {
+            lib.priv = &createWithPrivateHeap;
+            skipDxcExitDetach(lib.module);
+        }
+    }
     ComPtr<IDxcCompiler3> compiler;
     if (SUCCEEDED(lib.create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
         ComPtr<IDxcVersionInfo> info;
@@ -369,6 +480,12 @@ void setSourceReader(SourceReader reader) {
     const std::lock_guard lock(g_mutex);
     g_reader = std::move(reader);
 }
+
+void* privateHeapAlloc(std::size_t size) { return dxcMalloc().Alloc(size); }
+void* privateHeapRealloc(void* p, std::size_t size) { return dxcMalloc().Realloc(p, size); }
+void privateHeapFree(void* p) { dxcMalloc().Free(p); }
+std::size_t privateHeapSize(void* p) { return dxcMalloc().GetSize(p); }
+bool privateHeapOwns(const void* p) { return p != nullptr && PrivateHeapMalloc::ours(p); }
 
 void setCacheDirectory(fs::path dir) {
     const std::lock_guard lock(g_mutex);
@@ -534,7 +651,9 @@ Result compileNow(const Request& request) {
 
     ComPtr<IDxcUtils> utils;
     ComPtr<IDxcCompiler3> compiler;
-    if (FAILED(lib.create(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) || FAILED(lib.create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
+    // WS29: the compile itself (the allocation storm) runs on the private heap, only SPIR-V requests (the variants / materials); the rest of the library stays on the plain allocator
+    const DxcCreateInstanceProc make = (lib.priv != nullptr && std::find(args.begin(), args.end(), "-spirv") != args.end()) ? lib.priv : lib.create;
+    if (FAILED(make(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) || FAILED(make(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
         result.log = "DxcCreateInstance failed";
         return result;
     }
