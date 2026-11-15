@@ -1943,7 +1943,19 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     // S-1a: the plain ubershader module the draw was offered (its build / pipeline state moved since: the packet is made again)
     if (!c.v.wanted && !c.v.gbufWanted && uberAskedNow(*ps_) != c.v.uberAsked) return fail(10);  // (a draw that took a variant never asked for the plain module)
     // F2b-1: scene draws switched on / off, or the scene form of the draw was not ready when the packet was made: remade
-    if (c.v.sceneActive != sceneActive() || (c.v.sceneActive && c.v.scenePending)) return fail(10);
+    if (c.v.sceneActive != sceneActive()) return fail(10);
+    if (c.v.sceneActive && c.v.scenePending) {
+        // WS29 (frame-ownership.md 16.18): a decision that waited for a scene MODULE is the same decision while neither shader's variants changed state: the packet (the draw
+        // as the composed path makes it without the scene form) is replayed instead of remade (45,000 of 61,000 draws per 5 s were remade in the updated state, ~25 ms a frame).
+        // The queue's demand count stays what the remade draws would have made it
+        if (!c.v.pendMods || !pendingMemo_ || psDropped_ || vs_->arrivals.load(std::memory_order_acquire) != c.v.pendVsEpoch ||
+            ps_->arrivals.load(std::memory_order_acquire) != c.v.pendPsEpoch) {
+            return fail(10);
+        }
+        if (vs_->variantState[c.v.pendVsSlot].load(std::memory_order_relaxed) == 1) vs_->variantDemand[c.v.pendVsSlot].fetch_add(1, std::memory_order_relaxed);
+        if (ps_->variantState[c.v.pendPsSlot].load(std::memory_order_relaxed) == 1) ps_->variantDemand[c.v.pendPsSlot].fetch_add(1, std::memory_order_relaxed);
+        ++replayStats.pendingHeld;
+    }
     bool gbufTaken = false;
     if (c.v.gbufGate) {
         // the G-buffer's material pass (its variant reads the ambient too): taken when eligible, lit and in the G-buffer's rendering scope

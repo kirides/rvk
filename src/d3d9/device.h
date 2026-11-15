@@ -340,6 +340,7 @@ public:
     std::array<std::atomic<std::uint8_t>, kVariantSlots> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
     std::array<std::atomic<std::uint32_t>, kVariantSlots> variantDemand{};  // WS12: draws that asked for variants[i] while it was queued (the workers build the most asked-for first)
     std::atomic<std::uint32_t> variantUrgent{0};  // WS12: bit i = a draw asked for variants[i] while it was queued: moved ahead of the background (known-key) requests, once
+    std::atomic<std::uint32_t> arrivals{0};  // WS29: bumped when any variantState[i] changes to ready / failed / reset: a pending draw decision (scenePending) holds while it is unchanged
     std::atomic<std::uint32_t> uberSlots{0};  // S-1a: bit i = variants[i] was built from the HLSL ubershader (not the translated bytecode)
 };
 
@@ -1346,6 +1347,9 @@ public:
             std::uint32_t packTexSlot = 0;      // its bindless slot when the word was made
             bool sceneActive = false;   // F2b-1: scene draws were on for this draw (a change remakes the packet)
             bool scenePending = false;  // ... and its scene variants / pipeline were not ready: retried until they are
+            bool pendMods = false;      // WS29: ... because a v1 scene MODULE was still being built (not a pipeline): the decision holds while the shaders' arrivals are unchanged (replayBuild)
+            std::uint32_t pendVsEpoch = 0, pendPsEpoch = 0;  // (vs_ / ps_ ->arrivals before the decision)
+            std::uint8_t pendVsSlot = 0, pendPsSlot = 0;     // (the slots it waited for: their demand is kept up while the draws are replayed)
             rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
             rhi::ShaderModule uberAsked = rhi::ShaderModule::None;  // S-1a: the plain HLSL ubershader module the draw was offered (debug.ubershader; None = not built / not covered)
             std::uint8_t uberPs = 0;  // S-1a: which pixel shader the scene form took: see UberWhy
@@ -1608,6 +1612,11 @@ public:
     CompileProgress compileProgress();
     int lastVariantSite() const { return lastVariantSite_; }
     bool lastVariantPending() const { return lastVariantPending_; }
+    bool pendingMemo_ = [] {  // WS29: RVK_PENDING_MEMO=1 = a pending scene decision is held while no variant of the shaders arrived (default off: measured no gain, frame-ownership.md 16.18)
+        char v[8];
+        const DWORD len = GetEnvironmentVariableA("RVK_PENDING_MEMO", v, sizeof v);
+        return len > 0 && len < sizeof v && v[0] == '1';
+    }();
     int lastVariantSite_ = 0;
     bool lastVariantPending_ = false;
     // F15-1: request every scene form + pipeline of a draw at its first sight (default; RVK_F15_BASELINE=1 = the old one-after-the-other chain, A/B)
@@ -1698,6 +1707,7 @@ public:
     void setRetainVariants(bool on) { retainVariants_ = on; ++variantEpoch_; }
     struct ReplayStats {
         std::uint64_t replayed = 0, refused = 0, captured = 0, notCaptured = 0;
+        std::uint64_t pendingHeld = 0;  // WS29: replays of a packet whose scene form was pending, held because no variant of its shaders changed state
         // why a replay was refused: shaders / modules, phase, consumers, env, jitter, stream binding, index binding, texture, observer capture, no scope, variant decision, sky cube
         std::uint64_t why[12] = {};
         std::uint64_t ncWhy[12] = {};  // capture refused by prepareDraw: replaced, tint, captureDraw, variant not ready, gbuf write, custom, not indexed, replacement, uber, module, request

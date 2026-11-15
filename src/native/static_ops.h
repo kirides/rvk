@@ -1393,6 +1393,7 @@ private:
     } pktWindow_, pktTotal_;
     std::uint32_t pktMismatchLogged_ = 0;
     std::uint64_t pktWhyPrev_[12] = {}, pktNcPrev_[12] = {};  // the device's refusal counters at the last report (the window = the difference)
+    std::uint64_t pktHeldPrev_ = 0;  // WS29: replayStats.pendingHeld at the last report
     std::uint64_t pktGroup_[3][2] = {};                       // per cached group (main-view static, trees, shadow views) in the window: replayed / drawn fresh
     std::unique_ptr<d3d9::Device::CachedDraw> pktFresh_;
     static bool packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b);

@@ -3030,8 +3030,10 @@ void StaticOps::report() {
                     pktWhyPrev_[i] = st.why[i];
                     pktNcPrev_[i] = st.ncWhy[i];
                 }
-                spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}",
-                             why[0], why[1], why[2], why[3], why[4], why[5], why[6], why[7], why[8], why[9], why[10], why[11]);
+                const std::uint64_t held = st.pendingHeld - pktHeldPrev_;
+                pktHeldPrev_ = st.pendingHeld;
+                spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}; pending scene forms held (replayed without a remake) {}",
+                             why[0], why[1], why[2], why[3], why[4], why[5], why[6], why[7], why[8], why[9], why[10], why[11], held);
                 spdlog::info("native: packet cache not capturable by prepareDraw (5 s): replaced {}, tint {}, capture variant {}, variant not ready {}, gbuf write {}, custom {}, not indexed {}, replacement {}, uber {}, module {}, request {}; replayAllowed / textures (total): {}",
                              nc[0], nc[1], nc[2], nc[3], nc[4], nc[5], nc[6], nc[7], nc[8], nc[9], nc[10], st.notCaptured);
             }

@@ -1677,6 +1677,7 @@ void Device::sourceAttached(Shader& s) {
         if (slot == VariantSlot::Capture || slot == VariantSlot::BoneVs || slot == VariantSlot::WindVs) continue;  // (never the ubershader: provider slots / the capture variant)
         s.variants[i].store(rhi::ShaderModule::None, std::memory_order_release);
         s.variantState[i].store(0, std::memory_order_release);
+        s.arrivals.fetch_add(1, std::memory_order_release);
         reset |= 1u << i;
     }
     if (reset != 0) {
@@ -2217,7 +2218,10 @@ void Device::setUbershader(bool on) {
 void Device::resetUberVariants() {
     {
         std::unique_lock lock(variantMutex_);
-        for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
+        for (VariantJob& j : variantJobs_) {
+            j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
+            j.shader->arrivals.fetch_add(1, std::memory_order_release);
+        }
         variantJobs_.clear();
         variantUrgentJobs_ = 0;
         variantIdleCv_.wait(lock, [this] { return variantBusy_ == 0; });
@@ -2234,6 +2238,7 @@ void Device::resetUberVariants() {
         for (std::size_t i = 0; i < kVariantSlots; ++i) {
             sh->variants[i].store(rhi::ShaderModule::None, std::memory_order_release);
             sh->variantState[i].store(0, std::memory_order_release);
+            sh->arrivals.fetch_add(1, std::memory_order_release);
         }
         sh->uberSlots.store(0, std::memory_order_release);
     }
@@ -2459,11 +2464,13 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
         const VariantSlot baseSlot = scene ? sceneBaseSlot(slot) : slot;
         if (baseSlot != VariantSlot::Count && !variantProviders_[static_cast<std::size_t>(baseSlot)].options) {
             s->variantState[i].store(3);
+            s->arrivals.fetch_add(1, std::memory_order_release);
             return rhi::ShaderModule::None;
         }
         std::shared_ptr<Shader> owner = shaderOwner(s.get());
         if (!owner) {
             s->variantState[i].store(3);
+            s->arrivals.fetch_add(1, std::memory_order_release);
             return rhi::ShaderModule::None;
         }
         if (t_variantBackground) {
@@ -2640,6 +2647,7 @@ void Device::variantWorker() {
         const bool hadSource = job.shader->source.load(std::memory_order_acquire) != nullptr;
         if (!provider.options || !provider.options(*job.shader, o)) {
             job.shader->variantState[i].store(3, std::memory_order_release);
+            job.shader->arrivals.fetch_add(1, std::memory_order_release);
             done();
             continue;
         }
@@ -2669,6 +2677,7 @@ void Device::variantWorker() {
             ++variantsFailed_;
             if (!destroying_.load(std::memory_order_acquire)) spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);
             job.shader->variantState[i].store(3, std::memory_order_release);
+            job.shader->arrivals.fetch_add(1, std::memory_order_release);
             done();
             continue;
         }
@@ -2680,6 +2689,7 @@ void Device::variantWorker() {
         }
         job.shader->variants[i].store(m, std::memory_order_release);
         job.shader->variantState[i].store(2, std::memory_order_release);
+        job.shader->arrivals.fetch_add(1, std::memory_order_release);
         const auto t1 = std::chrono::steady_clock::now();
         done();
         if (!destroying_.load(std::memory_order_acquire)) prewarmVariantKeys(job.shader->hash, job.slot);  // F15-1 (not at teardown: the pipeline builders stop next)
@@ -2731,7 +2741,10 @@ void Device::stopVariantWorker() {
             // (a compile in flight cannot be cancelled (DXC): the join waits for it; a cold variant cache = seconds, a warm one = nothing)
             spdlog::info("d3d9: shader variants: stopping: {} queued dropped, {} in flight (finished first)", variantJobs_.size(), variantBusy_);
         }
-        for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
+        for (VariantJob& j : variantJobs_) {
+            j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
+            j.shader->arrivals.fetch_add(1, std::memory_order_release);
+        }
         variantJobs_.clear();
         variantUrgentJobs_ = 0;
     }

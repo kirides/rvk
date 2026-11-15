@@ -53,6 +53,71 @@ SourceReader g_reader;
 fs::path g_cacheDir;
 fs::path g_libraryDir;
 
+// WS29 (frame-ownership.md 16.18): dxcompiler allocates through the IMalloc it was created with. With the process heap, 12 variant workers compiling at once held the
+// heap's lock so often that the engine thread blocked in RtlAllocateHeap / RtlFreeHeap (31 % of the spike samples of an updated-cache session): DXC gets a heap of its own.
+// RVK_DXC_HEAP=0 = the process heap as before.
+class PrivateHeapMalloc final : public IMalloc {
+public:
+    PrivateHeapMalloc() : heap_(HeapCreate(0, 1u << 20, 0)) {}
+    bool ok() const { return heap_ != nullptr; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (riid == IID_IUnknown || riid == IID_IMalloc) {
+            *out = static_cast<IMalloc*>(this);
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }  // (immortal: lives for the process)
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    // Every block carries a 16 byte header with a magic: dxcompiler frees blocks it got from the CRT / CoTaskMemAlloc (before an IMalloc was set for the thread, in its static
+    // initialisers and at exit) through the same IMalloc, those go back to the process heap
+    static constexpr std::uint64_t kMagic = 0x52564b5844434d41ull;
+    static bool ours(const void* p) {
+        std::uint64_t m = 0;
+        std::memcpy(&m, static_cast<const std::uint8_t*>(p) - 16, sizeof m);
+        return m == kMagic;
+    }
+    void* STDMETHODCALLTYPE Alloc(SIZE_T size) override {
+        auto* b = static_cast<std::uint8_t*>(HeapAlloc(heap_, 0, size + 16));
+        if (!b) return nullptr;
+        std::memcpy(b, &kMagic, sizeof kMagic);
+        return b + 16;
+    }
+    void* STDMETHODCALLTYPE Realloc(void* p, SIZE_T size) override {
+        if (!p) return Alloc(size);
+        if (!ours(p)) return HeapReAlloc(GetProcessHeap(), 0, p, size ? size : 1);
+        void* n = Alloc(size);
+        if (!n) return nullptr;
+        std::memcpy(n, p, std::min<SIZE_T>(size, HeapSize(heap_, 0, static_cast<std::uint8_t*>(p) - 16) - 16));
+        Free(p);
+        return n;
+    }
+    void STDMETHODCALLTYPE Free(void* p) override {
+        if (!p) return;
+        if (ours(p)) HeapFree(heap_, 0, static_cast<std::uint8_t*>(p) - 16);
+        else HeapFree(GetProcessHeap(), 0, p);
+    }
+    SIZE_T STDMETHODCALLTYPE GetSize(void* p) override {
+        if (!p) return 0;
+        return ours(p) ? HeapSize(heap_, 0, static_cast<std::uint8_t*>(p) - 16) - 16 : HeapSize(GetProcessHeap(), 0, p);
+    }
+    int STDMETHODCALLTYPE DidAlloc(void*) override { return -1; }
+    void STDMETHODCALLTYPE HeapMinimize() override {}
+
+private:
+    HANDLE heap_;
+};
+
+// (never destroyed: DXC objects that live in statics are released after this translation unit's destructors ran)
+PrivateHeapMalloc& dxcMalloc() {
+    static PrivateHeapMalloc* const m = new PrivateHeapMalloc();
+    return *m;
+}
+DxcCreateInstance2Proc g_create2 = nullptr;
+
+HRESULT WINAPI createWithPrivateHeap(REFCLSID clsid, REFIID iid, LPVOID* out) { return g_create2(&dxcMalloc(), clsid, iid, out); }
+
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -238,6 +303,13 @@ Library loadLibrary() {
     if (!lib.create) {
         lib.failure = "dxcompiler.dll has no DxcCreateInstance";
         return lib;
+    }
+    {
+        char v[8];
+        const DWORD len = GetEnvironmentVariableA("RVK_DXC_HEAP", v, sizeof v);
+        const bool off = len > 0 && len < sizeof v && v[0] == '0';
+        g_create2 = reinterpret_cast<DxcCreateInstance2Proc>(GetProcAddress(lib.module, "DxcCreateInstance2"));
+        if (!off && g_create2 != nullptr && dxcMalloc().ok()) lib.create = &createWithPrivateHeap;
     }
     ComPtr<IDxcCompiler3> compiler;
     if (SUCCEEDED(lib.create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {

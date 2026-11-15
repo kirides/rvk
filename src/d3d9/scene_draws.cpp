@@ -95,6 +95,10 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     if (capture_ != nullptr) {
         lastVariant_.sceneActive = true;
         lastVariant_.scenePending = false;
+        // WS29: the shaders' arrival counters BEFORE the variants are asked (an arrival between the asks and the decision moves them: the memo then does not hold)
+        lastVariant_.pendMods = false;
+        lastVariant_.pendVsEpoch = vs_ ? vs_->arrivals.load(std::memory_order_acquire) : 0;
+        lastVariant_.pendPsEpoch = ps_ ? ps_->arrivals.load(std::memory_order_acquire) : 0;
     }
     // F7-2 (native.owned_vegetation_ops): the grass draws of the main view get the v2 form only, like the trees
     const bool veg = sceneVeg_ && sceneV2_ && kind == draws::Kind::Vegetation;
@@ -170,6 +174,11 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         } else {
             ++sceneStats_.fbVariantPending;
             pending();
+            if (capture_ != nullptr && pendingMemo_ && !bone && !lodVs && !psDropped_) {
+                lastVariant_.pendMods = true;  // WS29: a module is still being built: replayBuild holds this decision until one of the shaders' variants changes state
+                lastVariant_.pendVsSlot = static_cast<std::uint8_t>(vsSlot1);
+                lastVariant_.pendPsSlot = static_cast<std::uint8_t>(sceneFs);
+            }
         }
         return;
     }

@@ -61,8 +61,15 @@ constexpr std::uint32_t kStaticOpNone = 0xffffffu;
 const void* objectVtable(const std::uint8_t* addr, std::size_t back) {
     const std::uint8_t* base = addr - back;
     if ((reinterpret_cast<std::uintptr_t>(addr) & 0xfffu) < back) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery(base, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return nullptr;
+        // WS29: the last readable region is remembered (a record's logged reads sit in a few engine objects; the query was a system call per read, 10 % of a pending frame)
+        static thread_local std::uintptr_t okBegin = 0, okEnd = 0;
+        const auto b = reinterpret_cast<std::uintptr_t>(base);
+        if (b < okBegin || b >= okEnd) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery(base, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return nullptr;
+            okBegin = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            okEnd = okBegin + mbi.RegionSize;
+        }
     }
     return ptr(base, 0);
 }
