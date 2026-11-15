@@ -56,6 +56,8 @@ struct GameDyn : rhi::DynamicStateValues {
 };
 struct GameRecordState {
     VkPipeline bound = VK_NULL_HANDLE;
+    VkPipeline lastRaw = VK_NULL_HANDLE;  // the last retained handle resolved through PipelineCache::current and its result (one lookup per run of equal handles)
+    VkPipeline lastCurrent = VK_NULL_HANDLE;
     GameVI vi;
     GameIB ib;
     GameDyn dyn;
@@ -66,6 +68,7 @@ struct GameRecordState {
         lastVi = nullptr;
         lastDyn = nullptr;
         bound = VK_NULL_HANDLE;
+        lastRaw = lastCurrent = VK_NULL_HANDLE;
         vi.buffersValid = vi.layoutValid = false;
         vi.bufferCount = 0;
         ib.valid = false;
@@ -167,7 +170,7 @@ private:
     void startRecordThreads();
     void stopRecordThreads();
 
-    static void applyPacket(GameRecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const rhi::DrawPacket& p);
+    static void applyPacket(const PipelineCache& pipelines, GameRecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const rhi::DrawPacket& p);
     static void applyVertexInput(GameRecordState& rs, VkCommandBuffer cmd, const rhi::VertexInputValues& vi);
     static void applyDynamicState(GameRecordState& rs, VkCommandBuffer cmd, const rhi::DynamicStateValues& v);
     static void bindIndexBuffer(GameRecordState& rs, VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset, bool index32);
