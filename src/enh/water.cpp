@@ -75,7 +75,8 @@ double steadySeconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int height, const std::vector<std::uint16_t>& texels) {
+// an empty RGBA16F image (WS27: filled by Texture::uploadRows in slices, no CPU copy)
+std::unique_ptr<d3d9::Texture> createHalf4(d3d9::Device& device, int width, int height) {
     d3d9::TextureDesc desc;
     desc.width = static_cast<std::uint32_t>(width);
     desc.height = static_cast<std::uint32_t>(height);
@@ -83,16 +84,11 @@ std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int 
     desc.format = rhi::d3dfmt::A16B16G16R16F;
     desc.pool = d3d9::POOL_MANAGED;
     auto tex = device.createTexture(desc);
-    d3d9::Texture::Locked l;
-    if (!tex || !tex->valid() || !tex->lock(0, 0, nullptr, 0, l)) return nullptr;
-    const std::size_t row = static_cast<std::size_t>(width) * 8;
-    for (int z = 0; z < height; ++z) {
-        std::memcpy(static_cast<std::uint8_t*>(l.bits) + static_cast<std::size_t>(z) * l.rowPitch,
-                    texels.data() + static_cast<std::size_t>(z) * width * 4, row);
-    }
-    tex->unlock(0, 0);
+    if (!tex || !tex->valid()) return nullptr;
     return tex;
 }
+
+constexpr std::uint32_t kFloorUploadRows = 128;  // rows per texture per frame (2 MiB each at 2048 wide)
 
 std::uint64_t nameHash(const char* s) {
     std::uint64_t h = 1469598103934665603ull;
@@ -130,6 +126,8 @@ Water::~Water() {
     if (field_) dev_.release(std::move(field_));
     if (floorA_) dev_.release(std::move(floorA_));
     if (floorB_) dev_.release(std::move(floorB_));
+    if (upA_) dev_.release(std::move(upA_));
+    if (upB_) dev_.release(std::move(upB_));
     ocean_.reset();
     destroyShaders();
 }
@@ -786,7 +784,7 @@ double Water::seaClock() {
 
 void Water::recordOcean(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !fftWanted() || !ocean_ || ocean_->failed()) return;
-    serviceFloor(dev_);
+    serviceFloor(dev_, ctx.cmd);
     const std::uint64_t frame = dev_.stats().frames;
     // only while the sea is seen (it was drawn lately, or it is known and the tiles are not filled yet)
     if (!seaKnown_ || (ocean_->ready() && (lastGridFrame_ == 0 || frame > lastGridFrame_ + 30))) return;
@@ -926,23 +924,52 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     if (added > 0) floorDirty_ = true;
 }
 
-void Water::serviceFloor(d3d9::Device& device) {
+void Water::serviceFloor(d3d9::Device& device, rhi::CommandList& cmd) {
+    // WS27: a finished bake is uploaded in row slices over several frames into a second pair of textures, swapped in when complete
+    if (floorUp_) {
+        const seafloor::Field& f = *floorUp_;
+        const std::uint32_t h = static_cast<std::uint32_t>(f.grid.height);
+        const std::size_t pitch = static_cast<std::size_t>(f.grid.width) * 8;
+        const std::uint32_t rows = std::min(kFloorUploadRows, h - upRow_);
+        const std::size_t off = static_cast<std::size_t>(upRow_) * f.grid.width * 4;
+        if (upA_->uploadRows(cmd, upRow_, rows, f.a.data() + off, pitch) && upB_->uploadRows(cmd, upRow_, rows, f.b.data() + off, pitch)) {
+            upRow_ += rows;
+            ++upFrames_;
+        } else {
+            // no ring space (or unsupported): drop this upload, the next bake retries
+            spdlog::warn("enh: ocean: sea floor upload failed at row {}: dropped", upRow_);
+            upA_.reset();
+            upB_.reset();
+            floorUp_.reset();
+        }
+        if (floorUp_ && upRow_ >= h) {
+            if (floorA_) device.release(std::move(floorA_));
+            if (floorB_) device.release(std::move(floorB_));
+            floorA_ = std::move(upA_);
+            floorB_ = std::move(upB_);
+            floorMapping_ = f.grid.mapping();
+            spdlog::info("enh: ocean: sea floor field uploaded in {} frames, {:.0f} ms after the bake", upFrames_, (steadySeconds() - upStart_) * 1000.0);
+            floorUp_.reset();
+        }
+        if (floorUp_) return;  // the next finished bake waits for this upload
+    }
     if (floorBake_.valid() && floorBake_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         seafloor::Field f = floorBake_.get();
         if (f.valid()) {
-            auto a = uploadHalf4(device, f.grid.width, f.grid.height, f.a);
-            auto b = uploadHalf4(device, f.grid.width, f.grid.height, f.b);
+            auto a = createHalf4(device, f.grid.width, f.grid.height);
+            auto b = createHalf4(device, f.grid.width, f.grid.height);
             if (a && b) {
-                if (floorA_) device.release(std::move(floorA_));
-                if (floorB_) device.release(std::move(floorB_));
-                floorA_ = std::move(a);
-                floorB_ = std::move(b);
-                floorMapping_ = f.grid.mapping();
+                upA_ = std::move(a);
+                upB_ = std::move(b);
+                upRow_ = 0;
+                upFrames_ = 0;
+                upStart_ = steadySeconds();
             }
             spdlog::info("enh: ocean: sea floor field {}x{} of {:.0f} units: {} texels seen ({} land, {} water), max travel time {:.1f} s, "
                          "{} meshes observed, {:.0f} ms (bake: distance {:.0f}, travel time {:.0f}, exposure {:.0f}, pack {:.0f} ms)",
                          f.grid.width, f.grid.height, f.grid.cell, f.knownTexels, f.landTexels, f.waterTexels, f.maxTravel, floorMeshCount_,
                          (steadySeconds() - lastFloorBake_) * 1000.0, f.msDistance, f.msTravel, f.msExposure, f.msPack);
+            if (upA_ && upB_) floorUp_ = std::move(f);
         }
     }
     const double now = steadySeconds();
