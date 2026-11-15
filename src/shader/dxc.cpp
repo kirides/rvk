@@ -22,6 +22,7 @@
 #include <mutex>
 #include <thread>
 
+#include <MinHook.h>
 #include <wrl/client.h>
 
 #include <directx-dxc/dxcapi.h>
@@ -129,11 +130,26 @@ PrivateHeapMalloc& dxcMalloc() {
     return *m;
 }
 DxcCreateInstance2Proc g_create2 = nullptr;
-std::atomic<bool> g_privateUsed{false};
 
-HRESULT WINAPI createWithPrivateHeap(REFCLSID clsid, REFIID iid, LPVOID* out) {
-    g_privateUsed.store(true, std::memory_order_release);
-    return g_create2(&dxcMalloc(), clsid, iid, out);
+HRESULT WINAPI createWithPrivateHeap(REFCLSID clsid, REFIID iid, LPVOID* out) { return g_create2(&dxcMalloc(), clsid, iid, out); }
+
+// dxcompiler's statics made during a compile on the private heap are destroyed by its DLL_PROCESS_DETACH through the CRT's free: an access violation inside ExitProcess (every
+// exit that runs the detach: the game's ExitProcess path, tools returning from main). A process-exit detach (lpReserved != NULL) of dxcompiler is skipped: its entry point is
+// hooked once the library is loaded (thread attach / detach and a FreeLibrary detach run as before). The OS reclaims the memory.
+using DllEntryFn = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
+DllEntryFn g_dxcEntry = nullptr;
+BOOL WINAPI dxcEntryDetour(HINSTANCE h, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_DETACH && reserved != nullptr) return TRUE;
+    return g_dxcEntry(h, reason, reserved);
+}
+void skipDxcExitDetach(HMODULE m) {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const std::uint8_t*>(m) + dos->e_lfanew);
+    if (nt->OptionalHeader.AddressOfEntryPoint == 0) return;
+    void* entry = reinterpret_cast<std::uint8_t*>(m) + nt->OptionalHeader.AddressOfEntryPoint;
+    const MH_STATUS init = MH_Initialize();  // (already initialised by the game's hook set: MH_ERROR_ALREADY_INITIALIZED)
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) return;
+    if (MH_CreateHook(entry, reinterpret_cast<void*>(&dxcEntryDetour), reinterpret_cast<void**>(&g_dxcEntry)) == MH_OK) MH_EnableHook(entry);
 }
 
 std::wstring widen(std::string_view s) {
@@ -329,7 +345,10 @@ Library loadLibrary() {
         g_create2 = reinterpret_cast<DxcCreateInstance2Proc>(GetProcAddress(lib.module, "DxcCreateInstance2"));
         // (taken into use after the probe in library(): dxcompiler's own statics (LLVM's managed statics, tables) are made by the first compile, with the plain allocator, because
         // they are destroyed at DLL detach by whatever allocator the exiting thread has: a block of the private heap freed there crashed rvk_tests at exit)
-        if (!off && g_create2 != nullptr && dxcMalloc().ok()) lib.priv = &createWithPrivateHeap;
+        if (!off && g_create2 != nullptr && dxcMalloc().ok()) {
+            lib.priv = &createWithPrivateHeap;
+            skipDxcExitDetach(lib.module);
+        }
     }
     ComPtr<IDxcCompiler3> compiler;
     if (SUCCEEDED(lib.create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
@@ -467,9 +486,6 @@ void* privateHeapRealloc(void* p, std::size_t size) { return dxcMalloc().Realloc
 void privateHeapFree(void* p) { dxcMalloc().Free(p); }
 std::size_t privateHeapSize(void* p) { return dxcMalloc().GetSize(p); }
 bool privateHeapOwns(const void* p) { return p != nullptr && PrivateHeapMalloc::ours(p); }
-void terminateNow(int exitCode) {
-    if (g_privateUsed.load(std::memory_order_acquire)) TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exitCode));
-}
 
 void setCacheDirectory(fs::path dir) {
     const std::lock_guard lock(g_mutex);

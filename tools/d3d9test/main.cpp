@@ -6742,7 +6742,7 @@ void testInFrameRead(Fixture& f) {
     }
 }
 
-static int rvkToolMain(int argc, char** argv) {
+int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool validation = true, syncValidation = false;
     std::vector<std::string> only;  // --only <name part>[,<name part>...]: run the matching cases only (bisecting)
@@ -6834,15 +6834,4 @@ static int rvkToolMain(int argc, char** argv) {
     verrors += teardown->errors.load();
     std::printf("%s: %d failure(s), %u validation error(s)\n", g_failures == 0 && verrors == 0 ? "PASS" : "FAIL", g_failures, verrors);
     return g_failures == 0 && verrors == 0 ? 0 : 1;
-}
-
-// WS29: dxcompiler's DLL detach frees blocks of its private heap through the CRT (an access violation at process exit): the process ends here when the heap was used
-#include <cstdio>
-#include "shader/dxc.h"
-int main(int argc, char** argv) {
-    const int rc = rvkToolMain(argc, argv);
-    std::fflush(stdout);
-    std::fflush(stderr);
-    rvk::shader::dxc::terminateNow(rc);
-    return rc;
 }

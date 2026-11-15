@@ -489,7 +489,7 @@ int cmdHlsl(int argc, char** argv) {
 
 }  // namespace
 
-static int rvkToolMain(int argc, char** argv) {
+int main(int argc, char** argv) {
     if (argc < 3) {
         std::printf("usage: rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint] | show <file> | refdisasm <file>\n");
         return 2;
@@ -585,15 +585,4 @@ static int rvkToolMain(int argc, char** argv) {
     if (cmd == "evalcheck") return cmdEvalCheck(argv[2]);
     std::printf("unknown command %s\n", cmd.c_str());
     return 2;
-}
-
-// WS29: dxcompiler's DLL detach frees blocks of its private heap through the CRT (an access violation at process exit): the process ends here when the heap was used
-#include <cstdio>
-#include "shader/dxc.h"
-int main(int argc, char** argv) {
-    const int rc = rvkToolMain(argc, argv);
-    std::fflush(stdout);
-    std::fflush(stderr);
-    rvk::shader::dxc::terminateNow(rc);
-    return rc;
 }

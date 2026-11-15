@@ -97,9 +97,6 @@ void* privateHeapRealloc(void* p, std::size_t size);
 void privateHeapFree(void* p);
 std::size_t privateHeapSize(void* p);
 bool privateHeapOwns(const void* p);
-// WS29: dxcompiler's statics created during a compile on the private heap are destroyed at its DLL detach through the CRT's free (an access violation at process exit).
-// A tool that used the private heap ends its process with this instead of returning from main (output flushed by the caller); it returns when the private heap was not used.
-void terminateNow(int exitCode);
 
 // Bump when the argument set or the cache layout changes (part of every cache key)
 inline constexpr std::uint32_t kArgsRevision = 4;

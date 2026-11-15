@@ -4,7 +4,6 @@
 #include <iterator>
 
 #include "core/config.h"
-#include "shader/dxc.h"
 #include "shader/sm_tokens.h"
 #include "test.h"
 
@@ -192,8 +191,5 @@ int main() {
         std::fflush(stdout);  // a crash in the next test must not swallow this line
     }
     std::printf("%zu tests, %d failure(s)\n", rvk::test::registry().size(), rvk::test::failures());
-    const int rc = rvk::test::failures() == 0 ? 0 : 1;
-    std::fflush(stdout);
-    rvk::shader::dxc::terminateNow(rc);  // (WS29: dxcompiler's DLL detach frees blocks of its private heap through the CRT: not run)
-    return rc;
+    return rvk::test::failures() == 0 ? 0 : 1;
 }
