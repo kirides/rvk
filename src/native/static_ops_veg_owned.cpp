@@ -21,6 +21,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/defs.h"
+#include "d3d9/scene_hash.h"
 #include "enh/light_table.h"
 #include "engine/memread.h"
 #include "gpuscene/illumination_table.h"
@@ -516,6 +517,7 @@ void StaticOps::vegCompEnd(const Op& op) {
             }
             c.vi.buffers[found] = sb.buffer;
             c.vi.offsets[found] = sb.offset;
+            c.viHash = d3d9::hashVi(c.vi);  // (WS11: the draw's kept hash follows its vertex input)
             c.stream[1] = sb;
         }
         for (std::size_t i = 0; i < 4; ++i) {
@@ -624,7 +626,7 @@ void StaticOps::vegTake(List list, std::vector<Op>&& ops, std::uint64_t nsTake) 
     if (!vro_) return;
     vro_->window.opsTaken += ops.size();
     vro_->window.takeNs += nsTake;
-    vro_->taken[list == List::Solid ? 1 : 0] = std::move(ops);
+    vro_->taken[list == List::Solid ? 1 : 0].swap(ops);
 }
 
 // ---- the pass ----------------------------------------------------------------------------------------------------------------------
@@ -750,10 +752,14 @@ std::uint32_t StaticOps::vegPass(bool solid) {
         sc::GrassThin thin;  // S-5 (native.own_foliage): as the composition of the op would thin it
         std::uint32_t cursorAfter = 0;
     };
-    static thread_local std::vector<OpPlan> plans;
+    // WS15: the plans' vectors keep their capacity across passes (every plan owned 3 vectors that were freed with the pass: ~4 allocations per veg op and frame)
+    static thread_local std::vector<OpPlan> plans, planSpare;
+    for (OpPlan& old : plans) planSpare.push_back(std::move(old));
     plans.clear();
-    std::vector<std::uint32_t> drawnOps;
-    std::unordered_map<std::uint64_t, std::uint32_t> entryMemo;
+    static thread_local std::vector<std::uint32_t> drawnOps;
+    drawnOps.clear();
+    static thread_local PassMemo<std::uint32_t, 512> entryMemo;  // (lighting key -> entry; a full probe window just computes the entry again)
+    entryMemo.clear();
     std::vector<std::uint8_t>& flat = V.flat;
     for (std::size_t oi = 0; oi < ops.size(); ++oi) {
         Op& op = ops[oi];
@@ -867,6 +873,15 @@ std::uint32_t StaticOps::vegPass(bool solid) {
         std::vector<sc::GrassDraw>& draws = scr_.grassDraws;
         const std::uint32_t cursorAfter = sc::planGrass(plan, cursor, !solid, draws);
         OpPlan pl;
+        if (!planSpare.empty()) {
+            pl = std::move(planSpare.back());
+            planSpare.pop_back();
+            pl.batches.clear();
+            pl.entries.clear();
+            pl.tpls.clear();
+            pl.ax = pl.ay = 0;
+            pl.thin = {};
+        }
         pl.opIndex = oi;
         pl.rec = &rec;
         pl.cursorAfter = cursorAfter;
@@ -915,13 +930,12 @@ std::uint32_t StaticOps::vegPass(bool solid) {
                 }
                 // (the illumination object is what the lighting entry derives from)
                 const std::uint64_t lk = mixh(reinterpret_cast<std::uintptr_t>(illumPtr), (static_cast<std::uint64_t>(p.n) << 8) | p.firstLight);
-                const auto m = entryMemo.find(lk);
-                if (m != entryMemo.end()) {
-                    entry = m->second;
+                if (const std::uint32_t* m = entryMemo.get(lk)) {
+                    entry = *m;
                 } else {
                     const std::uint32_t slot = illum.ensureSlot(illumPtr);
                     entry = slot == gpuscene::kNoSlot ? gpuscene::kNoEntry : li.entryFor(slot, p);
-                    entryMemo[lk] = entry;
+                    entryMemo.put(lk, entry);
                 }
                 if (entry == gpuscene::kNoEntry || !li.ready()) {
                     lateWhy = &W.lateSpecial;
@@ -969,6 +983,8 @@ std::uint32_t StaticOps::vegPass(bool solid) {
             std::vector<std::pair<std::uint32_t, std::uint32_t>> bat;  // (plan index, batch index)
         };
         static thread_local std::vector<Run> runs;
+        static thread_local std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> runSpare;  // (WS15: the runs' vectors keep their capacity)
+        for (Run& old : runs) runSpare.push_back(std::move(old.bat));
         runs.clear();
         for (std::uint32_t p = 0; p < plans.size(); ++p) {
             for (std::uint32_t b = 0; b < plans[p].batches.size(); ++b) {
@@ -976,11 +992,17 @@ std::uint32_t StaticOps::vegPass(bool solid) {
                 if (tpl->passRun == 0) {
                     tpl->passRun = static_cast<std::uint32_t>(runs.size()) + 1;
                     runs.push_back({tpl, {}});
+                    if (!runSpare.empty()) {
+                        runs.back().bat = std::move(runSpare.back());
+                        runSpare.pop_back();
+                        runs.back().bat.clear();
+                    }
                 }
                 runs[tpl->passRun - 1].bat.push_back({p, b});
             }
         }
-        std::vector<std::uint32_t> order(runs.size());
+        static thread_local std::vector<std::uint32_t> order;
+        order.resize(runs.size());
         for (std::uint32_t i = 0; i < order.size(); ++i) order[i] = i;
         std::stable_sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) { return runs[a].tpl->devBucket < runs[b].tpl->devBucket; });
         const std::uint32_t nOps = static_cast<std::uint32_t>(plans.size());
@@ -1009,7 +1031,8 @@ std::uint32_t StaticOps::vegPass(bool solid) {
             struct RecKey {
                 std::uint32_t plan, entry, rec;
             };
-            std::vector<RecKey> recKeys;
+            static thread_local std::vector<RecKey> recKeys;  // (WS15: capacity kept across passes)
+            recKeys.clear();
             for (const std::uint32_t ri : order) {
                 Run& run = runs[ri];
                 tro::Tpl& tpl = *run.tpl;

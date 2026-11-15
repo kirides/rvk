@@ -20,6 +20,8 @@ $script:StageOfSetting = [ordered]@{
     'native.owned_instances'       = 'owned_instances'
     'native.owned_ordered'         = 'owned_ordered'
     'native.ordered_bulk'          = 'ordered_bulk'
+    'native.owned_delta'           = 'owned_delta'
+    'native.event_observers'       = 'event_observers'
     'native.owned_vegetation'      = 'owned_vegetation'
     'native.owned_vegetation_ops'  = 'owned_vegetation_ops'
     'native.clusters'              = 'clusters'
@@ -46,7 +48,7 @@ $script:OwnedStageDefaults = [ordered]@{
     'native.owned_windows' = 'true'; 'native.owned_objects' = 'true'; 'native.owned_records' = 'true'; 'native.scene_draws' = 'true'
     'native.owned_static' = 'true'; 'native.owned_persistent' = 'true'; 'native.owned_shadows' = 'true'; 'native.owned_shadow_views' = 'true'
     'native.owned_trees' = 'true'; 'native.owned_billboards' = 'true'; 'native.owned_vegetation' = 'true'; 'native.owned_vegetation_ops' = 'true'
-    'native.owned_actors' = 'true'; 'native.owned_instances' = 'true'; 'native.owned_ordered' = 'true'; 'native.ordered_bulk' = 'true'
+    'native.owned_actors' = 'true'; 'native.owned_instances' = 'true'; 'native.owned_ordered' = 'true'; 'native.ordered_bulk' = 'true'; 'native.event_observers' = 'true'; 'native.owned_delta' = 'true'
     'native.clusters' = 'true'; 'native.cluster_cull' = 'true'; 'native.cluster_cull_shadows' = 'true'
     'native.rt_records' = 'true'; 'native.rt_gpu_build' = 'true'; 'rt.table_entries' = 'true'; 'native.vertex_pull' = 'true'; 'native.own_foliage' = 'true'
     'native.bone_motion' = 'on'; 'native.rigid_motion' = 'true'; 'native.tree_wind' = 'on'; 'native.tree_motion' = 'on'; 'native.depth_z' = 'on'
@@ -66,7 +68,7 @@ function Get-OwnedStageSettings([switch]$Off) {
 # stages whose input can legitimately be absent from a whole run (frame-ownership.md 14.22): bone_motion acts only on skinned solid draws that move (a frozen
 # rvkcompare spot animates nothing), tree_wind only on animated SpeedTrees inside the RT range of a swaying-tree consumer. For these an arm claimed on also passes
 # when EVERY window says `inactive(armed, nothing owned in the window)` (armed, nothing to act on); `setting on, code off`, `gated` and `setting off` still fail.
-$script:IdleCapableStages = @('bone_motion', 'tree_wind', 'tree_motion', 'own_particles', 'owned_decals', 'owned_shadow_views', 'rt_gpu_build')  # (rt_gpu_build: no ray-traced consumer holds the RT scene; own_particles / owned_decals: a place without a live particle emitter / a decal in view; owned_shadow_views: no terrain map re-aim and no shadow-casting point light in the window)
+$script:IdleCapableStages = @('bone_motion', 'tree_wind', 'tree_motion', 'own_particles', 'owned_decals', 'owned_shadow_views', 'rt_gpu_build', 'event_observers')  # (event_observers: no event-driven observer in the window, e.g. the test baseline's water off = no sea-floor learning;rt_gpu_build: no ray-traced consumer holds the RT scene; own_particles / owned_decals: a place without a live particle emitter / a decal in view; owned_shadow_views: no terrain map re-aim and no shadow-casting point light in the window)
 $script:ArmedIdle = 'inactive(armed, nothing owned in the window)'
 
 # the stage windows of a log: an array of hashtables name -> state string (the first window of a run is a partial one: callers skip it)

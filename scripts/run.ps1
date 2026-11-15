@@ -194,6 +194,8 @@ if ($NoRenderer) {
             $values['rt.reflections'] = 'medium'
             $values['shadows.enabled'] = 'false'; $values['shadows.filter'] = 'high'; $values['shadows.map_size'] = 'auto'
             $values['lod.trees'] = '1'; $values['lod.meshes'] = '1'; $values['lod.view'] = '1'
+            # (WS1: the player default of native.owned_check is 0; the test baseline keeps the verification safety net: soaks, picture checks)
+            $values['native.owned_check'] = '10'
             # (S-9, frame-ownership.md 14.41: lighting.clustered / full_lit are no longer pinned off: the owned Full frame needs the table lighting, the baseline tests the
             # player's Full; the old pass = -Setting 'lighting.clustered=false','lighting.full_lit=false', which gates the owned stages off)
         }

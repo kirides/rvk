@@ -103,6 +103,25 @@ void StaticOps::stagesReport() {
         line += stage("ordered_bulk", settingOn(rs.nativeOrderedBulk), ownedOrderedOn() && dev_.orderedBulk(), b, std::format("{} ordered draws observed in bulk", b),
                       needsOf(rs.nativeOrderedBulk, {rs.nativeOwnedOrdered, rs.nativeSceneDraws, rs.nativeOwnedStatic, rs.nativeOwnedPersistent}), gateMain);
     }
+    {
+        // 16.9 (WS23, native.event_observers): acted = observer calls skipped for unchanged records in the window
+        static std::uint64_t lastSkip = 0;
+        const d3d9::Device::EventObsStats& e = dev_.eventObsStats;
+        const std::uint64_t sk = e.skipped[0] + e.skipped[1];
+        line += stage("event_observers", settingOn(rs.nativeEventObservers), ownedStatic_ && dev_.eventObservers(), sk - lastSkip, std::format("{} observer calls skipped", sk - lastSkip),
+                      needsOf(rs.nativeEventObservers, {rs.nativeOwnedPersistent, rs.nativeOwnedStatic}), gateMain);
+        lastSkip = sk;
+    }
+    {
+        // 14.51 (WS9, native.owned_delta): acted = owned passes run with the delta work in the window (+ what it did)
+        static std::uint64_t lastMarked = 0, lastRemade = 0;
+        line += stage("owned_delta", settingOn(rs.nativeOwnedDelta), ownedStatic_ && ownedDelta_, deltaPassesW_,
+                      std::format("{} passes, {} records marked out of date, {} remade", deltaPassesW_, staleMarked_ - lastMarked, staleRebuilds_ - lastRemade),
+                      needsOf(rs.nativeOwnedDelta, {rs.nativeSceneDraws, rs.nativeOwnedStatic}), gateMain);
+        lastMarked = staleMarked_;
+        lastRemade = staleRebuilds_;
+        deltaPassesW_ = 0;
+    }
     line += stage("owned_vegetation", settingOn(rs.nativeOwnedVegetation), ownedVeg_, vegStat_.retained, std::format("{} ops on retained streams", vegStat_.retained), needsOf(rs.nativeOwnedVegetation, {}));
     const std::uint64_t vegViews = vro_ ? vro_->window.ownedViews : 0;
     line += stage("owned_vegetation_ops", settingOn(rs.nativeOwnedVegetationOps), ownedVegOps_, vegViews, std::format("{} owned views", vegViews),

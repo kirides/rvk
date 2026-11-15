@@ -14,6 +14,7 @@
 // Stage (b) (GPU-driven draws that consume the table instead of engine lists) and stage (c) (point-light shadow cubes) build on the same buffer.
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -97,11 +98,17 @@ float lightEngineFalloff(float d2, float rcpSqrRange);
 // Full-owned lighting (setting lighting.full_lit, gpu-scene.md 9.8): lit draws are composed with one 3-light permutation and take ALL their point
 // lights from the table. Set by HalDevice::applyLighting (needs the table on and no compare run); read by native::StaticOps.
 bool fullLitActive();
+// WS13 (frame-ownership.md 14.55): a build with the inputs of the last one keeps its table + upload; default on, `debug lightskip 0|1` (overlay command) switches it inside one run
+// (perf-ab.ps1 -CommandTemplate), RVK_LIGHTS_SKIP_OFF=1 at start
+std::atomic<bool>& lightBuildSkip();
 void setFullLitActive(bool on);
 // the two table lighting options (lighting.trust_table / lighting.tree_merge), meaningful while fullLitActive()
 bool fullLitSkipsReads();   // lighting.trust_table: lit draws skip their own point-light reads when the table verifiably holds every light of the object
 bool fullLitTreeMerge();
 void setFullLitOptions(bool skipReads, bool treeMerge);
+// WS22 (frame-ownership.md 16.8): the static half of the light collection on a worker thread; 0 off, 1 on, 2 auto (default: on, except on integrated GPUs); `debug lightworker 0|1|2`
+// (overlay command, perf-ab.ps1 -CommandTemplate), RVK_LIGHT_WORKER=0|1 at start
+void setLightCollectWorker(int mode);
 
 class RtScene;
 
@@ -123,10 +130,12 @@ public:
     // true when a light of the last build (any level: the far lights too) sits within 8 units of `pos`: the table lights an object's own light there
     // per pixel, so the object's batch need not end on that light (native::planTreeBatches' table merge)
     static bool lightKnown(const float pos[3]);
+    static std::uint64_t knownSerial();  // WS11: changes whenever the grid lightKnown reads is replaced
     // F2c-1: a counter bumped whenever what `lightKnown` / `registryComplete` depend on changes (the "registry complete" flag flips, or the set of the last build's
     // light positions differs from the previous build's): a retained record that took its `holdsAll` decision from them stays valid while the value is the same
     static std::uint64_t registryGeneration();
-    static void noteDrawnLight(const float pr[4], const float col[4]);
+    // authoritative = the note comes from a fully composed frame (no owned view): only those update the colour a static registry light takes (frame-ownership.md 16.10)
+    static void noteDrawnLight(const float pr[4], const float col[4], bool authoritative = true);
 
     explicit LightTable(d3d9::Device& device);
     ~LightTable();
@@ -140,10 +149,17 @@ public:
     void setRtScene(RtScene* scene) { scene_ = scene; }
     void configureShadows(const ShadowSettings& s);
     void setCollectRadius(float r) { collectRadius_ = r; }
+    // lighting.occupancy: 0 off (every pixel takes the full cluster path), 1 on (pixels in a cluster without lights take the short path), 2 compare (Vulkan:
+    // the short path's state is checked against the full path for every empty-cluster pixel; mismatches are counted into the compare buffer, logged)
+    void setOccupancy(int mode);
+    // lighting.cluster_build (WS21, gpu-scene.md 9.16): 0 columns (one group per tile column, default), 1 threads (the legacy one thread per cluster kernel), 2 compare
+    // (Vulkan: the columns' build, then the legacy kernel reads it and counts differing clusters / occupancy words; rvk.log "cluster build compare", must be 0)
+    void setClusterBuild(int mode);
 
 private:
     void record(d3d9::PassContext& ctx);
     void recordShadow(d3d9::PassContext& ctx);
+    void recordShadowFilter(d3d9::PassContext& ctx);
     bool pipelineReady();
     bool shadowPipelinesReady();
     void applyShadowHold();
@@ -156,6 +172,15 @@ private:
     float collectRadius_ = 96000.0f;
     double colourRatio_[3]{};
     std::uint64_t colourRatioN_ = 0;
+    int occMode_ = 1;
+    std::unique_ptr<rhi::Buffer> occCmp_;  // compare counters (uint words: 0 mismatches, 1 empty-cluster pixels checked, 2 occupancy bit wrong, 3 first mismatch kind bits)
+    double occLog_ = -1e9;
+    int clusterMode_ = 0;
+    std::unique_ptr<rhi::Pipeline> legacyPipe_, comparePipe_;  // the legacy kernel and its compare variant (built when the mode asks)
+    std::future<std::unique_ptr<rhi::Pipeline>> legacyBuilding_, compareBuilding_;
+    std::unique_ptr<rhi::Buffer> clusterCmp_;  // compare counters (uint words: 0 clusters differing, 1 compared, 2 occupancy words differing, 3 builds compared, 4 highest differing cluster + 1)
+    double clusterLog_ = -1e9;
+    std::uint64_t clusterPasses_ = 0;
     float defaultRoughness_ = 0.7f;  // the physical style's roughness of surfaces without a pack entry
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_;
@@ -178,12 +203,46 @@ private:
         LightShadowPush push{};
         rhi::Texture* raw = nullptr;
         rhi::Texture* fin = nullptr;
-        std::uint32_t gx = 0, gy = 0;
-    } pendingShadow_;
+        std::uint32_t gx = 0, gy = 0;    // the filter's dispatch (full resolution)
+        std::uint32_t gxT = 0, gyT = 0;  // the trace's dispatch (the raw image: half resolution when the experiment bit is on)
+    } pendingShadow_, pendingFilter_;
     std::uint64_t shadowPasses_ = 0, shadowSkipped_ = 0;
     std::uint64_t passes_ = 0, skipped_ = 0, changedTotal_ = 0;
     std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0, lastNear_ = 0, lastNearStatic_ = 0, lastNearAny_ = 0;
     double lastLog_ = -1e9;
+    void verifyReference(const float cam[3]);
+    bool workerAllowed() const;
+    std::vector<engine::lights::WorldLight> compareScratch_;  // the check builds' inline collection (WS22)
+    engine::lights::Stats compareStats_;
+    std::uint64_t workerBuilds_ = 0, workerCompared_ = 0, workerDiffering_ = 0;
+    std::string workerFirst_;
+    std::uint32_t backstopCounter_ = 0;                                  // builds seen: every 64th compares the statics with a fresh uncached walk
+    std::uint64_t backstopChecks_ = 0, backstopMismatch_ = 0, backstopMismatchLogged_ = 0;
+    double backstopUs_ = 0.0;
+    std::uint64_t backstopWindowMismatch() { const std::uint64_t d = backstopMismatch_ - backstopMismatchLogged_; backstopMismatchLogged_ = backstopMismatch_; return d; }
+    bool verify_ = false;  // RVK_LIGHTS_VERIFY=1
+    std::vector<engine::lights::WorldLight> verifyDyn_, verifyDrawn_;
+    std::uint64_t verifyBuilds_ = 0, verifyDiffering_ = 0;
+    std::string verifyFirst_;
+    std::uint64_t knownGridHash_ = 0;
+    std::vector<std::uint32_t> shadowIdScratch_;
+    std::vector<std::pair<float, std::uint32_t>> nearLightsScratch_;
+    struct ReachKey {
+        float reach;
+        std::uint32_t index;
+    };
+    std::vector<ReachKey> reachKeys_;
+    std::vector<engine::lights::WorldLight> truncated_;
+    double cpuMs_[6]{};  // record()'s CPU per section, summed over cpuN_ builds (logged every 5 s)
+    std::uint64_t cpuN_ = 0;
+    // WS13: unchanged builds keep the table + upload (record())
+    static constexpr std::uint32_t kFullEvery = 64;
+    std::uint64_t buildSig_ = 0, buildSerial_ = 1;
+    bool haveSig_ = false;
+    std::uint32_t sinceFull_ = 0;
+    std::array<std::uint64_t, rhi::kFramesInFlight> uploadSerial_{};
+    std::uint64_t skipHits_ = 0, skipChecks_ = 0, skipDiffering_ = 0, uploadsSkipped_ = 0;
+    std::string skipFirst_;
 };
 
 }  // namespace rvk::enh

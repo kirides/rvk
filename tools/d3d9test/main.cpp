@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -704,6 +705,21 @@ void testOwnGuiRecords(Fixture& f) {
     for (auto& t : tex) f.dev.release(std::move(t));
 }
 
+// WS12: the translated expansion form is built by the shader workers; the engine's caller asks again at its next emission, the test waits for it
+static rvk::d3d9::Shader* particleVsReady(rvk::d3d9::Device& dev, rvk::d3d9::Shader& vs, int kind, const rvk::d3d9::VertexDecl* decl, const char** why) {
+    for (int i = 0; i < 6000; ++i) {
+        const char* w = nullptr;
+        rvk::d3d9::Shader* s = dev.particleVs(vs, kind, decl, &w);
+        if (s != nullptr || w == nullptr || std::strstr(w, "building") == nullptr) {
+            if (why != nullptr) *why = w;
+            return s;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (why != nullptr) *why = "still building after 60 s";
+    return nullptr;
+}
+
 // F11 (frame-ownership.md 14.26, native.own_particles): particle records expanded by the GPU (Device::particleVs = a translated particle-style vertex shader whose
 // inputs rvkParticleExpand builds from the instance record + VS c232..c247) against the same particles expanded on the CPU by the C++ twin
 // (d3d9::particle::expand) and drawn through the input assembler with the engine's vertex layout. Five ops: every orientation mode, entity coordinates with a
@@ -754,7 +770,7 @@ mov oT3, v3
     };
     auto edecl = f.dev.createVertexDecl(engineDecl);
     const char* why = nullptr;
-    Shader* pvs = f.dev.particleVs(*vs, pt::kKindParticle, edecl.get(), &why);
+    Shader* pvs = particleVsReady(f.dev, *vs, pt::kKindParticle, edecl.get(), &why);
     VertexDecl* pdecl = f.dev.particleDecl(pt::kKindParticle);
     if (pvs == nullptr || pdecl == nullptr) {
         std::printf("  FAIL own particles: the expansion form: %s\n", why != nullptr ? why : "no declaration");
@@ -923,7 +939,7 @@ mov oT0.xy, v2
         };
         auto sdecl = f.dev.createVertexDecl(skyDecl);
         const char* swhy = nullptr;
-        Shader* spvs = svs ? f.dev.particleVs(*svs, pt::kKindSkyBillboard, sdecl.get(), &swhy) : nullptr;
+        Shader* spvs = svs ? particleVsReady(f.dev, *svs, pt::kKindSkyBillboard, sdecl.get(), &swhy) : nullptr;
         VertexDecl* spdecl = f.dev.particleDecl(pt::kKindSkyBillboard);
         if (spvs == nullptr || !sps || spdecl == nullptr) {
             std::printf("  FAIL own particles: the sky billboard form: %s\n", swhy != nullptr ? swhy : "shaders");
@@ -1022,7 +1038,7 @@ mov oT1.xy, v3
         };
         auto tdecl = f.dev.createVertexDecl(stripDecl);
         const char* twhy = nullptr;
-        Shader* tpvs = tvs ? f.dev.particleVs(*tvs, pt::kKindStrip, tdecl.get(), &twhy) : nullptr;
+        Shader* tpvs = tvs ? particleVsReady(f.dev, *tvs, pt::kKindStrip, tdecl.get(), &twhy) : nullptr;
         VertexDecl* tpdecl = f.dev.particleDecl(pt::kKindStrip);
         if (tpvs == nullptr || !tps || tpdecl == nullptr) {
             std::printf("  FAIL own particles: the strip form: %s\n", twhy != nullptr ? twhy : "shaders");
@@ -1327,6 +1343,27 @@ void testLockAfterUpload(Fixture& f) {
     drawTexture(f, tex.get(), "lock_after_upload_2", p);
     expect("lock after upload: written corner", p, 5, 5, 0xFFFF00);
     expect("lock after upload: file contents kept", p, 50, 50, 0x00FF00);
+    f.dev.release(std::move(tex));
+}
+
+void testUploadRows(Fixture& f) {
+    // WS27: Texture::uploadRows fills a texture in row slices straight from caller memory (no CPU copy), over two "frames"
+    TextureDesc d;
+    d.width = d.height = 64;
+    d.format = rhi::d3dfmt::A8R8G8B8;
+    d.pool = POOL_MANAGED;
+    auto tex = f.dev.createTexture(d);
+    std::vector<std::uint32_t> top(64 * 32, 0xFFFF0000u), bottom(64 * 32, 0xFF0000FFu);
+    bool ok = tex->uploadRows(f.dev.uploadList(), 0, 32, top.data(), 64 * 4);
+    ok = tex->uploadRows(f.dev.uploadList(), 32, 32, bottom.data(), 64 * 4) && ok;
+    if (!ok) {
+        std::printf("  FAIL uploadRows: refused\n");
+        ++g_failures;
+    }
+    Pixels p;
+    drawTexture(f, tex.get(), "upload_rows", p);
+    expect("uploadRows: top slice", p, 32, 10, 0xFF0000);
+    expect("uploadRows: bottom slice", p, 32, 50, 0x0000FF);
     f.dev.release(std::move(tex));
 }
 
@@ -6768,6 +6805,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
+        {"uploadRows slices (WS27)", testUploadRows},
         {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"tree motion (14.42)", testTreeMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
         {"flush keeps frame memory (14.40)", testFlushKeepsFrameMemory}, {"in-frame read (14.40)", testInFrameRead},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)

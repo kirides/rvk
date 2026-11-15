@@ -14,6 +14,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/log.h"
+#include "core/ws19_small.h"
 #include "api/capture.h"
 #include "core/caps.h"
 #include "core/crash_dump.h"
@@ -396,6 +398,8 @@ void HalDevice::applyStaticOps() {
             staticOps_->setOwnedOrdered(ordered);
             dev_.setOrderedBulk(on(rs.nativeOrderedBulk));  // 14.44: the ordered draws to the observers in bulk
         }
+        dev_.setEventObservers(on(rs.nativeEventObservers) && ownedStatic && on(rs.nativeOwnedPersistent));  // 16.9 (WS23): observers by event
+    staticOps_->setOwnedDelta(on(rs.nativeOwnedDelta) && ownedStatic);  // 14.51 (WS9): the owned path's per-op work by change
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -463,6 +467,7 @@ HalDevice::~HalDevice() {
     matPack_.reset();    // joins its loader, frees the pack textures
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
+    sdsm_.reset();
     shadows_.reset();
     rtShadows_.reset();  // removes its pass, releases the RT scene
     lightTable_.reset(); // its destructor releases the RT scene (lamp shadows hold it): before the scene goes
@@ -557,6 +562,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     engine::window::onModeSet(p.window, p.windowed, o.width, o.height, p.refreshRate);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
                  o.vsync, rhi::d3dFormatName(o.depthFormat));
+    log::startAsync();  // WS22 (frame-ownership.md 16.8): the log's writes + flushes on their own thread from here on (no thread in DllMain)
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
@@ -772,11 +778,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     // enhanced sun shadows (enh/shadows.h, docs/research/shadows.md): a draw replacer for the shadow mask, live settings
     shadows_ = std::make_unique<enh::Shadows>(dev_);
+    sdsm_ = std::make_unique<enh::Sdsm>(dev_);
     rtShadows_ = std::make_unique<enh::RtShadows>(dev_, rtScene_.get());
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
         for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtRange, rs.rtShadowSync, rs.shadowsEnabled, rs.shadowsFilter,
-                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.rtReflectionTweaks}) {
+                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsFit, rs.shadowsSoft, rs.shadowsSoftSize, rs.rtReflectionTweaks}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
@@ -805,7 +812,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOrderedBulk, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords, rs.nativeRtGpuBuild}) {
+                                 rs.nativePacketCache, rs.nativeOwnPost, rs.nativeOwnSky, rs.nativeOwnGui, rs.nativeOwnParticles, rs.nativeOwnedDecals, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeOwnedVegetationOps, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedShadowViews, rs.nativeOwnedActors, rs.nativeOwnedInstances, rs.nativeOwnedOrdered, rs.nativeOrderedBulk, rs.nativeEventObservers, rs.nativeOwnedDelta, rs.nativeOwnedCheck, rs.nativeOwnedTrees, rs.nativeClusters, rs.nativeClusterCull, rs.nativeClusterCullShadows, rs.nativeVertexPull, rs.nativeBoneMotion, rs.nativeOwnFoliage, rs.nativeTreeWind, rs.nativeTreeMotion, rs.nativeRtRecords, rs.nativeRtGpuBuild}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -847,6 +854,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     enh::setPbrVariants(!packRoots.empty() || (clusterLights && rs.lightingStyle != nullptr && rs.lightingStyle->asEnum() == "physical"));
     if (rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && !clusterLights) spdlog::info("enh: lights: lighting.clustered applies in Full mode only");
     enh::setClusterVariants(clusterLights);
+    enh::setOccupancyCompareVariants(clusterLights && rs.lightingOccupancy != nullptr && rs.lightingOccupancy->asEnum() == "compare");
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (!packRoots.empty()) {
@@ -893,10 +901,15 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
                                                             return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
                                                         }});
-        if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
+        if (!matPack_) {
+            dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
+            // (WS19, frame-ownership.md 14.61: no pack = the answer never changes: a constant stamp lets retained packets / owned draws keep their word without a lookup per
+            // draw and frame; without a stamp the stamped state never held and every owned draw's signature called the provider)
+            if (!ws19SmallOff()) dev_.setPackStamp([]() -> std::uint32_t { return 0u; });
+        }
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
         lightTable_->setRtScene(rtScene_.get());
-        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingShadows, rs.lightingShadowQuality, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingOccupancy, rs.lightingClusterBuild, rs.lightingFullLit, rs.lightingShadows, rs.lightingShadowQuality, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
         }
         applyLighting();
@@ -1130,6 +1143,14 @@ void HalDevice::applyLighting() {
     lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : d == "bake" ? 4 : d == "prebake" ? 5 : d == "path" ? 6 : 0,
                            frozen::kMaterialRoughness);
     lightTable_->setCollectRadius(frozen::kLightCollectRadius);
+    if (rs.lightingOccupancy != nullptr) {
+        const std::string_view o = rs.lightingOccupancy->asEnum();
+        lightTable_->setOccupancy(o == "off" ? 0 : o == "compare" ? 2 : 1);
+    }
+    if (rs.lightingClusterBuild != nullptr) {
+        const std::string_view o = rs.lightingClusterBuild->asEnum();
+        lightTable_->setClusterBuild(o == "threads" ? 1 : o == "compare" ? 2 : 0);
+    }
     {
         enh::LightTable::ShadowSettings ls;
         const std::string_view m = rs.lightingShadows->asEnum();
@@ -1251,6 +1272,8 @@ void HalDevice::applyShadows() {
     s.blend = frozen::kShadowBlend;
     s.fade = frozen::kShadowFade;
     s.bias = rs.shadowsBias->asFloat();
+    s.soft = rs.shadowsSoft != nullptr && rs.shadowsSoft->asEnum() == "pcss";
+    if (rs.shadowsSoftSize != nullptr) s.softSize = rs.shadowsSoftSize->asFloat();
     const std::string_view dbg = rs.shadowsDebug->asEnum();
     s.debug = dbg == "cascades" ? 1 : dbg == "cascade_term" ? 2 : dbg == "terrain_term" ? 3 : dbg == "rt_term" ? 4 : dbg == "rt_coverage" ? 5 : 0;
     shadows_->apply(s);
@@ -1275,7 +1298,10 @@ void HalDevice::applyShadows() {
     const float metres = rs.shadowsRange->asFloat();
     o.range = metres > 0.0f ? metres * 100.0f : (s.enabled ? 10000.0f : 0.0f);
     o.splitFactor = o.range > 0.0f ? frozen::kShadowSplit : -1.0f;
+    const std::string_view fit = s.enabled && rs.shadowsFit != nullptr ? rs.shadowsFit->asEnum() : std::string_view("engine");
+    o.fit = fit == "sdsm" ? 2 : fit == "sphere" ? 1 : 0;
     engine::shadowmaps::setOverrides(o);
+    if (sdsm_) sdsm_->setEnabled(o.fit == 2);
     spdlog::info("hal: settings: shadow cascades: map size {}, range {}, split factor {}", o.mapSize > 0 ? std::to_string(o.mapSize) : "game",
                  o.range > 0.0f ? std::format("{:.0f} m", o.range / 100.0f) : std::string("game"),
                  o.splitFactor >= 0.0f ? std::format("{:.2f}", o.splitFactor) : std::string("game"));
@@ -1423,7 +1449,10 @@ bEResult HalDevice::GetFVFSize(unsigned long a0, unsigned long* a1) {
 bEResult HalDevice::PreprocessShader(eCGfxShared::eSGfxHLSLShaderSrc const& a0, bCString& a1) {
     using Fn = bEResult (*)(void*, const eCGfxShared::eSGfxHLSLShaderSrc*, bCString*);
     const Fn fn = dx9<Fn>("?PreprocessShader@eCDX9Device@@UEAA?AW4bEResult@@AEBUeSGfxHLSLShaderSrc@eCGfxShared@@AEAVbCString@@@Z");
-    return fn != nullptr ? fn(dx9Standin_, &a0, &a1) : bEResult_False;
+    const bEResult r = fn != nullptr ? fn(dx9Standin_, &a0, &a1) : bEResult_False;
+    // (WS24: the preprocessed text keys the D3DX bytecode cache of the Compile that follows for this request; bCString = a pointer to the text)
+    noteShaderPreprocess(&a0, r == bEResult_Ok ? *reinterpret_cast<const char* const*>(&a1) : nullptr);
+    return r;
 }
 
 bEResult HalDevice::CompileEffect(eCGfxShared::eSGfxEffectSource const& a0, void** a1, void** a2) {
@@ -1937,6 +1966,7 @@ void HalDevice::updateMenuPacing() {
     const auto& rs = settings::renderer();
     const auto* menuFps = rs.menuFps;
     dev_.setUnpaced(st.state == engine::menu::State::Loading);
+    dev_.setBackgroundFree(st.state != engine::menu::State::Game);  // WS12: the background compiles run on every thread outside the world, on few in it
     // frame generation: the world only (Unknown = the GUI is not up yet: the world), not paused (app state 1)
     if (framegen_) framegen_->setGameState(st.state == engine::menu::State::Game || st.state == engine::menu::State::Unknown, st.appState == 1);
     dev_.setMenuCap(st.state == engine::menu::State::Menu && menuFps != nullptr ? menuFps->value() : 0.0);

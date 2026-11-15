@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -145,7 +146,9 @@ public:
     void replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::DrawReplacement& out) override;
     // the sea floor field: the main view's static meshes are rasterised top-down (once per mesh and placement)
     bool wantsOpaque() const override;
-    void observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) override;
+    d3d9::OpaqueResult observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) override;
+    // (observeOpaque reads registers only for the world rows, worldRows: an owned draw's query carries them from the object table)
+    bool opaqueReadsRegisters(const d3d9::ReplaceQuery& q) const override { return q.objectRows == nullptr || q.instanced; }
 
 private:
     struct Body {
@@ -196,7 +199,7 @@ private:
     double seaClock();
     // the waves rolling in (WaterBlock::shoreWave xyz): period (s), amplitude (world units), breaker index
     std::array<float, 3> shoreWave() const;
-    void serviceFloor(d3d9::Device& device);
+    void serviceFloor(d3d9::Device& device, rhi::CommandList& cmd);
     void saveFloor();
 
     d3d9::Device& dev_;
@@ -260,6 +263,12 @@ private:
     std::shared_ptr<FloorState> floor_;
     std::future<seafloor::Field> floorBake_;
     std::unique_ptr<d3d9::Texture> floorA_, floorB_;
+    // WS27: the finished bake is uploaded in row slices over several frames into a second pair of textures; the pair is swapped in when complete
+    std::optional<seafloor::Field> floorUp_;
+    std::unique_ptr<d3d9::Texture> upA_, upB_;
+    std::uint32_t upRow_ = 0;
+    double upStart_ = 0.0;
+    std::uint32_t upFrames_ = 0;
     std::array<float, 4> floorMapping_{};
     double lastFloorBake_ = -1e9;
     std::uint64_t floorFrame_ = 0, floorFrameBytes_ = 0, floorMeshCount_ = 0;

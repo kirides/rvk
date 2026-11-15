@@ -421,7 +421,10 @@ struct RendererSettings {
     Setting* shadowsBias = nullptr;       // shadows.bias: constant depth bias (texels of a 45° slope)
     Setting* shadowsDebug = nullptr;      // shadows.debug: "off", "cascades"
     Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
-    Setting* shadowsRange = nullptr;      // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
+    Setting* shadowsFit = nullptr;        // shadows.fit: the cascade fit, engine | sphere | sdsm (docs/research/shadows.md 8)
+    Setting* shadowsSoft = nullptr;       // shadows.soft: off | pcss (PCSS + temporal / spatial denoise, docs/research/shadows.md 8.10)
+    Setting* shadowsSoftSize = nullptr;   // shadows.soft_size: the sun's cone half angle (degrees)
+    Setting* shadowsRange = nullptr;     // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
     Setting* shadowsRt = nullptr;         // shadows.rt: "off", "near", "extended" (ray-traced sun shadows near the camera, enh/rt_shadows)
     Setting* shadowsRtQuality = nullptr;  // shadows.rt_quality: "low", "medium", "high"
     Setting* shadowsRtRange = nullptr;    // shadows.rt_range: metres, 0 = from the mode
@@ -448,7 +451,9 @@ struct RendererSettings {
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
     Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
     Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots" | "shadows"
-    Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
+    Setting* lightingClusterBuild = nullptr; // lighting.cluster_build (debug): "columns" | "threads" | "compare" (WS21: the cluster build kernel; gpu-scene.md 9.16)
+    Setting* lightingOccupancy = nullptr; // lighting.occupancy (debug): "off" | "on" | "compare" (WS20: pixels in light-free clusters skip the table lookup; gpu-scene.md 9.15)
+    Setting* lightingShadows = nullptr;  // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
     Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
     // material pack (enh/material_pack, docs/research/material-pack.md)
     Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
@@ -508,6 +513,8 @@ struct RendererSettings {
     Setting* nativeClusterCullShadows = nullptr;  // native.cluster_cull_shadows: the cull of the owned draws of clustered meshes in the sun cascades (frame-ownership.md 7.37, F3-2)
     Setting* nativeOwnedInstances = nullptr;  // native.owned_instances: instance lists + hardware batches owned (frame-ownership.md 14.19, F2f)
     Setting* nativeOwnedOrdered = nullptr;  // native.owned_ordered: the order-dependent ops (blended terrain layers, alpha / refracted lists) owned at their place (frame-ownership.md 14.20, F9 + F14)
+    Setting* nativeEventObservers = nullptr;  // native.event_observers: observers by event (frame-ownership.md 16.9, WS23)
+    Setting* nativeOwnedDelta = nullptr;   // native.owned_delta: the owned path's per-op work by change (frame-ownership.md 14.51)
     Setting* nativeOrderedBulk = nullptr;  // native.ordered_bulk: the ordered owned draws to the observers in bulk (frame-ownership.md 14.44)
     Setting* nativeOwnedActors = nullptr;  // native.owned_actors: skinned actor ops owned (frame-ownership.md 7.40, F6-1)
     Setting* nativeOwnedShadows = nullptr;  // native.owned_shadows: the sun cascades' static mesh z ops owned (frame-ownership.md 7.36, F3-1)

@@ -1455,7 +1455,8 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
                 if (gpu) draws_[before]->particleGpu = 2;
                 gpu = false;
             } else if (gpu) {
-                std::vector<sc::DrawDesc> trials;
+                static thread_local std::vector<sc::DrawDesc> trials;  // (WS15: capacity kept; the 10 KB block was allocated per particle op)
+                trials.clear();
                 trials.reserve(drawCount_ - before);
                 for (std::size_t i = before; i < drawCount_ && gpu; ++i) {
                     trials.push_back(*draws_[i]);

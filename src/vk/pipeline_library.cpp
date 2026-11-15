@@ -298,6 +298,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize, bool compil
 
 void PipelineCache::optimizer() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline optimizer");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);  // (WS12: background work, the engine thread keeps its core)
     std::unique_lock lock(optMutex_);
     for (;;) {
         optCv_.wait(lock, [&] { return optQuit_ || !optQueue_.empty(); });
@@ -341,7 +342,10 @@ void PipelineCache::startLibraries() {
     useLibraries_ = true;
     char recipe[16]{};
     retainLto_ = GetEnvironmentVariableA("RVK_GPL_RECIPE", recipe, sizeof(recipe)) > 0 && std::strcmp(recipe, "lto") == 0;
-    spdlog::info("vulkan: pipeline libraries: {} recipe", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)");
+    char pl[8]{};
+    prewarmLink_ = !(GetEnvironmentVariableA("RVK_PREWARM_LINK", pl, sizeof(pl)) > 0 && pl[0] == '0');
+    spdlog::info("vulkan: pipeline libraries: {} recipe; prewarm requests {}", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)",
+                 prewarmLink_ ? "fast-linked first" : "built whole (RVK_PREWARM_LINK=0)");
     optQuit_ = false;
     optThread_ = std::thread([this] { optimizer(); });
 }

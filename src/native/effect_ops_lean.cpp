@@ -135,20 +135,25 @@ void EffectOps::issueLean(bool draw) {
         const bool own = ownSwap_ && k == 0;  // S-7c: our pixel shader for this draw, the composed state after it
         const fxc::EffectDraw& d = own ? *ownPatched_ : *draws_[k];
         applyDevice(d);
+        lap(9);
         issueIndex_ = k;
         if (!draw) {
             if (own) applyDevice(*draws_[k]);
             continue;  // S-7: a held unit (own_post): the state as for a draw, nothing drawn
         }
         drawComposed(d);  // (S-7d: the ports)
+        lap(10);
         if (own) applyDevice(*draws_[k]);
         ++stats_->issuedDraws;
     }
     issuing_ = false;
     tag = savedTag;
     // EndTechnique's EndRenderStateBlock: the render states as at the entry
-    for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) {
-        if (dev_.renderState(rs) != entryRs_[rs]) dev_.setRenderState(rs, entryRs_[rs]);
+    const std::uint32_t* cur = dev_.renderStateArray();
+    if (std::memcmp(cur, entryRs_.data(), sizeof(std::uint32_t) * fxc::kRenderStates) != 0) {
+        for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) {
+            if (cur[rs] != entryRs_[rs]) dev_.setRenderState(rs, entryRs_[rs]);
+        }
     }
 }
 
@@ -156,8 +161,12 @@ void EffectOps::predictAfter(bool sprite) {
     afterFields_.clear();
     if (drawCount_ == 0) return;
     if (!after_) after_ = std::make_unique<fxc::EffectDraw>();
-    *after_ = *draws_[drawCount_ - 1];
-    after_->rs = entryRs_;
+    // (WS5: the ~10 KB copy of the last draw is only read by checkAfter, on check frames)
+    leanUpdateFrame();
+    if (checkFrame_) {
+        *after_ = *draws_[drawCount_ - 1];
+        after_->rs = entryRs_;
+    }
     afterMasters_ = hal_.masterBits();
     const auto& s = engine::sym();
     auto* unit = const_cast<std::uint8_t*>(static_cast<U8*>(unitFilter_));

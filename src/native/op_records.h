@@ -198,6 +198,10 @@ struct DrawRec {
     const void* illumPtr = nullptr;
 };
 
+// WS6: Store::lookup's memo, a direct-mapped table of the records by key hash (a record erases its own slot when it dies: ~OpRecord)
+constexpr std::size_t kRecMemo = 32768;
+inline std::vector<struct OpRecord*> g_recMemo;
+
 struct OpRecord {
     Key key;
     Stamp stamp;
@@ -250,6 +254,11 @@ struct OpRecord {
     // (clean again when it still holds). `shaders` = the covered shaders with their field fingerprint (no event exists for a shader's property fields: polled once per shader and
     // frame). `lightEpoch` = depevents::lightEpoch when the stamp was last verified (a changed light set re-verifies every record once).
     mutable bool dirty = false;
+    // WS9 (frame-ownership.md 14.51): the owned path refused a draw of this record for a reason a fresh composition removes (its retained packet was made while the
+    // scene forms were pending, a module / variant moved since): the op's late composition remakes the record (recEnter), as a check frame's refused derivation
+    // would. Without it a player (native.owned_check = 0: no check frames) kept such records for the whole session and composed their ops late every frame
+    mutable bool stale = false;
+    mutable std::uint64_t clusterOkSerial = ~0ull;  // WS19: ClusterStore::stateSerial when no draw of the record was stale (recLiveWhy)
     std::uint64_t lightEpoch = 0;
     std::vector<const void*> deps;
     std::vector<std::pair<const void*, std::uint64_t>> shaders;
@@ -298,6 +307,10 @@ private:
 };
 
 inline OpRecord::~OpRecord() {
+    if (!g_recMemo.empty()) {
+        OpRecord*& slot = g_recMemo[KeyHash{}(key) & (kRecMemo - 1)];
+        if (slot == this) slot = nullptr;
+    }
     for (const void* d : deps) DepIndex::get().remove(d, this);
 }
 
@@ -336,6 +349,38 @@ struct Stats {
 
 struct Store {
     std::unordered_map<Key, std::unique_ptr<OpRecord>, KeyHash> map;
+    // WS6: the per-op record lookup of the owned path (ownedSelect + ownedPass: two hash-map finds per op and view) behind the memo of the hits (g_recMemo: a slot
+    // holds the live record of the key that hashes to it, ~OpRecord clears it, so a hit is the map's own answer and the maps' inserts never move a record).
+    // verify (periodic checks on, gpuscene::checksOff() false): every 64th hit is compared with the map's answer (the owned views do not run on check frames: a compare there
+    // would never happen); a mismatch is counted and switches the memo off
+    std::uint64_t memoHits = 0, memoMisses = 0, memoChecked = 0, memoBad = 0;
+    bool memoOff = false;
+    OpRecord* lookup(const Key& key, bool verify) {
+        if (memoOff) {
+            const auto it = map.find(key);
+            return it == map.end() ? nullptr : it->second.get();
+        }
+        if (g_recMemo.empty()) g_recMemo.assign(kRecMemo, nullptr);
+        OpRecord*& m = g_recMemo[KeyHash{}(key) & (kRecMemo - 1)];
+        if (m != nullptr && m->key == key) {
+            if (verify && (++memoHits & 63u) == 0) {
+                ++memoChecked;
+                const auto it = map.find(key);
+                if (it == map.end() || it->second.get() != m) {
+                    ++memoBad;
+                    memoOff = true;
+                }
+            } else if (!verify) {
+                ++memoHits;
+            }
+            return m;
+        }
+        ++memoMisses;
+        const auto it = map.find(key);
+        if (it == map.end()) return nullptr;
+        m = it->second.get();
+        return m;
+    }
     Stats window, total;
     Stats shadowWindow, shadowTotal;         // F3-1: the cascades' ops (keys with view != 0)
     Stats& stats(bool shadow) { return shadow ? shadowWindow : window; }

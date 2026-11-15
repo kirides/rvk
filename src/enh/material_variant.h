@@ -46,6 +46,10 @@ bool pbrVariants();
 // shader that reads g_PointLights fills those registers per pixel from the table's cluster (RVK_MV_CLUSTER); the tag changes with it.
 void setClusterVariants(bool on);
 bool clusterVariants();
+// lighting.occupancy = compare: the cluster variants carry the occupancy compare block (atomic counter writes in the pixel shader: they switch off early depth
+// test, ~7 ms in the jungle), decided at the start like the cluster variants (the code is not compiled in otherwise)
+void setOccupancyCompareVariants(bool on);
+bool occupancyCompareVariants();
 
 // the varying location of the capture vertex shader's previous world position (enh/rt_scene)
 inline constexpr std::uint32_t kPrevWorldLocation = 15;  // TEXCOORD15: no game shader writes it (location 30 exceeded maxVertexOutputComponents 128)

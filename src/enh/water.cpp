@@ -75,7 +75,8 @@ double steadySeconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int height, const std::vector<std::uint16_t>& texels) {
+// an empty RGBA16F image (WS27: filled by Texture::uploadRows in slices, no CPU copy)
+std::unique_ptr<d3d9::Texture> createHalf4(d3d9::Device& device, int width, int height) {
     d3d9::TextureDesc desc;
     desc.width = static_cast<std::uint32_t>(width);
     desc.height = static_cast<std::uint32_t>(height);
@@ -83,16 +84,11 @@ std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int 
     desc.format = rhi::d3dfmt::A16B16G16R16F;
     desc.pool = d3d9::POOL_MANAGED;
     auto tex = device.createTexture(desc);
-    d3d9::Texture::Locked l;
-    if (!tex || !tex->valid() || !tex->lock(0, 0, nullptr, 0, l)) return nullptr;
-    const std::size_t row = static_cast<std::size_t>(width) * 8;
-    for (int z = 0; z < height; ++z) {
-        std::memcpy(static_cast<std::uint8_t*>(l.bits) + static_cast<std::size_t>(z) * l.rowPitch,
-                    texels.data() + static_cast<std::size_t>(z) * width * 4, row);
-    }
-    tex->unlock(0, 0);
+    if (!tex || !tex->valid()) return nullptr;
     return tex;
 }
+
+constexpr std::uint32_t kFloorUploadRows = 128;  // rows per texture per frame (2 MiB each at 2048 wide)
 
 std::uint64_t nameHash(const char* s) {
     std::uint64_t h = 1469598103934665603ull;
@@ -130,6 +126,8 @@ Water::~Water() {
     if (field_) dev_.release(std::move(field_));
     if (floorA_) dev_.release(std::move(floorA_));
     if (floorB_) dev_.release(std::move(floorB_));
+    if (upA_) dev_.release(std::move(upA_));
+    if (upB_) dev_.release(std::move(upB_));
     ocean_.reset();
     destroyShaders();
 }
@@ -786,7 +784,7 @@ double Water::seaClock() {
 
 void Water::recordOcean(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !fftWanted() || !ocean_ || ocean_->failed()) return;
-    serviceFloor(dev_);
+    serviceFloor(dev_, ctx.cmd);
     const std::uint64_t frame = dev_.stats().frames;
     // only while the sea is seen (it was drawn lately, or it is known and the tiles are not filled yet)
     if (!seaKnown_ || (ocean_->ready() && (lastGridFrame_ == 0 || frame > lastGridFrame_ + 30))) return;
@@ -831,21 +829,21 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
 
 bool Water::wantsOpaque() const { return fftWanted() && settings_.oceanWaves && floorPending_.size() < kFloorMaxPending; }
 
-void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
+d3d9::OpaqueResult Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     if (q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.decl == nullptr || q.instanced || q.vertexStride < 12 ||
         q.primitives == 0 || (q.primitiveType != 4 && q.primitiveType != 5)) {
-        return;
+        return d3d9::OpaqueResult::Known;
     }
     const d3d9::VertexElement* pos = nullptr;
     for (const d3d9::VertexElement& e : q.decl->elements()) {
         if (e.stream != 0) continue;
-        if (e.usage == 2) return;                        // BLENDINDICES: skinned
-        if (e.usage == 5 && e.usageIndex == 4) return;  // TEXCOORD4: the engine's instance index (constant instancing)
+        if (e.usage == 2) return d3d9::OpaqueResult::Known;                        // BLENDINDICES: skinned
+        if (e.usage == 5 && e.usageIndex == 4) return d3d9::OpaqueResult::Known;  // TEXCOORD4: the engine's instance index (constant instancing)
         if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = &e;
     }
-    if (pos == nullptr) return;
+    if (pos == nullptr) return d3d9::OpaqueResult::Known;
     float rows[3][4];
-    if (!worldRows(device, q, rows)) return;
+    if (!worldRows(device, q, rows)) return d3d9::OpaqueResult::Known;
     // one entry per mesh range and placement
     std::uint64_t key = 1469598103934665603ull;
     const auto mix = [&key](const void* p, std::size_t n) {
@@ -857,17 +855,17 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     mix(ids, sizeof(ids));
     mix(range, sizeof(range));
     mix(rows, sizeof(rows));
-    if (floorMeshes_.contains(key)) return;
+    if (floorMeshes_.contains(key)) return d3d9::OpaqueResult::Known;
     const std::uint64_t frame = device.stats().frames;
     if (frame != floorFrame_) {
         floorFrame_ = frame;
         floorFrameBytes_ = 0;
     }
-    if (floorFrameBytes_ > kFloorFrameBudget) return;  // next frame (it is drawn again)
+    if (floorFrameBytes_ > kFloorFrameBudget) return d3d9::OpaqueResult::Retry;  // next frame (it is drawn again)
     const std::uint32_t isize = q.indexBuffer->index32() ? 4u : 2u;
     const std::uint32_t icount = q.primitiveType == 4 ? q.primitives * 3 : q.primitives + 2;
     std::vector<std::uint8_t> idata(static_cast<std::size_t>(icount) * isize);
-    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.data())) return;
+    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.data())) return d3d9::OpaqueResult::Retry;
     std::vector<std::uint32_t> idx(icount);
     std::uint32_t lo = 0xffffffffu, hi = 0;
     for (std::uint32_t i = 0; i < icount; ++i) {
@@ -879,16 +877,16 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
             v = v16;
         }
         const std::int64_t vv = static_cast<std::int64_t>(v) + q.baseVertex;
-        if (vv < 0) return;
+        if (vv < 0) return d3d9::OpaqueResult::Known;
         idx[i] = static_cast<std::uint32_t>(vv);
         lo = std::min(lo, idx[i]);
         hi = std::max(hi, idx[i]);
     }
     const std::uint32_t stride = q.vertexStride;
     const std::uint64_t vbytes = static_cast<std::uint64_t>(hi - lo + 1) * stride;
-    if (vbytes > (64u << 20)) return;
+    if (vbytes > (64u << 20)) return d3d9::OpaqueResult::Known;
     std::vector<std::uint8_t> vdata(static_cast<std::size_t>(vbytes));
-    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.data())) return;
+    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.data())) return d3d9::OpaqueResult::Retry;
     floorMeshes_.insert(key);
     floorFrameBytes_ += vbytes + idata.size();
     const seafloor::Grid g = floorGrid();
@@ -924,25 +922,55 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     }
     ++floorMeshCount_;
     if (added > 0) floorDirty_ = true;
+    return d3d9::OpaqueResult::Learned;
 }
 
-void Water::serviceFloor(d3d9::Device& device) {
+void Water::serviceFloor(d3d9::Device& device, rhi::CommandList& cmd) {
+    // WS27: a finished bake is uploaded in row slices over several frames into a second pair of textures, swapped in when complete
+    if (floorUp_) {
+        const seafloor::Field& f = *floorUp_;
+        const std::uint32_t h = static_cast<std::uint32_t>(f.grid.height);
+        const std::size_t pitch = static_cast<std::size_t>(f.grid.width) * 8;
+        const std::uint32_t rows = std::min(kFloorUploadRows, h - upRow_);
+        const std::size_t off = static_cast<std::size_t>(upRow_) * f.grid.width * 4;
+        if (upA_->uploadRows(cmd, upRow_, rows, f.a.data() + off, pitch) && upB_->uploadRows(cmd, upRow_, rows, f.b.data() + off, pitch)) {
+            upRow_ += rows;
+            ++upFrames_;
+        } else {
+            // no ring space (or unsupported): drop this upload, the next bake retries
+            spdlog::warn("enh: ocean: sea floor upload failed at row {}: dropped", upRow_);
+            upA_.reset();
+            upB_.reset();
+            floorUp_.reset();
+        }
+        if (floorUp_ && upRow_ >= h) {
+            if (floorA_) device.release(std::move(floorA_));
+            if (floorB_) device.release(std::move(floorB_));
+            floorA_ = std::move(upA_);
+            floorB_ = std::move(upB_);
+            floorMapping_ = f.grid.mapping();
+            spdlog::info("enh: ocean: sea floor field uploaded in {} frames, {:.0f} ms after the bake", upFrames_, (steadySeconds() - upStart_) * 1000.0);
+            floorUp_.reset();
+        }
+        if (floorUp_) return;  // the next finished bake waits for this upload
+    }
     if (floorBake_.valid() && floorBake_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         seafloor::Field f = floorBake_.get();
         if (f.valid()) {
-            auto a = uploadHalf4(device, f.grid.width, f.grid.height, f.a);
-            auto b = uploadHalf4(device, f.grid.width, f.grid.height, f.b);
+            auto a = createHalf4(device, f.grid.width, f.grid.height);
+            auto b = createHalf4(device, f.grid.width, f.grid.height);
             if (a && b) {
-                if (floorA_) device.release(std::move(floorA_));
-                if (floorB_) device.release(std::move(floorB_));
-                floorA_ = std::move(a);
-                floorB_ = std::move(b);
-                floorMapping_ = f.grid.mapping();
+                upA_ = std::move(a);
+                upB_ = std::move(b);
+                upRow_ = 0;
+                upFrames_ = 0;
+                upStart_ = steadySeconds();
             }
             spdlog::info("enh: ocean: sea floor field {}x{} of {:.0f} units: {} texels seen ({} land, {} water), max travel time {:.1f} s, "
                          "{} meshes observed, {:.0f} ms (bake: distance {:.0f}, travel time {:.0f}, exposure {:.0f}, pack {:.0f} ms)",
                          f.grid.width, f.grid.height, f.grid.cell, f.knownTexels, f.landTexels, f.waterTexels, f.maxTravel, floorMeshCount_,
                          (steadySeconds() - lastFloorBake_) * 1000.0, f.msDistance, f.msTravel, f.msExposure, f.msPack);
+            if (upA_ && upB_) floorUp_ = std::move(f);
         }
     }
     const double now = steadySeconds();

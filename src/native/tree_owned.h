@@ -51,6 +51,24 @@ struct Tpl {
     std::uint64_t passSerial = 0;       // the pass this template was made ready in (scratch)
     std::uint32_t passRun = 0;          // its run in the pass's list (scratch)
     std::uint64_t devBucket = 0;        // Device::ownedBucketKey (scratch, per pass)
+    std::uint64_t uid = 0;              // WS11: unique for the life of the process (State::tplSerial): the layout reuse compares uids, never addresses (a freed template's address is reused)
+};
+
+// WS11 (frame-ownership.md 14.52): what a z-type pass (the main z pre-pass, a cascade) laid out last time, kept while the next pass is the same instance for instance: the row block,
+// the records (window 2's base relative to the block), the items and the position list. Reused only when every instance has the same template (uid) and the same 16 row floats,
+// every run's template record and bucket are the same, and no observer wants a run; check frames build the layout anyway and compare
+struct Layout {
+    bool valid = false;
+    std::uint32_t P = 0, viewSlot = 0, missRun = 0;
+    std::vector<std::uint64_t> uid;                    // per plan instance: its template's uid
+    std::vector<float> rows;                           // per plan instance: its 16 row floats
+    std::vector<std::uint32_t> runFirst, runN;         // per run (order of first appearance): the plan index of its first instance, its instances
+    std::vector<shader::abi::DrawRecord> runBase;      // the template's record when the layout was made
+    std::vector<std::uint64_t> runBucket;
+    std::vector<d3d9::Device::TreeItem> items;
+    std::vector<shader::abi::DrawRecord> recs;         // vsWin[2] = the block's chunk base is patched in
+    std::vector<std::uint32_t> recChunk, posRec;
+    std::vector<std::uint8_t> block;
 };
 
 // what an op's templates are valid for (read at the op's entry; the pass compares)
@@ -90,6 +108,9 @@ struct OpRec {
     // F3-4 (frame-ownership.md 14.29): a shadow view's fronds op that draws nothing by the engine's rule (RenderFrondsZPass 0x6f0cc0: the leaf cards' vertex count rb +0x3c >
     // the fronds' rb +0x3a): no templates; the owned pass checks the rule again and only runs the slot's side effect (the queue sort)
     bool empty = false;
+    // WS17 (frame-ownership.md 14.59): the composition drew nothing and the plan said so (no instance with a LOD, or fronds of strip 0 only): the record keeps the stamp and the slot's side
+    // effects; the pass plans the op again and composes it late when it now has instances
+    bool noDraw = false;
 };
 
 // one planned instance (queue order, leaves: LOD-major as the composition draws them)
@@ -101,6 +122,7 @@ struct Inst {
     std::uint64_t key = 0;
     float row[16] = {};                 // c32 + 4 p .. c35 + 4 p
     bool sun = false;
+    bool staticSh = false;              // WS17: the instance's illumination has static SH (+0x90): the composition cuts a batch of its own around it (planTreeBatches)
     std::uint16_t strip = 0;            // branches / fronds: the LOD's strip length (a fronds instance with 0 is not drawn)
 };
 
@@ -108,12 +130,16 @@ struct Stats {
     std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, instances = 0, items = 0, records = 0, observed = 0, flushes = 0, compBatches = 0, compViews = 0, packets = 0;
     // why an op taken from the list was composed late
     std::uint64_t lateNoRec = 0, lateStamp = 0, lateView = 0, lateMaterial = 0, latePlan = 0, lateSpecial = 0, lateNoTemplate = 0, lateTemplate = 0, lateFlush = 0, lateRows = 0;
+    std::uint64_t specBy[8] = {};  // WS17: special lighting by reason: no list / static SH, dynamic lights, lights unknown, template not table lit, holds all, no entry, other
     std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0, emptyOps = 0, matMoved = 0;  // (matMoved: templates dropped because their material record was re-allocated)  // (emptyOps: F3-4 shadow fronds ops that draw nothing, taken on their empty record)
     std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, no draws, other
     std::uint64_t derived = 0, reused = 0, refused = 0, tableFull = 0;
     // check frames: the composition against the plan and the templates
     std::uint64_t checkOps = 0, checkInst = 0, checkRowDiff = 0, checkLightDiff = 0, checkKeyDiff = 0, checkCountDiff = 0, checkDraws = 0, checkTplDiff = 0, checkMiss = 0, checkMissCompared = 0;
     std::uint64_t planNs = 0, tplNs = 0, rowNs = 0, flushNs = 0, sideNs = 0, takeNs = 0;
+    // WS11 detail timers (RVK_OWNED_TIMERS=1): the op's checks, treeTemplate, the lighting entries, the observers' call, the passes' whole
+    std::uint64_t opNs = 0, mkTplNs = 0, entryNs = 0, obsNs = 0, passNs = 0, recNs = 0, zPassNs = 0, zInst = 0, sInst = 0;
+    std::uint64_t layoutHits = 0, layoutBuilt = 0, layoutChecks = 0, layoutDiff = 0, layoutInst = 0;  // WS11 layout reuse: passes served from / stored in the layout, check-frame comparisons, differences, instances served
     void add(const Stats& o);
 };
 
@@ -143,6 +169,7 @@ struct State {
     std::vector<Inst> composed;         // check frames: the composed instances in order
     std::vector<Inst> plan;             // check frames: the plan made at the op's entry
     bool checkOp = false;
+    bool planOk = false;                // the plan made at the op's entry succeeded
     std::uint32_t logged = 0;
     std::string gate;                   // the last view's unmet condition of the trees' own readiness ("" = none; the stage line names it)
     std::uint64_t lastFrameChecked = ~0ull;
@@ -157,6 +184,9 @@ struct State {
     std::vector<std::uint32_t> order;
     std::uint64_t scrubTick = 0;
     std::uint64_t differingSeen = 0;
+    std::uint64_t tplSerial = 0;
+    std::vector<Layout> layout;          // WS11: by view key x pass (viewKey * 2 + solid)
+    std::vector<std::uint32_t> recChunk; // scratch: the chunk of each of this pass's records (z passes)
 };
 
 }  // namespace rvk::native::tro

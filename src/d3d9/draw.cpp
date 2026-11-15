@@ -21,19 +21,23 @@
 #include "d3d9/device.h"
 #include "gpuscene/cluster_table.h"
 #include "d3d9/memeq.h"
+#include "d3d9/scene_hash.h"
 #include "native/f2c_measure.h"
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
 void diagAfterDraw(Device& d, const char* what);  // device.cpp (RVK_NAN_BISECT)
 
+// RVK_PERF_NO_DRAWTIMER=1 (WS22, frame-ownership.md 16.1: the per-draw clock reads cost Wrapper more than Full): [debug] perf without the per-draw CPU timers (drawMs / drawRecordMs read 0)
+static const bool g_noDrawTimers = [] { char v[8]; return GetEnvironmentVariableA("RVK_PERF_NO_DRAWTIMER", v, sizeof(v)) != 0 && v[0] == '1'; }();
+
 // [debug] perf: CPU time inside a draw call
 struct Device::DrawTimer {
     Device& d;
     std::chrono::steady_clock::time_point t0;
-    explicit DrawTimer(Device& device) : d(device), t0(device.options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    explicit DrawTimer(Device& device) : d(device), t0(device.options_.perf && !g_noDrawTimers ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     ~DrawTimer() {
-        if (d.options_.perf) {
+        if (d.options_.perf && !g_noDrawTimers) {
             d.perf_.drawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
     }
@@ -238,11 +242,13 @@ bool Device::prepareTextures() {
 // F15-1 (frame-ownership.md 14.20): the same per-texture step as prepareTextures, for an owned draw's texture (no draw is being prepared: the record's own texture)
 bool Device::ownedTextureNeedsPrep(const Texture* t) const {
     if (t == nullptr || t->isNull()) return false;
+    // WS9: the common answer first (a sampleable texture needs nothing; the bound-target test below only turns a "needs" into "no")
+    if (!t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return false;
     for (Surface* s : rt_) {
         if (s != nullptr && s->texture() == t) return false;  // (a feedback loop: the derivation refuses it, as before)
     }
     if (ds_ != nullptr && ds_->texture() == t) return false;
-    return t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return true;
 }
 
 void Device::ownedPrepTexture(Texture* t) {
@@ -1734,7 +1740,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     ++stats_.totalDraws;
     ++passDraws_;
     phases_.countDraw();
-    const auto recordStart = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto recordStart = options_.perf && !g_noDrawTimers ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     draws_.count(kind, phase.view);
     if (f5::enabled()) f5Note(primitiveType, geom, kind, phase);
     if (tint != 0) draws_.countTinted();
@@ -1783,7 +1789,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             if (tex_[slot] != nullptr) r->textures[slot] = tex_[slot]->ref().id;
         }
     }
-    if (options_.perf) {
+    if (options_.perf && !g_noDrawTimers) {
         perf_.drawRecordMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - recordStart).count();
     }
     // the camera cross-check: the main view's camera constants as the first solid material draw sees them
@@ -1810,6 +1816,8 @@ void Device::fillCapture(const DrawPacket& p) {
     c.clusterUsing = clusterUsing_;
     c.vi = *p.vi;
     c.dyn = *p.dyn;
+    c.viHash = hashVi(c.vi);
+    c.dynHash = hashDyn(c.dyn);
     c.block = lastBlock_;
     c.query = lastQuery_;
     c.kind = lastKind_;
@@ -1856,6 +1864,13 @@ void Device::fillCapture(const DrawPacket& p) {
         // only draws whose textures were all sampled as such (the block holds their bindless slots)
         if (t == nullptr || t->isNull() || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t == substituteFrom_) {
             ++replayStats.notCaptured;
+            static const bool ncLog = GetEnvironmentVariableA("RVK_NCLOG", nullptr, 0) != 0;  // (diagnostic: why a draw's textures keep it out of the packet cache)
+            static int ncLogged = 0;
+            if (ncLog && ncLogged < 40 && stats_.frames > 600 && lastKind_ == draws::Kind::Skinned) {
+                ++ncLogged;
+                spdlog::info("d3d9: not captured (texture): kind {} slot {} tex {} null {} layout {} substitute {} material '{}'", draws::name(lastKind_), slot, static_cast<const void*>(t), t != nullptr && t->isNull(),
+                             t != nullptr ? static_cast<int>(t->layout()) : -1, t == substituteFrom_, tag_.materialName != nullptr ? tag_.materialName : "");
+            }
             return;
         }
         c.texMask |= 1u << slot;
@@ -1872,7 +1887,16 @@ void Device::fillCapture(const DrawPacket& p) {
     c.env.depthReversed = boundDepthReversed() ? 1u : 0u;
     c.valid = replayAllowed(c);
     if (c.valid) ++replayStats.captured;
-    else ++replayStats.notCaptured;
+    else {
+        ++replayStats.notCaptured;
+        static const bool ncLog = GetEnvironmentVariableA("RVK_NCLOG", nullptr, 0) != 0;
+        static int ncLogged = 0;
+        if (ncLog && ncLogged < 40 && stats_.frames > 600 && lastKind_ == draws::Kind::Skinned) {
+            ++ncLogged;
+            spdlog::info("d3d9: not captured (replayAllowed): kind {} tint {} gbuf {} armed {} logDraws {} wp0 {} custom {} up {} material '{}'", draws::name(lastKind_), static_cast<int>(tint_), gbuf_.active, gbufArmed_,
+                         stats_.totalDraws < options_.logDraws, wp0_.on, customVertices_, up_.active, tag_.materialName != nullptr ? tag_.materialName : "");
+        }
+    }
 }
 
 // F2c-2: the world rows (c33..c35) of the draw being prepared as the object table holds them (null: not an object-window draw); counted against the register file

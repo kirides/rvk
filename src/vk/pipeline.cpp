@@ -235,18 +235,33 @@ bool PipelineCache::prewarmOnce(const PipelineDesc& desc) {
     return true;
 }
 
+void PipelineCache::setBackgroundLimit(unsigned n, bool low) {
+    {
+        const std::lock_guard lock(prewarmMutex_);
+        backgroundLimit_ = n;
+        backgroundLow_ = low;
+    }
+    prewarmCv_.notify_all();
+}
+
 void PipelineCache::prewarmWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline prewarm");
     std::unique_lock lock(prewarmMutex_);
     for (;;) {
-        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmQueue_.empty() || !prewarmUrgent_.empty(); });
+        // (WS12: the plain queue only while fewer than backgroundLimit_ of its builds run: the engine's own thread keeps its core in the world)
+        const auto plainOk = [&] { return !prewarmQueue_.empty() && (backgroundLimit_ == 0 || backgroundActive_ < backgroundLimit_); };
+        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmUrgent_.empty() || plainOk(); });
         if (prewarmQuit_) {
             return;
         }
-        std::deque<PipelineDesc>& q = !prewarmUrgent_.empty() ? prewarmUrgent_ : prewarmQueue_;
+        const bool urgent = !prewarmUrgent_.empty();
+        std::deque<PipelineDesc>& q = urgent ? prewarmUrgent_ : prewarmQueue_;
         const PipelineDesc d = q.front();
         q.pop_front();
+        if (!urgent) ++backgroundActive_;
+        const int priority = urgent ? THREAD_PRIORITY_NORMAL : backgroundLow_ ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_BELOW_NORMAL;
         lock.unlock();
+        SetThreadPriority(GetCurrentThread(), priority);
         bool claimed = false;
         {
             // claimed under the lock, built outside it: draws meanwhile find their pipelines, a get() of this one waits for it
@@ -259,21 +274,55 @@ void PipelineCache::prewarmWorker() {
         }
         if (claimed) {
             const auto t0 = std::chrono::steady_clock::now();
-            VkPipeline p = build(d);
+            // WS25: with pipeline libraries a request is first fast-linked (a link of the shaders' libraries, tens of microseconds, then optimised by the
+            // optimizer thread): the draw waiting for it (the scene forms of the owned path) no longer waits for a whole ~30 ms build per pipeline
+            // behind the other requests. A description that cannot be linked (no libraries) or RVK_PREWARM_LINK=0 builds whole as before.
+            VkPipeline p = VK_NULL_HANDLE;
+            bool linked = false;
+            if (useLibraries_ && prewarmLink_) {
+                p = link(d, false, true);
+                linked = p != VK_NULL_HANDLE;
+            }
+            if (!linked) p = build(d);
+            if (linked) {
+                const std::lock_guard pl(mutex_);
+                const auto [it, inserted] = pipelines_.emplace(d, p);
+                if (inserted) {
+                    fastLinks_.insert(p);
+                    fastLinkedCount_.fetch_add(1, std::memory_order_relaxed);
+                } else if (fastLinks_.contains(it->second)) {
+                    vkDestroyPipeline(ctx_->device(), p, nullptr);  // (a draw's own fast link arrived meanwhile)
+                    p = VK_NULL_HANDLE;
+                    linked = false;
+                } else {
+                    vkDestroyPipeline(ctx_->device(), p, nullptr);
+                    p = VK_NULL_HANDLE;
+                    linked = false;
+                }
+                if (linked) {
+                    const std::lock_guard ol(optMutex_);
+                    optQueue_.emplace_back(d, p);
+                }
+            }
+            if (linked) optCv_.notify_one();
             const auto ns = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-            if (p != VK_NULL_HANDLE) {
+            if (p != VK_NULL_HANDLE || linked) {
                 prewarmed_.fetch_add(1, std::memory_order_relaxed);
                 prewarmNs_.fetch_add(ns, std::memory_order_relaxed);
             }
             {
                 const std::lock_guard pl(mutex_);
-                if (p != VK_NULL_HANDLE) insertBuilt(d, p);  // a failure is left to get(), which logs and caches it
+                if (p != VK_NULL_HANDLE && !linked) insertBuilt(d, p);  // a failure is left to get(), which logs and caches it
                 building_.erase(d);
             }
             builtCv_.notify_all();
         }
         lock.lock();
+        if (!urgent) {
+            --backgroundActive_;
+            prewarmCv_.notify_one();  // (a worker waiting for a free background slot)
+        }
     }
 }
 

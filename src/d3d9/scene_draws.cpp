@@ -643,9 +643,9 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out,
         out.viHash = hashVi(*out.vi);
     } else {
         out.vi = &c.vi;
-        out.viHash = hashVi(c.vi);
+        out.viHash = c.viHash;
     }
-    out.dynHash = hashDyn(c.dyn);
+    out.dynHash = c.dynHash;
     out.indexBuffer = c.packet.indexBuffer;
     out.indexOffset = c.packet.indexOffset;
     out.index32 = c.packet.index32;
@@ -733,8 +733,8 @@ void Device::loadOwnedRegisters(const OwnedWindows& ow) {
 }
 
 std::uint64_t Device::f2c4BucketKey(const CachedDraw& c) const {
-    std::uint64_t h = hashVi(c.vi);
-    h = f2c4::mix64(h, hashDyn(c.dyn));
+    std::uint64_t h = c.viHash;
+    h = f2c4::mix64(h, c.dynHash);
     h = f2c4::mix64(h, static_cast<std::uint64_t>(c.scenePipeline2));
     h = f2c4::mix64(h, c.packet.indexBuffer);
     h = f2c4::mix64(h, c.packet.indexOffset);

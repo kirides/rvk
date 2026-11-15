@@ -1523,7 +1523,51 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
-    r.shadowsRt = &reg.add({
+    r.shadowsFit = &reg.add({
+        .key = "shadows.fit",
+        .label = "Shadow map fit",
+        .category = "Shadows",
+        .description = "How tightly the sun's shadow maps are fitted around what the camera sees. Tight: a smaller, steadier fit "
+                       "(sharper shadows at the same resolution, or the same sharpness at a lower one). Adaptive: fitted to the "
+                       "surfaces actually in view each frame (a small GPU pass; sharper still, most where little of the view is "
+                       "near). Game: the game's own fit.",
+        .type = Type::Enum,
+        .defaultValue = 2,  // sdsm (shadows.md 8.10: x1.2 - 2.7 texel density at +0.03 - 0.10 ms GPU, fast turns / sun sweeps / cuts checked)
+        .options = {"engine", "sphere", "sdsm"},
+        .optionLabels = {"Game", "Tight", "Adaptive"},
+        .flags = Flag::Advanced,
+        .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
+    });
+    r.shadowsSoft = &reg.add({
+        .key = "shadows.soft",
+        .label = "Soft shadows",
+        .category = "Shadows",
+        .description = "Shadows get softer the farther they are from the object that casts them (sharp where a tree or a post touches "
+                       "the ground, soft at the tip of its shadow), smoothed over a few frames. Costs some graphics performance. "
+                       "Off: even, crisp shadow edges.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "pcss"},
+        .optionLabels = {"Off", "On"},
+        .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
+    });
+    r.shadowsSoftSize = &reg.add({
+        .key = "shadows.soft_size",
+        .label = "Soft shadow size",
+        .category = "Shadows",
+        .description = "How wide the soft shadow edges grow with the distance from the object (the apparent size of the sun, in degrees). "
+                       "The real sun is 0.27; higher is softer.",
+        .type = Type::Float,
+        .defaultValue = 0.15,
+        .min = 0.1,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .needs = {{"shadows.soft", "off", true, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
+    });    r.shadowsRt = &reg.add({
         .key = "shadows.rt",
         .label = "Ray-traced shadows",
         .category = "Shadows",
@@ -1907,6 +1951,36 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "clusters", "slots", "shadows", "bake", "prebake", "path"},
         .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows", "Baked light shadow", "Colour before the baked-light shadow", "Cluster path used"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Clustered lights",
+    });
+    r.lightingClusterBuild = &reg.add({
+        .key = "lighting.cluster_build",
+        .label = "Light cluster build kernel",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer switch: \"Columns\" = one group per screen-tile column culls each light once (GD3D11's scheme), \"Threads\" = the legacy one thread per cluster kernel "
+                       "(A/B), \"Compare\" (Vulkan) runs the legacy kernel on the columns' output and counts differing clusters (rvk.log \"cluster build compare\", must be 0).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"columns", "threads", "compare"},
+        .optionLabels = {"Columns", "Threads (legacy)", "Compare"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}},
+        .page = "Debug", .section = "Clustered lights",
+    });
+    r.lightingOccupancy = &reg.add({
+        .key = "lighting.occupancy",
+        .label = "Light table occupancy shortcut",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer switch: pixels whose cluster holds no table light skip the per-pixel light selection (exact: the same colours). \"Off\" = every pixel walks the "
+                       "cluster path (A/B), \"Compare\" (Vulkan) also runs the full path on those pixels and counts differences (rvk.log \"occupancy compare\", must be 0).",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"off", "on", "compare"},
+        .optionLabels = {"Off", "On", "Compare"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}},
         .page = "Debug", .section = "Clustered lights",
     });
     r.lightingShadows = &reg.add({
@@ -2665,9 +2739,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "With native.owned_static: every N-th frame (and the frame before it) no op leaves the lists: the old path composes and draws them and the record-derived "
-                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never.",
+                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never "
+                       "(the player default: the check frames cost ~2 ms CPU + ~1 ms GPU per frame; scripts/run.ps1's test baseline pins 10).",
         .type = Type::Int,
-        .defaultValue = 10,
+        .defaultValue = 0,
         .min = 0,
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,
@@ -2825,6 +2900,37 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"native.owned_ordered", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeEventObservers = &reg.add({
+        .key = "native.event_observers",
+        .label = "Native frame: observers by event",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, with persistent owned draws (frame-ownership.md 16.9, WS23): an observer that keeps no per-frame state for a record is shown the record only when it "
+                       "entered or changed (retained draw, signature, env epoch, object rows): the enhanced water's sea floor learning (a draw it has learnt is not shown again) and "
+                       "object motion's covered draws (counters only). Of the unchanged records a rolling 1 in 64 per frame and every one on a native.owned_check frame are observed "
+                       "again and compared with what the observer remembers (mismatch: counted and fixed; DIFFERING on a check frame). Off = every owned draw is shown per draw. "
+                       "rvk.log `native: event observers (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeOwnedDelta = &reg.add({
+        .key = "native.owned_delta",
+        .label = "Native frame: owned path work by change",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, with owned static draws (frame-ownership.md 14.51, WS9): the owned path's per-op work follows what changed: a record the owned path refuses "
+                       "as out of date (made while its scene forms were pending, a module or variant moved since) is remade at its op's late composition instead of only on a check "
+                       "frame (or, for a record made before its draw's scene form existed, as soon as its composition draws a scene draw). Off = such records are remade on "
+                       "check frames only (with native.owned_check = 0: never). rvk.log `native: owned static (5 s)` ... `records out of date`, `native: stages` owned_delta.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_static", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
     r.nativeOwnedBillboards = &reg.add({

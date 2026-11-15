@@ -70,6 +70,9 @@ public:
     // description is queued once
     // returns true when it queued `desc` (first request)
     bool prewarmOnce(const PipelineDesc& desc);
+    // WS12: at most n builds of the plain prewarm queue (the pipelines known from earlier runs) at once (0 = no limit), at the lowest thread priority when `low`, else below
+    // normal (the urgent queue, a draw waiting for its pipeline, is never limited and keeps normal priority)
+    void setBackgroundLimit(unsigned n, bool low);
     // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
     // device teardown, before the shader modules are destroyed: the prewarm workers and the library optimiser joined (queues dropped, a build in flight
@@ -126,6 +129,9 @@ private:
     std::deque<PipelineDesc> prewarmQueue_;
     std::deque<PipelineDesc> prewarmUrgent_;  // prewarmOnce: draw-time requests
     bool prewarmQuit_ = false;
+    unsigned backgroundLimit_ = 0;   // (prewarmMutex_) setBackgroundLimit
+    bool backgroundLow_ = false;
+    unsigned backgroundActive_ = 0;  // plain-queue builds in flight
     struct HashOf {
         std::size_t operator()(const PipelineDesc& d) const;
     };
@@ -162,6 +168,7 @@ private:
     void stopLibraries();
     void destroyLibraries();
     bool useLibraries_ = false;
+    bool prewarmLink_ = true;  // WS25: the prewarm workers fast-link first (RVK_PREWARM_LINK=0: whole builds)
     bool retainLto_ = false;  // true = the former library recipe (RVK_GPL_RECIPE=lto); false = DXVK's
     std::mutex libMutex_;
     std::map<LibKey, VkPipeline> shaderLibs_;
