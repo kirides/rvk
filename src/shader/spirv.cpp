@@ -1,6 +1,13 @@
 #include "shader/spirv.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 #include "shader/dxc.h"
 
@@ -17,7 +24,13 @@ SpirvResult compileHlsl(Stage stage, std::string_view hlsl, std::string_view nam
     r.source = std::string(hlsl);
     r.entry = stage == Stage::Vertex ? "VSMain" : "PSMain";
     r.profile = stage == Stage::Vertex ? "vs_6_6" : "ps_6_6";
-    r.optLevel = 1;
+    // WS31 (frame-ownership.md 16.21): -O0 by default. The driver compiles the SPIR-V again, the GPU time is the same as with -O1 (jungle -0.2 %, hold within the noise), but a DXC compile
+    // costs about half and the variant queue of a cold / updated first session empties in ~80 s instead of ~200. RVK_DXC_OPT_SPIRV=n restores a level (the cache key includes it).
+    static const int opt = [] {
+        char v[8];
+        return GetEnvironmentVariableA("RVK_DXC_OPT_SPIRV", v, sizeof v) != 0 ? std::clamp(std::atoi(v), 0, 3) : 0;
+    }();
+    r.optLevel = opt;
     r.cache = true;
     r.half16 = half16;
     r.debugInfo = debugInfo();

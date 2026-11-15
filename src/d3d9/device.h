@@ -1236,6 +1236,8 @@ public:
     // prewarm) may use every thread at their normal low priority; in the world they run on few threads at the lowest one
     void setBackgroundFree(bool free);
     bool backgroundFree() const { return backgroundFree_.load(std::memory_order_relaxed); }
+    double variantTuneBase() const { return variantTune_.base; }  // WS31 (engine thread: the log line)
+    double variantTuneTarget() const { return variantTune_.target; }
     unsigned variantWorkersAllowed() const { return variantLimit(); }  // WS30: the limit now (adaptive in the world)
     bool unpaced() const { return unpaced_; }
     // Exclusive fullscreen (docs/research/window-mode.md 8). `monitor` != null: the swapchain is built with the exclusive
@@ -2846,7 +2848,8 @@ private:
         std::chrono::steady_clock::time_point start{};
         double cpuSum = 0.0;
         std::uint32_t frames = 0;
-        std::uint32_t changes = 0, low = 0;
+        std::uint32_t changes = 0, low = 0, windows = 0;
+        double base = 0.0, smooth = 0.0, target = 0.0;  // WS31: the engine thread's CPU with few workers, its smoothed window mean, the current target
     } variantTune_;  // (engine thread only)
     std::atomic<std::uint64_t> variantPromoted_{0}, variantLimited_{0};
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request

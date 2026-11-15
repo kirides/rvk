@@ -1388,9 +1388,9 @@ void StaticOps::lateSecondReport() {
         std::size_t queued = 0;
         std::uint64_t built = 0, failed = 0;
         dev_.variantQueue(queued, built, failed);
-        spdlog::info("native: composed late (1 s) t+{:.0f} s: main {} ops in {} views ({:.1f} / view), cascades {} ops in {} views; {}; variant queue {} (built {}, failed {} run total), variant workers allowed {}",
+        spdlog::info("native: composed late (1 s) t+{:.0f} s: main {} ops in {} views ({:.1f} / view), cascades {} ops in {} views; {}; variant queue {} (built {}, failed {} run total), variant workers allowed {} (engine base {:.1f} ms, target {:.1f})",
                      std::chrono::duration<double>(now - lateStart_).count(), L.ops[0], L.views[0], L.views[0] != 0 ? static_cast<double>(L.ops[0]) / static_cast<double>(L.views[0]) : 0.0,
-                     L.ops[1], L.views[1], why, queued, built, failed, dev_.variantWorkersAllowed());
+                     L.ops[1], L.views[1], why, queued, built, failed, dev_.variantWorkersAllowed(), dev_.variantTuneBase(), dev_.variantTuneTarget());
     }
     late1s_ = {};
     late1sAt_ = now;

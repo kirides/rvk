@@ -2546,21 +2546,27 @@ unsigned Device::variantLimit() const {
     return world != 0 ? std::min(limit, world) : limit;
 }
 
-// WS30 (frame-ownership.md 16.20): in the world the number of variant workers building at once follows the engine thread's CPU per frame. Measured on the traversal route in the first
-// session after an update: the engine thread (never descheduled: its thread cycle time equals its wall time) takes 15.6 ms of CPU per frame with 12 workers compiling, 12 with 8, 11 with 6,
-// 9 with 4 and 6.5 without (the same code runs slower next to the DXC compiles: shared caches / memory bandwidth, not SMT, not the scheduler: reserving cores or EcoQoS changed little).
-// Every 0.5 s the mean CPU per frame (a frame is capped at 40 ms so that one hitch does not decide) is compared with the target: above it one worker fewer (at least 2), below 80 % of it one
-// more, up to all. RVK_VARIANT_ADAPT=0 = the former fixed limit, RVK_VARIANT_TARGET_MS (default 10), RVK_VARIANT_MIN (default 2).
+// WS30 / WS31 (frame-ownership.md 16.20, 16.21): in the world the number of variant workers building at once follows the engine thread's CPU per frame, RELATIVE to what that
+// thread costs on this machine in this scene when few workers run (the compiles slow the engine thread by up to 2x: shared L3 / memory bandwidth, not the scheduler). The law:
+//   every 0.5 s the mean CPU per frame (a frame counts at most 40 ms) is smoothed (s = (s + mean) / 2). base = an estimate of the engine's uncontended cost: it follows s
+//   downwards at once (a lower s from any limit is a cheaper scene or less contention: the real cost is at most that), and upwards only slowly (2 % a window, ~25 s) and only while
+//   the limit is at most min + 1 (a heavier scene; with many workers a higher s is contention, not the scene). target = base * ratio + margin (1.3 / 0.3 ms).
+//   s > target: one worker fewer (at least min); s < target - 0.1 * base for three windows in a row: one more (up to all).
+// The first windows of a world visit run at the minimum (they seed the base). A machine or scene with a high warm cost keeps its workers (an absolute 10 ms target pinned the limit
+// at 2 above that). RVK_VARIANT_ADAPT=0 = the former fixed limit, RVK_VARIANT_TARGET_MS=x = an absolute target (the WS30 law), RVK_VARIANT_RATIO / _MARGIN_MS, RVK_VARIANT_MIN (2).
 void Device::tuneVariantWorkers(float cpuMs) {
     static const struct Cfg {
         bool on = true;
-        double target = 10.0;
+        double target = 0.0;  // absolute (> 0), else relative
+        double ratio = 1.3, margin = 0.3;
         unsigned min = 2;
     } cfg = [] {
         Cfg c;
         char v[16];
         if (GetEnvironmentVariableA("RVK_VARIANT_ADAPT", v, sizeof v) != 0) c.on = std::atoi(v) != 0;
         if (GetEnvironmentVariableA("RVK_VARIANT_TARGET_MS", v, sizeof v) != 0 && std::atof(v) > 0.0) c.target = std::atof(v);
+        if (GetEnvironmentVariableA("RVK_VARIANT_RATIO", v, sizeof v) != 0 && std::atof(v) > 1.0) c.ratio = std::atof(v);
+        if (GetEnvironmentVariableA("RVK_VARIANT_MARGIN_MS", v, sizeof v) != 0 && std::atof(v) >= 0.0) c.margin = std::atof(v);
         if (GetEnvironmentVariableA("RVK_VARIANT_MIN", v, sizeof v) != 0 && std::atoi(v) > 0) c.min = static_cast<unsigned>(std::atoi(v));
         return c;
     }();
@@ -2569,6 +2575,9 @@ void Device::tuneVariantWorkers(float cpuMs) {
     if (backgroundFree_.load(std::memory_order_relaxed)) {
         if (variantAllowed_.load(std::memory_order_relaxed) != 0) variantAllowed_.store(0, std::memory_order_relaxed);  // (outside the world: all of them)
         t.frames = 0;
+        t.base = 0.0;  // (the next visit measures again)
+        t.smooth = 0.0;
+        t.windows = 0;
         return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -2580,14 +2589,24 @@ void Device::tuneVariantWorkers(float cpuMs) {
     t.cpuSum = 0.0;
     t.frames = 0;
     const unsigned all = variantThreadCount();
+    const unsigned lo = std::min(cfg.min, all);
     unsigned cur = variantAllowed_.load(std::memory_order_relaxed);
-    if (cur == 0) cur = all;
+    if (cur == 0) cur = lo;  // (the first windows of a visit measure the base with the minimum)
+    t.smooth = t.windows == 0 ? mean : (t.smooth + mean) * 0.5;
+    ++t.windows;
+    if (t.base <= 0.0) t.base = t.smooth;
+    else if (t.smooth < t.base) t.base += (t.smooth - t.base) * 0.5;
+    else if (cur <= lo + 1) t.base += (t.smooth - t.base) * 0.02;
+    const double target = cfg.target > 0.0 ? cfg.target : t.base * cfg.ratio + cfg.margin;
+    const double slack = cfg.target > 0.0 ? target * 0.2 : t.base * 0.1;
     unsigned next = cur;
-    if (mean > cfg.target) {
+    if (t.windows <= 3) {
+        next = lo;
+    } else if (t.smooth > target) {
         t.low = 0;
-        next = std::max(cfg.min, cur - 1);
-    } else if (mean < cfg.target * 0.8) {
-        if (++t.low >= 2) {  // (one more only after a second quiet window: the limit does not hunt with every camera turn)
+        next = std::max(lo, cur - 1);
+    } else if (t.smooth < target - slack) {
+        if (++t.low >= 3) {  // (one more only after quiet windows in a row: the limit does not hunt with every camera turn)
             t.low = 0;
             next = std::min(all, cur + 1);
         }
@@ -2595,6 +2614,7 @@ void Device::tuneVariantWorkers(float cpuMs) {
         t.low = 0;
     }
     next = std::min(next, all);
+    t.target = target;
     if (next != cur || variantAllowed_.load(std::memory_order_relaxed) == 0) {
         variantAllowed_.store(next, std::memory_order_relaxed);
         if (next != cur) {
