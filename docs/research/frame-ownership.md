@@ -7708,3 +7708,56 @@ Engine-thread CPU per frame (mean ms; route 0 - 30 s / 30 - 80 s / 80 - 180 s): 
 **Fix.** `PipelineCache::current(p)` (a `successor_` map, fast link -> its replacement, filled where `superseded_` is) through `GameDevice::currentPipeline` (default identity; Vulkan: `GameRecord::currentPipeline`) / `Device::currentPipeline`; the check frames of the billboards (`bbDraw`) and of the op records (`recDraw`) compare `current(derived)` with `current(composed)`, so a swap is never DIFFERING while a genuinely different description still is. rvk.log `native: owned billboards (5 s)` counts the compares that would have differed: `pipelines swapped by the cache N`.
 
 **Verification.** `rvk_tests` 363 / 0, `rvk_d3d9test --validation` PASS 0 / 0. Full, test baseline, private copy `risen-test-vk-billdiff` instance 52, lock `rvk-billdiff` (`scripts/traverse-session.ps1`, `rvk-work/scratch/billdiff`): the warm-up session (cache keys built) hit the case, **`pipelines swapped by the cache 20`, DIFFERING 0** (the 20 compares are the old DIFFERING); updated-cache sessions (`bin\rvk\cache\hlsl` removed, keys kept) b1 - b4: DIFFERING 0, no `picture_check` FAILED, no `[error]` lines.
+
+### 16.20 WS30: the cold-start CPU gap is the compile workers' contention, not work of ours (2026-11-15, branch `worktree-agent-a3ca1a12572c40016` on main b7d6825; env `RVK_VARIANT_ADAPT=0` = the former fixed limit, `RVK_VARIANT_TARGET_MS` (default 10), `RVK_VARIANT_MIN` (default 2); diagnostics `tools/hitch/winprof.py`, `win5s.py`, `winsum.py`, `thrcpu.py`, frames.csv column `thread_cpu`)
+
+**Method.** Traversal route (`rvk_traverse`, 100 s sessions), private copy `risen-test-vk-ws30` instance 53, default lock (no shared copy existed), `RisenTest.exe`, player defaults, vsync off. Profiled sessions (`-CpuProfile`, normal sampler, no spike rows): `tools/hitch/winprof.py --from 30 --to 80` = inclusive / self / module ms per frame (profile % x the 5 s block's mean CPU per frame) per function side by side; `win5s.py` = per 5 s p50 / p95, CPU, variant queue, pending ops, variant-decision refusals, RT instances / row writes, owned share. Profile overhead is large (warm 30 - 80 s: 8.5 ms profiled against 6.5 unprofiled): states are compared within the profiled set.
+
+**The gap (30 - 80 s, engine-thread CPU per frame).** Full warm 8.5 ms (pw1) / 6.5 unprofiled (w0, hA, hB), Full updated 17.5 (pu1) / 14.7 unprofiled (uA x3: 14.2 - 15.6), Wrapper updated 6.4 profiled / 5.8 unprofiled. Updated minus warm, profiled, ms per frame (inclusive; the first rows are plumbing):
+
+| function | warm | updated | diff |
+|---|---|---|---|
+| `eCApplication::DoRender` | 6.64 | 13.58 | +6.94 |
+| `detourSceneUpdate` | 5.91 | 12.23 | +6.33 |
+| `detourExecute` (scene Execute) | 4.72 | 9.77 | +5.05 |
+| `eCFrustumDatabase::Execute` | 4.46 | 9.26 | +4.80 |
+| `StaticOps::opEnterImpl` | 1.79 | 4.31 | +2.52 |
+| `FrameTap::opEnter` | 1.79 | 4.15 | +2.35 |
+| `eCApplication::Process` (engine streaming / physics) | 1.77 | 3.69 | +1.92 |
+| `FrameTap::passBeginImpl` | 1.61 | 3.25 | +1.64 |
+| `eCImageFilterScene::OnUpdateOutput` (75cf33) | 1.18 | 2.44 | +1.26 |
+| `StaticOps::ownedPass` | 1.12 | 2.35 | +1.23 |
+| `StaticOps::issue` | 0.69 | 1.81 | +1.12 |
+| `eCCameraBase::Update` | 0.97 | 2.07 | +1.09 |
+| `detourBeginZPass` | 0.82 | 1.75 | +0.93 |
+| `detourShadowMapRender` (the engine's own shadow render inside) | 0.76 | 1.67 | +0.91 |
+| `Device::inject` | 0.95 | 1.81 | +0.86 |
+| `RtScene::record` (gpuInput self 0.057 -> 0.164, gpuBlasRow 0.023 -> 0.072) | 0.57 | 1.23 | +0.66 |
+
+By module (self): d3d9 4.30 -> 9.09 (2.1x), engine 1.48 -> 3.05 (2.1x), sharedbase 0.63 -> 1.26 (2.0x), vcruntime140 0.41 -> 0.98 (2.4x), amdvlk64 0.48 -> 0.86, ntdll 0.68 -> 1.02, game 0.27 -> 0.57 (2.1x). **Everything is 2x slower, the engine's own code (culling, camera, property sets, navigation) as much as ours.** The RT scene loop (WS29's 31 %) is not special: it doubles like the rest (0.57 -> 1.23), and its row writes per frame are the same as warm (inputs 0.3 - 30, BLAS rows 0.1 - 0.7 per frame in both). The pending path's extra work exists (variant-decision refusals 45,000 - 57,000 per 5 s while the queue is long, `composeFx` 0.04 -> 0.52, `composePrecipitation` 0 -> 0.35) but it is ~1 ms, not the 9.
+
+**Evidence for the cause.**
+1. The engine thread is not descheduled: its thread cycle time (`QueryThreadCycleTime`, new frames.csv column `thread_cpu`, `thrcpu.py`) equals its wall CPU per frame (98 - 102 % in warm and updated sessions alike).
+2. The machine is saturated: sampler CPU 100 % for the whole 30 - 80 s of an updated session (warm 20 - 40 %); the process takes 78.6 % of all 16 logical processors (12 `rvk dxc compile` helper threads, the `rvk pipeline optimizer` thread at 96 % of a core, the engine thread at 98 %).
+3. The cost follows the number of workers compiling at once (`RVK_VARIANT_THREADS`, updated, one session each, same build): engine CPU per frame in 30 - 80 s **12 workers 15.6 ms, 8: 12.0, 6: 11.0, 4: 9.0, none (warm) 6.5**; frames > 25 ms 199 / 95 / 47 / 28 / 14. (WS12's note that the engine thread's cost does not depend on the number of workers does not hold in this window.)
+4. It is not SMT or the scheduler: excluding the last 3 / 2 physical cores (both SMT siblings) from all background threads' affinity gave 11.9 / 14.0 ms (12 workers), EcoQoS on them 14.8 (tried, removed again). What remains is shared L3 / memory bandwidth / allocator traffic of 12 concurrent DXC compiles (not separated further).
+
+**Fix: the number of variant workers building at once in the world follows the engine thread's CPU per frame** (`Device::tuneVariantWorkers`, called from `Device::present`): every 0.5 s (>= 8 frames; a frame counts at most 40 ms) the mean CPU per frame is compared with the target (10 ms): above it one worker fewer (at least 2), below 80 % of it one more after two such windows, up to all (`variantLimit()`); outside the world (loading / menu, `backgroundFree_`) all of them as before. Exploratory targets (updated, 1 session each): 7 ms -> 8.3 ms CPU / mean 3.2 workers, 9 -> 8.9, 12 -> 10.1 / 6.5 workers. rvk.log `native: composed late` lines show `variant workers allowed N`. The queue drains later (A: empty at +80 s of the route, B: at +130 - 140 s); the pending forms are composed by the engine path meanwhile exactly as before (same picture, only the length of the phase changed).
+
+**A/B (same build, A = `RVK_VARIANT_ADAPT=0`, B = default; route window 30 - 80 s, ms; sessions alternated; sampler mean machine CPU A 76 - 78 %, B 55 - 58 %; 0 sessions dropped).**
+
+| state / arm | sessions | p50 | p95 | p99 | max | > 25 ms | > 33 | > 50 | engine CPU / frame |
+|---|---|---|---|---|---|---|---|---|---|
+| updated A | uA1 / uA2 / uA3 | 13.4 / 15.1 / 14.0 | 25.0 / 26.0 / 25.8 | 30.9 / 30.8 / 31.4 | 57 / 64 / 60 | 175 / 207 / 217 | 17 / 21 / 26 | 2 / 4 / 2 | 14.2 / 15.6 / 14.4 |
+| updated B | uB1 / uB2 / uB3 | 8.7 / 8.2 / 8.1 | 14.5 / 15.2 / 15.8 | 19.1 / 21.0 / 21.3 | 47 / 54 / 52 | 19 / 22 / 28 | 9 / 11 / 12 | 0 / 1 / 1 | 8.9 / 8.6 / 8.7 |
+| updated Wrapper | uW1 / uW2 | 5.8 / 5.8 | 9.3 / 9.4 | 11.6 / 11.8 | 40 / 40 | 7 / 7 | 2 / 4 | 0 / 0 | 5.8 / 5.8 |
+| cold A | cA1 / cA2 | 14.1 / 13.8 | 25.2 / 26.3 | 30.8 / 33.4 | 143 / 132 | 177 / 259 | 25 / 36 | 8 / 5 | 14.9 / 14.7 |
+| cold B | cB1 / cB2 | 8.0 / 7.5 | 15.5 / 15.8 | 21.9 / 22.2 | 136 / 126 | 35 / 32 | 11 / 12 | 3 / 2 | 8.7 / 8.4 |
+| warm A | hA1 / hA2 | 6.3 / 6.2 | 10.9 / 11.0 | 14.0 / 14.1 | 41 / 48 | 10 / 16 | 6 / 6 | 0 / 0 | 6.5 / 6.5 |
+| warm B | hB1 / hB2 | 6.2 / 6.3 | 10.8 / 11.1 | 14.3 / 14.3 | 41 / 44 | 12 / 9 | 7 / 4 | 0 / 0 | 6.4 / 6.5 |
+
+Means: updated A -> B p50 14.2 -> 8.4, p95 25.6 -> 15.2, frames > 25 ms 200 -> 23 per 50 s, engine CPU 14.7 -> 8.7 ms (Wrapper 5.8; warm 6.5); cold A -> B p95 25.8 -> 15.6, > 25 ms 218 -> 34, > 50 ms 6.5 -> 2.5 (the cold max of 126 - 143 ms is the D3DX compile on the engine thread, unchanged: 16.18 Left 4); warm unchanged (p95 11.0 / 10.9, > 25 ms 13 / 10). Whole 100 s route: updated A -> B > 25 ms 289 -> 116, p95 23.4 -> 16.2; cold 333 -> 138. 180 s sessions (uA180 / uB180; 30 - 80 s: A 15.8 ms CPU, 224 frames > 25 ms; B 8.4, 26; 80 - 130 s: A 6.2 / 8, B 8.1 / 21; 130 - 180 s both 4.0 - 4.2, 0): B pays the longer pending phase (130 s against 80 s) at ~8 ms instead of ~15 ms.
+
+**Correctness.** The change only moves WHEN variants arrive (same order; pending forms use the engine path as before): in every A / B session `[error]` 0, `[warning]` 0, no `picture_check` FAILED, `DIFFERING` and `MISS` counters 0. The RT scene, its materials and the owned stages are untouched (no picture comparison made: nothing that draws changed). No GPU-address code. Gates: `rvk_tests` 364 / 0 failures, `rvk_d3d9test --validation` PASS (Vulkan and D3D12, 0 validation errors), `rvk_vktest --passes` PASS.
+
+**Left.** (1) Even with 4 - 5 workers the window costs 8.7 ms against 6.5 warm: shared-cache contention of the compiles (the single `rvk pipeline optimizer` thread alone is 40 - 96 % of a core in this phase); a cheaper first compile (`-O0`, rebuilt at `-O1` later) or a smaller DXC working set would lower the cost per worker. (2) Target 10 ms trades phase length for frame time; the controller hunts between 2 and 12 workers on the route's camera turns (period ~12 s), a smoother control is possible. (3) The RT loop, `recEnd` and the record builds' vector copies are no longer suspects for this phase (they scale with the slowdown, not with the state). (4) `thread_cpu` is calibrated once at startup (a 20 ms spin): use ratios between windows of one session, not absolute values across sessions.

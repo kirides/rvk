@@ -1236,6 +1236,7 @@ public:
     // prewarm) may use every thread at their normal low priority; in the world they run on few threads at the lowest one
     void setBackgroundFree(bool free);
     bool backgroundFree() const { return backgroundFree_.load(std::memory_order_relaxed); }
+    unsigned variantWorkersAllowed() const { return variantLimit(); }  // WS30: the limit now (adaptive in the world)
     bool unpaced() const { return unpaced_; }
     // Exclusive fullscreen (docs/research/window-mode.md 8). `monitor` != null: the swapchain is built with the exclusive
     // structures for that monitor (re-created now when this changes); `hold`: the window is in front, take the exclusive
@@ -2150,6 +2151,7 @@ private:
     bool gbufferLit() const;                                                        // ... that test
     BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
+    void tuneVariantWorkers(float cpuMs);  // WS30: the in-world worker limit follows the engine thread's CPU per frame (device.cpp)
     unsigned variantLimit() const;         // WS12: workers allowed to build at once: all while the engine is not in the world (loading / menu), a few while it is
     void promoteVariant(const ShaderRef& s, VariantSlot slot);  // WS12: a draw needs a queued variant: it goes ahead of the known-key (background) requests
     static unsigned variantThreadCount();  // 14.26: the variant workers (all hardware threads but four, 3..12; RVK_VARIANT_THREADS)
@@ -2839,6 +2841,13 @@ private:
     std::deque<VariantJob> variantJobs_;
     std::size_t variantUrgentJobs_ = 0;  // WS12: the jobs at the front of variantJobs_ that a draw asked for (variantMutex_)
     std::atomic<bool> backgroundFree_{true};
+    std::atomic<unsigned> variantAllowed_{0};  // WS30: the adaptive in-world limit (0 = not set yet: all)
+    struct VariantTune {
+        std::chrono::steady_clock::time_point start{};
+        double cpuSum = 0.0;
+        std::uint32_t frames = 0;
+        std::uint32_t changes = 0, low = 0;
+    } variantTune_;  // (engine thread only)
     std::atomic<std::uint64_t> variantPromoted_{0}, variantLimited_{0};
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
     mutable std::mutex shaderJobMutex_;
