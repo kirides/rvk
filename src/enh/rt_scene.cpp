@@ -2917,12 +2917,21 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
     builds.reserve(maxBuilds);
     std::vector<std::uint64_t> built;
     bool copied = false;  // strip conversions copied into their index buffers: visible to the builds (and the shaders) first
+    // WS26 (frame-ownership.md 16.15): a CPU time budget for the input preparation of one frame's builds (the index / vertex reads into zeroed
+    // temporaries, ~1 - 2 ms per BLAS: 48 BLAS of a bulk delivery took 50 - 85 ms on the render thread); the rest waits for the next frames.
+    // RVK_RT_BUILD_MS=<ms> (default 6, 0 = off = the former per-frame count / triangle budget only)
+    static const double timeBudgetMs = [] {
+        char b[32];
+        return GetEnvironmentVariableA("RVK_RT_BUILD_MS", b, sizeof b) ? std::atof(b) : 6.0;
+    }();
+    const auto loopStart = std::chrono::steady_clock::now();
     while (!pending_.empty() && built.size() < maxBuilds) {
         Blas* b = findBlas(pending_.front());
         if (b == nullptr || b->state != BlasState::Pending) {
             pending_.pop_front();
             continue;
         }
+        if (timeBudgetMs > 0.0 && !built.empty() && msSince(loopStart) > timeBudgetMs) break;
         if (!budget.take(b->key.primitives)) break;
         pending_.pop_front();
         const auto c0 = std::chrono::steady_clock::now();
