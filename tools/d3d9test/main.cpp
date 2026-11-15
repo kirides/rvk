@@ -1346,6 +1346,27 @@ void testLockAfterUpload(Fixture& f) {
     f.dev.release(std::move(tex));
 }
 
+void testUploadRows(Fixture& f) {
+    // WS27: Texture::uploadRows fills a texture in row slices straight from caller memory (no CPU copy), over two "frames"
+    TextureDesc d;
+    d.width = d.height = 64;
+    d.format = rhi::d3dfmt::A8R8G8B8;
+    d.pool = POOL_MANAGED;
+    auto tex = f.dev.createTexture(d);
+    std::vector<std::uint32_t> top(64 * 32, 0xFFFF0000u), bottom(64 * 32, 0xFF0000FFu);
+    bool ok = tex->uploadRows(f.dev.uploadList(), 0, 32, top.data(), 64 * 4);
+    ok = tex->uploadRows(f.dev.uploadList(), 32, 32, bottom.data(), 64 * 4) && ok;
+    if (!ok) {
+        std::printf("  FAIL uploadRows: refused\n");
+        ++g_failures;
+    }
+    Pixels p;
+    drawTexture(f, tex.get(), "upload_rows", p);
+    expect("uploadRows: top slice", p, 32, 10, 0xFF0000);
+    expect("uploadRows: bottom slice", p, 32, 50, 0x0000FF);
+    f.dev.release(std::move(tex));
+}
+
 void testReadOnlyLockOfFreshTexture(Fixture& f) {
     // eCGfxImageData::OnRead (the savegame thumbnails) fills a fresh managed texture through LockImageLayer(level,
     // D3DLOCK_READONLY): D3D9 keeps a fresh level dirty until its first upload, so the written texels are sampled
@@ -6784,6 +6805,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
+        {"uploadRows slices (WS27)", testUploadRows},
         {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned pull (S-4)", testOwnedPull}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"instance rows (F2f)", testInstanceRows}, {"bone motion (14.13)", testBoneMotion}, {"rigid motion (14.15 b)", testRigidMotion}, {"tree motion (14.42)", testTreeMotion}, {"list motion (14.26)", testListMotion}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
         {"flush keeps frame memory (14.40)", testFlushKeepsFrameMemory}, {"in-frame read (14.40)", testInFrameRead},
         {"teardown with captures", testTeardownWithCaptures},  // (keep last: the device is destroyed right after it)

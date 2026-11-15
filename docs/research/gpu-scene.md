@@ -374,6 +374,8 @@ Goal: Full at least as fast as Wrapper; Full's table lighting + `lighting.light_
 
 **Tried / left.** A "skip lights that add < 6 % of the pixel's candidate light" cut was built (experiment bit) but not measured or judged: left out. `light.cluster` GPU (0.06 - 0.15 ms) is untouched: near-level threads could skip the far lights (sort near-first, pass the near count), est. -0.03 ms. Temporal reuse of the traced visibility for static lamp + static geometry (reprojection) not built. The tree-header change detection is an inference from a register dump (+0x38 = 2805 / 3092 = count / capacity at the town); the 150-call re-walk is the safety net.
 
+**Review fixes (frame-ownership.md 16.12, 2026-11-14):** the drawn-light match cache's `cellsHash` is now a chain (order-dependent; the cells / matches hold indices into `scratch_`, so a same-multiset reordering used to keep stale indices = drawn colours on the wrong static lights); every 64th build compares the static lights field by field with a fresh uncached walk (`light_table.cpp` rolling backstop, runs with `native.owned_check = 0` too; rvk.log `enh: lights: backstop (5 s)`, ~150 us per comparison = ~2.4 us per build); the static cache keeps each payload's walk-time position and rewalks once when a payload's position differs (a freed light whose memory another static light reused); the inline collect never waits for the worker's cache lock.
+
 ### 9.15 Light occupancy shortcut (WS20, 2026-11-14, `lighting.occupancy`, default on)
 
 **Goal.** Skip the table lighting's per-pixel work where no table light can reach (WS18, frame-ownership.md 14.60: the empty-cluster path costs 0.03 - 0.05 ms above no lookup).

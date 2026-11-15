@@ -1528,16 +1528,46 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Shadow map fit",
         .category = "Shadows",
         .description = "How tightly the sun's shadow maps are fitted around what the camera sees. Tight: a smaller, steadier fit "
-                       "(sharper shadows at the same resolution, or the same sharpness at a lower one). Game: the game's own fit.",
+                       "(sharper shadows at the same resolution, or the same sharpness at a lower one). Adaptive: fitted to the "
+                       "surfaces actually in view each frame (a small GPU pass; sharper still, most where little of the view is "
+                       "near). Game: the game's own fit.",
         .type = Type::Enum,
-        .defaultValue = 1,
-        .options = {"engine", "sphere"},
-        .optionLabels = {"Game", "Tight"},
+        .defaultValue = 2,  // sdsm (shadows.md 8.10: x1.2 - 2.7 texel density at +0.03 - 0.10 ms GPU, fast turns / sun sweeps / cuts checked)
+        .options = {"engine", "sphere", "sdsm"},
+        .optionLabels = {"Game", "Tight", "Adaptive"},
         .flags = Flag::Advanced,
         .needs = {{"shadows.enabled", "true", false, true}},
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
-    r.shadowsRt = &reg.add({
+    r.shadowsSoft = &reg.add({
+        .key = "shadows.soft",
+        .label = "Soft shadows",
+        .category = "Shadows",
+        .description = "Shadows get softer the farther they are from the object that casts them (sharp where a tree or a post touches "
+                       "the ground, soft at the tip of its shadow), smoothed over a few frames. Costs some graphics performance. "
+                       "Off: even, crisp shadow edges.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "pcss"},
+        .optionLabels = {"Off", "On"},
+        .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
+    });
+    r.shadowsSoftSize = &reg.add({
+        .key = "shadows.soft_size",
+        .label = "Soft shadow size",
+        .category = "Shadows",
+        .description = "How wide the soft shadow edges grow with the distance from the object (the apparent size of the sun, in degrees). "
+                       "The real sun is 0.27; higher is softer.",
+        .type = Type::Float,
+        .defaultValue = 0.15,
+        .min = 0.1,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .needs = {{"shadows.soft", "off", true, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
+    });    r.shadowsRt = &reg.add({
         .key = "shadows.rt",
         .label = "Ray-traced shadows",
         .category = "Shadows",

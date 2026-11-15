@@ -747,7 +747,7 @@ void StaticOps::bbNoteLights(const std::uint8_t* illum) {
             float e[8]{};
             engine::safeRead(illum + 0x10 + 0x40 * i, &e[0], 16);
             engine::safeRead(illum + 0x10 + 0x40 * i + 0x10, &e[4], 16);
-            enh::LightTable::noteDrawnLight(e, e + 4);
+            enh::LightTable::noteDrawnLight(e, e + 4, !ownedView_.active);
         }
     }
 }

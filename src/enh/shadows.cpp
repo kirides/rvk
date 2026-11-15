@@ -1,6 +1,7 @@
 #include "enh/shadows.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -8,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/rhi_scope.h"
 #include "enh/rt_shadows.h"
 #include "shader/embedded.h"
 
@@ -38,11 +40,25 @@ bool viewDepthOfHardwareZ(const d3d9::scene::Mat4& projection, float z, float en
     return true;
 }
 
+SoftParams softParams(float halfAngleDegrees, const float texelWorld[3]) {
+    constexpr float kPi = 3.14159265f;
+    SoftParams p;
+    p.scale = 2.0f * std::tan(std::clamp(halfAngleDegrees, 0.01f, 10.0f) * kPi / 180.0f);
+    p.minRadius = kSoftMinRadius;
+    for (int i = 0; i < 3; ++i) {
+        const float texel = std::max(texelWorld[i], 1e-3f);
+        p.searchRadius[i] = std::clamp(0.5f * p.scale * kSoftCasterHeight / texel, kSoftSearchMin, kSoftSearchMax);
+    }
+    return p;
+}
 Shadows::Shadows(d3d9::Device& device) : dev_(device) {}
 
 Shadows::~Shadows() {
     if (registered_) dev_.removeDrawReplacer(this);
     destroyShaders();
+    for (auto& b : softBuilding_) {
+        if (b.valid()) b.get();  // (a pipeline still being built is waited for; the RHI retires it with the device's frames)
+    }
 }
 
 void Shadows::destroyShaders() {
@@ -74,6 +90,172 @@ bool Shadows::ensureShaders() {
     return true;
 }
 
+namespace {
+constexpr const char* kSoftShaders[3] = {"shadows/shadow_soft_trace.comp", "shadows/shadow_soft_temporal.comp", "shadows/shadow_soft_spatial.comp"};
+constexpr const char* kSoftNames[3] = {"shadows.soft trace", "shadows.soft temporal", "shadows.soft spatial"};
+constexpr const char* kSoftImages[4] = {"shadows.soft raw", "shadows.soft history0", "shadows.soft history1", "shadows.soft final"};
+}  // namespace
+
+// first use only (off = nothing exists: no pipelines, no threads, no images): the compute pipelines build in the background, the mask
+// draws the PCF grid until they are ready
+void Shadows::startSoftBuild() {
+    if (softBuilt_ || softFailed_) return;
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
+        softFailed_ = true;
+        return;
+    }
+    softBuilt_ = true;
+    // the raw image holds two channels, the final one: RG8 / R8 when the GPU has the extended storage formats (else RGBA8, same values)
+    softRg8_ = dev_.game().gameCaps().storageImageExtendedFormats && !d3d9::Device::bwBaseline();
+    const bool ext = softRg8_;
+    spdlog::info("enh: shadows.soft: images {}", ext ? "RG8 / R8 (extended storage formats)" : "RGBA8 (no extended storage formats / baseline)");
+    for (int i = 0; i < 3; ++i) {
+        softBuilding_[i] = std::async(std::launch::async, [rdev, i, ext]() {
+            rhi::ComputePipelineDesc d;
+            const char* def = !ext ? nullptr : i == 0 ? "SOFT_RG8=1" : i == 2 ? "SOFT_R8=1" : nullptr;
+            d.cs.spirv = def != nullptr ? shader::embedded::spirvVariant(kSoftShaders[i], def) : shader::embedded::spirv(kSoftShaders[i]);
+            d.cs.dxil = def != nullptr ? shader::embedded::dxilVariantOnDemand(kSoftShaders[i], def) : shader::embedded::dxilOnDemand(kSoftShaders[i]);
+            d.name = kSoftNames[i];
+            return rdev->createComputePipeline(d);
+        });
+    }
+}
+
+bool Shadows::softPipelinesReady() {
+    if (softFailed_) return false;
+    bool all = true;
+    for (int i = 0; i < 3; ++i) {
+        if (softPipe_[i]) continue;
+        if (!softBuilding_[i].valid() || softBuilding_[i].wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            all = false;
+            continue;
+        }
+        softPipe_[i] = softBuilding_[i].get();
+        if (!softPipe_[i]) {
+            spdlog::error("enh: shadows.soft: the compute pipeline {} failed: soft shadows stay off this session", kSoftNames[i]);
+            softFailed_ = true;
+            return false;
+        }
+    }
+    return all;
+}
+
+void Shadows::releaseSoft() {
+    if (!softHistoryValid_ && softLastFrame_ == ~0ull) return;  // never ran
+    for (const char* k : kSoftImages) dev_.releaseTransient(k);
+    softHistoryValid_ = false;
+    softLastFrame_ = ~0ull;
+    softW_ = softH_ = 0;
+}
+
+std::uint32_t Shadows::runSoft(d3d9::Device& device, const rhi::RingAlloc& block, d3d9::Texture* depth, std::uint32_t w, std::uint32_t h,
+                               std::array<d3d9::Texture*, 3> maps, int cascades) {
+    if (softFailed_) return 0;
+    if (!softPipelinesReady() || depth == nullptr || depth->isNull() || depth->desc().width != w || depth->desc().height != h || w == 0 || h == 0) {
+        softHistoryValid_ = false;
+        ++softSkipped_;
+        return 0;
+    }
+    const std::uint64_t frame = device.stats().frames;
+    if (w != softW_ || h != softH_ || softLastFrame_ + 1 != frame) softHistoryValid_ = false;  // new images / a frame without the mask: no history
+    const VkFormat rawFormat = softRg8_ ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkFormat finFormat = softRg8_ ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    rhi::Texture* raw = device.transient(kSoftImages[0], {rawFormat, {w, h}});
+    rhi::Texture* hist[2] = {device.transient(kSoftImages[1], {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}}),
+                             device.transient(kSoftImages[2], {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}})};
+    rhi::Texture* fin = device.transient(kSoftImages[3], {finFormat, {w, h}});
+    const rhi::RingAlloc pa = device.ring(sizeof(RtShadowParams), 16);
+    if (raw == nullptr || fin == nullptr || hist[0] == nullptr || hist[1] == nullptr || pa.ptr == nullptr) {
+        softHistoryValid_ = false;
+        ++softSkipped_;
+        return 0;
+    }
+    const std::uint32_t cur = softHistory_ ^ 1u;
+    RtShadowParams p{};
+    p.tex[0] = depth->bindlessSlot();
+    p.tex[1] = raw->heapSampled();
+    p.tex[2] = hist[softHistory_]->heapSampled();
+    p.tex[3] = hist[cur]->heapSampled();
+    p.info[0] = w;
+    p.info[1] = h;
+    p.mode[0] = static_cast<std::uint32_t>(frame);
+    p.mode[1] = softHistoryValid_ ? 1u : 0u;
+    p.range[0] = 1e9f;
+    p.range[3] = 1.0f;  // spatial filter strength
+    p.aux[0] = block.ref.low();
+    p.aux[1] = block.ref.high();
+    std::memcpy(pa.ptr, &p, sizeof(p));
+    RtShadowPush push{};
+    push.params[0] = pa.ref.low();
+    push.params[1] = pa.ref.high();
+    const std::uint32_t gx = (w + 7) / 8, gy = (h + 7) / 8;
+
+    bool ok = true;
+    // 1 trace: the cascade term (PCSS taps) of every pixel into the raw image
+    device.runPassNow(kSoftNames[0], [&](d3d9::PassContext& ctx) {
+        rhi::CommandList& cmd = ctx.cmd;
+        bool ready = device.readable(depth, cmd);
+        for (int i = 0; i < cascades && ready; ++i) ready = maps[static_cast<std::size_t>(i)] != nullptr && device.readable(maps[static_cast<std::size_t>(i)], cmd);
+        RhiScope rs(device, cmd);
+        if (!ready || !rs) {
+            ok = false;
+            return;
+        }
+        rhi::CommandList& cl = rs.cl();
+        rhi::Texture* rawT = rs.wrap(*raw);
+        cl.transition(*rs.wrap(*hist[softHistory_]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);  // (read-only since its own frame)
+        cl.transition(*rawT, VK_IMAGE_LAYOUT_GENERAL);
+        cl.bindPipeline(*softPipe_[0]);
+        rhi::Texture* const storage[] = {rawT};
+        cl.setStorageTextures(storage);
+        push.h.frame = ctx.frameBlock.bits;
+        push.h.passId = 0;
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(gx, gy, 1);
+        cl.transition(*rawT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    if (!ok) {
+        softHistoryValid_ = false;
+        ++softSkipped_;
+        return 0;
+    }
+    // 2 temporal, 3 spatial (the same push: the params block names every image)
+    for (int stage = 1; stage <= 2; ++stage) {
+        rhi::Texture* out = stage == 1 ? hist[cur] : fin;
+        device.runPassNow(kSoftNames[stage], [&](d3d9::PassContext& ctx) {
+            RhiScope rs(device, ctx.cmd);
+            if (!rs) {
+                ok = false;
+                return;
+            }
+            rhi::CommandList& cl = rs.cl();
+            rhi::Texture* outT = rs.wrap(*out);
+            cl.transition(*outT, VK_IMAGE_LAYOUT_GENERAL);
+            cl.bindPipeline(*softPipe_[stage]);
+            rhi::Texture* const storage[] = {outT};
+            cl.setStorageTextures(storage);
+            push.h.frame = ctx.frameBlock.bits;
+            push.h.passId = 0;
+            cl.setPushConstants(&push, sizeof(push));
+            cl.dispatch(gx, gy, 1);
+            cl.transition(*outT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+    }
+    if (!ok) {
+        softHistoryValid_ = false;
+        ++softSkipped_;
+        return 0;
+    }
+    softHistory_ = cur;
+    softHistoryValid_ = true;
+    softLastFrame_ = frame;
+    softW_ = w;
+    softH_ = h;
+    if (softFrames_++ == 0) spdlog::info("enh: shadows.soft: first frame {}x{} ({} cascades)", w, h, cascades);
+    return fin->heapSampled();
+}
+
 void Shadows::apply(const Settings& s) {
     settings_ = s;
     const bool want = s.enabled && ensureShaders();
@@ -84,8 +266,11 @@ void Shadows::apply(const Settings& s) {
         dev_.removeDrawReplacer(this);
     }
     registered_ = want;
-    spdlog::info("enh: shadows: {} (taps {}x{}, softness {:.2f}, cascade blend {:.2f}, fade {:.2f}, bias {:.2f}, debug {})",
-                 want ? "on" : "off", s.taps, s.taps, s.softness, s.blend, s.fade, s.bias, s.debug);
+    if (want && s.soft) startSoftBuild();
+    else releaseSoft();
+    spdlog::info("enh: shadows: {} (taps {}x{}, softness {:.2f}, cascade blend {:.2f}, fade {:.2f}, bias {:.2f}, debug {}, soft {}{})",
+                 want ? "on" : "off", s.taps, s.taps, s.softness, s.blend, s.fade, s.bias, s.debug, want && s.soft ? "pcss" : "off",
+                 want && s.soft ? std::format(" (sun half angle {:.2f} deg, {} taps)", s.softSize, std::clamp(s.taps, 2, 4)) : std::string());
 }
 
 bool Shadows::handles(d3d9::draws::Kind, d3d9::scene::Phase phase, const d3d9::draws::Tag&) const {
@@ -226,6 +411,18 @@ void Shadows::drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int va
     }
 
     const rhi::RingAlloc a = device.ring(sizeof(b), 16);
+    b.mode[2] = static_cast<std::uint32_t>(std::clamp(settings_.taps, 2, 4));
+    b.mode[3] = static_cast<std::uint32_t>(device.stats().frames);
+    if (settings_.soft && settings_.debug == 0 && a.ptr != nullptr && depth != nullptr && rt != nullptr) {
+        // PCSS + denoise (shadows.md 8.10): the passes run here, at the mask draw (its cascade matrices), before it; the draw then reads their result
+        const SoftParams sp = softParams(settings_.softSize, texelWorld);
+        b.soft[0] = sp.scale;
+        b.soft[1] = sp.minRadius;
+        for (int i = 0; i < 3; ++i) b.softR[i] = sp.searchRadius[i];
+        std::array<d3d9::Texture*, 3> maps{};
+        for (int i = 0; i < n; ++i) maps[static_cast<std::size_t>(i)] = cascades_[static_cast<std::size_t>(i)].map;
+        b.rt[1] = runSoft(device, a, depth, rt->width(), rt->height(), maps, n);
+    }
     std::memcpy(a.ptr, &b, sizeof(b));
     out.action = d3d9::DrawReplacement::Action::Procedural;
     out.vs = vs_;

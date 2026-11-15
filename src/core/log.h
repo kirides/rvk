@@ -14,5 +14,8 @@ void startAsync();
 bool asyncActive();
 // Waits (at most 2 s) until every line logged so far is written and flushed: the shutdown, the terminate hook, the overlay's quit, the crash filters. No-op for the synchronous logger.
 void flushSync();
+// The process is ending (exit / terminate hooks, crash filter): the queued lines are written on the calling thread and every later line is written synchronously by its caller (the exit path kills
+// the logger thread; nothing waits for it afterwards). Bounded waits only; idempotent. No-op for the synchronous logger.
+void enterExitMode();
 
 }  // namespace rvk::log

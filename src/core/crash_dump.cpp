@@ -189,6 +189,7 @@ Hook<ExitProcessFn> g_exitProcess;
 
 void NTAPI detourExitProcess(LONG code) {
     log::flushSync();  // (the logger thread dies with the process: every line so far written first)
+    log::enterExitMode();  // (later lines, DllMain's detach included, are written by their callers)
     if (!g_exiting.exchange(true)) {
         g_exitCode = static_cast<unsigned>(code);
         g_mainThread = GetCurrentThreadId();
@@ -219,6 +220,7 @@ LONG NTAPI detourTerminate(HANDLE process, LONG code) {
     const bool self = process == nullptr || process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId();
     if (self) {
         log::flushSync();
+        log::enterExitMode();  // (NtTerminateProcess(NULL) kills the logger thread: the final self-terminate must not wait for it)
         // (also when the window was closed and the device's shutdown has not begun yet: the test harness's terminate thread (risen-spass exit_on_finish, 1.5 s after
         // the scenario's result) came before the engine released the device)
         const DWORD shut = g_shutdownThread.load(std::memory_order_acquire);
@@ -241,7 +243,7 @@ LONG NTAPI detourTerminate(HANDLE process, LONG code) {
 }
 
 LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* info) {
-    log::flushSync();
+    log::enterExitMode();  // (bounded locks only: the fault may have been inside the queue's push())
     std::string report;
     try {
         report = crashReport(info->ExceptionRecord, *info->ContextRecord);

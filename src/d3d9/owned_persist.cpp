@@ -517,13 +517,41 @@ std::uint32_t ws23Drop() {
 
 void Device::setEventObservers(bool on) {
     on = on && !ws23EnvOff();
-    if (on != eventObs_) obsMemo_.clear();
+    if (on != eventObs_) {
+        obsMemo_.clear();
+        obsModeFrame_ = ~std::uint64_t{0};
+    }
     eventObs_ = on;
+}
+
+// WS23 review: what the memo's verdicts depend on beyond (record, signature, epoch): the bone motion mode (object motion's `covered`), the observer set and the replacer set with
+// their opaque interest (water.enabled adds / removes a replacer, wantsOpaque follows its settings). A change forgets every memory. Evaluated once per frame.
+void Device::syncObsMemoMode() {
+    if (obsModeFrame_ == stats_.frames) return;
+    obsModeFrame_ = stats_.frames;
+    std::uint64_t k = 0xcbf29ce484222325ull;
+    const auto mix = [&k](std::uint64_t w) {
+        k = (k ^ w) * 0x100000001b3ull;
+        k ^= k >> 29;
+    };
+    mix(static_cast<std::uint64_t>(boneMode_));
+    mix(observers_.size());
+    for (const DrawObserver* o : observers_) mix(reinterpret_cast<std::uintptr_t>(o));
+    mix(replacers_.size());
+    for (DrawReplacer* r : replacers_) {
+        mix(reinterpret_cast<std::uintptr_t>(r));
+        mix(r->wantsOpaque() ? 1u : 0u);
+    }
+    if (k != obsModeKey_) {
+        obsModeKey_ = k;
+        obsMemo_.clear();
+    }
 }
 
 bool Device::eventObsSkip(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, bool entered, bool changed, const float* rows, bool& recheck) {
     recheck = false;
     if (!eventObs_) return false;
+    syncObsMemoMode();
     if (id >= obsMemo_.size()) obsMemo_.resize(static_cast<std::size_t>(id) + 256);
     ObsMemo& m = obsMemo_[id];
     const std::size_t k = bit == kObsOpaque ? 0 : 1;
@@ -563,6 +591,7 @@ bool Device::eventObsSkip(std::uint32_t id, const CachedDraw* cd, std::uint64_t 
 
 void Device::eventObsDone(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, const float* rows, bool settled, bool wasRecheck) {
     if (!eventObs_) return;
+    syncObsMemoMode();
     if (id >= obsMemo_.size()) obsMemo_.resize(static_cast<std::size_t>(id) + 256);
     ObsMemo& m = obsMemo_[id];
     const std::size_t k = bit == kObsOpaque ? 0 : 1;

@@ -138,6 +138,10 @@ public:
     VkImageLayout layout() const { return tex_ ? tex_->layout() : VK_IMAGE_LAYOUT_UNDEFINED; }
     std::uint32_t bindlessSlot() const { return slot_; }
     bool prepareForSampling(rhi::CommandList& cl);  // uploads pending data, transitions to shader-read; false if nothing to sample
+    // WS27: rows [y0, y0 + rows) of level 0 straight from caller memory (D3D9 layout, `srcRowPitch` apart) into the upload ring and one
+    // buffer -> texture copy: no CPU copy of the texture, no zero fill, no second convert copy. Plain 2D formats without a conversion only;
+    // the image stays in TRANSFER_DST until the first use for sampling. False = nothing copied (ring full / unsupported): call again later.
+    bool uploadRows(rhi::CommandList& cl, std::uint32_t y0, std::uint32_t rows, const void* src, std::size_t srcRowPitch);
     // what the engine uses the image for (Device::tagImage; render thread)
     scene::ImageRole role() const { return role_; }
     // persistent identity (d3d9/identity.h): the generation counts uploads of CPU data
@@ -1271,6 +1275,7 @@ public:
         float outputFps = 0.0f;   // ... and frames shown per second (generated ones included)
     };
     const LiveFrame& liveFrame() const { return live_; }
+    void hitchDiag(std::chrono::steady_clock::time_point now);  // WS26: RVK_HITCH_MS / RVK_FRAME_CSV (device.cpp)
     Surface* backBuffer() { return backBufferSurface_; }
     // Manual frame generation (enh/framegen.h): set from the BeforePresent pass with the interpolated frame (display size, same
     // format family as the back buffer, usable as a transfer source); present() shows it first and the real frame half a base
@@ -1477,6 +1482,7 @@ public:
     // (every n-th first sighting is remembered without the observation: the rolling check / the check frames must find it)
     static constexpr std::uint8_t kObsOpaque = 1, kObsMotion = 2;
     void setEventObservers(bool on);
+    void syncObsMemoMode();  // forgets the memo when the bone motion mode / observer set / replacer set changed (once per frame)
     bool eventObservers() const { return eventObs_; }
     // may the observer skip the record (an unchanged one whose memory holds `bit`)? false = observe it in full, then eventObsDone; `recheck` = observed only to compare
     bool eventObsSkip(std::uint32_t id, const CachedDraw* cd, std::uint64_t sig, std::uint64_t epoch, std::uint8_t bit, bool entered, bool changed, const float* rows, bool& recheck);
@@ -2216,6 +2222,7 @@ private:
         std::uint8_t bits = 0;
     };
     std::vector<ObsMemo> obsMemo_;
+    std::uint64_t obsModeKey_ = 0, obsModeFrame_ = ~std::uint64_t{0};
     bool eventObs_ = true;
     // per kind: 0 z, 1 solid (the plain static passes), 2 + list - 1 the ordered list segments (14.44: solid, refracted, alpha)
     static constexpr std::size_t kBulkKinds = 5;

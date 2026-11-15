@@ -84,6 +84,9 @@ void CSMain(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex) {
     const uint u = far ? gid.x - cols0 : gid.x;
     const uint3 gd = far ? pc.grid1.xyz : pc.grid.xyz;
     const uint slices = min(gd.z, RVK_COL_MAX_SLICES);
+    // a level with no slices (grid1.z = 0 = no far level): nothing to build; without this s1 = slices - 1 wrapped to 0xFFFFFFFF (gsMask out of bounds) and gsBmin[0] was read uninitialised.
+    // (uniform per group: every thread of the group leaves together, no barrier is skipped; the header + light copy above are done)
+    if (slices == 0u) return;
     const uint tx = u % gd.x;
     const uint ty = u / gd.x;
     const uint colStride = gd.x * gd.y;  // the cluster index step between two slices of the column

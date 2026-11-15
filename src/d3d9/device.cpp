@@ -1330,6 +1330,57 @@ void Device::diagCropLuma() {
     free->busy = true;
 }
 
+// WS26 diagnostics, off unless an environment variable is set (one static bool test per frame otherwise):
+//   RVK_HITCH_MS=<n>   `diag: hitch:` line for every frame interval above n ms with that frame's split and the counters' deltas
+//                      (pipelines built / ms, shaders built, texture + buffer upload bytes, read-backs, draw-call time, skipped-while-compiling draws,
+//                      compile jobs pending); the counters of perf_ need `-Perf`
+//   RVK_FRAME_CSV=<f>  every frame: frame,time of day (ms),interval,cpu,present,slot wait (flushed every 256 frames)
+void Device::hitchDiag(std::chrono::steady_clock::time_point now) {
+    static const double hitchMs = [] {
+        char b[32];
+        return GetEnvironmentVariableA("RVK_HITCH_MS", b, sizeof b) ? std::atof(b) : 0.0;
+    }();
+    static std::FILE* csv = [] () -> std::FILE* {
+        char b[MAX_PATH];
+        if (!GetEnvironmentVariableA("RVK_FRAME_CSV", b, sizeof b)) return nullptr;
+        std::FILE* f = nullptr;
+        if (fopen_s(&f, b, "w") != 0) return nullptr;
+        std::fputs("frame,tod_ms,interval,cpu,present,slot\n", f);
+        return f;
+    }();
+    if (hitchMs <= 0.0 && csv == nullptr) return;
+    const float interval = live_.intervalMs;
+    const float prevPresent = std::chrono::duration<float, std::milli>(now - presentStart_).count();
+    if (csv != nullptr) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        const long tod = ((st.wHour * 60 + st.wMinute) * 60 + st.wSecond) * 1000 + st.wMilliseconds;
+        std::fprintf(csv, "%llu,%ld,%.3f,%.3f,%.3f,%.3f\n", static_cast<unsigned long long>(stats_.frames), tod, interval, live_.cpuMs, prevPresent, frameSlotWaitMs_);
+        if ((stats_.frames & 255) == 0) std::fflush(csv);
+    }
+    // counter snapshots (perf_ is reset by takePerf: a smaller value = a new interval)
+    struct Snap { double pipelines, pipelineMs, shaders, shaderMs, tex, buf, readbacks, readbackMs, drawMs, skipped, jobs, refused, captured, replayed, variants; };
+    static Snap prev{};
+    static float lastPresentMs = 0.0f;
+    const Snap cur{static_cast<double>(perf_.pipelinesBuilt), perf_.pipelineMs, static_cast<double>(perf_.shadersBuilt), perf_.shaderMs,
+                   static_cast<double>(perf_.textureUploadBytes), static_cast<double>(perf_.bufferUploadBytes), static_cast<double>(perf_.readbacks), perf_.readbackMs,
+                   perf_.drawMs, static_cast<double>(stats_.skippedCompiling),
+                   static_cast<double>(shaderJobsQueued_.load(std::memory_order_relaxed)) - static_cast<double>(shaderJobsDone_.load(std::memory_order_relaxed)),
+                   static_cast<double>(replayStats.refused), static_cast<double>(replayStats.captured), static_cast<double>(replayStats.replayed),
+                   static_cast<double>(variantsBuilt_.load(std::memory_order_relaxed))};
+    const auto d = [](double c, double p) { return c >= p ? c - p : c; };
+    if (hitchMs > 0.0 && interval > hitchMs) {
+        spdlog::info("diag: hitch: frame {} interval {:.1f} ms = previous present {:.1f} + CPU {:.1f} (slot wait {:.1f}); this frame: draw calls {:.1f} ms, pipelines built {:.0f} ({:.1f} ms), "
+                     "shaders built {:.0f} ({:.1f} ms), uploads tex {:.0f} KiB buf {:.0f} KiB, read-backs {:.0f} ({:.1f} ms), draws skipped while compiling {:.0f}, compile jobs pending {:.0f}, packets replayed {:.0f} / refused {:.0f} / captured {:.0f}, variants built (all threads) {:.0f}",
+                     static_cast<unsigned long long>(stats_.frames), interval, lastPresentMs, live_.cpuMs, frameSlotWaitMs_, d(cur.drawMs, prev.drawMs), d(cur.pipelines, prev.pipelines),
+                     d(cur.pipelineMs, prev.pipelineMs), d(cur.shaders, prev.shaders), d(cur.shaderMs, prev.shaderMs), d(cur.tex, prev.tex) / 1024.0, d(cur.buf, prev.buf) / 1024.0,
+                     d(cur.readbacks, prev.readbacks), d(cur.readbackMs, prev.readbackMs), d(cur.skipped, prev.skipped), cur.jobs, d(cur.replayed, prev.replayed), d(cur.refused, prev.refused),
+                     d(cur.captured, prev.captured), d(cur.variants, prev.variants));
+    }
+    prev = cur;
+    lastPresentMs = prevPresent;
+}
+
 void Device::present() {
     RVK_ZONE("Device::present");
     presentStart_ = std::chrono::steady_clock::now();
@@ -1359,6 +1410,7 @@ void Device::present() {
                                                    d.frameSlotWaitMs_});
                 }
             }
+            d.hitchDiag(now);
             d.lastPresentStart_ = d.presentStart_;
             d.presentEnd_ = now;
         }
