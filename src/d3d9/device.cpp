@@ -2550,15 +2550,15 @@ unsigned Device::variantLimit() const {
 // thread costs on this machine in this scene when few workers run (the compiles slow the engine thread by up to 2x: shared L3 / memory bandwidth, not the scheduler). The law:
 //   every 0.5 s the mean CPU per frame (a frame counts at most 40 ms) is smoothed (s = (s + mean) / 2). base = an estimate of the engine's uncontended cost: it follows s
 //   downwards at once (a lower s from any limit is a cheaper scene or less contention: the real cost is at most that), and upwards only slowly (2 % a window, ~25 s) and only while
-//   the limit is at most min + 1 (a heavier scene; with many workers a higher s is contention, not the scene). target = base * ratio + margin (1.3 / 0.3 ms).
-//   s > target: one worker fewer (at least min); s < target - 0.1 * base for three windows in a row: one more (up to all).
+//   the limit is at most min + 1 (a heavier scene; with many workers a higher s is contention, not the scene). target = max(base * ratio + margin, floor) (1.3 / 0.3 / 6 ms).
+//   s > target: one worker fewer (at least min); s < target * 0.92 for three windows in a row: one more (up to all).
 // The first windows of a world visit run at the minimum (they seed the base). A machine or scene with a high warm cost keeps its workers (an absolute 10 ms target pinned the limit
-// at 2 above that). RVK_VARIANT_ADAPT=0 = the former fixed limit, RVK_VARIANT_TARGET_MS=x = an absolute target (the WS30 law), RVK_VARIANT_RATIO / _MARGIN_MS, RVK_VARIANT_MIN (2).
+// at 2 above that). RVK_VARIANT_ADAPT=0 = the former fixed limit, RVK_VARIANT_TARGET_MS=x = an absolute target (the WS30 law), RVK_VARIANT_RATIO / _MARGIN_MS / _FLOOR_MS, RVK_VARIANT_MIN (2).
 void Device::tuneVariantWorkers(float cpuMs) {
     static const struct Cfg {
         bool on = true;
         double target = 0.0;  // absolute (> 0), else relative
-        double ratio = 1.3, margin = 0.3;
+        double ratio = 1.3, margin = 0.3, floor = 6.0;
         unsigned min = 2;
     } cfg = [] {
         Cfg c;
@@ -2567,6 +2567,7 @@ void Device::tuneVariantWorkers(float cpuMs) {
         if (GetEnvironmentVariableA("RVK_VARIANT_TARGET_MS", v, sizeof v) != 0 && std::atof(v) > 0.0) c.target = std::atof(v);
         if (GetEnvironmentVariableA("RVK_VARIANT_RATIO", v, sizeof v) != 0 && std::atof(v) > 1.0) c.ratio = std::atof(v);
         if (GetEnvironmentVariableA("RVK_VARIANT_MARGIN_MS", v, sizeof v) != 0 && std::atof(v) >= 0.0) c.margin = std::atof(v);
+        if (GetEnvironmentVariableA("RVK_VARIANT_FLOOR_MS", v, sizeof v) != 0 && std::atof(v) >= 0.0) c.floor = std::atof(v);
         if (GetEnvironmentVariableA("RVK_VARIANT_MIN", v, sizeof v) != 0 && std::atoi(v) > 0) c.min = static_cast<unsigned>(std::atoi(v));
         return c;
     }();
@@ -2597,8 +2598,9 @@ void Device::tuneVariantWorkers(float cpuMs) {
     if (t.base <= 0.0) t.base = t.smooth;
     else if (t.smooth < t.base) t.base += (t.smooth - t.base) * 0.5;
     else if (cur <= lo + 1) t.base += (t.smooth - t.base) * 0.02;
-    const double target = cfg.target > 0.0 ? cfg.target : t.base * cfg.ratio + cfg.margin;
-    const double slack = cfg.target > 0.0 ? target * 0.2 : t.base * 0.1;
+    // (relative target with an absolute floor: in a cheap scene, base 1-3 ms, a 2x contention still leaves the frame far from any hitch, so the compiles keep their workers there)
+    const double target = cfg.target > 0.0 ? cfg.target : std::max(t.base * cfg.ratio + cfg.margin, cfg.floor);
+    const double slack = cfg.target > 0.0 ? target * 0.2 : target * 0.08;
     unsigned next = cur;
     if (t.windows <= 3) {
         next = lo;
