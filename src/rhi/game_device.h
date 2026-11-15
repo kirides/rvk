@@ -574,6 +574,9 @@ public:
     // draws skipped so far because their pipeline was still being built (D3D12's background PSOs; 0 where pipelines are built at first use): a compare of two
     // images drawn in this window is not valid when it moved (frame-ownership.md 14.24)
     virtual std::uint64_t pipelineSkips() const { return 0; }
+    // the pipeline that now serves what `p` was made for (a fast-linked pipeline replaced by its optimised build keeps working for the draws that hold it, but the cache
+    // hands out the new one): the owned records' check frames compare through it (frame-ownership.md 16.19)
+    virtual GamePipeline currentPipeline(GamePipeline p) const { return p; }
     // starts recording a slot; `details` keeps the labels of the main stream's marks for TimestampResult::segments
     virtual void timestampStart(std::uint32_t slot, bool details) = 0;
     virtual bool timestampDetails(std::uint32_t slot) const = 0;

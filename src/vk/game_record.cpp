@@ -68,6 +68,10 @@ rhi::GamePipeline GameRecord::findPipeline(const PipelineDesc& desc) const {
     return rhiPipeline(pipelines_.find(desc));
 }
 
+rhi::GamePipeline GameRecord::currentPipeline(rhi::GamePipeline p) const {
+    return rhiPipeline(pipelines_.current(reinterpret_cast<VkPipeline>(static_cast<std::uint64_t>(p))));
+}
+
 bool GameRecord::containsPipeline(const PipelineDesc& desc) const {
     return pipelines_.contains(desc);
 }

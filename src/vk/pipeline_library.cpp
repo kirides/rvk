@@ -327,6 +327,7 @@ void PipelineCache::optimizer() {
                 // command buffers may still use the fast-linked pipeline: it is kept until destroy()
                 fastLinks_.erase(fast);
                 superseded_.push_back(it->second);
+                successor_[it->second] = p;
                 it->second = p;
             } else {
                 superseded_.push_back(p);

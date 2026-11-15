@@ -671,6 +671,7 @@ public:
     }
     GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created, bool wait = true) override { return record_.resolvePipeline(desc, created, wait); }
     GamePipeline findPipeline(const PipelineDesc& desc) override { return record_.findPipeline(desc); }
+    GamePipeline currentPipeline(GamePipeline p) const override { return record_.currentPipeline(p); }
     bool pipelineContains(const PipelineDesc& desc) override { return record_.containsPipeline(desc); }
     void prewarmPipeline(const PipelineDesc& desc) override { record_.prewarmPipeline(desc); }
     void prewarmOncePipeline(const PipelineDesc& desc) override { record_.prewarmOncePipeline(desc); }

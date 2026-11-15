@@ -98,6 +98,17 @@ public:
         const std::lock_guard lock(mutex_);
         return pipelines_.contains(desc);
     }
+    // the pipeline now serving the description `p` was made for: `p` itself, or the build that replaced it (a fast-linked pipeline superseded by its optimised build;
+    // retained draws keep the handle they were made with, which stays valid): the check frames compare pipelines through this; any thread
+    VkPipeline current(VkPipeline p) const {
+        const std::lock_guard lock(mutex_);
+        for (int i = 0; i < 4; ++i) {
+            const auto it = successor_.find(p);
+            if (it == successor_.end()) break;
+            p = it->second;
+        }
+        return p;
+    }
     // the pipeline of `desc` when it exists, else VK_NULL_HANDLE (never builds); any thread
     VkPipeline find(const PipelineDesc& desc) const {
         const std::lock_guard lock(mutex_);
@@ -156,6 +167,7 @@ private:
     std::map<LibKey, VkPipeline> shaderLibs_;
     std::map<VkPrimitiveTopology, VkPipeline> vertexInputLibs_;
     std::map<OutputKey, VkPipeline> outputLibs_;
+    std::unordered_map<VkPipeline, VkPipeline> successor_;  // a superseded fast link -> the pipeline that replaced it (under mutex_)
     std::vector<VkPipeline> superseded_;  // fast-linked pipelines replaced by optimised ones (under mutex_)
     std::thread optThread_;
     std::mutex optMutex_;

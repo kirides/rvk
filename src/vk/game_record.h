@@ -87,6 +87,7 @@ public:
     rhi::GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created = nullptr, bool wait = true);
     rhi::GamePipeline findPipeline(const PipelineDesc& desc) const;
     bool containsPipeline(const PipelineDesc& desc) const;
+    rhi::GamePipeline currentPipeline(rhi::GamePipeline p) const;
     void prewarmPipeline(const PipelineDesc& desc);
     void prewarmOncePipeline(const PipelineDesc& desc);
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);

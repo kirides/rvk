@@ -422,7 +422,8 @@ void StaticOps::bbDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey)
                                               ss.fbNullAddress, ss.fbNotBatchable));
     } else if (pv.valid) {
         ++w.compared;
-        if (dv.pipeline != pv.pipeline) fail(bbrec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
+        // (through currentPipeline: a retained draw made while its pipeline was a fast link holds the superseded handle: the same pipeline, 16.19)
+        if (dev_.currentPipeline(dv.pipeline) != dev_.currentPipeline(pv.pipeline)) fail(bbrec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
         if (dv.viHash != pv.viHash) fail(bbrec::Field::VertexInput, "vertex input");
         if (dv.dynHash != pv.dynHash) fail(bbrec::Field::VertexInput, "dynamic state");
         if (dv.first != pv.first || dv.count != pv.count || dv.vertexOffset != pv.vertexOffset || dv.indexBuffer != pv.indexBuffer || dv.indexOffset != pv.indexOffset || dv.index32 != pv.index32) {
