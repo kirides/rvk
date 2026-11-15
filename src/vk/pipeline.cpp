@@ -453,6 +453,7 @@ void PipelineCache::insertBuilt(const PipelineDesc& d, VkPipeline p) {
     if (fastLinks_.erase(it->second) > 0) {
         // command buffers may still use the fast link: kept until destroy()
         superseded_.push_back(it->second);
+        successor_[it->second] = p;
         it->second = p;
         return;
     }

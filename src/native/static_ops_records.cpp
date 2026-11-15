@@ -717,7 +717,8 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         }
     } else if (pv.valid) {
         ++w.compared;
-        if (dv.pipeline != pv.pipeline) fail(orec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
+        // (through currentPipeline: a retained draw made while its pipeline was a fast link holds the superseded handle: the same pipeline, 16.19)
+        if (dev_.currentPipeline(dv.pipeline) != dev_.currentPipeline(pv.pipeline)) fail(orec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
         if (dv.viHash != pv.viHash) {
             std::string extra;
             if (rec.actor && op_ != nullptr) extra = actorDiffText(*op_, r);

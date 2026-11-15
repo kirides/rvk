@@ -422,7 +422,11 @@ void StaticOps::bbDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey)
                                               ss.fbNullAddress, ss.fbNotBatchable));
     } else if (pv.valid) {
         ++w.compared;
-        if (dv.pipeline != pv.pipeline) fail(bbrec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
+        // (through currentPipeline: a retained draw made while its pipeline was a fast link holds the superseded handle: the same pipeline, 16.19)
+        if (dv.pipeline != pv.pipeline) {
+            if (dev_.currentPipeline(dv.pipeline) != dev_.currentPipeline(pv.pipeline)) fail(bbrec::Field::Pipeline, std::format("{} vs {} {}", static_cast<std::uint32_t>(dv.pipeline), static_cast<std::uint32_t>(pv.pipeline), cdv));
+            else ++w.pipeSwapped;
+        }
         if (dv.viHash != pv.viHash) fail(bbrec::Field::VertexInput, "vertex input");
         if (dv.dynHash != pv.dynHash) fail(bbrec::Field::VertexInput, "dynamic state");
         if (dv.first != pv.first || dv.count != pv.count || dv.vertexOffset != pv.vertexOffset || dv.indexBuffer != pv.indexBuffer || dv.indexOffset != pv.indexOffset || dv.index32 != pv.index32) {
@@ -1014,12 +1018,12 @@ void StaticOps::bbReport() {
     const double frame = static_cast<double>(frames);
     spdlog::info("native: owned billboards (5 s): {} recordable ops of {} ({:.1f} %), {} draws; not recorded: {}; valid at entry {} ({:.1f} % of recordable ops), built {}, rebuilt {} ({}), {} records; "
                  "derived {} draws (not derived: {}), compared with a scene draw {}, DIFFERING {} draws ({}), clean {}; constants: {} sources checked, {} stale, {} registers compared; "
-                 "ignored carry-over: alphaRef {}, c5.w {}, view blocks at another slot {}; audit: {} records checked, {} caught by the post stamps, {} DISAGREEMENTS ({}); "
+                 "ignored carry-over: alphaRef {}, c5.w {}, view blocks at another slot {}, pipelines swapped by the cache {}; audit: {} records checked, {} caught by the post stamps, {} DISAGREEMENTS ({}); "
                  "OWNED ops {} draws {} (refused: {}); CPU per frame: build {:.1f} us ({} builds), derive + compare {:.1f} us ({} draws), stamps {:.1f} us, audit {:.1f} us, owned replay {:.1f} us",
                  w.ops, w.opsAll, w.opsAll != 0 ? 100.0 * static_cast<double>(w.ops) / static_cast<double>(w.opsAll) : 0.0, w.draws, list(w.excluded, bbrec::kExclNames, bbrec::kExclCount), w.validAtEntry,
                  w.ops != 0 ? 100.0 * static_cast<double>(w.validAtEntry) / static_cast<double>(w.ops) : 0.0, w.built, w.rebuilt, rebuilt.empty() ? "none" : rebuilt, B.map.size(), w.derived,
                  list(w.refused, orec::kDeriveWhy, orec::kDeriveWhyCount, 1), w.compared, w.differing, list(w.byField, bbrec::kFieldNames, bbrec::kFieldCount), w.clean, w.constChecks, w.constStale,
-                 w.constRegsCompared, w.alphaRefCarry, w.c5wCarry, w.viewDup, w.auditChecked, w.auditCaught, w.auditDisagree, list(w.auditBy, orec::kAuditNames, orec::kAuditCount), w.ownedOps, w.ownedDraws,
+                 w.constRegsCompared, w.alphaRefCarry, w.c5wCarry, w.viewDup, w.pipeSwapped, w.auditChecked, w.auditCaught, w.auditDisagree, list(w.auditBy, orec::kAuditNames, orec::kAuditCount), w.ownedOps, w.ownedDraws,
                  list(w.refuse, bbrec::kRefuseNames, bbrec::kRefuseCount), static_cast<double>(w.buildNs) / frame / 1000.0, w.builds, static_cast<double>(w.deriveNs) / frame / 1000.0, w.derives,
                  static_cast<double>(w.stampNs) / frame / 1000.0, static_cast<double>(w.auditNs) / frame / 1000.0, static_cast<double>(w.replayNs) / frame / 1000.0);
     spdlog::info("native: owned billboards (total): {} recordable ops, {} draws, valid at entry {}, built {}, rebuilt {}, derived {}, compared {}, DIFFERING {} ({}), audit DISAGREEMENTS {} ({} more caught by the post stamps) of {} checks, constants stale {} of {}, owned ops {} draws {}; constants table {} of {} images, FULL refusals {}",

@@ -2424,6 +2424,10 @@ private:
     std::array<RecentPipeline, 256> recentPipelines_{};
     static std::size_t recentSlot(const PipelineDesc& pd);
     GamePipeline findPipeline(const PipelineDesc& d);
+public:
+    // the pipeline now serving the description `p` was made for (the cache replaces a fast-linked pipeline by its optimised build; retained draws keep the old handle)
+    GamePipeline currentPipeline(GamePipeline p) const { return game_->currentPipeline(p); }
+private:
     bool sameDesc(const PipelineDesc& a, const PipelineDesc& b) const;
     // what a vertex shader's inputs read from a vertex declaration (computeVertexInput): fixed per (declaration, shader)
     struct VertexPlanInput {
