@@ -1271,6 +1271,7 @@ public:
         float outputFps = 0.0f;   // ... and frames shown per second (generated ones included)
     };
     const LiveFrame& liveFrame() const { return live_; }
+    void hitchDiag(std::chrono::steady_clock::time_point now);  // WS26: RVK_HITCH_MS / RVK_FRAME_CSV (device.cpp)
     Surface* backBuffer() { return backBufferSurface_; }
     // Manual frame generation (enh/framegen.h): set from the BeforePresent pass with the interpolated frame (display size, same
     // format family as the back buffer, usable as a transfer source); present() shows it first and the real frame half a base

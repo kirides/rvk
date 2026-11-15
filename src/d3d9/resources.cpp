@@ -396,6 +396,13 @@ void Texture::upload(rhi::CommandList& cl) {
             copy.extent = {w, h, d};
             cl.copyBufferToTextureBox(*tex_, game.ringBuffer(staging), copy);
             dev_.countUpload(true, sliceBytes * d);
+            if (sliceBytes * d >= (4ull << 20)) {  // WS26 diagnostics (RVK_HITCH_MS set): a texture upload of 4 MiB or more in one frame
+                static const bool on = GetEnvironmentVariableA("RVK_HITCH_MS", nullptr, 0) != 0;
+                if (on) {
+                    spdlog::info("diag: big upload: texture {:p} {}x{}x{} level {} face {} of {}, {} KiB, box {}x{}+{}+{}, D3DFORMAT {} pool {} usage {:#x}", static_cast<const void*>(this), desc_.width, desc_.height, desc_.depth,
+                                 level, face, desc_.levels, (sliceBytes * d) >> 10, w, h, x0, y0, desc_.format, desc_.pool, desc_.usage);
+                }
+            }
             l.dirty = false;
             copied = true;
             // File textures (never locked) are not read back by the engine: drop the CPU copy. A texture that was locked keeps

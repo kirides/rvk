@@ -1,0 +1,6 @@
+id          = "rvk_traverse"
+name        = "Renderer test: the hero is carried along a long route"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "WS26 traversal / hitch census: after a new game the hero is placed along a polyline through the world at running speed for -Param seconds (streaming, camera turns, pinned game time). docs/research/frame-ownership.md 16.15."
+main        = "main.lua"
