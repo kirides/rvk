@@ -674,6 +674,7 @@ public:
     bool pipelineContains(const PipelineDesc& desc) override { return record_.containsPipeline(desc); }
     void prewarmPipeline(const PipelineDesc& desc) override { record_.prewarmPipeline(desc); }
     void prewarmOncePipeline(const PipelineDesc& desc) override { record_.prewarmOncePipeline(desc); }
+    void setPipelineBackgroundLimit(unsigned n, bool low) override { record_.setPipelineBackgroundLimit(n, low); }
     void preparePipelineShader(ShaderModule module, VkShaderStageFlagBits stage) override { record_.prepareShader(module, stage); }
     void savePipelineCache() override { record_.saveCache(); }
     void stopPipelineBuilds() override { record_.stopPipelineBuilds(); }

@@ -17,6 +17,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/ws19_small.h"
 #include "d3d9/defs.h"
 #include "enh/light_table.h"
 #include "engine/memread.h"
@@ -333,7 +334,12 @@ void StaticOps::recEnter(const Op& op) {
         recAudit(op);
     }
     R.wantOwnable = ownedStatic_ && R.cur != nullptr && !R.cur->ownable;
-    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable;
+    if (R.cur != nullptr && R.cur->stale && ownedDelta_ && !rebuildStaleOff()) {
+        // WS9: the owned path found the record out of date (orec::OpRecord::stale): remade from this composition
+        R.refused = true;
+        ++staleRebuilds_;
+    }
+    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable || R.refused;
     recCollect_ = ownedStatic_;  // (the touches / stream 3 lists of every composed eligible op: a record can be made from any composition)
     if (R.building) {
         R.readLog = {};
@@ -356,9 +362,14 @@ int StaticOps::recLiveWhy(const orec::OpRecord& rec) {
     if (!rec.watch.empty() && !ret::validate(rec.watch.data(), rec.watch.size())) return static_cast<int>(orec::kStampFields) + 5;
     // F5-1: a draw was composed while its range's cluster build was pending (the build has finished or failed since: composed again, it takes the clustered copy) or drew with a
     // clustered copy that is gone (the index buffer's copy was replaced, the setting went off)
+    // WS19 (frame-ownership.md 14.61): one map lookup per clustered draw and frame before; the answer only moves with the store's state serial
     {
-        for (const orec::DrawRec& d : rec.draws) {
-            if (d.cd && d.cd->clusterWait != 0 && gpuscene::clusterstore().stale(d.cd->clusterWait, d.cd->clusterUsing)) return static_cast<int>(orec::kStampFields) + 5;
+        const std::uint64_t cs = gpuscene::clusterstore().stateSerial();
+        if (rec.clusterOkSerial != cs || ws19SmallOff()) {
+            for (const orec::DrawRec& d : rec.draws) {
+                if (d.cd && d.cd->clusterWait != 0 && gpuscene::clusterstore().stale(d.cd->clusterWait, d.cd->clusterUsing)) return static_cast<int>(orec::kStampFields) + 5;
+            }
+            rec.clusterOkSerial = cs;
         }
     }
     return -1;
@@ -582,6 +593,26 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     R.probes[k] = R.probe;
     R.pkeys[k] = pkey;
     if (R.cur == nullptr || k >= R.cur->draws.size()) return;
+    // WS7 (frame-ownership.md 14.49): a record built while the draw's scene form was still being made (draws[k].scene false: the op is composed every frame, "not a scene
+    // draw") is out of date as soon as the composition has the form: remade from this composition now, not at some later check frame
+    static const bool ws7Off = GetEnvironmentVariableA("RVK_WS7_BASELINE", nullptr, 0) != 0;  // (A/B: the old behaviour, remade at a check frame at best)
+    // WS10: actor records too (an actor record built while its forms were pending - a cold shader cache - was "not a scene draw" for good with owned_check = 0: actors 0 % owned;
+    // RVK_WS10_ACTORS_OFF=1 keeps WS7's exclusion)
+    static const bool ws10ActorsOff = GetEnvironmentVariableA("RVK_WS10_ACTORS_OFF", nullptr, 0) != 0;
+    if (!ws7Off && !R.refused && (!R.cur->actor || !ws10ActorsOff) && pkey != 0) {
+        const orec::DrawRec& cur = R.cur->draws[k];
+        // the owned path's own tests of a retained draw (ownedDerive / deriveScene / orderedValid): a scene draw with its v2 pipeline, not made while a form was pending
+        const auto ownable = [](const d3d9::Device::CachedDraw& c) {
+            return c.valid && c.scenePipeline2 != d3d9::GamePipeline::None && c.v.sceneActive && !c.v.scenePending && (c.packet.batchable || c.ordered);
+        };
+        if (!cur.scene || cur.cd == nullptr || !ownable(*cur.cd)) {
+            const auto pit = packets_.find(pkey);
+            if (pit != packets_.end() && ownable(pit->second.cd)) {
+                R.refused = true;
+                ++R.stats(R.key.view != 0).refused[9];
+            }
+        }
+    }
     // 7.27: the derivation + compare of a valid record is verification: check frames only (the record's validity is the stamps' job, the audit's net and the
     // owned path's own derivation; a refused derive on another frame remakes the record at the next check frame)
     if (!gpuscene::verifyFrame() && !(R.key.view != 0 && ownedShadowCheck_)) return;  // (F3-1: a cascade's check view is decided by the cascades' own frame count)
@@ -1090,6 +1121,11 @@ void StaticOps::recReport() {
     orec::Stats& w = R.window;
     R.total.add(w);
     R.shadowTotal.add(R.shadowWindow);
+    if (R.memoHits + R.memoMisses != 0) {
+        // WS6: the record lookup memo of the owned path (hits = lookups answered without the hash map; checked = compared with the map on check frames; BAD must stay 0)
+        spdlog::info("native: record memo (5 s): {} hits, {} misses, {} checked on check frames, {} BAD{}", R.memoHits, R.memoMisses, R.memoChecked, R.memoBad, R.memoOff ? " (memo OFF)" : "");
+        R.memoHits = R.memoMisses = R.memoChecked = 0;
+    }
     if (R.shadowWindow.differing != 0) {
         std::string why = "draws DIFFERING on the check frames";
         for (std::size_t f = 0; f < orec::kFieldCount; ++f) {

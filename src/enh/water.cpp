@@ -829,21 +829,21 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
 
 bool Water::wantsOpaque() const { return fftWanted() && settings_.oceanWaves && floorPending_.size() < kFloorMaxPending; }
 
-void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
+d3d9::OpaqueResult Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     if (q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.decl == nullptr || q.instanced || q.vertexStride < 12 ||
         q.primitives == 0 || (q.primitiveType != 4 && q.primitiveType != 5)) {
-        return;
+        return d3d9::OpaqueResult::Known;
     }
     const d3d9::VertexElement* pos = nullptr;
     for (const d3d9::VertexElement& e : q.decl->elements()) {
         if (e.stream != 0) continue;
-        if (e.usage == 2) return;                        // BLENDINDICES: skinned
-        if (e.usage == 5 && e.usageIndex == 4) return;  // TEXCOORD4: the engine's instance index (constant instancing)
+        if (e.usage == 2) return d3d9::OpaqueResult::Known;                        // BLENDINDICES: skinned
+        if (e.usage == 5 && e.usageIndex == 4) return d3d9::OpaqueResult::Known;  // TEXCOORD4: the engine's instance index (constant instancing)
         if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = &e;
     }
-    if (pos == nullptr) return;
+    if (pos == nullptr) return d3d9::OpaqueResult::Known;
     float rows[3][4];
-    if (!worldRows(device, q, rows)) return;
+    if (!worldRows(device, q, rows)) return d3d9::OpaqueResult::Known;
     // one entry per mesh range and placement
     std::uint64_t key = 1469598103934665603ull;
     const auto mix = [&key](const void* p, std::size_t n) {
@@ -855,17 +855,17 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     mix(ids, sizeof(ids));
     mix(range, sizeof(range));
     mix(rows, sizeof(rows));
-    if (floorMeshes_.contains(key)) return;
+    if (floorMeshes_.contains(key)) return d3d9::OpaqueResult::Known;
     const std::uint64_t frame = device.stats().frames;
     if (frame != floorFrame_) {
         floorFrame_ = frame;
         floorFrameBytes_ = 0;
     }
-    if (floorFrameBytes_ > kFloorFrameBudget) return;  // next frame (it is drawn again)
+    if (floorFrameBytes_ > kFloorFrameBudget) return d3d9::OpaqueResult::Retry;  // next frame (it is drawn again)
     const std::uint32_t isize = q.indexBuffer->index32() ? 4u : 2u;
     const std::uint32_t icount = q.primitiveType == 4 ? q.primitives * 3 : q.primitives + 2;
     std::vector<std::uint8_t> idata(static_cast<std::size_t>(icount) * isize);
-    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.data())) return;
+    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.data())) return d3d9::OpaqueResult::Retry;
     std::vector<std::uint32_t> idx(icount);
     std::uint32_t lo = 0xffffffffu, hi = 0;
     for (std::uint32_t i = 0; i < icount; ++i) {
@@ -877,16 +877,16 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
             v = v16;
         }
         const std::int64_t vv = static_cast<std::int64_t>(v) + q.baseVertex;
-        if (vv < 0) return;
+        if (vv < 0) return d3d9::OpaqueResult::Known;
         idx[i] = static_cast<std::uint32_t>(vv);
         lo = std::min(lo, idx[i]);
         hi = std::max(hi, idx[i]);
     }
     const std::uint32_t stride = q.vertexStride;
     const std::uint64_t vbytes = static_cast<std::uint64_t>(hi - lo + 1) * stride;
-    if (vbytes > (64u << 20)) return;
+    if (vbytes > (64u << 20)) return d3d9::OpaqueResult::Known;
     std::vector<std::uint8_t> vdata(static_cast<std::size_t>(vbytes));
-    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.data())) return;
+    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.data())) return d3d9::OpaqueResult::Retry;
     floorMeshes_.insert(key);
     floorFrameBytes_ += vbytes + idata.size();
     const seafloor::Grid g = floorGrid();
@@ -922,6 +922,7 @@ void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
     }
     ++floorMeshCount_;
     if (added > 0) floorDirty_ = true;
+    return d3d9::OpaqueResult::Learned;
 }
 
 void Water::serviceFloor(d3d9::Device& device, rhi::CommandList& cmd) {

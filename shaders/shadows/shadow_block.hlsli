@@ -4,7 +4,11 @@
 // Port of shadow_block.glsl; needs rvk_draw.hlsli (pc.draw). Read it through rvkShadowBlock().
 #pragma once
 
+#ifdef SHADOW_BLOCK_NO_DRAW
+#include "rvk_common.hlsli"  // (a pass reads the block through its own push: shadow_pcss.comp)
+#else
 #include "rvk_draw.hlsli"
+#endif
 
 struct ShadowBlock {
     float4 cascade[12];  // cascade c: rows 4c..4c+3 of DepthToShadowMatrix (texcoord = (dot(row0, p), .., dot(row3, p)))
@@ -18,13 +22,17 @@ struct ShadowBlock {
                          // bias (texels of a 45 degree slope), w steepest receiver slope the bias follows (tan)
     float4 target;       // x 1 / width, y 1 / height, z width, w height
     uint4 mode;          // x taps per axis (1..4), y debug view (0 off, 1 cascades, 2 cascade term only, 3 terrain term only,
-                         // 4 the ray-traced term only, 5 the ray-traced coverage), zw 0
-    uint4 rt;            // x the ray-traced visibility (t2D, enh/rt_shadows; 0 = none), yzw 0
+                         // 4 the ray-traced term only, 5 the ray-traced coverage), z soft filter taps (2..4), w frame index
+    uint4 rt;            // x the ray-traced visibility (t2D, enh/rt_shadows; 0 = none), y the soft shadow trace's result (t2D; 0 = none), zw 0
     float4 rtParams;     // x range (depth-map units), y blend band (fraction of the range), zw 0
     float4 depthRemap;   // read by the VERTEX shader (this block replaces the draw's DrawBlock: posFix is not there): x, y = the
                          // reversed-depth remap Device::depthRemap (z' = z + x + y at z = w = 1; 0 when the depth is not reversed)
+    float4 soft;         // shadows.soft (PCSS): x penumbra width per unit of blocker distance (2 tan of the sun's half angle), y smallest filter radius (texels), zw 0
+    float4 softR;        // xyz the blocker search radius per cascade (texels)
 };
 
 typedef RVK_REF(ShadowBlock) ShadowPtr;
 
+#ifndef SHADOW_BLOCK_NO_DRAW
 ShadowPtr rvkShadowBlock() { return rvkPtr<ShadowBlock, 16>(pc.draw); }
+#endif

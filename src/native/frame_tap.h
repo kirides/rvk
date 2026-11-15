@@ -34,7 +34,7 @@ public:
     // native.frame_tap (its report); the tap also runs while the static ops (N5.1) use it
     void apply(bool on);
     bool enabled() const { return on_; }
-    void setStaticOps(class StaticOps* ops) { statics_ = ops; }
+    void setStaticOps(class StaticOps* ops);
     void setStaticOpsActive(bool on);
     // N5.5c: the effect draws (native/effect_ops) take the draws of their units first
     void setEffectOps(class EffectOps* ops) { effects_ = ops; }
@@ -81,8 +81,10 @@ private:
     void beginView(void* db, void* desc, ViewKind kind, void* shadowMap, std::int32_t cascade);
     ViewKind shadowKind(const void* shadowMap, std::int32_t& cascade);
     VtableInfo& vtableInfo(const void* vtable);
-    void resolve(Op& op);
+    void resolve(Op& op, bool deferHeavy = false);
+    static void resolveLate(void* self, Op& op);  // (StaticOps' hook: the deferred part of resolve, for a taken op composed late)
     void logOps() const;
+    std::uint32_t passBeginImpl(bool solid);
 
     void update();
     d3d9::Device& dev_;
@@ -117,9 +119,16 @@ private:
     std::vector<f10req::Deferred> deferred_;
     std::vector<RawOp> merged_;
     std::vector<RawOp> ownedKept_;
-    std::vector<Op> ownedOps_;
+    std::vector<Op> ownedOps_, treeOps_, vegOps_;  // (WS6: persistent scratch, swapped with the StaticOps takers)
+    struct Sel {
+        std::uint32_t i = 0;  // position in raw_
+        OpKind kind = OpKind::Unknown;
+    };
+    std::vector<Sel> sel_, selSorted_;
+    static constexpr std::size_t kVtCache = 16;
     std::vector<std::uint8_t> ownedMark_;
     std::unordered_map<const void*, VtableInfo> vtables_;
+    std::array<std::pair<const void*, VtableInfo*>, kVtCache> vtCache_{};
 
     // per view kind: the last view, the window since the last report, its first view with mismatches
     std::array<TapCounts, kViewKindCount> last_{}, window_{};

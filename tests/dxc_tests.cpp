@@ -114,6 +114,56 @@ TEST(dxc_disk_cache_follows_includes) {
     fs::remove_all(dir, ec);
 }
 
+// WS12: the generated shaders (the translator's text, the ubershader) are cached by their text + arguments, not by a version number: the same text is a hit whatever built it,
+// another text / flag set is a miss
+TEST(dxc_generated_text_cache_is_content_keyed) {
+    if (!dxc::available()) return;
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "rvk_dxc_generated_cache_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    dxc::setCacheDirectory(dir);
+    const auto request = [](float value, bool half16) {
+        dxc::Request r;
+        r.file = "translated.hlsl";
+        r.source = "float4 PSMain() : SV_Target0 { return float4(" + std::to_string(value) + ", 0, 0, 1); }\n";
+        r.entry = "PSMain";
+        r.profile = "ps_6_6";
+        r.optLevel = 1;
+        r.half16 = half16;
+        return r;
+    };
+    const dxc::Result first = dxc::compile(request(0.25f, false));
+    CHECK_MSG(first.ok(), first.log.c_str());
+    CHECK(!first.fromCache);
+    const dxc::Result again = dxc::compile(request(0.25f, false));
+    CHECK(again.fromCache);
+    CHECK(again.words == first.words);
+    CHECK(!dxc::compile(request(0.5f, false)).fromCache);          // another text
+    CHECK(!dxc::compile(request(0.25f, true)).fromCache);          // another flag set
+    dxc::Request refresh = request(0.25f, false);
+    refresh.refresh = true;
+    const dxc::Result forced = dxc::compile(refresh);              // a hit that turned out damaged is compiled and stored again
+    CHECK(forced.ok());
+    CHECK(!forced.fromCache);
+    CHECK(dxc::compile(request(0.25f, false)).fromCache);
+    // the entries nobody used for a month are removed, the used ones stay
+    std::size_t entries = 0;
+    fs::path oldest;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        if (e.path().extension() != ".dxo") continue;
+        if (entries++ == 0) {
+            oldest = e.path();
+            fs::last_write_time(oldest, fs::file_time_type::clock::now() - std::chrono::hours(24 * 40));
+        }
+    }
+    CHECK(entries >= 3);
+    CHECK(dxc::pruneCache(std::chrono::hours(24 * 30)) == 1);
+    CHECK(!fs::exists(oldest));
+    dxc::setCacheDirectory({});
+    fs::remove_all(dir, ec);
+}
+
 TEST(dxc_debug_info_variant) {
     if (!dxc::available()) return;
     dxc::Request r = probeRequest();
@@ -317,7 +367,7 @@ TEST(shadows_block_hlsl_matches_cpp) {
                {"maps", offsetof(B, maps)}, {"res", offsetof(B, res)}, {"vsm", offsetof(B, vsm)},
                {"vsmParams", offsetof(B, vsmParams)}, {"params", offsetof(B, params)}, {"target", offsetof(B, target)},
                {"mode", offsetof(B, mode)}, {"rt", offsetof(B, rt)}, {"rtParams", offsetof(B, rtParams)},
-               {"depthRemap", offsetof(B, depthRemap)}},
+               {"depthRemap", offsetof(B, depthRemap)}, {"soft", offsetof(B, soft)}, {"softR", offsetof(B, softR)}},
               "ShadowBlock");
     // the old bug: the vertex shader read DrawBlock.posFix from this block; a ShadowBlock member must never sit where a DrawBlock's posFix does unless it is the remap itself
     CHECK(offsetof(B, depthRemap) != offsetof(abi::DrawBlock, posFix));

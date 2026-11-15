@@ -2439,7 +2439,7 @@ void testRtInstanceBuild(rhi::Device& dev, const Shaders& sh) {
             for (int c = 0; c < 4; ++c) m.uvMap[r][c] = 0.25f * static_cast<float>(r * 4 + c) + static_cast<float>(i);
         }
     }
-    const auto away = [](float (&rows)[12], float x) {
+    const auto away = [](void* rows, float x) {  // (12 floats: an InstanceInput row block or a VkTransformMatrixKHR)
         const float r[12] = {1, 0, 0, x, 0, 1, 0, 0, 0, 0, 1, 0};
         std::memcpy(rows, r, sizeof(r));
     };
@@ -2473,7 +2473,7 @@ void testRtInstanceBuild(rhi::Device& dev, const Shaders& sh) {
     std::vector<rb::Literal> lit(kLiterals);
     for (std::uint32_t i = 0; i < kLiterals; ++i) {
         rb::Literal& l = lit[i];
-        away(*reinterpret_cast<float(*)[12]>(&l.vi.transform.matrix[0][0]), 300.0f + static_cast<float>(i));
+        away(l.vi.transform.matrix, 300.0f + static_cast<float>(i));
         l.vi.instanceCustomIndex = i == 0 ? 0u : 11u;
         l.vi.mask = abi::kRtMaskDynamic;
         l.vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;

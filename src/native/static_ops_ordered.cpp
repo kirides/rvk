@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <utility>
 #include <format>
 
 #include <spdlog/spdlog.h>
@@ -124,7 +125,14 @@ int StaticOps::orderedValid(const Op& op, const orec::OpRecord& rec) {
     }
     if (recLiveWhy(rec) >= 0) return kOwLive;
     for (const orec::DrawRec& r : rec.draws) {
-        if (!r.scene || r.cd == nullptr || !r.cd->valid) return kOwNotScene;
+        if (!r.scene || r.cd == nullptr || !r.cd->valid) {
+            const std::size_t li = op.list == List::Solid ? 0 : op.list == List::Refracted ? 1 : 2;
+            const std::size_t c = r.cd == nullptr ? 127
+                                                  : std::min<std::size_t>(static_cast<std::size_t>(r.cd->kind), 31) | (r.cd->ordered ? 32u : 0u) |
+                                                        (r.cd->scenePipeline2 == d3d9::GamePipeline::None ? 64u : 0u);
+            ++ordW_.notScene[li][c];
+            return kOwNotScene;
+        }
     }
     return -1;
 }
@@ -193,6 +201,21 @@ bool StaticOps::orderedPlace(const Op& op) {
     }
     if (!ownedView_.active) return false;  // (a check / warm-up frame, or the owned path is not ready: composed, and compared)
     const std::size_t li = solid ? 0 : op.list == List::Refracted ? 1 : 2;
+    {  // (diagnostics, 16.10: RVK_ORD_LISTS=<mask> keeps only the lists whose bit is set owned (1 solid, 2 refracted, 4 alpha, 8 actors; default 15), RVK_ORD_SORT=<hex> only the ops
+       // whose sort id & 0xffff equals it (a leading '-' = all but those); the others stay composed: bisecting an owned ordered op against the composed frame)
+        static const unsigned mask = [] {
+            char b[16] = {};
+            return GetEnvironmentVariableA("RVK_ORD_LISTS", b, sizeof(b)) != 0 ? static_cast<unsigned>(std::atoi(b)) : 15u;
+        }();
+        static const std::pair<int, unsigned> sortSel = [] {
+            char b[32] = {};
+            if (GetEnvironmentVariableA("RVK_ORD_SORT", b, sizeof(b)) == 0) return std::make_pair(0, 0u);
+            const bool neg = b[0] == '-';
+            return std::make_pair(neg ? -1 : 1, static_cast<unsigned>(std::strtoul(b + (neg ? 1 : 0), nullptr, 16)));
+        }();
+        if (((mask >> (actor ? 3u : static_cast<unsigned>(li))) & 1u) == 0) return false;
+        if (sortSel.first != 0 && ((op.raw.sortId & 0xffffu) == sortSel.second) != (sortSel.first > 0)) return false;
+    }
     const auto it = recs_->map.find(orec::Key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0});
     if (it == recs_->map.end()) {
         if (!solid && !actor) {
@@ -398,6 +421,15 @@ void StaticOps::orderedReport() {
         for (std::size_t k = 1; k < std::size(kDev); ++k) {
             if (w.devWhy[l][k] != 0) why += std::format(" <{} {}>", kDev[k], w.devWhy[l][k]);
         }
+        {
+            std::string ns;
+            for (std::size_t k = 0; k < 128; ++k) {
+                if (w.notScene[l][k] == 0) continue;
+                ns += std::format(" [{} {}{}: {}]", k == 127 ? "no cd" : d3d9::draws::name(static_cast<d3d9::draws::Kind>(k & 31)), (k & 32) != 0 ? "ordered" : "unordered",
+                                  (k & 64) != 0 ? ", no v2 pipeline" : "", w.notScene[l][k]);
+            }
+            if (!ns.empty()) why += " {not scene, first draw:" + ns + "}";
+        }
         if (w.observer[l] != 0) why += std::format(" <observer wanted a capture {}>", w.observer[l]);
         if (w.tableFull[l] != 0) why += std::format(" <record table full {}>", w.tableFull[l]);
         if (w.notRetained[l] != 0) why += std::format("; not retained (no packet: water / replaced) {}", w.notRetained[l]);
@@ -421,6 +453,15 @@ void StaticOps::orderedReport() {
                      static_cast<double>(w.ns) / static_cast<double>(std::max<std::uint64_t>(1, w.owned[0] + w.owned[1] + w.owned[2])) / 1000.0,
                      static_cast<double>(w.flushNs) / static_cast<double>(std::max<std::uint64_t>(1, w.owned[0] + w.owned[1] + w.owned[2])) / 1000.0, w.owned[0] + w.owned[1] + w.owned[2]);
         b = {};
+    }
+    {
+        // 16.9 (WS23): the event-driven observers: per observer kind (replacers' opaque learning = the water's sea floor, object motion's covered draws) the calls skipped for
+        // unchanged records, the full observations, the re-observations (rolling 1 in 64 + check frames), the mismatches they found (fixed), DIFFERING on check frames
+        const d3d9::Device::EventObsStats& e = dev_.eventObsStats;
+        if (dev_.eventObservers() || e.observed[0] + e.observed[1] != 0) {
+            spdlog::info("native: event observers (5 s, totals): sea floor learning: skipped {}, observed {} (rechecked {}, mismatch {}, DIFFERING {}); object motion: skipped {}, observed {} (rechecked {}, mismatch {}, DIFFERING {}); fault injection dropped {}",
+                         e.skipped[0], e.observed[0], e.rechecked[0], e.mismatch[0], e.compareMismatch[0], e.skipped[1], e.observed[1], e.rechecked[1], e.mismatch[1], e.compareMismatch[1], e.injected);
+        }
     }
     w = {};
 }

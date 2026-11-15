@@ -92,9 +92,20 @@ void ObjectMotion::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
     for (std::size_t i = 0; i < f.count; ++i) {
         const d3d9::Device::OwnedRecordView& r = f.records[i];
         if ((r.wanted & f.observerBit) == 0) continue;
+        // WS23 (native.event_observers): a record that did not enter / change and whose covered branch was taken before: observe() only counts there, so the counters are
+        // added without the draw's device state; a rolling 1 in 64 and the check frames observe it in full and compare (Device::eventObsSkip)
+        bool recheck = false;
+        if (dev.eventObsSkip(r.id, r.cd, r.sig, r.epoch, d3d9::Device::kObsMotion, r.entered, r.changed, nullptr, recheck)) {
+            ++(isRigid(r.cd->kind) ? diagRigid_ : diagSkin_);
+            ++boneDraws_;
+            dev.noteCaptureAvoided(r.cd->kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(r.cd->query));
+            continue;
+        }
         // (the scope sets the motion flags as ownedObserve did: observe() takes its covered branch; it reads no register there)
         d3d9::Device::OwnedDrawScope scope(dev, r);
+        lastCovered_ = false;
         observe(dev, scope.query());
+        dev.eventObsDone(r.id, r.cd, r.sig, r.epoch, d3d9::Device::kObsMotion, nullptr, lastCovered_, recheck && !lastCovered_);
     }
 }
 
@@ -141,6 +152,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // (14.22: a rigid draw whose VS window 2 is an instance row image has no motion of its own on any path: the image is immutable while its record lives)
     if ((q.kind == Kind::Skinned || isRigid(q.kind)) && (dev.boneMotionCovered() || (isRigid(q.kind) && dev.rigidRowWindow()))) {
         ++boneDraws_;
+        lastCovered_ = true;
         dev.noteCaptureAvoided(q.kind == Kind::Skinned ? d3d9::Device::CaptureBy::MotionSkinned : d3d9::Device::CaptureBy::MotionRigid, d3d9::Device::captureKindOf(q));
         return;
     }

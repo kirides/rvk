@@ -354,6 +354,12 @@ void EffectOps::shadowSceneBegin(void* mapPtr) {
         packedCellScene();
         return;
     }
+    // shadows.fit != engine: the UpdateCamera pre-hook rewrote the light box (engine/shadow_maps), so the camera composed from the
+    // engine's fit is not what the engine built: nothing to compare (the composed camera is not used for any draw)
+    if (engine::shadowmaps::fitOverridden()) {
+        ++setupStats_->skipped;
+        return;
+    }
     // the camera UpdateCamera left (the map's eCCameraBase +0x58) and its texture matrix
     U8* cam = ptr(setupMap_, 0x58);
     ++setupStats_->cameras;

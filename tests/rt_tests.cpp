@@ -300,6 +300,34 @@ TEST(rt_registry_pinned_never_stale) {
     CHECK(reg.age(cam, 5001, 501.0, l, nullptr) == 1 && reg.size() == 0);
 }
 
+// WS11 (frame-ownership.md 14.52): the cover of an owned tree run keeps each instance's position as a hint: `at` answers only for the key it was kept with, and `refresh` is
+// what a repeated see() does
+TEST(rt_registry_position_hint_and_refresh) {
+    rt::Registry reg;
+    const rt::Rows a = at(1, 0, 0), b = at(2, 0, 0), c = at(3, 0, 0);
+    const std::uint64_t ka = rt::instanceKey(1, a), kb = rt::instanceKey(1, b), kc = rt::instanceKey(1, c);
+    reg.see(ka, 1, a, 0, 0x1, 0x10, 1, 1, 0.0);
+    reg.see(kb, 1, b, 0, 0x2, 0, 1, 1, 0.0);
+    reg.see(kc, 1, c, 0, 0x4, 0x30, 1, 1, 0.0);
+    const std::size_t pa = reg.positionOf(*reg.find(ka)), pb = reg.positionOf(*reg.find(kb)), pc = reg.positionOf(*reg.find(kc));
+    CHECK(reg.at(pa, ka) == reg.find(ka) && reg.at(pb, kb) == reg.find(kb) && reg.at(pc, kc) == reg.find(kc));
+    CHECK(reg.at(pa, kb) == nullptr && reg.at(99, ka) == nullptr);
+    // refresh = see() of an existing instance: frame / time, flags OR-ed, a non-zero data word replaces, the view bit added
+    rt::Registry twin = reg;
+    reg.see(ka, 1, a, 0, 0x8, 0x20, 2, 7, 0.5);
+    rt::Registry::refresh(*twin.find(ka), 0x8, 0x20, 2, 7, 0.5);
+    const rt::Registry::Instance &x = *reg.find(ka), &y = *twin.find(ka);
+    CHECK(x.lastFrame == y.lastFrame && x.lastTime == y.lastTime && x.flags == y.flags && x.data == y.data && x.views == y.views);
+    CHECK(x.lastFrame == 7 && x.flags == 0x9 && x.data == 0x20 && x.views == 3);
+    rt::Registry::refresh(*twin.find(kb), 0, 0, 1, 8, 0.6);  // (a zero data word keeps the old one)
+    CHECK(twin.find(kb)->data == 0 && twin.find(ka)->data == 0x20);
+    // a removal moves instances: the hint of the moved one no longer matches (the caller falls back to the lookup)
+    reg.removeIf([&](const rt::Registry::Instance& in) { return in.key == ka; });
+    CHECK(reg.at(pa, ka) == nullptr);
+    CHECK(reg.find(kb) != nullptr && reg.find(kc) != nullptr);
+    CHECK(reg.at(reg.positionOf(*reg.find(kc)), kc) == reg.find(kc));
+}
+
 // F4-5 (frame-ownership.md 14.17): the SpeedTree wind by compute: the vertex class of a declaration and the CPU reference of the vertex shader's position
 TEST(tree_wind_layout_classes_and_refusals) {
     namespace tw = rvk::enh::treewind;

@@ -134,7 +134,8 @@ StaticOps::Skip StaticOps::nonOpPasses(const std::uint8_t* shader, const std::ui
     in.combi = combi;
     in.instanced = false;
     in.switchValue = switchValue;
-    std::vector<sc::Pass> passes;
+    static thread_local std::vector<sc::Pass> passes;  // (WS15: capacity kept: one allocation per decal record and frame before; passDraw does not come back here)
+    passes.clear();
     const std::uint8_t* version = nullptr;
     if (const Skip k = shaderPasses(shader, in, version, passes); k != Skip::None) return k;
     if (version == nullptr) return Skip::None;
@@ -168,7 +169,9 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
     // illumination holder (+0xf8): {decal, holder + 0x78}
     const std::int32_t count = get<std::int32_t>(admin, 0x28);
     U8* array = ptr(admin, 0x20);
-    std::vector<std::uint8_t> queue;
+    // (WS13: the per-pass scratch is kept between passes: the 360 KB vertex scratch was value-initialised every pass; nothing reads a byte build() did not write)
+    static thread_local std::vector<std::uint8_t> queue;
+    queue.clear();
     for (std::int32_t i = 0; i < count; ++i) {
         U8* decal = ptr(array, 8 * static_cast<std::size_t>(i));
         bool ok = false;
@@ -208,9 +211,12 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
         DecalEntry* entry = nullptr;  // owned: the persistent buffers drawn
         bool built = false;           // its bytes were made this frame (vb / ib)
     };
-    std::vector<Record> records;
-    std::vector<std::uint8_t> vb(static_cast<std::size_t>(kMaxVertices) * kDecalStride);
-    std::vector<std::uint16_t> ib(kMaxIndices);
+    static thread_local std::vector<Record> records;
+    static thread_local std::vector<std::uint8_t> vb;
+    static thread_local std::vector<std::uint16_t> ib;
+    records.clear();
+    if (vb.size() != static_cast<std::size_t>(kMaxVertices) * kDecalStride) vb.resize(static_cast<std::size_t>(kMaxVertices) * kDecalStride);
+    if (ib.size() != static_cast<std::size_t>(kMaxIndices)) ib.resize(kMaxIndices);
     std::int32_t vtx = 0, idx = 0;
     bool locked = false;
     // the record-break state (the previous record's keys)
@@ -220,7 +226,7 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
     U8* prevList = nullptr;
     float prevF = one_;
     bool alone = false;
-    std::vector<std::uint8_t> src;
+    static thread_local std::vector<std::uint8_t> src;
     // one decal's indices (rebased to `base`) and vertices into ib / vb at idx / vtx
     const auto build = [&](std::size_t q, std::int32_t at, std::int32_t iat, std::int32_t base) -> Skip {
         U8* decal = decalAt(q);

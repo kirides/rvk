@@ -146,7 +146,9 @@ public:
     void replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::DrawReplacement& out) override;
     // the sea floor field: the main view's static meshes are rasterised top-down (once per mesh and placement)
     bool wantsOpaque() const override;
-    void observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) override;
+    d3d9::OpaqueResult observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) override;
+    // (observeOpaque reads registers only for the world rows, worldRows: an owned draw's query carries them from the object table)
+    bool opaqueReadsRegisters(const d3d9::ReplaceQuery& q) const override { return q.objectRows == nullptr || q.instanced; }
 
 private:
     struct Body {

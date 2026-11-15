@@ -1,0 +1,6 @@
+id          = "rvk_sdsmtest"
+name        = "Renderer test: shadow fit under fast camera motion"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "The camera turns at a fixed speed / the sun sweeps / the hero is teleported between shadow spots, with frame-by-frame screenshot bursts (docs/research/shadows.md 8.10)."
+main        = "main.lua"

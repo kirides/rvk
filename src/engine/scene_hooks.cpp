@@ -18,6 +18,7 @@
 #include "core/exports.h"
 #include "core/hooks.h"
 #include "d3d9/device.h"
+#include "engine/lights.h"
 #include "engine/memread.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
@@ -491,6 +492,9 @@ bool detourSceneUpdate(void* filter, int index) {
     restoreSceneImageSize();
     ++g_inSceneFilter;
     d3d9::Device* d = device();
+    // WS22 (frame-ownership.md 16.8, engine-gfx.md): the light table's static light collection starts on its worker before eCCameraBase::Update (nothing writes the light tree /
+    // payloads from here to EndZPass); the camera of the previous frame + a margin, the take (EndZPass) filters to the real centre
+    if (d != nullptr && lights::asyncActive() && d->lastCamera().valid) lights::asyncKick(d->lastCamera().position.data(), d->stats().frames);
     std::int32_t* rect = d != nullptr ? mainCameraRect() : nullptr;
     std::int32_t saved[4] = {};
     bool scaled = false;

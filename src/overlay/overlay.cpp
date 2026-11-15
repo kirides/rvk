@@ -4,6 +4,8 @@
 
 #include "gpuscene/owned_compact.h"
 #include "overlay/overlay.h"
+#include "core/log.h"
+#include "enh/light_table.h"
 #include "enh/material_pack.h"
 
 #include <windows.h>
@@ -26,6 +28,7 @@
 #include "core/settings.h"
 #include "api/capture.h"
 #include "engine/image_effects.h"
+#include "engine/lights.h"
 #include "engine/menu_state.h"
 #include "engine/vfs.h"
 #include "overlay/keys.h"
@@ -450,10 +453,43 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         d3d9::pullViewMask().store(m);
         return ok(std::format("owned shadow views pulled mask {}", m));
     }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "treereuse") {
+        // frame-ownership.md 14.52 (WS11): the owned tree pass's reuse on / off inside one run (the z passes' kept layout, the RT scene's covers of tree runs)
+        if (w[2] != "0" && w[2] != "1") return fail("debug treereuse 0|1");
+        d3d9::treeReuse().store(w[2] == "1");
+        return ok(std::format("owned tree reuse {}", w[2] == "1" ? "on" : "off"));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "treeown") {
+        // frame-ownership.md 14.59 (WS17): the owned tree pass's additions (bit 0 static-SH instances, bit 1 batch-first keys, bit 2 empty-op records) inside one run
+        std::uint32_t m = 0;
+        const auto r = std::from_chars(w[2].data(), w[2].data() + w[2].size(), m);
+        if (r.ec != std::errc() || m > 7) return fail("debug treeown <mask 0..7>");
+        d3d9::treeOwnMask().store(m);
+        return ok(std::format("owned tree additions mask {}", m));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "lightskip") {
+        // frame-ownership.md 14.55 (WS13): the light table's unchanged-build skip on / off inside one run
+        if (w[2] != "0" && w[2] != "1") return fail("debug lightskip 0|1");
+        enh::lightBuildSkip().store(w[2] == "1");
+        return ok(std::format("light table build skip {}", w[2] == "1" ? "on" : "off"));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "lightworker") {
+        // frame-ownership.md 16.8 (WS22): the light table's static collection on a worker thread: 0 off, 1 on, 2 auto (on except on integrated GPUs)
+        if (w[2] != "0" && w[2] != "1" && w[2] != "2") return fail("debug lightworker 0|1|2");
+        enh::setLightCollectWorker(w[2][0] - '0');
+        return ok(std::format("light collect worker mode {}", w[2]));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "lightsfast") {
+        // frame-ownership.md 14.57 (WS15): lights::collect's one-region re-read of the kept static lights on / off inside one run
+        if (w[2] != "0" && w[2] != "1") return fail("debug lightsfast 0|1");
+        engine::lights::setFastStatic(w[2] == "1");
+        return ok(std::format("light collect fast re-read {}", w[2] == "1" ? "on" : "off"));
+    }
     if (w[0] == "quit" && w.size() == 1) {
         // ends the game at once (perf-ab.ps1 after its last window: no scenario result, rvk.log flushed); TerminateProcess: no engine shutdown code runs
         spdlog::info("overlay: [debug] command quit: terminating the process");
         spdlog::default_logger()->flush();
+        log::flushSync();
         TerminateProcess(GetCurrentProcess(), 0);
         return ok("quit");
     }

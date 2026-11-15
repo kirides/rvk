@@ -952,16 +952,33 @@ void StaticOps::setOwnFoliage(bool on) {
     spdlog::info("native: own foliage {}", on ? "on (grass distance thinning tied to lod.view on every converted grass stream of the main view)" : "off");
 }
 
-sc::GrassThin StaticOps::grassThinOf(float gridEnd) const {
+sc::GrassThin StaticOps::grassThinOf(float gridEnd) {
     // (not while the engine's bytes are compared: scene_ops_compare; the owned pass has no g_, so the group's own state decides for every path alike)
     if (!ownFoliage_ || viewKind_ != ViewKind::Main || groups_[static_cast<std::size_t>(Group::Vegetation)].compare) return {};
     static const bool all = [] {
         char v[4] = {};
         return GetEnvironmentVariableA("RVK_S5_GRASS_OFF", v, sizeof(v)) != 0 && v[0] == '1';
     }();
+    // frame-ownership.md 16.14: the camera of THIS view. view_ is reset at viewBegin and composed by the first op that needs it (viewAndMirror); composeVegetation decides
+    // the thinning before its viewAndMirror, so a vegetation op that opened the view's lists (the main z pass at beach_sun) thinned around camPos = (0, 0, 0) while the
+    // owned pass (viewAndMirror first) and every later op thinned around the real camera: the composed z and colour passes disagreed (holes, black slivers) and the owned
+    // frames differed from the composed ones by 3.2 % of the picture. The main view's camera is read here as composeView reads it (database +0x14c0 -> +0x1738, +0x150).
+    // RVK_S5_THIN_ORIGIN=1 = the former behaviour (diagnostics).
+    static const bool origin = [] {
+        char v[4] = {};
+        return GetEnvironmentVariableA("RVK_S5_THIN_ORIGIN", v, sizeof(v)) != 0 && v[0] == '1';
+    }();
+    float cam[3] = {view_.camPos[0], view_.camPos[1], view_.camPos[2]};
+    if (!view_.valid) {
+        ++foliageW_.viewUnset;
+        if (!origin) {
+            U8* c = ptr(ptr(db_, 0x14c0), 0x1738);
+            if (c == nullptr || !rd(c, 0x150, cam, 12)) return {};  // (composeView fails the same way: the op is not composed)
+        }
+    }
     const auto& rs = settings::renderer();
     const float lodView = rs.lodView != nullptr ? rs.lodView->asFloat() : 1.0f;
-    return sc::grassThinParams(view_.camPos, gridEnd, lodView, all);
+    return sc::grassThinParams(cam, gridEnd, lodView, all);
 }
 
 void StaticOps::foliageCount(const sc::GrassThin&, std::size_t instances, std::uint32_t changed, std::uint32_t removed) {
@@ -977,6 +994,7 @@ void StaticOps::foliageReport() {
     foliageTotal_.instances += w.instances;
     foliageTotal_.changed += w.changed;
     foliageTotal_.removed += w.removed;
+    foliageTotal_.viewUnset += w.viewUnset;
     {
         // S-5 measurement: what vertex pulling of the trees' / grass' own flushes could merge (always logged while those flushes run)
         auto& f = dev_.treeFlushStats;
@@ -996,9 +1014,9 @@ void StaticOps::foliageReport() {
     }
     if (ownFoliage_ || w.ops != 0) {
         const auto& rs = settings::renderer();
-        spdlog::info("native: own foliage (5 s): grass thinning (lod.view {:g}): {} streams thinned, {} instances, {} shrunk or removed ({:.1f} %), {} removed ({:.1f} %)",
+        spdlog::info("native: own foliage (5 s): grass thinning (lod.view {:g}): {} streams thinned, {} instances, {} shrunk or removed ({:.1f} %), {} removed ({:.1f} %); decided before the view was composed {} (camera read from the database)",
                      rs.lodView != nullptr ? rs.lodView->asFloat() : 1.0f, w.ops, w.instances, w.changed, w.instances ? 100.0 * static_cast<double>(w.changed) / static_cast<double>(w.instances) : 0.0,
-                     w.removed, w.instances ? 100.0 * static_cast<double>(w.removed) / static_cast<double>(w.instances) : 0.0);
+                     w.removed, w.instances ? 100.0 * static_cast<double>(w.removed) / static_cast<double>(w.instances) : 0.0, w.viewUnset);
     }
     w = {};
 }

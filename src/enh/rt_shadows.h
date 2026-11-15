@@ -31,8 +31,9 @@ struct RtShadowParams {
     std::uint32_t mode[4];  // frame index, history valid, debug, 1 = opaque-first visibility (A/B; 0 = one query)
     float sun[4];           // unit vector towards the sun, tan of the cone's half angle
     float range[4];         // range (view depth, world units), ray reach, origin bias, spatial filter strength
+    std::uint32_t aux[4];   // the soft shadow passes (enh/shadows, shadows.soft): xy the ShadowBlock address; zw 0
 };
-static_assert(sizeof(RtShadowParams) == 5 * 16);
+static_assert(sizeof(RtShadowParams) == 6 * 16);
 
 // mirror of the passes' push block
 struct RtShadowPush {

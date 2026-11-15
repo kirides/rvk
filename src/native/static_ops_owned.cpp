@@ -350,15 +350,15 @@ bool StaticOps::ownedSelect(const Op& op) {
         ~T() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
     } selTimer{W.selectNs};
     const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), ownedViewKey_};
-    const auto it = recs_->map.find(key);
-    if (it == recs_->map.end()) {
+    orec::OpRecord* const recp = recs_->lookup(key, !gpuscene::checksOff());
+    if (recp == nullptr) {
         // (not a candidate: the first reason it is not eligible, for the counters)
         const orec::Excl ex = recExclusion(op);
         if (ex != orec::Excl::Count) ++W.leftExcl[static_cast<std::size_t>(ex)];
         else ++W.leftNoRecord;
         return false;
     }
-    const orec::OpRecord& rec = *it->second;
+    const orec::OpRecord& rec = *recp;
     rec.lastSeen = dev_.stats().frames;
     if (rec.ordered) {
         ++W.leftOrdered;  // F9 (native.owned_ordered): an order-dependent op stays in the list; its slot draws it from its records at its place (orderedPlace)
@@ -405,7 +405,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         orec::Stamp a = rec.stamp;
         a.view = a.materials = 0;
         int d = orec::firstDifference(a, st);
-        if (d == 4 && rec.actor && actorPickSwap(*it->second, st.lightmaps)) {  // (F6-2: an actor's morph pick seen before: its draws swapped in)
+        if (d == 4 && rec.actor && actorPickSwap(*recp, st.lightmaps)) {  // (F6-2: an actor's morph pick seen before: its draws swapped in)
             a = rec.stamp;
             a.view = a.materials = 0;
             d = orec::firstDifference(a, st);
@@ -446,7 +446,7 @@ bool StaticOps::ownedSelect(const Op& op) {
 void StaticOps::ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs) {
     ownedStats().owned += ops.size();
     ownedStats().compactNs += compactNs;
-    ownedOps_[list == List::Solid ? 1 : 0] = std::move(ops);
+    ownedOps_[list == List::Solid ? 1 : 0].swap(ops);
 }
 
 // the record's read log against the engine's memory, at the pass (some of what the composition read is the pass's own state: the admin's pass type)
@@ -594,9 +594,8 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
             const auto& amb = cd.ps->semantics[d3d9::Semantic::AmbientLight];
             if (amb.present() && amb.count >= 7 && amb.reg >= 14 && amb.reg + 7 <= 14 + 24) {
                 const std::uint64_t key = mix(mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight), amb.reg);
-                const auto hit = ownedAmbient_.find(key);
-                if (hit != ownedAmbient_.end()) {
-                    in.ambientLit = hit->second;
+                if (const bool* hit = ownedAmbient_.get(key)) {
+                    in.ambientLit = *hit;
                 } else {
                     float L[24][4]{};
                     bool lit = false;
@@ -606,7 +605,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
                             lit = c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f;
                         }
                     }
-                    ownedAmbient_.emplace(key, lit);
+                    ownedAmbient_.put(key, lit);
                     in.ambientLit = lit;
                 }
             }
@@ -631,11 +630,11 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         if (li.active() && r.illumSlot != gpuscene::kNoSlot) {
             const std::uint64_t lkey = mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight);
             std::uint32_t entry;
-            if (const auto lc = ownedCache_.light.find(lkey); lc != ownedCache_.light.end()) {
-                entry = lc->second;
+            if (const std::uint32_t* lc = ownedCache_.light.get(lkey)) {
+                entry = *lc;
             } else {
                 entry = li.entryFor(r.illumSlot, p);
-                ownedCache_.light.emplace(lkey, entry);
+                ownedCache_.light.put(lkey, entry);
             }
             if (entry != gpuscene::kNoEntry && li.ready()) {
                 d3d9::OwnedWindows::Win& lw = dw.w[1][3];
@@ -660,6 +659,7 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         if (rc != 0) {
             why = kFbRefused;
             lateDetail_ = lateOfCode(dev_, cd, rc);
+            markStale(rec, lateDetail_);
             tag = baseTag;
             return false;
         }
@@ -681,6 +681,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     }
     const auto t0 = tnow();
     const std::uint64_t submit0 = W.submitNs, side0 = W.sideNs, mat0 = W.matNs;
+    if (ownedDelta_) ++deltaPassesW_;
     ret::gLog = nullptr;
     finishOp();
     leanAbort();
@@ -688,6 +689,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     bool viewOk = view_.valid;
     if (!viewOk && ownedView_.admin != nullptr) viewOk = composeView(ownedView_.admin);
     const auto tPrep = tnow();
+    g_passPhaseNs[0] += ns(t0, tPrep);
     ++opSerial_;  // (the sampler snapshot of the polls is read afresh)
     // the view's stamp as the admin is now (the pass's state: the admin's type / mode bytes differ between the z and the solid pass)
     const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
@@ -733,6 +735,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         }
         if (!viewWinOk) viewWinOk = gpuscene::windowtables().fillViews(dev_, viewWin, mirror_.adminVs + 12, 0x7ffffu, mirror_.adminVs, mirror_.adminPs);
     }
+    const auto tView = tnow();
+    g_passPhaseNs[1] += ns(tPrep, tView);
     // the device state to give back: shaders, tag, the register file (loaded for the observers that read material constants)
     static float savedVs[d3d9::kVsFloatConsts][4], savedPs[d3d9::kPsFloatConsts][4];
     std::memcpy(savedVs, dev_.vsConstants(), sizeof(savedVs));
@@ -742,6 +746,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
     W.prepNs += ns(tPrep, tnow());
+    const auto tSave = tnow();
+    g_passPhaseNs[2] += ns(tView, tSave);
     ownedAmbient_.clear();
     ownedCache_.mat.clear();
     ownedCache_.light.clear();
@@ -761,10 +767,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         for (std::size_t i = 0; i < ops.size(); ++i) {
             if (!recs_) break;
             const Op& o = ops[i];
-            const auto it = recs_->map.find(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), ownedViewKey_});
-            if (it != recs_->map.end()) {
-                ownedRecPtrs_[i] = it->second.get();
-                bound += static_cast<std::uint32_t>(it->second->draws.size());
+            const orec::OpRecord* const rp = recs_->lookup(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), ownedViewKey_}, !gpuscene::checksOff());
+            if (rp != nullptr) {
+                ownedRecPtrs_[i] = rp;
+                bound += static_cast<std::uint32_t>(rp->draws.size());
             }
         }
         if (ownedPersistent_ && viewWinOk && viewWin.viewSlot != d3d9::OwnedWindows::kNoView && gpuscene::drawrecords().ready() && bound != 0) {
@@ -792,6 +798,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
             }
         }
     }
+    const auto tLoop = tnow();
+    g_passPhaseNs[3] += ns(tSave, tLoop);
     // an owned op composed where the engine's slot would have run it (the record is rebuilt from this composition)
     const auto composeLate = [&](Op& op, int why) {
         ++W.fallback[why];
@@ -805,6 +813,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
             lateDetail_ = kLateOther;
         }
         dev_.setSceneIssue(false);
+        if (op.lazy && opResolveFn_ != nullptr) opResolveFn_(opResolveSelf_, op);
         tag = savedTag;
         tag.source = op.kind == OpKind::Animation ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
         tag.context = op.raw.context;
@@ -923,6 +932,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         }
     }
     flushItems();
+    const auto tLoopEnd = tnow();
+    g_passPhaseNs[4] += ns(tLoop, tLoopEnd);
     if (persistent && mainView) {
         const auto tb = tnow();
         dev_.ownedBulkFlush(true);  // F2c-4b: the end of the pass (the left list)
@@ -946,6 +957,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         m.maxDrawsPerPass[k] = std::max<std::uint64_t>(m.maxDrawsPerPass[k], drawn);
         m.maxOpsPerPass[k] = std::max<std::uint64_t>(m.maxOpsPerPass[k], opsInPass);
     }
+    g_passPhaseNs[5] += ns(tLoopEnd, tnow());
+    ++g_passPhaseCount[0];
+    g_passPhaseCount[1] += persistent ? 1 : 0;
+    g_passPhaseCount[2] += opsInPass;
     const std::uint64_t total = ns(t0, tnow());
     const std::uint64_t sub = (W.submitNs - submit0) + (W.sideNs - side0) + (W.matNs - mat0);
     W.buildNs += total > sub ? total - sub : 0;
@@ -984,8 +999,7 @@ bool StaticOps::ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeP
     const auto& amb = cd.ps->semantics[d3d9::Semantic::AmbientLight];
     if (!(amb.present() && amb.count >= 7 && amb.reg >= 14 && amb.reg + 7 <= 14 + 24)) return false;
     const std::uint64_t key = mix(mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight), amb.reg);
-    const auto hit = ownedAmbient_.find(key);
-    if (hit != ownedAmbient_.end()) return hit->second;
+    if (const bool* hit = ownedAmbient_.get(key)) return *hit;
     float L[24][4]{};
     bool lit = false;
     int cwhy = 0;
@@ -1002,7 +1016,7 @@ bool StaticOps::ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeP
         spdlog::info("native: owned ambient test false for a G-buffer draw: illum slot {}, compose {} (why {}), params tableLit {} holdsAll {} n {} first {}, amb reg {}, L[amb] {:.3f} {:.3f} {:.3f} {:.3f}, ps {:x}", r.illumSlot,
                      composed, cwhy, p.tableLit, p.holdsAll, p.n, p.firstLight, amb.reg, L[amb.reg - 14][0], L[amb.reg - 14][1], L[amb.reg - 14][2], L[amb.reg - 14][3], cd.ps->hash);
     }
-    ownedAmbient_.emplace(key, lit);
+    ownedAmbient_.put(key, lit);
     return lit;
 }
 
@@ -1060,11 +1074,11 @@ void StaticOps::ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindo
         std::uint32_t entry;
         if (cached) {
             const std::uint64_t lkey = mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight);
-            if (const auto lc = ownedCache_.light.find(lkey); lc != ownedCache_.light.end()) {
-                entry = lc->second;
+            if (const std::uint32_t* lc = ownedCache_.light.get(lkey)) {
+                entry = *lc;
             } else {
                 entry = li.entryFor(r.illumSlot, p);
-                ownedCache_.light.emplace(lkey, entry);
+                ownedCache_.light.put(lkey, entry);
             }
         } else {
             entry = li.entryFor(r.illumSlot, p);
@@ -1119,6 +1133,23 @@ void StaticOps::ownedMissReport(const char* where, const Op* op, const orec::Dra
     }
     spdlog::error("native: owned persistent: MISS ({}): the persistent draw of {} (slot {}, material '{}') differs from a fresh derivation although nothing it was derived from moved: {}", where,
                   op != nullptr ? describe(*op) : std::string("an op"), slot, r.tagMaterialName != nullptr ? r.tagMaterialName : "", what.empty() ? "(bytes)" : what);
+}
+
+// WS9 (frame-ownership.md 14.51): `RVK_WS9_STALE_OFF=1` = the old behaviour (a record the owned path refused as out of date is remade only on a check frame)
+bool StaticOps::rebuildStaleOff() {
+    static const bool off = [] {
+        char v[8] = {};
+        return GetEnvironmentVariableA("RVK_WS9_STALE_OFF", v, sizeof(v)) != 0 && v[0] != '0';
+    }();
+    return off;
+}
+
+// WS9: a refusal whose root reason a fresh composition removes marks the record (its late composition remakes it: recEnter). Not the texture / env / table reasons:
+// remaking the record changes nothing there
+void StaticOps::markStale(const orec::OpRecord& rec, int late) {
+    if (late != kLatePending && late != kLateModule && late != kLateArrived && late != kLateDecision) return;
+    if (!rec.stale) ++staleMarked_;
+    rec.stale = true;
 }
 
 // one op from its persistent draw records: false = not drawn (why: a Fallback code); the draws it queued stay in ownedItems_ (the caller drops them)
@@ -1213,6 +1244,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
             restoreTag();
             why = kFbRefused;
             lateDetail_ = (cd.vs != nullptr && cd.ps != nullptr && cd.vs->module == cd.vsModule && cd.ps->module == cd.fsModule) ? kLateNotAllowed : kLateModule;
+            markStale(rec, lateDetail_);
             return false;
         }
         bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig && P.viewSlot == viewSlot;
@@ -1240,6 +1272,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
                 restoreTag();
                 why = kFbRefused;
                 lateDetail_ = lateOfCode(dev_, cd, rc);
+                markStale(rec, lateDetail_);
                 return false;
             }
             if (scrub) {
@@ -1456,11 +1489,11 @@ void StaticOps::ownedReport() {
     spdlog::info(
         "native: owned static (5 s): {} main views ({} compacted, {} check frames, {} warm-up, {} gated off{}), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
         "(fallbacks: {}; root reasons: {}; textures made ready instead {}), undrawn {}; left to the engine path: {}; replay refusals: {}; scene indirect calls {}; check frames DIFFERING {} draws; side effects: {} touches, {} lightmap binds, {} stream 3; "
-        "CPU per main view: compaction {:.1f} us (of it the stamp / record checks {:.1f}), view + windows setup {:.1f} us, material polls + stamps {:.1f} us, build {:.1f} us (the rest: derivation inputs, windows, object records), side effects {:.1f} us, submit {:.1f} us (replayOwned incl. observers)",
+        "CPU per main view: compaction {:.1f} us (of it the stamp / record checks {:.1f}), view + windows setup {:.1f} us, material polls + stamps {:.1f} us, build {:.1f} us (the rest: derivation inputs, windows, object records), side effects {:.1f} us, submit {:.1f} us (replayOwned incl. observers); records out of date (run): {} marked, {} remade",
         w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, gateList(w), w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
         w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), list(w.late, kLateNames, kLateCount), dev_.ownedTexturePreps_ - texPrepLast, w.undrawn, left, refused.empty() ? "none" : refused, dev_.sceneStats().indirectCalls - ownedIndirectLast_,
         recs_ ? recs_->total.differing : 0, w.touches, w.lightmaps, w.stream3, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.selectNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
-        static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0);
+        static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0, staleMarked_, staleRebuilds_);
     ownedIndirectLast_ = dev_.sceneStats().indirectCalls;
     ownedDevLast_ = d;
     w = {};

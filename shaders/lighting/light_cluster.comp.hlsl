@@ -14,7 +14,7 @@ struct LightClusterPush {
     uint2 src;       // the CPU upload buffer's read reference: RvkLight[count] (this frame in flight's)
     uint2 dst;       // the device buffer's read-write reference
     uint4 grid;      // x tiles x, y tiles y, z slices, w light count
-    float4 zs;       // x near, y far, z slices / ln(far / near), w unused
+    float4 zs;       // x near, y far, z slices / ln(far / near), w the occupancy bit set's byte offset (uint bits; 0 = not written)
     uint4 offs;      // x lights offset, y clusters offset (bytes), z style, w flags
     uint4 shadow;    // x light shadow image slot (bindless, 0 = none this frame), y width, z height, w light count with a shadow id
     uint4 grid1;     // the far level: x tiles x, y tiles y, z slices (0 = none), w its clusters' offset (bytes)
@@ -28,15 +28,24 @@ float2 rvkClusterSlope(RvkFrame f, float2 ndc) {
 }
 
 groupshared float4 gsLight[64];
+groupshared uint gsOcc[2];
 
 [numthreads(64, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     const uint t = id.x;
+    if (gi < 2u) gsOcc[gi] = 0u;
+    GroupMemoryBarrierWithGroupSync();
     const uint count = pc.grid.w;
     const uint clusters0 = pc.grid.x * pc.grid.y * pc.grid.z;
     const uint clusters = clusters0 + pc.grid1.x * pc.grid1.y * pc.grid1.z;
     RvkFrame f = rvkLoadFrame(pc.frame);
 
+#ifdef RVK_CLUSTER_COMPARE
+    // compare variant (WS21, gpu-scene.md 9.16): this legacy kernel reads the column build's output (header, lights and clusters already written) and counts
+    // differences into the 64-byte counter buffer (pc.shadow.xy, a read-write reference): w0 clusters differing, w1 clusters compared, w2 occupancy words
+    // differing, w3 builds compared, w4 the highest differing cluster + 1 (combined index)
+    if (t == 0u) rvkBufAdd(pc.shadow.xy, 12, 1u);
+#else
     if (t == 0u) {
         rvkBufStore(pc.dst, 0, f.frameInfo.x + 1u);
         rvkBufStore(pc.dst, 4, count);
@@ -49,7 +58,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         rvkBufStore(pc.dst, 32, asuint(pc.zs.x));
         rvkBufStore(pc.dst, 36, asuint(pc.zs.y));
         rvkBufStore(pc.dst, 40, asuint(pc.zs.z));
-        rvkBufStore(pc.dst, 44, 0u);
+        rvkBufStore(pc.dst, 44, asuint(pc.zs.w));  // the occupancy bit set's byte offset (0 = none)
         rvkBufStore(pc.dst, 48, pc.offs.x);
         rvkBufStore(pc.dst, 52, pc.offs.y);
         rvkBufStore(pc.dst, 56, pc.offs.z);
@@ -70,6 +79,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             rvkRwStore<float4, 16>(rvkAddrAdd(rvkAddr(pc.dst), pc.offs.x + t * RVK_LIGHT_BYTES + k * 16u), v);
         }
     }
+#endif
     const bool active = t < clusters;
 
     // cluster t -> (level, tile x, tile y, slice)
@@ -95,6 +105,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bmax = max(bmax, max(a, b));
     }
     uint n = 0;
+    uint bad = 0;
     const uint outBase = (far ? pc.grid1.w : pc.offs.y) + u * RVK_LIGHT_CLUSTER_BYTES;
     // the group stages 64 lights at a time (view-space centre + range) in shared memory: every thread tests them against its own box
     for (uint base = 0; base < count; base += 64u) {
@@ -112,12 +123,38 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 float4 g = gsLight[k];
                 float3 d = g.xyz - clamp(g.xyz, bmin, bmax);
                 if (dot(d, d) <= g.w * g.w) {
+#ifdef RVK_CLUSTER_COMPARE
+                    if (rvkBufLoad(pc.dst, outBase + 4u + n * 4u) != base + k) bad |= 2u;
+#else
                     rvkBufStore(pc.dst, outBase + 4u + n * 4u, base + k);
+#endif
                     ++n;
                 }
             }
         }
         GroupMemoryBarrierWithGroupSync();
     }
+#ifdef RVK_CLUSTER_COMPARE
+    if (active) {
+        if (rvkBufLoad(pc.dst, outBase) != n) bad |= 1u;
+        rvkBufAdd(pc.shadow.xy, 4, 1u);
+        if (bad != 0u) {
+            rvkBufAdd(pc.shadow.xy, 0, 1u);
+            const uint cid = far ? clusters0 + u : u;
+            const uint prev = rvkRwAtomicMax(rvkAddrAdd(rvkAddr(pc.shadow.xy), 16u), cid + 1u);
+        }
+    }
+#else
     if (active) rvkBufStore(pc.dst, outBase, n);
+#endif
+    // the occupancy bit set (rvk_light_model.hlsli rvkLightClusterOccupied): bit t of the combined cluster space = the cluster holds a light; the group's 64
+    // threads are 64 consecutive clusters = two words (a group starts at a multiple of 64)
+    uint occOld;
+    if (active && n > 0u) InterlockedOr(gsOcc[gi >> 5], 1u << (gi & 31u), occOld);
+    GroupMemoryBarrierWithGroupSync();
+#ifdef RVK_CLUSTER_COMPARE
+    if (gi < 2u && asuint(pc.zs.w) != 0u && rvkBufLoad(pc.dst, asuint(pc.zs.w) + ((t - gi) / 32u + gi) * 4u) != gsOcc[gi]) rvkBufAdd(pc.shadow.xy, 8, 1u);
+#else
+    if (gi < 2u && asuint(pc.zs.w) != 0u) rvkBufStore(pc.dst, asuint(pc.zs.w) + ((t - gi) / 32u + gi) * 4u, gsOcc[gi]);
+#endif
 }

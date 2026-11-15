@@ -28,9 +28,18 @@ inline bool dynEqual(const rhi::DynamicStateValues& a, const rhi::DynamicStateVa
 
 
 // F2c-2: content hashes of the interned vertex input / dynamic state (the arena pointers differ between frames, the contents do not)
+// (WS9, frame-ownership.md 14.51: eight bytes per step; the byte loop was 0.4 ms per frame at the savegame hold: every composed scene draw hashes its vertex input,
+// every owned tree / grass template its bucket. The values are only compared within the process)
 inline std::uint64_t hashBytes(std::uint64_t h, const void* p, std::size_t n) {
     const auto* b = static_cast<const std::uint8_t*>(p);
-    for (std::size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
+    std::size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        std::uint64_t w;
+        std::memcpy(&w, b + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
     return h;
 }
 
