@@ -60,6 +60,13 @@ public:
     using Key = std::array<std::uint64_t, 6>;
     enum class State : std::uint8_t { Pending, Built, Ready, Failed };
 
+    // WS32: copies of a draw range's bytes as the engine's CPU copies hold them (uninitialised until written: `new uint8_t[n]`)
+    struct Raw {
+        std::unique_ptr<std::uint8_t[]> ib, vb;
+        std::size_t ibBytes = 0, vbBytes = 0;
+        std::uint32_t isz = 0, stride = 0, minIndex = 0, numVertices = 0;
+    };
+
     struct Entry {
         Key key{};
         std::uint64_t id = 0, ibId = 0;
@@ -69,6 +76,9 @@ public:
         // the job (engine thread -> worker; released by the worker)
         std::vector<std::uint32_t> idx;  // local vertex ids
         std::vector<float> pos;
+        // WS32: the raw job of requestRaw (the engine thread only copies the two ranges' bytes, the worker makes idx / pos / srcHash from them: no zero fill, no conversion loops on
+        // the engine thread); released by the worker
+        Raw raw;
         std::uint64_t srcHash = 0;       // hash64 of the range's index bytes at the request
         // the result (worker -> engine thread)
         clusters::Result result;
@@ -94,11 +104,13 @@ public:
     Entry* find(const Key& key);
     // render thread: a new Pending entry + its build job (null: the queue is full)
     Entry* request(const Key& key, std::uint64_t ibId, std::vector<std::uint32_t>&& idx, std::vector<float>&& pos, std::uint64_t srcHash);
+    // WS32: the same from raw copies of the range (the worker converts them; unusable data = a Failed entry)
+    Entry* requestRaw(const Key& key, std::uint64_t ibId, Raw&& raw);
     // render thread: the arena copy's read-back verification (Vulkan: the arena allows TRANSFER_SRC): up to this many uploads are compared, then every 8th
     static constexpr std::uint32_t kVerifyFirst = 24;
     // render thread: Built -> Ready: the arena copy of the range's indices in cluster order + the table rows. `src` = the range's index bytes read from the engine's CPU copy
     // NOW (3 x isz per triangle); a mismatch with the request's hash = Failed. False: Failed or not possible now (the entry's state says which)
-    bool upload(d3d9::Device& dev, Entry& e, const std::vector<std::uint8_t>& src, std::uint32_t isz);
+    bool upload(d3d9::Device& dev, Entry& e, const std::uint8_t* src, std::size_t srcBytes, std::uint32_t isz);
     // the engine index buffer's static copy is gone / replaced: its entries go. Any thread (queued); the render thread frees them in drain() (every clustered draw and every present)
     void bufferChanged(std::uint64_t ibId);
     void drain(d3d9::Device& dev);

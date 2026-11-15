@@ -864,16 +864,18 @@ d3d9::OpaqueResult Water::observeOpaque(d3d9::Device& device, const d3d9::Replac
     if (floorFrameBytes_ > kFloorFrameBudget) return d3d9::OpaqueResult::Retry;  // next frame (it is drawn again)
     const std::uint32_t isize = q.indexBuffer->index32() ? 4u : 2u;
     const std::uint32_t icount = q.primitiveType == 4 ? q.primitives * 3 : q.primitives + 2;
-    std::vector<std::uint8_t> idata(static_cast<std::size_t>(icount) * isize);
-    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.data())) return d3d9::OpaqueResult::Retry;
-    std::vector<std::uint32_t> idx(icount);
+    // (WS32: uninitialised buffers, every byte is written: the zero fill of up to 8 MiB per frame was a hitch of the first sight of geometry)
+    const std::size_t idataBytes = static_cast<std::size_t>(icount) * isize;
+    const std::unique_ptr<std::uint8_t[]> idata(new std::uint8_t[idataBytes]);
+    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.get())) return d3d9::OpaqueResult::Retry;
+    const std::unique_ptr<std::uint32_t[]> idx(new std::uint32_t[icount]);
     std::uint32_t lo = 0xffffffffu, hi = 0;
     for (std::uint32_t i = 0; i < icount; ++i) {
         std::uint32_t v = 0;
-        if (isize == 4) std::memcpy(&v, idata.data() + static_cast<std::size_t>(i) * 4, 4);
+        if (isize == 4) std::memcpy(&v, idata.get() + static_cast<std::size_t>(i) * 4, 4);
         else {
             std::uint16_t v16 = 0;
-            std::memcpy(&v16, idata.data() + static_cast<std::size_t>(i) * 2, 2);
+            std::memcpy(&v16, idata.get() + static_cast<std::size_t>(i) * 2, 2);
             v = v16;
         }
         const std::int64_t vv = static_cast<std::int64_t>(v) + q.baseVertex;
@@ -885,15 +887,15 @@ d3d9::OpaqueResult Water::observeOpaque(d3d9::Device& device, const d3d9::Replac
     const std::uint32_t stride = q.vertexStride;
     const std::uint64_t vbytes = static_cast<std::uint64_t>(hi - lo + 1) * stride;
     if (vbytes > (64u << 20)) return d3d9::OpaqueResult::Known;
-    std::vector<std::uint8_t> vdata(static_cast<std::size_t>(vbytes));
-    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.data())) return d3d9::OpaqueResult::Retry;
+    const std::unique_ptr<std::uint8_t[]> vdata(new std::uint8_t[static_cast<std::size_t>(vbytes)]);
+    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.get())) return d3d9::OpaqueResult::Retry;
     floorMeshes_.insert(key);
-    floorFrameBytes_ += vbytes + idata.size();
+    floorFrameBytes_ += vbytes + idataBytes;
     const seafloor::Grid g = floorGrid();
     const float gx1 = g.minX + static_cast<float>(g.width) * g.cell, gz1 = g.minZ + static_cast<float>(g.height) * g.cell;
     const auto world = [&](std::uint32_t v, float out[3]) {
         float p[3];
-        std::memcpy(p, vdata.data() + static_cast<std::size_t>(v - lo) * stride + pos->offset, 12);
+        std::memcpy(p, vdata.get() + static_cast<std::size_t>(v - lo) * stride + pos->offset, 12);
         for (int r = 0; r < 3; ++r) out[r] = rows[r][0] * p[0] + rows[r][1] * p[1] + rows[r][2] * p[2] + rows[r][3];
     };
     std::size_t added = 0;

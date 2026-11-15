@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <unordered_set>
@@ -1512,17 +1513,26 @@ void StaticOps::ownedShadowReport() {
     for (const PersistStats* q : {&persistShadowW_, &persistLightW_[0], &persistLightW_[1]}) miss += q->scrubMiss + q->checkMiss;
     if (recs_) {
         // the shadow views' records age out: a cascade / cell sees other ops as the camera moves, a record that was not looked at for 1,200 frames gives its slots back
+        // WS32 (frame-ownership.md 16.23): the main view's records age out the same way. They never did: walking, the records of everything passed stayed (up to 30,000, then the map
+        // was cleared whole) and held the draw record table's 16,384 slots (live 11,000 -> 16,384 within a minute of the route, then every later op was composed for want of a slot: FULL
+        // refusals 650,000 per 5 s in dense places). RVK_REC_AGE=<frames> (default 1200; 0 = the main view's records never age: the former behaviour)
+        static const std::uint64_t mainAge = [] {
+            const char* v = std::getenv("RVK_REC_AGE");
+            return v != nullptr ? static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10)) : std::uint64_t{1200};
+        }();
         const std::uint64_t now = dev_.stats().frames;
-        std::uint64_t swept = 0;
+        std::uint64_t swept = 0, sweptMain = 0;
         for (auto it = recs_->map.begin(); it != recs_->map.end();) {
-            if (it->first.view != 0 && it->second->lastSeen + 1200 < now && it->second->builtFrame + 1200 < now) {
+            const bool main = it->first.view == 0;
+            if ((main ? mainAge != 0 : true) && it->second->lastSeen + (main ? mainAge : 1200) < now && it->second->builtFrame + (main ? mainAge : 1200) < now) {
                 it = recs_->map.erase(it);
                 ++swept;
+                sweptMain += main ? 1 : 0;
             } else {
                 ++it;
             }
         }
-        if (swept != 0) spdlog::info("native: owned shadows: {} shadow view records not seen for 1200 frames dropped", swept);
+        if (swept != 0) spdlog::info("native: owned shadows: {} records not seen for their age dropped ({} of the main view, {} shadow views)", swept, sweptMain, swept - sweptMain);
     }
     ownedShadowW_ = {};
     persistShadowW_ = {};

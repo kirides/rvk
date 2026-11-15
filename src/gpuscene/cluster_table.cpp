@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -80,6 +81,30 @@ ClusterStore::Entry* ClusterStore::request(const Key& key, std::uint64_t ibId, s
     return e.get();
 }
 
+ClusterStore::Entry* ClusterStore::requestRaw(const Key& key, std::uint64_t ibId, Raw&& raw) {
+    if (pending_ >= kMaxPending) {
+        ++stats_.queueFull;
+        return nullptr;
+    }
+    auto e = std::make_shared<Entry>();
+    e->key = key;
+    e->id = nextId_++;
+    e->ibId = ibId;
+    e->raw = std::move(raw);
+    entries_[key] = e;
+    byId_[e->id] = e.get();
+    serial_.fetch_add(1, std::memory_order_release);  // WS19 (stateSerial)
+    ++pending_;
+    ++stats_.requested;
+    {
+        const std::lock_guard lock(mutex_);
+        if (!worker_.joinable()) worker_ = std::thread([this] { workerMain(); });
+        queue_.push_back(e);
+    }
+    cv_.notify_one();
+    return e.get();
+}
+
 void ClusterStore::workerMain() {
     for (;;) {
         std::shared_ptr<Entry> e;
@@ -98,6 +123,40 @@ void ClusterStore::workerMain() {
 
 void ClusterStore::buildOne(Entry& e) {
     const double t0 = nowMs();
+    if (e.raw.ib) {
+        // WS32: the conversion the engine thread used to do (the indices as local vertex ids, the positions, the hash of the index bytes)
+        Raw r = std::move(e.raw);
+        e.raw = Raw{};
+        const std::size_t n = r.ibBytes / r.isz;
+        bool bad = false;
+        e.srcHash = clusters::hash64(r.ib.get(), r.ibBytes);
+        e.idx.resize(n);
+        for (std::size_t i = 0; i < n && !bad; ++i) {
+            std::uint32_t v = 0;
+            if (r.isz == 4) {
+                std::memcpy(&v, &r.ib[i * 4], 4);
+            } else {
+                std::uint16_t w = 0;
+                std::memcpy(&w, &r.ib[i * 2], 2);
+                v = w;
+            }
+            if (v < r.minIndex || v - r.minIndex >= r.numVertices) bad = true;
+            else e.idx[i] = v - r.minIndex;
+        }
+        e.pos.resize(static_cast<std::size_t>(r.numVertices) * 3);
+        for (std::uint32_t v = 0; v < r.numVertices && !bad; ++v) {
+            std::memcpy(&e.pos[3 * static_cast<std::size_t>(v)], &r.vb[static_cast<std::size_t>(v) * r.stride], 12);
+            for (int j = 0; j < 3; ++j) bad = bad || !std::isfinite(e.pos[3 * static_cast<std::size_t>(v) + j]);
+        }
+        if (bad) {
+            // (not a range the builder can use: drawn as the engine made it; the Failed entry refuses it cheaply at every later draw)
+            e.why = "the range's indices or positions are not usable";
+            std::vector<std::uint32_t>().swap(e.idx);
+            std::vector<float>().swap(e.pos);
+            e.state.store(State::Failed, std::memory_order_release);
+            return;
+        }
+    }
     const std::uint64_t h = clusters::contentHash(e.idx, e.pos);
     char name[32];
     std::snprintf(name, sizeof(name), "%016llx.cl", static_cast<unsigned long long>(h));
@@ -183,7 +242,7 @@ bool ClusterStore::ensureTable(d3d9::Device& dev) {
     return true;
 }
 
-bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::uint8_t>& src, std::uint32_t isz) {
+bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::uint8_t* src, std::size_t srcBytes, std::uint32_t isz) {
     const auto fail = [&](std::uint64_t& counter, const char* why) {
         ++counter;
         e.why = why;
@@ -198,7 +257,7 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
     const std::uint32_t tris = static_cast<std::uint32_t>(e.result.perm.size());
     const std::uint64_t bytes = static_cast<std::uint64_t>(tris) * 3 * isz;
     if (isz != 2 && isz != 4) return fail(stats_.failedData, "index size");
-    if (src.size() != bytes || clusters::hash64(src.data(), src.size()) != e.srcHash) return fail(stats_.failedData, "the engine's index data changed since the request");
+    if (srcBytes != bytes || clusters::hash64(src, srcBytes) != e.srcHash) return fail(stats_.failedData, "the engine's index data changed since the request");
     if (arenaBytes_ + bytes > kMaxArenaBytes) return fail(stats_.failedMemory, "arena budget");
     if (!ensureTable(dev)) return fail(stats_.failedTable, "no table");
     const std::uint32_t n = static_cast<std::uint32_t>(e.result.clusters.size());
@@ -217,7 +276,7 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
         return false;
     }
     // the clustered bytes made in CPU memory (the ring may be write-combined: never read), checked against the engine's triangles, then copied
-    std::vector<std::uint8_t> out(static_cast<std::size_t>(bytes));
+    const std::unique_ptr<std::uint8_t[]> out(new std::uint8_t[static_cast<std::size_t>(bytes)]);  // (every byte is written below: no zero fill)
     for (std::uint32_t k = 0; k < tris; ++k) std::memcpy(&out[static_cast<std::size_t>(k) * 3 * isz], &src[static_cast<std::size_t>(e.result.perm[k]) * 3 * isz], 3 * isz);
     {
         std::vector<std::uint32_t> a(static_cast<std::size_t>(tris) * 3), b(static_cast<std::size_t>(tris) * 3);
@@ -242,7 +301,7 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
             return fail(stats_.failedData, "multiset differs");
         }
     }
-    std::memcpy(staging.ptr, out.data(), out.size());
+    std::memcpy(staging.ptr, out.get(), static_cast<std::size_t>(bytes));
     rhi::CommandList& list = dev.uploadList();
     list.copyBuffer(*na.buffer, na.offset, game.ringBuffer(staging), staging.offset, bytes);
     // the read-back verification of the arena copy (Vulkan; the first uploads, then every 8th)
@@ -255,7 +314,7 @@ bool ClusterStore::upload(d3d9::Device& dev, Entry& e, const std::vector<std::ui
             if (c.buffer) {
                 list.memoryBarrier(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
                 list.copyBuffer(*c.buffer, 0, *na.buffer, na.offset, bytes);
-                c.expect = out;
+                c.expect.assign(out.get(), out.get() + static_cast<std::size_t>(bytes));
                 c.frameValue = game.frameValue();
                 c.id = e.id;
                 c.busy = true;
