@@ -138,6 +138,10 @@ public:
     VkImageLayout layout() const { return tex_ ? tex_->layout() : VK_IMAGE_LAYOUT_UNDEFINED; }
     std::uint32_t bindlessSlot() const { return slot_; }
     bool prepareForSampling(rhi::CommandList& cl);  // uploads pending data, transitions to shader-read; false if nothing to sample
+    // WS27: rows [y0, y0 + rows) of level 0 straight from caller memory (D3D9 layout, `srcRowPitch` apart) into the upload ring and one
+    // buffer -> texture copy: no CPU copy of the texture, no zero fill, no second convert copy. Plain 2D formats without a conversion only;
+    // the image stays in TRANSFER_DST until the first use for sampling. False = nothing copied (ring full / unsupported): call again later.
+    bool uploadRows(rhi::CommandList& cl, std::uint32_t y0, std::uint32_t rows, const void* src, std::size_t srcRowPitch);
     // what the engine uses the image for (Device::tagImage; render thread)
     scene::ImageRole role() const { return role_; }
     // persistent identity (d3d9/identity.h): the generation counts uploads of CPU data

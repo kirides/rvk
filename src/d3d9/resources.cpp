@@ -418,6 +418,38 @@ void Texture::upload(rhi::CommandList& cl) {
     }
 }
 
+bool Texture::uploadRows(rhi::CommandList& cl, std::uint32_t y0, std::uint32_t rows, const void* src, std::size_t srcRowPitch) {
+    if (!valid_ || isNull_ || src == nullptr || rows == 0 || fmt_.compressed || fmt_.convert != rhi::Convert::None ||
+        desc_.type != TextureType::Tex2D || y0 >= desc_.height) {
+        return false;
+    }
+    rows = std::min(rows, desc_.height - y0);
+    rhi::GameDevice& game = dev_.game();
+    const rhi::GameCaps& caps = game.gameCaps();
+    const std::uint32_t rowBytes = static_cast<std::uint32_t>(rhi::storageSize(fmt_, desc_.width, 1));
+    const std::uint32_t align = std::max(1u, caps.uploadRowAlign);
+    const std::uint32_t pitch = (rowBytes + align - 1) / align * align;
+    const std::uint64_t bytes = static_cast<std::uint64_t>(pitch) * rows;
+    rhi::RingAlloc staging = game.allocRing(bytes, std::max<std::uint32_t>(16, caps.uploadOffsetAlign));
+    if (staging.ptr == nullptr) return false;
+    for (std::uint32_t r = 0; r < rows; ++r) {
+        std::memcpy(static_cast<std::uint8_t*>(staging.ptr) + static_cast<std::size_t>(r) * pitch,
+                    static_cast<const std::uint8_t*>(src) + static_cast<std::size_t>(r) * srcRowPitch, rowBytes);
+    }
+    if (tex_->layout() != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) cl.transition(*tex_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    rhi::BufferTextureCopy copy;
+    copy.bufferOffset = staging.offset;
+    copy.rowPitch = pitch == rowBytes ? 0 : pitch;
+    copy.sub = {0, 0};
+    copy.offset = {0, static_cast<std::int32_t>(y0), 0};
+    copy.extent = {desc_.width, rows, 1};
+    cl.copyBufferToTextureBox(*tex_, game.ringBuffer(staging), copy);
+    dev_.countUpload(true, bytes);
+    lastUseFrame_ = dev_.frameValue();
+    generation_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 bool Texture::prepareForSampling(rhi::CommandList& cl) {
     if (!valid_ || isNull_) {
         return false;
