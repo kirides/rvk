@@ -3030,6 +3030,21 @@ void StaticOps::report() {
                     pktWhyPrev_[i] = st.why[i];
                     pktNcPrev_[i] = st.ncWhy[i];
                 }
+                static const bool supersededCensus = GetEnvironmentVariableA("RVK_SUPERSEDED_CENSUS", nullptr, 0) != 0;  // (diagnostic: a lookup under the cache mutex per packet)
+                if (supersededCensus) {
+                    // WS29: retained packets (and their scene forms) that still hold a fast-linked pipeline the optimiser has replaced (the draw runs the unoptimised link)
+                    std::uint64_t superseded = 0, scenes = 0, supersededScene = 0;
+                    for (const auto& [key, e] : packets_) {
+                        if (!e.cd.valid) continue;
+                        if (e.cd.packet.pipeline != d3d9::GamePipeline::None && dev_.currentPipeline(e.cd.packet.pipeline) != e.cd.packet.pipeline) ++superseded;
+                        for (const d3d9::GamePipeline sp : {e.cd.scenePipeline, e.cd.scenePipeline2, e.cd.scenePipelinePull}) {
+                            if (sp == d3d9::GamePipeline::None) continue;
+                            ++scenes;
+                            if (dev_.currentPipeline(sp) != sp) ++supersededScene;
+                        }
+                    }
+                    spdlog::info("native: retained packets holding a superseded pipeline (5 s): {} of {} packets, scene forms {} of {} (the optimised build exists, the retained draw runs the fast link)", superseded, packets_.size(), supersededScene, scenes);
+                }
                 const std::uint64_t held = st.pendingHeld - pktHeldPrev_;
                 pktHeldPrev_ = st.pendingHeld;
                 spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}; pending scene forms held (replayed without a remake) {}",
