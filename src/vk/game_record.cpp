@@ -200,7 +200,7 @@ void GameRecord::recordChunk(RecordThread& t, ChunkEntry& c) {
             const rhi::ClearOp& op = c.draw.clears[p.first];
             vkCmdClearAttachments(cmd, op.count, op.atts, 1, &op.rect);
         } else {
-            applyPacket(rs, cmd, c.layout, p);
+            applyPacket(pipelines_, rs, cmd, c.layout, p);
         }
     }
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) return;
@@ -422,7 +422,7 @@ void GameRecord::invalidateRecordingState() {
 
 // the inline path: one packet recorded into the frame's command list now
 void GameRecord::applyDrawPacket(const rhi::DrawPacket& packet) {
-    applyPacket(rec_, frames_->cmd(), bindless_->pipelineLayout(), packet);
+    applyPacket(pipelines_, rec_, frames_->cmd(), bindless_->pipelineLayout(), packet);
 }
 
 // ---- packet application (the D3D9 model's, src/d3d9/draw.cpp, moved verbatim; vi.buffers / indexBuffer are Buffer handles) ---
@@ -438,12 +438,18 @@ GameRecord::~GameRecord() {
     shutdown();
 }
 
-void GameRecord::applyPacket(GameRecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const rhi::DrawPacket& p) {
+void GameRecord::applyPacket(const PipelineCache& pipelines, GameRecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const rhi::DrawPacket& p) {
     if (p.vi != rs.lastVi) {
         applyVertexInput(rs, cmd, *p.vi);
         rs.lastVi = p.vi;
     }
-    const VkPipeline pipeline = vkPipeline(p.pipeline);
+    // a retained draw keeps the handle it was made with; while that is a fast link the optimiser has replaced, bind the optimised build (the composed draws always do)
+    const VkPipeline raw = vkPipeline(p.pipeline);
+    if (raw != rs.lastRaw) {
+        rs.lastRaw = raw;
+        rs.lastCurrent = pipelines.current(raw);
+    }
+    const VkPipeline pipeline = rs.lastCurrent;
     if (pipeline != rs.bound) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         rs.bound = pipeline;
