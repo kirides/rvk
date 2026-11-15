@@ -1345,7 +1345,7 @@ void Device::hitchDiag(std::chrono::steady_clock::time_point now) {
         if (!GetEnvironmentVariableA("RVK_FRAME_CSV", b, sizeof b)) return nullptr;
         std::FILE* f = nullptr;
         if (fopen_s(&f, b, "w") != 0) return nullptr;
-        std::fputs("frame,tod_ms,interval,cpu,present,slot\n", f);
+        std::fputs("frame,tod_ms,interval,cpu,present,slot,thread_cpu\n", f);
         return f;
     }();
     if (hitchMs <= 0.0 && csv == nullptr) return;
@@ -1355,7 +1355,23 @@ void Device::hitchDiag(std::chrono::steady_clock::time_point now) {
         SYSTEMTIME st;
         GetLocalTime(&st);
         const long tod = ((st.wHour * 60 + st.wMinute) * 60 + st.wSecond) * 1000 + st.wMilliseconds;
-        std::fprintf(csv, "%llu,%ld,%.3f,%.3f,%.3f,%.3f\n", static_cast<unsigned long long>(stats_.frames), tod, interval, live_.cpuMs, prevPresent, frameSlotWaitMs_);
+        // WS30: this thread's own CPU time since the last frame (QueryThreadCycleTime, cycles per ms calibrated once): wall CPU minus it = descheduled / waiting
+        static const double cyclesPerMs = [] {
+            LARGE_INTEGER f0, a, b;
+            QueryPerformanceFrequency(&f0);
+            ULONG64 c0 = 0, c1 = 0;
+            QueryThreadCycleTime(GetCurrentThread(), &c0);
+            QueryPerformanceCounter(&a);
+            do { QueryPerformanceCounter(&b); } while (b.QuadPart - a.QuadPart < f0.QuadPart / 50);
+            QueryThreadCycleTime(GetCurrentThread(), &c1);
+            return static_cast<double>(c1 - c0) / (1000.0 * static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(f0.QuadPart));
+        }();
+        static ULONG64 lastCycles = 0;
+        ULONG64 cyc = 0;
+        QueryThreadCycleTime(GetCurrentThread(), &cyc);
+        const double threadMs = lastCycles != 0 ? static_cast<double>(cyc - lastCycles) / cyclesPerMs : 0.0;
+        lastCycles = cyc;
+        std::fprintf(csv, "%llu,%ld,%.3f,%.3f,%.3f,%.3f,%.3f\n", static_cast<unsigned long long>(stats_.frames), tod, interval, live_.cpuMs, prevPresent, frameSlotWaitMs_, threadMs);
         if ((stats_.frames & 255) == 0) std::fflush(csv);
     }
     // counter snapshots (perf_ is reset by takePerf: a smaller value = a new interval)
@@ -1389,6 +1405,7 @@ void Device::present() {
         const double cpu = std::chrono::duration<double, std::milli>(presentStart_ - presentEnd_).count();
         perf_.cpuFrameMs += cpu;
         live_.cpuMs = static_cast<float>(cpu);
+        tuneVariantWorkers(live_.cpuMs);
     }
     if (stats_.frames > 1) {
         // the base frame interval (present to present), smoothed: the manual frame generation shows its frame half of it before the real one
@@ -2524,7 +2541,67 @@ unsigned Device::variantLimit() const {
         }
         return 0u;
     }();
-    return world != 0 ? std::min(all, world) : all;
+    const unsigned adaptive = variantAllowed_.load(std::memory_order_relaxed);
+    const unsigned limit = adaptive != 0 ? std::min(all, adaptive) : all;
+    return world != 0 ? std::min(limit, world) : limit;
+}
+
+// WS30 (frame-ownership.md 16.20): in the world the number of variant workers building at once follows the engine thread's CPU per frame. Measured on the traversal route in the first
+// session after an update: the engine thread (never descheduled: its thread cycle time equals its wall time) takes 15.6 ms of CPU per frame with 12 workers compiling, 12 with 8, 11 with 6,
+// 9 with 4 and 6.5 without (the same code runs slower next to the DXC compiles: shared caches / memory bandwidth, not SMT, not the scheduler: reserving cores or EcoQoS changed little).
+// Every 0.5 s the mean CPU per frame (a frame is capped at 40 ms so that one hitch does not decide) is compared with the target: above it one worker fewer (at least 2), below 80 % of it one
+// more, up to all. RVK_VARIANT_ADAPT=0 = the former fixed limit, RVK_VARIANT_TARGET_MS (default 10), RVK_VARIANT_MIN (default 2).
+void Device::tuneVariantWorkers(float cpuMs) {
+    static const struct Cfg {
+        bool on = true;
+        double target = 10.0;
+        unsigned min = 2;
+    } cfg = [] {
+        Cfg c;
+        char v[16];
+        if (GetEnvironmentVariableA("RVK_VARIANT_ADAPT", v, sizeof v) != 0) c.on = std::atoi(v) != 0;
+        if (GetEnvironmentVariableA("RVK_VARIANT_TARGET_MS", v, sizeof v) != 0 && std::atof(v) > 0.0) c.target = std::atof(v);
+        if (GetEnvironmentVariableA("RVK_VARIANT_MIN", v, sizeof v) != 0 && std::atoi(v) > 0) c.min = static_cast<unsigned>(std::atoi(v));
+        return c;
+    }();
+    if (!cfg.on) return;
+    VariantTune& t = variantTune_;
+    if (backgroundFree_.load(std::memory_order_relaxed)) {
+        if (variantAllowed_.load(std::memory_order_relaxed) != 0) variantAllowed_.store(0, std::memory_order_relaxed);  // (outside the world: all of them)
+        t.frames = 0;
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (t.frames == 0) t.start = now;
+    t.cpuSum += std::min(cpuMs, 40.0f);
+    ++t.frames;
+    if (now - t.start < std::chrono::milliseconds(500) || t.frames < 8) return;
+    const double mean = t.cpuSum / t.frames;
+    t.cpuSum = 0.0;
+    t.frames = 0;
+    const unsigned all = variantThreadCount();
+    unsigned cur = variantAllowed_.load(std::memory_order_relaxed);
+    if (cur == 0) cur = all;
+    unsigned next = cur;
+    if (mean > cfg.target) {
+        t.low = 0;
+        next = std::max(cfg.min, cur - 1);
+    } else if (mean < cfg.target * 0.8) {
+        if (++t.low >= 2) {  // (one more only after a second quiet window: the limit does not hunt with every camera turn)
+            t.low = 0;
+            next = std::min(all, cur + 1);
+        }
+    } else {
+        t.low = 0;
+    }
+    next = std::min(next, all);
+    if (next != cur || variantAllowed_.load(std::memory_order_relaxed) == 0) {
+        variantAllowed_.store(next, std::memory_order_relaxed);
+        if (next != cur) {
+            ++t.changes;
+            variantCv_.notify_all();
+        }
+    }
 }
 
 void Device::setBackgroundFree(bool free) {
