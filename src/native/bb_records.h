@@ -94,7 +94,7 @@ struct Stats {
     std::uint64_t refused[orec::kDeriveWhyCount] = {};
     std::uint64_t differing = 0, clean = 0;
     std::uint64_t byField[kFieldCount] = {};
-    std::uint64_t alphaRefCarry = 0, c5wCarry = 0, viewDup = 0;
+    std::uint64_t alphaRefCarry = 0, c5wCarry = 0, viewDup = 0, pipeSwapped = 0;
     std::uint64_t auditChecked = 0, auditDisagree = 0, auditCaught = 0;
     std::uint64_t auditBy[orec::kAuditCount] = {};
     std::uint64_t constChecks = 0, constStale = 0, constRegsCompared = 0;
@@ -110,7 +110,7 @@ struct Stats {
         derived += o.derived; compared += o.compared; differing += o.differing; clean += o.clean;
         for (std::size_t i = 0; i < orec::kDeriveWhyCount; ++i) refused[i] += o.refused[i];
         for (std::size_t i = 0; i < kFieldCount; ++i) byField[i] += o.byField[i];
-        alphaRefCarry += o.alphaRefCarry; c5wCarry += o.c5wCarry; viewDup += o.viewDup;
+        alphaRefCarry += o.alphaRefCarry; c5wCarry += o.c5wCarry; viewDup += o.viewDup; pipeSwapped += o.pipeSwapped;
         auditChecked += o.auditChecked; auditDisagree += o.auditDisagree; auditCaught += o.auditCaught;
         for (std::size_t i = 0; i < orec::kAuditCount; ++i) auditBy[i] += o.auditBy[i];
         constChecks += o.constChecks; constStale += o.constStale; constRegsCompared += o.constRegsCompared;
