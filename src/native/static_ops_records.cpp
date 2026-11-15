@@ -116,7 +116,7 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
     st.light = mix(mix(mixPtr(mixPtr(0, illum), list), get<std::uint8_t>(list, 0) | (get<std::uint8_t>(illum, 0xc) << 8) | (get<std::uint8_t>(illum, 0xd) << 16)),
                    get<std::uint8_t>(list, 0x34));
     st.switchValue = get<std::int32_t>(ptr(ctx, 0x18), 0x20);
-    st.fadeBits = std::bit_cast<std::uint32_t>(op.raw.fade);
+    st.fadeBits = orec::fadeStampBits(op.raw.fade);
     {
         std::uint64_t h = 0;
         for (std::uint32_t i = 0; i < 2; ++i) {

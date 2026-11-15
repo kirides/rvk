@@ -5,7 +5,9 @@
 // indices in cluster order is made and the packet is pointed at it. The vertex streams, base vertex and everything else of the draw are untouched.
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 
 #include "d3d9/device.h"
 #include "gpuscene/cluster_table.h"
@@ -57,8 +59,31 @@ void Device::clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint
         // first sight: copies of the range's indices (as local ids) and positions go to the worker
         const std::uint64_t vbytes = static_cast<std::uint64_t>(numVertices) * streams_[0].stride;
         if (vbytes > (96ull << 20) || static_cast<std::uint64_t>(primitives) * 12 > (96ull << 20)) return;
-        std::vector<std::uint8_t> ibytes(static_cast<std::size_t>(primitives) * 3 * isz), vbuf(static_cast<std::size_t>(vbytes));
         const std::uint32_t firstVertex = static_cast<std::uint32_t>(baseVertex + static_cast<std::int64_t>(minIndex));
+        static const bool rawJob = [] {
+            const char* v = std::getenv("RVK_CLUSTER_RAW");  // WS32 A/B knob: 0 = the former conversion on the engine thread
+            return v == nullptr || v[0] != '0';
+        }();
+        if (rawJob) {
+            // WS32: only the two copies are made here (uninitialised memory, no zero fill); the worker converts them (ClusterStore::buildOne)
+            gpuscene::ClusterStore::Raw raw;
+            raw.ibBytes = static_cast<std::size_t>(primitives) * 3 * isz;
+            raw.vbBytes = static_cast<std::size_t>(vbytes);
+            raw.ib.reset(new std::uint8_t[raw.ibBytes]);
+            raw.vb.reset(new std::uint8_t[raw.vbBytes]);
+            raw.isz = isz;
+            raw.stride = streams_[0].stride;
+            raw.minIndex = minIndex;
+            raw.numVertices = numVertices;
+            if (!ib->readCpu(startIndex * isz, static_cast<std::uint32_t>(raw.ibBytes), raw.ib.get()) ||
+                !vb->readCpu(streams_[0].offset + firstVertex * streams_[0].stride, static_cast<std::uint32_t>(vbytes), raw.vb.get())) {
+                return;
+            }
+            e = store.requestRaw(key, ir.id, std::move(raw));
+            if (e != nullptr) clusterWait_ = e->id;
+            return;
+        }
+        std::vector<std::uint8_t> ibytes(static_cast<std::size_t>(primitives) * 3 * isz), vbuf(static_cast<std::size_t>(vbytes));
         if (!ib->readCpu(startIndex * isz, static_cast<std::uint32_t>(ibytes.size()), ibytes.data()) ||
             !vb->readCpu(streams_[0].offset + firstVertex * streams_[0].stride, static_cast<std::uint32_t>(vbytes), vbuf.data())) {
             return;
@@ -97,9 +122,10 @@ void Device::clusterApply(std::uint32_t type, std::int32_t baseVertex, std::uint
     }
     if (st == State::Built) {
         // the arena copy: the index bytes as the engine's CPU copy holds them now
-        std::vector<std::uint8_t> ibytes(static_cast<std::size_t>(primitives) * 3 * isz);
-        if (!ib->readCpu(startIndex * isz, static_cast<std::uint32_t>(ibytes.size()), ibytes.data())) return;
-        if (!store.upload(*this, *e, ibytes, isz)) {
+        const std::size_t ibBytes = static_cast<std::size_t>(primitives) * 3 * isz;
+        const std::unique_ptr<std::uint8_t[]> ibytes(new std::uint8_t[ibBytes]);  // (WS32: written by readCpu: no zero fill)
+        if (!ib->readCpu(startIndex * isz, static_cast<std::uint32_t>(ibBytes), ibytes.get())) return;
+        if (!store.upload(*this, *e, ibytes.get(), ibBytes, isz)) {
             st = e->state.load(std::memory_order_acquire);
             if (st != State::Ready) {
                 if (st != State::Failed) clusterWait_ = e->id;  // (the ring was full: the next draw tries again)

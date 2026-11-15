@@ -1372,6 +1372,15 @@ TEST(native_pssm_pass_states_follow_the_mask_loop) {
     CHECK(fxc::kPssmIndices[6] == 4 && fxc::kPssmIndices[17] == 3);
 }
 
+// WS32: the stamp holds the fade's class (opaque / fading), not its bits: a fade that moves every frame keeps its record (RVK_FADE_STAMP=0 = the exact bits, not set here)
+TEST(op_record_fade_stamp_is_a_class) {
+    using native::orec::fadeStampBits;
+    CHECK(fadeStampBits(0.25f) == fadeStampBits(0.9f));
+    CHECK(fadeStampBits(1.0f) == fadeStampBits(1.5f));
+    CHECK(fadeStampBits(0.9999f) != fadeStampBits(1.0f));
+    CHECK(fadeStampBits(0.0f) == fadeStampBits(0.3f));
+}
+
 // F2c-2 (op_records.h): the stamp's field-wise comparison names the first differing field; the key hashes by all of its parts
 TEST(op_record_stamp_first_difference) {
     native::orec::Stamp a;

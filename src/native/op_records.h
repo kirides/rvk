@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <utility>
 #include <cstdint>
 #include <memory>
@@ -64,6 +66,16 @@ struct Stamp {
     std::uint64_t materials = 0;        // the draws' material records' structure versions (filled after the composition)
     bool operator==(const Stamp&) const = default;
 };
+// WS32 (frame-ownership.md 16.23): the stamp's fade is its CLASS (1 = opaque, 0.5 = fading), not its bits: the value itself reaches the draws only as c32.w of the object window,
+// which ownedDrawOp serves from the op's live fade at every replay (the pass states depend on fade < 1 only), so an alpha-list op fading in or out (its fade changes every frame
+// while the camera moves) kept its record instead of being composed + rebuilt each frame. RVK_FADE_STAMP=0 = the exact bits as before (A/B)
+inline std::uint32_t fadeStampBits(float fade) {
+    static const bool exact = [] {
+        const char* v = std::getenv("RVK_FADE_STAMP");
+        return v != nullptr && v[0] == '0';
+    }();
+    return std::bit_cast<std::uint32_t>(exact ? fade : (fade >= 1.0f ? 1.0f : 0.5f));
+}
 inline constexpr const char* kStampNames[] = {"LOD resource", "entity", "geometry / material", "illumination", "lightmaps", "overlay flags", "illum pointer", "fade",
                                               "switch value", "object slot", "variant epoch", "registry generation", "view", "material structure"};
 inline constexpr std::size_t kStampFields = std::size(kStampNames);
