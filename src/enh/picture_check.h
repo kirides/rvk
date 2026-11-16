@@ -107,6 +107,8 @@ private:
     std::uint64_t settleUntil_ = 0; // no compare / store before this frame (after a frame-value jump: a capture's mid-frame submit + wait, a gap)
     std::vector<Cycle> cycles_;     // open cycles (owned views compared, closing control not yet read back)
     int dumpLeft_ = 0;              // RVK_PICTURE_DUMP=<n>: at most n outlier views are written to bin/rvk/dumps
+    bool dumpAny_ = false;
+    std::uint32_t dumpStride_ = 1, dumpSeen_ = 0;
     bool dumpEver_ = false;         // RVK_PICTURE_DUMP was set (the images keep the copy usage once the dumps ran out: no re-creation)
     std::uint64_t dumpFrom_ = 0, dumpTo_ = 0;  // RVK_PICTURE_DUMP_RANGE=<from>-<to>: the compared views of these frames are dumped (any window; at most 48)
     double dumpMin_ = 0.0;                     // RVK_PICTURE_DUMP_MIN=<share>: ... those differing on at least this share of the picture
