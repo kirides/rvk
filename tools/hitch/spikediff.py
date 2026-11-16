@@ -8,7 +8,7 @@ def collect(tags, kind):
     for tag in tags:
         n = 0
         rows = []
-        for l in open(os.path.join(spikecat.D, tag + '_rvk.log'), encoding='utf-8', errors='replace'):
+        for l in spikecat.logLines(tag):
             m = re.search(r'diag: spike: (\d+) samples', l)
             if m:
                 n = int(m.group(1))

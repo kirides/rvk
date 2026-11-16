@@ -399,6 +399,143 @@ void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* u
     }).detach();
 }
 
+// WS34: the process's HardFaultCount and every thread's scheduler state / wait reason from NtQuerySystemInformation(SystemProcessInformation): a stalled thread that
+// shows WrPageIn (or a hard fault count that moves) is waiting for a page read, not for a lock or the CPU.
+struct ThreadSched {
+    std::uint32_t id = 0, state = 0, waitReason = 0, switches = 0;
+};
+struct ProcSched {
+    std::uint32_t hardFaults = 0, pageFaults = 0;
+    std::vector<ThreadSched> threads;
+};
+ProcSched querySched() {
+    ProcSched out;
+    using NtQsi = LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG);
+    static const auto nt = reinterpret_cast<NtQsi>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
+    if (nt == nullptr) return out;
+    std::vector<std::uint8_t> buf(1u << 20);
+    ULONG need = 0;
+    LONG st = 0;
+    for (int tries = 0; tries < 4; ++tries) {
+        st = nt(5, buf.data(), static_cast<ULONG>(buf.size()), &need);
+        if (st >= 0) break;
+        buf.resize(static_cast<std::size_t>(need) + (1u << 18));
+    }
+    if (st < 0) return out;
+    const DWORD pid = GetCurrentProcessId();
+    std::size_t off = 0;
+    for (;;) {
+        const auto* b = buf.data() + off;
+        const std::uint32_t next = *reinterpret_cast<const std::uint32_t*>(b);
+        const std::uint32_t nthreads = *reinterpret_cast<const std::uint32_t*>(b + 4);
+        const std::uint64_t procId = *reinterpret_cast<const std::uint64_t*>(b + 0x50);
+        if (procId == pid) {
+            out.hardFaults = *reinterpret_cast<const std::uint32_t*>(b + 0x10);
+            out.pageFaults = *reinterpret_cast<const std::uint32_t*>(b + 0x80);
+            const std::uint8_t* t = b + 0x100;  // SYSTEM_THREAD_INFORMATION[]: 80 bytes each
+            for (std::uint32_t i = 0; i < nthreads; ++i, t += 80) {
+                ThreadSched ts;
+                ts.id = static_cast<std::uint32_t>(*reinterpret_cast<const std::uint64_t*>(t + 0x30));
+                ts.switches = *reinterpret_cast<const std::uint32_t*>(t + 0x40);
+                ts.state = *reinterpret_cast<const std::uint32_t*>(t + 0x44);
+                ts.waitReason = *reinterpret_cast<const std::uint32_t*>(t + 0x48);
+                out.threads.push_back(ts);
+            }
+            break;
+        }
+        if (next == 0) break;
+        off += next;
+    }
+    return out;
+}
+
+// WS34: a stall watch for frames of 100+ ms that hide from the sampling profiler (a blocked engine thread: the profiler's thread walks stall with it). `progress` is
+// polled every ~3 ms; once the value has not changed for `thresholdMs`, every other thread's stack is logged ("diag: stall: frame N age X ms: thread id name: f0 < f1 ..."),
+// again after 250 ms and 600 ms of the same frame (3 dumps at most per frame; the dump suspends each thread for a few microseconds). Off unless RVK_STALL_MS is set.
+void startStallWatch(double thresholdMs, std::uint64_t (*progress)(void*), void* user) {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true)) return;
+    std::thread([thresholdMs, progress, user] {
+        SetThreadDescription(GetCurrentThread(), L"rvk stall watch");
+        std::uint64_t last = progress(user);
+        const double freq = qpcFreq();
+        std::uint64_t since = qpc();
+        int reports = 0;
+        std::uint32_t hf1 = 0;
+        Symbolizer sym;
+        for (;;) {
+            Sleep(3);
+            const std::uint64_t now = progress(user);
+            const std::uint64_t t = qpc();
+            if (now != last || now == 0) {
+                if (reports > 0) {
+                    const ProcSched after = querySched();
+                    spdlog::info("diag: stall: frame {} ended after {:.0f} ms: hard faults +{} since the first dump, page faults {}", last,
+                                 static_cast<double>(t - since) * 1000.0 / freq, after.hardFaults - hf1, after.pageFaults);
+                }
+                last = now;
+                since = t;
+                reports = 0;
+                continue;
+            }
+            const double ageMs = static_cast<double>(t - since) * 1000.0 / freq;
+            const double due = reports == 0 ? thresholdMs : reports == 1 ? 250.0 : 600.0;
+            if (reports >= 3 || ageMs < due) continue;
+            ++reports;
+            const ProcSched sched = querySched();
+            if (reports == 1) hf1 = sched.hardFaults;
+            spdlog::info("diag: stall: frame {} age {:.0f} ms (dump {}): process hard faults {} (page faults {})", now, ageMs, reports, sched.hardFaults, sched.pageFaults);
+            const DWORD self = GetCurrentThreadId();
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            std::vector<DWORD> ids;
+            if (snap != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 te{};
+                te.dwSize = sizeof(te);
+                for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+                    if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != self) ids.push_back(te.th32ThreadID);
+                }
+                CloseHandle(snap);
+            }
+            struct Taken {
+                DWORD id;
+                int n;
+                std::wstring name;
+                std::uint64_t pcs[kMaxFrames];
+            };
+            std::vector<Taken> taken;
+            taken.reserve(ids.size());
+            for (const DWORD id : ids) {
+                HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, id);
+                if (h == nullptr) continue;
+                Taken tk{id, 0, {}, {}};
+                if (PWSTR d = nullptr; SUCCEEDED(GetThreadDescription(h, &d)) && d != nullptr) {
+                    tk.name = d;
+                    LocalFree(d);
+                }
+                refreshUnwindModules();
+                if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+                    tk.n = sampleThread(h, tk.pcs, kMaxFrames);  // nothing allocates while it is suspended
+                    ResumeThread(h);
+                }
+                CloseHandle(h);
+                taken.push_back(std::move(tk));
+            }
+            for (const Taken& tk : taken) {
+                if (tk.n == 0) continue;
+                std::string line;
+                for (int i = 0; i < tk.n; ++i) line += (i == 0 ? "" : " < ") + sym.name(tk.pcs[i]);
+                std::string nm;
+                for (const wchar_t c : tk.name) nm += c < 128 ? static_cast<char>(c) : '?';
+                std::string ss;
+                for (const ThreadSched& ts : sched.threads) {
+                    if (ts.id == tk.id) ss = std::format(" [state {} wait {} switches {}]", ts.state, ts.waitReason, ts.switches);
+                }
+                spdlog::info("diag: stall: frame {} age {:.0f} ms (dump {}): thread {} '{}'{}: {}", now, ageMs, reports, tk.id, nm, ss, line);
+            }
+        }
+    }).detach();
+}
+
 std::string allThreadStacks() {
     const DWORD self = GetCurrentThreadId();
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
