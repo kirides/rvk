@@ -169,6 +169,11 @@ private:
 
     void enable();
     void disable();
+    // WS40: no gi.* pipeline exists while GI is off ("Off = nothing exists"): built on a worker when GI turns on (the pass skips until they are ready), the screen probes' two when
+    // gi.screen is on, released when GI turns off (an unfinished build is dropped by the next apply)
+    void startBuilds();
+    void startScreenBuilds();
+    void releasePipelines();
     void record(d3d9::PassContext& ctx);
     bool pipelinesReady();
     bool ensureResources(rhi::CommandList& cmd);

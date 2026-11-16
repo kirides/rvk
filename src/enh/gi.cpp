@@ -85,24 +85,50 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
         failed_ = true;
         return;
     }
-    const auto build = [rdev](const char* file, const char* name) {
-        return [rdev, file, name]() {
-            rhi::ComputePipelineDesc d;
-            d.cs.spirv = shader::embedded::spirv(file);
-            d.cs.dxil = shader::embedded::dxilOnDemand(file);
-            d.name = name;
-            return rdev->createComputePipeline(d);
-        };
-    };
-    // both compute pipelines in the background from the start: turning GI on later costs no frame
-    traceBuild_ = std::async(std::launch::async, build("gi/gi_trace.comp", "gi.trace"));
-    blendBuild_ = std::async(std::launch::async, build("gi/gi_blend.comp", "gi.blend"));
+    // (WS40: no pipeline is built here: a session with GI off has no gi.* pipelines; startBuilds runs when GI turns on)
     dev_.setVariantProvider(d3d9::VariantSlot::Gi, {materialVariantTag("gi"), variantOptions});
-    // the screen probes' passes (stage C)
-    // three storage images: the trace writes the probes' ratio / correction / geometry images, the resolve the first two
-    // (resolved ratio, correction + count) of them
-    spTraceBuild_ = std::async(std::launch::async, build("gi/sp_trace.comp", "gi.screen trace"));
-    spResolveBuild_ = std::async(std::launch::async, build("gi/sp_resolve.comp", "gi.screen resolve"));
+}
+
+namespace {
+std::future<std::unique_ptr<rhi::Pipeline>> buildCompute(rhi::Device* rdev, const char* file, const char* name) {
+    return std::async(std::launch::async, [rdev, file, name]() {
+        rhi::ComputePipelineDesc d;
+        d.cs.spirv = shader::embedded::spirv(file);
+        d.cs.dxil = shader::embedded::dxilOnDemand(file);
+        d.name = name;
+        return rdev->createComputePipeline(d);
+    });
+}
+}  // namespace
+
+void Gi::startBuilds() {
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) return;
+    if (!trace_ && !traceBuild_.valid()) traceBuild_ = buildCompute(rdev, "gi/gi_trace.comp", "gi.trace");
+    if (!blend_ && !blendBuild_.valid()) blendBuild_ = buildCompute(rdev, "gi/gi_blend.comp", "gi.blend");
+    startScreenBuilds();
+}
+
+// the screen probes' passes (stage C): three storage images: the trace writes the probes' ratio / correction / geometry images, the resolve the first two
+// (resolved ratio, correction + count) of them
+void Gi::startScreenBuilds() {
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr || !on_ || s_.screen == 0) return;
+    if (!spTrace_ && !spTraceBuild_.valid()) spTraceBuild_ = buildCompute(rdev, "gi/sp_trace.comp", "gi.screen trace");
+    if (!spResolve_ && !spResolveBuild_.valid()) spResolveBuild_ = buildCompute(rdev, "gi/sp_resolve.comp", "gi.screen resolve");
+}
+
+void Gi::releasePipelines() {
+    const auto drop = [](std::unique_ptr<rhi::Pipeline>& p, PipelineFuture& f) {
+        p.reset();  // (retired with the device's frames)
+        if (f.valid() && f.wait_for(std::chrono::seconds(0)) == std::future_status::ready) f.get().reset();
+    };
+    drop(trace_, traceBuild_);
+    drop(blend_, blendBuild_);
+    drop(spTrace_, spTraceBuild_);
+    drop(spResolve_, spResolveBuild_);
+    drop(refTrace_, refBuild_);
+    refViewPipe_.reset();
 }
 
 Gi::~Gi() {
@@ -125,6 +151,8 @@ void Gi::apply(const Settings& s) {
     const bool want = s.enabled && available();
     if (want && !on_) enable();
     if (!want && on_) disable();
+    if (!on_) releasePipelines();  // (also drops a build that was still running when GI turned off)
+    if (on_) startScreenBuilds();
     s_.foliage = std::clamp(s_.foliage, 0, 2);
     if (on_) {
         scene_->setDynamic(this, s_.characters || s_.foliage > 0);
@@ -170,6 +198,7 @@ void Gi::apply(const Settings& s) {
 
 void Gi::enable() {
     on_ = true;
+    startBuilds();
     scene_->acquire(this);
     dev_.addDrawObserver(this);
     // after the RT scene's pass (order -100): its TLAS of this frame
@@ -195,6 +224,7 @@ void Gi::disable() {
     dev_.setGiHeader({});
     dev_.setFrameSgi({});
     sgiValid_ = false;
+    releasePipelines();
     for (const char* k : {"sgi.probes", "sgi.resolved0", "sgi.resolved1"}) dev_.releaseTransient(k);
     dev_.removeDrawObserver(this);
     dev_.removePasses(this);
