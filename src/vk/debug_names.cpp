@@ -26,6 +26,8 @@ std::string moduleName(VkShaderModule m) {
 
 }  // namespace
 
+std::string moduleLabel(VkShaderModule m) { return moduleName(m); }
+
 void setEnabled(bool on) { g_enabled.store(on, std::memory_order_relaxed); }
 bool enabled() { return g_enabled.load(std::memory_order_relaxed); }
 

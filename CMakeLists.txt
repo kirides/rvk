@@ -467,6 +467,8 @@ add_library(rvk_core STATIC
     src/vk/crash_markers.cpp
     src/vk/crash_markers.h
     src/vk/debug_names.cpp
+    src/vk/isa_dump.cpp
+    src/vk/isa_dump.h
     src/vk/debug_names.h
     src/rhi/d3d_formats.cpp
     src/rhi/d3d_formats.h

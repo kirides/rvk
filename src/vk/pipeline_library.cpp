@@ -31,6 +31,7 @@
 #include <spdlog/spdlog.h>
 
 #include "vk/context.h"
+#include "vk/isa_dump.h"
 #include "vk/pipeline.h"
 #include "core/profile.h"
 
@@ -96,6 +97,10 @@ bool PipelineCache::librariesSupported(const Context& ctx) {
 bool PipelineCache::librariesAllowed(const Context& ctx, std::string* why) {
     if (!librariesSupported(ctx)) {
         if (why != nullptr) *why = "the device lacks graphics pipeline libraries + extended dynamic state 3 + dynamic vertex input";
+        return false;
+    }
+    if (isa::enabled()) {
+        if (why != nullptr) *why = "RVK_ISA_DUMP: a linked pipeline has no executables of its own";
         return false;
     }
     char env[8]{};

@@ -36,6 +36,8 @@ void image(const Context& ctx, const Image& image, std::string_view name);
 void shaderModule(const Context& ctx, VkShaderModule module, std::string_view name);
 // a graphics pipeline: "pipe <vs name> + <fs name>"
 void pipeline(const Context& ctx, VkPipeline pipeline, VkShaderModule vs, VkShaderModule fs);
+// the remembered name of a module ("?" when unknown); the ISA dump labels pipelines with it
+std::string moduleLabel(VkShaderModule module);
 
 // (rhi/names.h: the pure name formatter of a D3D9 model texture)
 using rhi::names::TextureInfo;

@@ -575,6 +575,76 @@ int cmdUberSpv(int argc, char** argv) {
     return reportDxil(items, 30, true);
 }
 
+// ---- embedded-spv: the SPIR-V of every embedded hand-written shader (same jobs / defines as `embedded`) written as <outdir>/<dir>__<name>[__<defines>].<stage>.spv, for offline ISA / register
+// analysis (RGA, scripts/isa-survey.ps1; docs/research/shader-isa.md) ----
+int cmdEmbeddedSpv(int argc, char** argv) {
+    if (argc < 4) { std::printf("usage: dxil-check embedded-spv <outdir> [--filter S] [--jobs N]\n"); return 2; }
+    const fs::path outDir = argv[3];
+    std::string filter;
+    int jobs = defaultJobs();
+    for (int i = 4; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--filter" && i + 1 < argc) filter = argv[++i];
+        else if (a == "--jobs" && i + 1 < argc) jobs = std::atoi(argv[++i]);
+    }
+    if (!requireDxc()) return 2;
+    fs::create_directories(outDir);
+    struct Job { std::string name, defines; };
+    std::vector<Job> jobList;
+    for (const auto& f : embedded::hlslSources()) {
+        std::string name(f.name);
+        if (!name.ends_with(".hlsl")) continue;
+        name.resize(name.size() - 5);
+        if (!(name.ends_with(".comp") || name.ends_with(".vert") || name.ends_with(".frag"))) continue;
+        if (!filter.empty() && name.find(filter) == std::string::npos) continue;
+        if (name == "water/ocean_fft.comp") {
+            for (int n = 128; n <= 512; n *= 2) {
+                int l = 0;
+                while ((1 << l) < n) ++l;
+                jobList.push_back({name, std::format("OCEAN_N={};OCEAN_LOG2N={}", n, l)});
+            }
+        } else {
+            jobList.push_back({name, {}});
+            if (name == "material/ge_default.vert" || name == "material/ge_default.frag") {
+                jobList.push_back({name, "RVK_SCENE_RECORD=1"});
+                jobList.push_back({name, "RVK_SCENE_VIEW=1"});
+            }
+        }
+    }
+    std::atomic<int> failed{0};
+    parallelFor(jobList.size(), jobs, [&](std::size_t i) {
+        const Job& j = jobList[i];
+        rvk::shader::dxc::Request r;
+        r.file = j.name + ".hlsl";
+        const std::string ext = j.name.substr(j.name.rfind('.'));
+        r.entry = ext == ".comp" ? "CSMain" : ext == ".vert" ? "VSMain" : "PSMain";
+        r.profile = ext == ".comp" ? "cs_6_6" : ext == ".vert" ? "vs_6_6" : "ps_6_6";
+        for (std::size_t pos = 0; pos < j.defines.size();) {
+            const auto end = std::min(j.defines.find(';', pos), j.defines.size());
+            const std::string d = j.defines.substr(pos, end - pos);
+            const auto eq = d.find('=');
+            if (!d.empty()) r.defines.push_back({d.substr(0, eq), eq == std::string::npos ? std::string() : d.substr(eq + 1)});
+            pos = end + 1;
+        }
+        r.cache = g_diskCache;
+        r.target = rvk::shader::dxc::Target::Spirv;
+        const auto sp = rvk::shader::dxc::compile(r);
+        if (!sp.ok()) { ++failed; std::printf("FAIL %s: %s\n", j.name.c_str(), firstError(sp.log).c_str()); return; }
+        std::string base = j.name.substr(0, j.name.rfind('.'));
+        for (char& c : base) if (c == '/') c = '_';
+        base += "__" + ext.substr(1);
+        if (!j.defines.empty()) {
+            std::string d = j.defines;
+            for (char& c : d) if (c == '=' || c == ';') c = '_';
+            base += "__" + d;
+        }
+        std::ofstream f(outDir / (base + ".spv"), std::ios::binary);
+        f.write(reinterpret_cast<const char*>(sp.words.data()), static_cast<std::streamsize>(sp.words.size() * 4));
+    });
+    std::printf("%zu shaders -> %s (%d failed)\n", jobList.size(), outDir.string().c_str(), failed.load());
+    return failed.load() == 0 ? 0 : 1;
+}
+
 int cmdDxilCheck(int argc, char** argv) {
     const std::string what = argv[2];
     // shared options (any position): -j N / -jN (= --jobs N), --no-memo, --cache <dir> (dxc's disk cache: unchanged requests are not compiled again in
@@ -604,6 +674,7 @@ int cmdDxilCheck(int argc, char** argv) {
     if (what == "embedded") return cmdDxilEmbedded(argc, argv);
     if (what == "uber") return cmdDxilUber(argc, argv);
     if (what == "uber-spv") return cmdUberSpv(argc, argv);
+    if (what == "embedded-spv") return cmdEmbeddedSpv(argc, argv);
     if (what == "corpus" && argc >= 4) {
         TranslateOptions options;
         VariantFn variant = nullptr;

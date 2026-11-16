@@ -9,6 +9,7 @@
 #include "vk/bindless.h"
 #include "core/profile.h"
 #include "vk/context.h"
+#include "vk/isa_dump.h"
 #include "vk/frames.h"
 
 namespace rvk::vk {
@@ -130,6 +131,7 @@ VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::spa
     ci.stage.pName = "main";
     ci.stage.pSpecializationInfo = spec;
     ci.layout = layout;
+    ci.flags |= isa::flags(ctx);
     VkPipeline p = VK_NULL_HANDLE;
     if (const VkResult r = vkCreateComputePipelines(ctx.device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p); r != VK_SUCCESS) {
         spdlog::error("vulkan: compute pass {}: {}", name != nullptr ? name : "?", resultString(r));
@@ -137,6 +139,7 @@ VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::spa
     }
     vkDestroyShaderModule(ctx.device(), m, nullptr);
     if (p != VK_NULL_HANDLE && name != nullptr) ctx.setName(p, VK_OBJECT_TYPE_PIPELINE, name);
+    if (isa::enabled()) isa::dump(ctx, p, std::string("compute ") + (name != nullptr ? name : "?"));
     return p;
 }
 
@@ -221,6 +224,7 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         ci.pColorBlendState = &cb;
         ci.pDynamicState = &dy;
         ci.layout = layout;
+        ci.flags |= isa::flags(ctx);
         if (const VkResult r = vkCreateGraphicsPipelines(ctx.device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p); r != VK_SUCCESS) {
             spdlog::error("vulkan: pass pipeline {}: {}", desc.name != nullptr ? desc.name : "?", resultString(r));
             p = VK_NULL_HANDLE;
@@ -231,6 +235,7 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
     if (vs != VK_NULL_HANDLE) vkDestroyShaderModule(ctx.device(), vs, nullptr);
     if (fs != VK_NULL_HANDLE) vkDestroyShaderModule(ctx.device(), fs, nullptr);
     if (p != VK_NULL_HANDLE && desc.name != nullptr) ctx.setName(p, VK_OBJECT_TYPE_PIPELINE, desc.name);
+    if (isa::enabled()) isa::dump(ctx, p, std::string("pass ") + (desc.name != nullptr ? desc.name : "?"));
     return p;
 }
 

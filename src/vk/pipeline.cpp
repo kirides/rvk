@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "vk/context.h"
+#include "vk/isa_dump.h"
 #include "core/profile.h"
 
 namespace rvk::vk {
@@ -476,12 +477,14 @@ VkPipeline PipelineCache::build(const PipelineDesc& d) {
     ci.pColorBlendState = &cb;
     ci.pDynamicState = &dy;
     ci.layout = layout_;
+    ci.flags |= isa::flags(*ctx_);
     VkPipeline p = VK_NULL_HANDLE;
-    if (const VkResult r = vkCreateGraphicsPipelines(ctx_->device(), cache_, 1, &ci, nullptr, &p); r != VK_SUCCESS) {
+    if (const VkResult r = vkCreateGraphicsPipelines(ctx_->device(), isa::enabled() ? VK_NULL_HANDLE : cache_, 1, &ci, nullptr, &p); r != VK_SUCCESS) {
         spdlog::error("vulkan: vkCreateGraphicsPipelines: {}", resultString(r));
         return VK_NULL_HANDLE;
     }
     names::pipeline(*ctx_, p, vkModule(d.vs), vkModule(d.fs));
+    if (isa::enabled()) isa::dump(*ctx_, p, "pipe " + names::moduleLabel(vkModule(d.vs)) + " + " + names::moduleLabel(vkModule(d.fs)));
     return p;
 }
 
