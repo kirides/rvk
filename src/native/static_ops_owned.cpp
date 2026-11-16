@@ -580,11 +580,17 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
             for (std::uint32_t i = 0; i < 7; ++i) in.ss[st][i] = r.ss[st][i];
         }
         in.alphaFunc = r.alphaTestState != 0 ? r.alphaFunc : 8u;
-        in.alphaRef = static_cast<float>(r.alphaRef & 0xffu);
+        {
+            // WS33: a fading masked shader's alpha reference from the op's fade now (the record holds maskRef)
+            std::uint32_t ref;
+            float mv;
+            orec::liveMask(r, op.list == List::ZPass ? 1.0f : op.raw.fade, ref, mv);
+            in.alphaRef = static_cast<float>(ref & 0xffu);
+            in.psC5[3] = r.maskSet ? mv : 0.0f;
+        }
         in.psC5[0] = mirror_.adminPs[5][0];
         in.psC5[1] = mirror_.adminPs[5][1];
         in.psC5[2] = mirror_.adminPs[5][2];
-        in.psC5[3] = r.maskSet ? r.maskValue : 0.0f;
         gpuscene::ComposeParams p;
         p.tableLit = r.lightTableLit;
         p.holdsAll = r.lightHoldsAll;
@@ -1021,7 +1027,7 @@ bool StaticOps::ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeP
     return lit;
 }
 
-void StaticOps::ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in) {
+void StaticOps::ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in, float fade) {
     for (std::size_t i = 0; i < 4; ++i) {
         in.streams[i] = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(r.streams[i]));
         in.strides[i] = r.strides[i];
@@ -1033,11 +1039,14 @@ void StaticOps::ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Devic
         for (std::uint32_t i = 0; i < 7; ++i) in.ss[st][i] = r.ss[st][i];
     }
     in.alphaFunc = r.alphaTestState != 0 ? r.alphaFunc : 8u;
-    in.alphaRef = static_cast<float>(r.alphaRef & 0xffu);
+    std::uint32_t ref;
+    float mv;
+    orec::liveMask(r, fade, ref, mv);  // (WS33)
+    in.alphaRef = static_cast<float>(ref & 0xffu);
     in.psC5[0] = mirror_.adminPs[5][0];
     in.psC5[1] = mirror_.adminPs[5][1];
     in.psC5[2] = mirror_.adminPs[5][2];
-    in.psC5[3] = r.maskSet ? r.maskValue : 0.0f;
+    in.psC5[3] = r.maskSet ? mv : 0.0f;
     in.ambientLit = ambientLit;
 }
 
@@ -1238,7 +1247,10 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
         tag.materialName = r.tagMaterialName;
         lap(S.windowNs);
         bool allowed = false;
-        const std::uint64_t sig = dev_.ownedDrawSig(cd, r.streams, r.strides, r.indices, r.tex, amb, P.ow, allowed);
+        const float liveFade = op.list == List::ZPass ? 1.0f : op.raw.fade;
+        std::uint64_t sig = dev_.ownedDrawSig(cd, r.streams, r.strides, r.indices, r.tex, amb, P.ow, allowed);
+        // WS33: a fading masked shader's alpha reference moves with the op's fade (an integer: few distinct values): a change derives the draw again
+        if (r.maskFading) sig = mix(sig, 0x3a5f00d000000000ull | (orec::maskRefLive(r, liveFade) & 0xffu));
         lap(S.sigNs);
         if (!allowed) {
             ++S.refused;
@@ -1263,7 +1275,7 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
                 P.handle.slot = slot;
             }
             d3d9::Device::DeriveIn in;
-            ownedMakeIn(r, amb, in);
+            ownedMakeIn(r, amb, in, liveFade);
             d3d9::Device::OwnedPersist out;
             const int rc = dev_.ownedDerive(cd, in, P.ow, tab.blockRef(P.handle.slot), tab.zeroRef(), true, out);
             lap(S.deriveNs);
@@ -1344,7 +1356,8 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     d3d9::OwnedWindows dw;
     ownedBuildWindows(r, viewWin, objWin, p, false, dw);
     bool allowed = false;
-    const std::uint64_t sig = dev_.ownedDrawSig(*r.cd, r.streams, r.strides, r.indices, r.tex, in.ambientLit, dw, allowed);
+    std::uint64_t sig = dev_.ownedDrawSig(*r.cd, r.streams, r.strides, r.indices, r.tex, in.ambientLit, dw, allowed);
+    if (r.maskFading) sig = mix(sig, 0x3a5f00d000000000ull | (static_cast<std::uint32_t>(in.alphaRef) & 0xffu));  // (WS33: in = the composition's live reference)
     const bool envSame = P.envIndex >= 0 ? dev_.ownedEnvSameAt(static_cast<std::size_t>(P.envIndex), true, viewSlot, P.epoch) : dev_.ownedEnvSame(solid, viewSlot, P.epoch);
     if (!allowed || P.sig != sig || !envSame) {
         ++S.checkSkipped;  // (the owned path would derive this draw again)

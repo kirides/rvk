@@ -110,7 +110,9 @@ void fillBlending(RenderStates& rs, const BlendInputs& b, bool additive, float f
             rs.dst = additive ? 2u : 6u;
             rs.alphaTest = 2;
             rs.alphaFunc = 5;
-            rs.alphaRef = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<float>(b.maskRef) * fade));
+            rs.alphaRef = maskFadeRef(b.maskRef, fade);
+            rs.maskFading = true;
+            rs.maskRef = b.maskRef;
             return;
         case 3:
             rs.src = 9;

@@ -7802,3 +7802,37 @@ Means: updated A -> B p50 14.2 -> 8.4, p95 25.6 -> 15.2, frames > 25 ms 200 -> 2
 Section view: X vs Z at 120 s p50 8.8 vs 10.0 ms (p90 12.8 vs 16.2; Wrapper 7.7 / 10.4); other sections ~equal. Session-to-session spread of one arm is 0.3 ms CPU (Z 5.43 - 5.73), so the arms V / Y cannot be told apart; X vs Z is -0.2 ms CPU, p99 -2 ms, 17 fewer frames > 25 ms. **The gate (Full >= Wrapper) is NOT met**: the remaining gap is ~0.4 ms CPU, p95 +1.3, p99 +2.8.
 **Left.** Flat Full-only machinery (z pass, effect units, injected passes, RT record, ordered places), heap churn (vector copies in `DrawDesc::operator=`, `ReadRec` logs, `composePrecipitation`: ~0.3 ms), a first-touch-free buffer pool for the cluster / water temporaries (spikes), the heap-lock wait of `RtlFreeHeap` in spike frames (52 samples; the holder is a worker's large free), `detourCacheEntities` (both modes). Not measured: D3D12, picture check at static spots after the age-out (traversal's picture check has no data: camera moves).
 **Static scenes (perf-ab, `-Restart`, 3 pairs, A = all three switches off, B = new; machine loaded by another game: noisy).** CPU engine+HAL: hold 7.57 -> 8.15 (z +0.4, B sd 2.0), jungle 9.18 -> 12.11 (z +0.6, B sd 7.2: one outlier window), harbour_docks 2.66 -> 2.67; interval p50 +2.7 % / +3.0 % / +4.6 % (z 0.2 / 0.1 / 1.0). No significant change; not conclusive for hold / jungle (to repeat on a quiet machine).
+
+### 16.24 WS33: the masked alpha reference served live at replay; the op-record stamp is the fade class for every op again (2026-11-16, branch `worktree-agent-a7323997e90735848` on main 472b6f6; `RVK_FADE_STAMP=0` still = the exact fade bits)
+
+**Problem.** 16.23's class stamp left one fade-derived value baked into a record: `sc::fillBlending` (masked shader, blend mode 1, fade < 1) sets `alphaRef = (int)((float)maskRef * fade)`, which `passDraw` copied into `DrawDesc` -> `orec::DrawRec::alphaRef / maskValue` (the DrawBlock's alpha reference and PS c5.w of the derived draw). 762aa1f fixed the stale reference by keeping the exact fade in the stamp of ops with a masked sub-mesh (`fadeMasked`): correct, but ~57,000 - 71,000 fade rebuilds per 180 s traversal (vs 9 - 12 with the class) and WS32's CPU gain given back.
+
+**Everything fade-derived in a record (checked).** (1) `d.alphaRef` / `d.maskValue` (above): the only bake. (2) blend src / dst / blend enable / `fillBlending` default branch: depend on `fade == 1` vs `< 1` only: the class covers them. (3) c32.w: the object window, served live (`ownedDrawOp` / `ownedDrawOpPersistent`: `op.raw.fade`). (4) the retained packet / bb records key on the exact c32.w bits already (`alphaBits` in the retention key) and trees / vegetation templates are not fade passes (instanced / grid fade): unchanged. (5) The RT scene's observers read `CachedDraw::query.alphaRef` (the build-time reference); that value is stale between builds in the class world as it was in WS32 (not made live here: observers only; the picture path is the DrawBlock).
+
+**Design.** `sc::RenderStates::maskFading / maskRef` (set by `fillBlending` in the masked fade < 1 branch) -> `DrawDesc` -> `orec::DrawRec::maskFading / maskRef`. `sc::maskFadeRef(maskRef, fade)` is the one expression (composition and replay). `orec::liveMask(r, fade, alphaRef, maskValue)` gives the record's own values for a draw that does not fade a mask, else computes alphaRef and `alphaRef / 256` from the op's live fade. Used by `ownedDrawOp` (non-persistent), `ownedMakeIn` (persistent derive, scrub; `fade` parameter, default 1), and the check frame's derivation (`recDraw`, with `op_->raw.fade`, not the composition's c32.w: DIFFERING / BlockAlpha / BlockC5 compare the composed draw with the replay's value). The persistent draw signature (`ownedDrawSig` result) is mixed with the live integer reference for a `maskFading` draw (`ownedDrawOpPersistent`, `ownedMissCheck`): a changed reference derives the draw again (rewrites its slot), a fade that moves without changing the integer does not; no composition, no record rebuild. The stamp lost `fadeMasked`; `fadeStampBits(fade)` is the class for every op. Files: `native/static_compose.{h,cpp}`, `native/op_records.h`, `native/static_ops{,_owned,_records,_deps}.cpp`, `static_ops.h`, `tests/native_tests.cpp` (`op_record_masked_fade_reference_is_live`: every (maskRef, fade) pair: `liveMask` == the composition's `passStates` reference bit for bit; fade 1 and non-fading passes carry no live reference).
+
+**Gates.** `rvk_tests` 366 / 0 failures; `rvk_d3d9test --validation` Vulkan and `--backend d3d12`: 0 failures, 0 validation errors. No GPU address handling added (no GPU-AV run); pedantic clang-cl build not run (small change, no new warnings in the MSVC build).
+
+**Picture check (Full, `native.picture_check=true`, rvkcompare; DIFFERING 0 / MISS 0 in every run).**
+
+| config | build | runs | runs with a FAILED window |
+|---|---|---|---|
+| pcA (6 spots) | WS33 | 3 | 1 (run 1, jungle first spot, 1 window worst view 0.131 %, colour only) |
+| jungle + harbour_docks, `RVK_PICTURE_DUMP=36;RVK_PICTURE_DUMP_ANY=5` | WS33 first build | 8 | 1 (`cap_1`: 2 windows 0.098 / 0.10 %, ~1,400 px of speckle on foliage edges, constant over ages 1 - 7) |
+| same | WS33 final (check compare on `op_->raw.fade`) | 10 | 0 |
+| same | main 472b6f6 | 8 | 0 |
+
+The two FAILED windows both came from the first run(s) after the copy's caches were cold / the first spot of a session (the scene still settling); not reproduced in the 10 runs of the final build, and the size (0.1 %) is two orders below the stale-reference failure (4.5 / 8.8 %, ~25 % of runs). Not proven to be a flake: 2 of 21 WS33 runs vs 0 of 8 on main.
+
+**Traversal (harbour route, 180 s, window 20 - 180 s, shared copy, `RisenTest.exe`, player defaults, Full, interleaved; fade rebuilds = sum of the `fade N` of `owned records (5 s)`).**
+
+| session | build | p50 | p95 | p99 | > 25 ms | > 33 ms | CPU/frame | fade rebuilds |
+|---|---|---|---|---|---|---|---|---|
+| tM1 | WS33 | 4.86 | 10.54 | 13.82 | 29 | 10 | 5.35 | 9 |
+| tM2 | WS33 | 5.03 | 10.52 | 14.14 | 31 | 10 | 5.41 | 12 |
+| tB1 | main 472b6f6 | 5.67 | 12.31 | 16.09 | 39 | 15 | 6.22 | 57,138 |
+| tB2 | main 472b6f6 | 5.00 | 10.61 | 13.88 | 32 | 8 | 5.44 | 70,888 |
+
+WS33 mean CPU 5.38 (WS32: 5.37), main 5.83 (tB1 a noisy session; tB2 alone 5.44, so the CPU gain over 472b6f6 is within the noise except for tB1); fade rebuilds back to the WS32 level (9 - 12). MISS / DIFFERING 0 in all four.
+
+**Not done.** The RT scene observers still see the build-time `query.alphaRef` (see above); no GPU-AV run; no pedantic build; the 2-of-21 small FAILED windows are unexplained (no dump analysis beyond one view: foliage edge speckle).

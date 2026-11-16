@@ -1379,8 +1379,49 @@ TEST(op_record_fade_stamp_is_a_class) {
     CHECK(fadeStampBits(1.0f) == fadeStampBits(1.5f));
     CHECK(fadeStampBits(0.9999f) != fadeStampBits(1.0f));
     CHECK(fadeStampBits(0.0f) == fadeStampBits(0.3f));
-    CHECK(fadeStampBits(0.25f, true) != fadeStampBits(0.9f, true));  // masked shader: alphaRef = maskRef * fade is baked into the draws
-    CHECK(fadeStampBits(1.0f, true) == fadeStampBits(1.5f, true));
+}
+
+// WS33: a masked shader's alpha reference at fade < 1 is served live: the record keeps maskRef + the flag, liveMask computes (int)((float)maskRef * fade) exactly as fillBlending
+TEST(op_record_masked_fade_reference_is_live) {
+
+    using native::orec::DrawRec;
+    for (std::uint32_t maskRef : {0u, 1u, 77u, 128u, 255u}) {
+        for (float fade : {0.0f, 0.001f, 0.25f, 0.333333f, 0.5f, 0.9f, 0.999f}) {
+            sc::BlendInputs b;
+            b.mode = 1;
+            b.maskRef = static_cast<std::uint8_t>(maskRef);
+            const sc::RenderStates rs = sc::passStates(0x200u, b, fade);  // flags 0x200: a non-instanced pass that fades
+            CHECK(rs.maskFading);
+            CHECK(rs.maskRef == maskRef);
+            DrawRec r;  // the record as built at some other fade of the class
+            r.maskFading = rs.maskFading;
+            r.maskRef = rs.maskRef;
+            r.alphaRef = sc::maskFadeRef(maskRef, 0.5f);
+            r.maskValue = static_cast<float>(r.alphaRef) * (1.0f / 256.0f);
+            std::uint32_t ref = 0;
+            float mv = 0.0f;
+            native::orec::liveMask(r, fade, ref, mv);
+            CHECK(ref == rs.alphaRef);  // bit for bit what a composition at this fade bakes
+            CHECK(mv == static_cast<float>(rs.alphaRef) * (1.0f / 256.0f));
+            CHECK(native::orec::maskRefLive(r, fade) == rs.alphaRef);
+        }
+        sc::BlendInputs b;
+        b.mode = 1;
+        b.maskRef = static_cast<std::uint8_t>(maskRef);
+        const sc::RenderStates one = sc::passStates(0x200u, b, 1.0f);  // fade 1: a plain masked pass: no live reference
+        CHECK(!one.maskFading);
+        CHECK(one.alphaRef == maskRef);
+        const sc::RenderStates inst = sc::passStates(0x600u, b, 0.5f);  // a pass that does not read the fade
+        CHECK(!inst.maskFading);
+        CHECK(inst.alphaRef == maskRef);
+    }
+    DrawRec plain;  // not a fading mask: the record's own values
+    plain.alphaRef = 40;
+    plain.maskValue = 0.25f;
+    std::uint32_t ref = 0;
+    float mv = 0.0f;
+    native::orec::liveMask(plain, 0.1f, ref, mv);
+    CHECK(ref == 40 && mv == 0.25f);
 }
 
 // F2c-2 (op_records.h): the stamp's field-wise comparison names the first differing field; the key hashes by all of its parts

@@ -144,9 +144,8 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
                            (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2d8)) << 32) | (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x78)) << 40) |
                            (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2b8)) << 48) | (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2a8)) << 56));
             h = mixPtr(mix(h, static_cast<std::uint32_t>(get<std::int32_t>(sh, 0x68))), ptr(sh, 0x220));
-            if (get<std::int32_t>(sh, 0x50) == 1) st.fadeMasked = true;
         }
-        st.fadeBits = orec::fadeStampBits(op.raw.fade, st.fadeMasked);
+        st.fadeBits = orec::fadeStampBits(op.raw.fade);
         const std::uint32_t node = op.raw.desc >> 8;
         if (node != 0 && node != kStaticOpNone && sub != 0xffu && static_cast<std::int32_t>(sub) < count) {
             // F2d: a hierarchy node op draws the node's index range of its sub-mesh (subMeshDraws: sub +0x40 table of 0x28-byte nodes, +0x20 = first index, the
@@ -641,11 +640,18 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         for (std::uint32_t i = 0; i < 7; ++i) in.ss[st][i] = r.ss[st][i];
     }
     in.alphaFunc = r.alphaTestState != 0 ? r.alphaFunc : 8u;  // (deviceStates: SetMasterAlphaTesting(1), the test is off whatever the pass says)
-    in.alphaRef = static_cast<float>(r.alphaRef & 0xffu);
+    {
+        // WS33: the pass's alpha reference at the fade the composition just ran with (a fading masked shader's record holds maskRef, not the reference)
+        std::uint32_t ref;
+        float mv;
+        // (the op's fade as the owned replay serves it, not c32.w: the compare below then tells when the two differ)
+        orec::liveMask(r, op_ != nullptr ? op_->raw.fade : mirror_.global[1][3], ref, mv);
+        in.alphaRef = static_cast<float>(ref & 0xffu);
+        in.psC5[3] = r.maskSet ? mv : 0.0f;
+    }
     in.psC5[0] = mirror_.adminPs[5][0];
     in.psC5[1] = mirror_.adminPs[5][1];
     in.psC5[2] = mirror_.adminPs[5][2];
-    in.psC5[3] = r.maskSet ? r.maskValue : 0.0f;
     if (r.cd->v.needsAmbient() && r.illumSlot != gpuscene::kNoSlot) {
         // the ambient test of the GI / pack variant decision, from the record's illumination instead of the device's registers
         gpuscene::ComposeParams p;
@@ -958,6 +964,8 @@ void StaticOps::recEnd(const Op& op) {
         r.alphaRef = d.alphaRef;
         r.maskSet = d.maskSet;
         r.maskValue = d.maskValue;
+        r.maskFading = d.maskFading;
+        r.maskRef = d.maskRef;
         r.matSlot = d.matSlot;
         r.illumSlot = d.illumSlot;
         r.illumPtr = d.illumPtr;

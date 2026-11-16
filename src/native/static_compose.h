@@ -71,7 +71,14 @@ struct RenderStates {
     std::uint32_t renderMode = 0;        // 0 = the admin's (+0x340)
     std::uint32_t depthFunc = 4;
     bool valid = true;                   // false: a kind the engine leaves uninitialised (not composable)
+    // WS33: a masked shader at fade < 1: alphaRef = maskFadeRef(maskRef, fade). The record keeps maskRef + this flag and the replay computes the reference from the op's live fade
+    bool maskFading = false;
+    std::uint32_t maskRef = 0;
 };
+// the masked shader's alpha reference at a fade below 1 (FillBlendingRenderStates: (int)((float)maskRef * fade)); the composition and the owned replay both use this one expression
+inline std::uint32_t maskFadeRef(std::uint32_t maskRef, float fade) {
+    return static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<float>(maskRef) * fade));
+}
 // eCShaderBase::FillBlendingRenderStates 0x6d0430 (fields the mode does not set keep their value)
 struct BlendInputs {
     std::int32_t mode = 0;       // shader +0x50 eEShaderMaterialBlendMode
@@ -420,6 +427,9 @@ struct DrawDesc {
     std::uint32_t alphaFunc = 8, alphaRef = 0;
     bool maskSet = false;
     float maskValue = 0.0f;
+    // WS33: the pass's alpha reference is maskFadeRef(maskRef, the op's fade) (masked shader, fade < 1): the op record serves it live (orec::liveMask)
+    bool maskFading = false;
+    std::uint32_t maskRef = 0;
     // F4-3 (native.owned_trees): the bucket key of a SpeedTree batch's draw (StaticOps::treeBucketKey; 0 = not a tree draw / not retainable)
     std::uint64_t treeKey = 0;
     // F12 (frame-ownership.md 14.24, native.own_sky): the sky dome's draw (eCShaderSkyDome: main view and cube faces): drawn with the sky dome port
