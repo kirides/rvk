@@ -906,6 +906,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
                                                             return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
                                                         }});
+        // WS40 (shader-isa.md 8): the light table alone, no PBR code: lit draws take the variant without the GI hooks while GI is off (the Gi slot's hooked form is built once GI is on)
+        if (!enh::pbrVariants()) {
+            dev_.setVariantProvider(d3d9::VariantSlot::GiCl, {enh::materialVariantTag("cl"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
+                                                                  return enh::materialVariantOptions(s, enh::MaterialVariant::ClusterOnly, o);
+                                                              }});
+            dev_.setGiClusterOnly(true);
+        }
         if (!matPack_) {
             dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
             // (WS19, frame-ownership.md 14.61: no pack = the answer never changes: a constant stamp lets retained packets / owned draws keep their word without a lookup per

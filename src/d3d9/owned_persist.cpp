@@ -164,8 +164,7 @@ std::uint64_t Device::ownedDrawSig(const CachedDraw& c, const void* const* strea
     std::uint64_t h = hmix(0x84222325cbf29ce4ull, ambientLit ? 1u : 0u);
     // the variant the draw was offered while it was still being built (a module that exists now = another pixel shader and pipeline)
     if (c.v.gate && c.v.wanted) {
-        const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
-        const rhi::ShaderModule now = c.ps->variantState[vi].load(std::memory_order_acquire) == 2 ? c.ps->variants[vi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+        const rhi::ShaderModule now = giVariantPeek(*c.ps);
         h = hmix(h, static_cast<std::uint64_t>(now));
     }
     if (c.v.gbufGate && c.v.gbufWanted) {  // (F-VAR: the G-buffer variant the draw was offered, as the GI one)

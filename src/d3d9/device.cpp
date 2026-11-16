@@ -1688,7 +1688,7 @@ void notifySourceAttached(Shader& s) {
 
 void Device::sourceAttached(Shader& s) {
     if (!ubershader_.load(std::memory_order_relaxed) || destroying_.load(std::memory_order_acquire)) return;
-    const std::uint32_t uber = s.uberSlots.load(std::memory_order_acquire);
+    const std::uint64_t uber = s.uberSlots.load(std::memory_order_acquire);
     std::uint32_t reset = 0;
     const std::lock_guard lock(variantMutex_);
     for (std::size_t i = 0; i < kVariantSlots; ++i) {
@@ -2473,7 +2473,7 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     if (state == 2) return s->variants[i].load(std::memory_order_acquire);
     if (state == 1 && !t_variantBackground) {
         s->variantDemand[i].fetch_add(1, std::memory_order_relaxed);
-        if ((s->variantUrgent.load(std::memory_order_relaxed) & (1u << i)) == 0) promoteVariant(s, slot);
+        if ((s->variantUrgent.load(std::memory_order_relaxed) & (1ull << i)) == 0) promoteVariant(s, slot);
     }
     if (state != 0) return rhi::ShaderModule::None;
     if (destroying_.load(std::memory_order_acquire)) return rhi::ShaderModule::None;  // (F15-1: a shader worker's key prewarm during destroy() must not restart the workers)
@@ -2494,10 +2494,10 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
             return rhi::ShaderModule::None;
         }
         if (t_variantBackground) {
-            s->variantUrgent.fetch_and(~(1u << i), std::memory_order_relaxed);
+            s->variantUrgent.fetch_and(~(1ull << i), std::memory_order_relaxed);
             variantJobs_.push_back({std::move(owner), slot, false});
         } else {  // a draw wants it now: ahead of the known-key requests, after the earlier draw requests
-            s->variantUrgent.fetch_or(1u << i, std::memory_order_relaxed);
+            s->variantUrgent.fetch_or(1ull << i, std::memory_order_relaxed);
             variantJobs_.insert(variantJobs_.begin() + static_cast<std::ptrdiff_t>(variantUrgentJobs_), {std::move(owner), slot, true});
             ++variantUrgentJobs_;
         }
@@ -2512,10 +2512,37 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     return rhi::ShaderModule::None;
 }
 
+// WS40: the GI-slot module of a draw (device.h giVariant)
+rhi::ShaderModule Device::giVariant(const ShaderRef& s, rhi::ShaderModule* alt) {
+    if (alt != nullptr) *alt = rhi::ShaderModule::None;
+    if (!giClusterOnly_) return variant(s, VariantSlot::Gi);
+    const VariantSlot pref = giSlotPreferred();
+    const VariantSlot other = pref == VariantSlot::Gi ? VariantSlot::GiCl : VariantSlot::Gi;
+    const rhi::ShaderModule m = variant(s, pref);
+    const std::size_t oi = static_cast<std::size_t>(other);
+    const rhi::ShaderModule o = s->variantState[oi].load(std::memory_order_acquire) == 2 ? s->variants[oi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+    if (m != rhi::ShaderModule::None) {
+        if (alt != nullptr) *alt = o;
+        return m;
+    }
+    return o;
+}
+
+rhi::ShaderModule Device::giVariantPeek(const Shader& s) const {
+    const auto peek = [&](VariantSlot slot) {
+        const std::size_t i = static_cast<std::size_t>(slot);
+        return s.variantState[i].load(std::memory_order_acquire) == 2 ? s.variants[i].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+    };
+    if (!giClusterOnly_) return peek(VariantSlot::Gi);
+    const VariantSlot pref = giSlotPreferred();
+    const rhi::ShaderModule m = peek(pref);
+    return m != rhi::ShaderModule::None ? m : peek(pref == VariantSlot::Gi ? VariantSlot::GiCl : VariantSlot::Gi);
+}
+
 // WS12: a draw needs a variant that is queued (requested from the known keys at load): moved behind the other draw requests, ahead of the background ones (once per slot)
 void Device::promoteVariant(const ShaderRef& s, VariantSlot slot) {
     const std::size_t i = static_cast<std::size_t>(slot);
-    if (s->variantUrgent.fetch_or(1u << i, std::memory_order_relaxed) & (1u << i)) return;
+    if (s->variantUrgent.fetch_or(1ull << i, std::memory_order_relaxed) & (1ull << i)) return;
     const std::lock_guard lock(variantMutex_);
     for (std::size_t k = variantUrgentJobs_; k < variantJobs_.size(); ++k) {
         if (variantJobs_[k].shader.get() != s.get() || variantJobs_[k].slot != slot) continue;
@@ -2784,7 +2811,7 @@ void Device::variantWorker() {
             continue;
         }
         ++variantsBuilt_;
-        if (viaUber) job.shader->uberSlots.fetch_or(1u << i, std::memory_order_release);
+        if (viaUber) job.shader->uberSlots.fetch_or(1ull << i, std::memory_order_release);
         {
             const std::lock_guard lock(shaderMutex_);
             variantHashes_.emplace(m, std::pair<std::uint64_t, std::uint8_t>{job.shader->hash, static_cast<std::uint8_t>(i)});
@@ -3836,6 +3863,16 @@ bool Device::prewarmKey(std::size_t index) {
             return true;
         }
         if (slot >= static_cast<std::uint8_t>(VariantSlot::Count)) return false;
+        // WS40: a key of the Gi slots (hooks + light table) names the cluster-only form while GI is off (keys of sessions before the split name Gi for the light table alone), and a
+        // cluster-only key is not built while GI is on (the hooked form is what the draws want then; a GI toggle's draws request their own)
+        if (giClusterOnly_) {
+            const bool off = !giDraws_.on;
+            if (off && (slot == static_cast<std::uint8_t>(VariantSlot::Gi) || slot == static_cast<std::uint8_t>(VariantSlot::SceneGi) || slot == static_cast<std::uint8_t>(VariantSlot::SceneGi2))) {
+                slot = static_cast<std::uint8_t>(slot == static_cast<std::uint8_t>(VariantSlot::Gi) ? VariantSlot::GiCl : slot == static_cast<std::uint8_t>(VariantSlot::SceneGi) ? VariantSlot::SceneGiCl : VariantSlot::SceneGiCl2);
+            } else if (!off && (slot == static_cast<std::uint8_t>(VariantSlot::GiCl) || slot == static_cast<std::uint8_t>(VariantSlot::SceneGiCl) || slot == static_cast<std::uint8_t>(VariantSlot::SceneGiCl2))) {
+                return false;
+            }
+        }
         const std::size_t i = slot;
         const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
         if (state == 2) {

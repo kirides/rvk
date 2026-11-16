@@ -37,12 +37,13 @@ std::string materialVariantTag(std::string_view base) {
 bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o, GbufferOutputs outputs) {
     if (s.stage != shader::Stage::Pixel || (s.reflection.colorOutputs & 1u) == 0) return false;
     if (kind == MaterialVariant::GbufferMotion && !writesMotion(outputs)) return false;  // (per-object motion has nothing to write)
-    const bool outNormal = kind != MaterialVariant::Gi && writesNormal(outputs);
-    const bool outMotion = kind != MaterialVariant::Gi && writesMotion(outputs);
+    const bool clOnly = kind == MaterialVariant::ClusterOnly;
+    const bool outNormal = kind != MaterialVariant::Gi && !clOnly && writesNormal(outputs);
+    const bool outMotion = kind != MaterialVariant::Gi && !clOnly && writesMotion(outputs);
     const auto& amb = s.semantics[Semantic::AmbientLight];
-    const bool ambient = amb.present() && amb.count >= 7;
-    const bool gbuffer = kind != MaterialVariant::Gi;
-    if (!ambient && !gbuffer) return false;
+    const bool ambient = !clOnly && amb.present() && amb.count >= 7;
+    const bool gbuffer = kind != MaterialVariant::Gi && !clOnly;
+    if (!ambient && !gbuffer && !clOnly) return false;
     // G-buffer variants: material shaders only (the engine's material graph samplers, or lit)
     if (gbuffer && !ambient && !s.semantics.has(d3d9::ShaderSemantics::Material)) return false;
     const auto& ind = s.semantics[Semantic::IndoorAmbient];
@@ -54,7 +55,7 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
     }
     const auto& dirLight = s.semantics[Semantic::DirLight];
     const auto& pntLights = s.semantics[Semantic::PointLights];
-    const bool pbr = g_pbr && (dirLight.present() || pntLights.present());
+    const bool pbr = g_pbr && !clOnly && (dirLight.present() || pntLights.present());
     if (pbr) {
         defines += std::format("#define RVK_MV_PBR 1\n#define RVK_MV_PBR_DIR_REG {}\n#define RVK_MV_PBR_PNT_REG {}\n#define RVK_MV_PBR_PNT_COUNT {}\n",
                                dirLight.present() ? dirLight.reg : -1, pntLights.present() ? pntLights.reg : 0,
@@ -65,6 +66,7 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
     // the Full-owned light table (enh/light_table): the point-light registers become per-pixel values (rvk_light_model.hlsli)
     const bool cluster = g_cluster && pntLights.present() && pntLights.count >= 4;
     const int clCount = cluster ? std::min(3, pntLights.count / 4) : 0;
+    if (clOnly && !cluster) return false;  // (nothing to hook: the draw keeps the engine's / the plain module)
     if (cluster) {
         defines += std::format("#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG {}\n#define RVK_MV_CL_COUNT {}\n#define RVK_MV_CL_PARAM {}\n", pntLights.reg, clCount,
                                shader::abi::kFrameParamLights);

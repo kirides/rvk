@@ -1339,7 +1339,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     cv.pack = packProvider_ && !packBypass_;
     cv.gate = cv.giOn || cv.pack;
     cv.vsUsed = vsModule;
-    rhi::ShaderModule fsVariant = rhi::ShaderModule::None, vsVariant = rhi::ShaderModule::None, fsPlain = rhi::ShaderModule::None;
+    rhi::ShaderModule fsVariant = rhi::ShaderModule::None, vsVariant = rhi::ShaderModule::None, fsPlain = rhi::ShaderModule::None, fsAlt = rhi::ShaderModule::None;
     const bool notInstanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0;
     if (!replaced && !captureRequest_.null() && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
@@ -1360,7 +1360,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     } else if (!replaced && tint == 0 && cv.gate) {
         cv.staticOk = giStaticEligible(phase);
         cv.wanted = cv.staticOk && ambientLit();
-        if (cv.wanted) fsVariant = variant(ps_, VariantSlot::Gi);
+        if (cv.wanted) fsVariant = giVariant(ps_, &fsAlt);  // (WS40: the preferred GI-slot module; fsAlt = the other slot's, a pipeline fallback)
     }
     cv.fsAsked = fsVariant;
     // (S-1a: the plain module is only built for draws no GI / pack / G-buffer variant is wanted for: those take the variant's own ubershader module)
@@ -1396,7 +1396,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         customVertices_ = 0;
         return false;
     }
-    bool giDraw = false, captureDraw = false;
+    bool giDraw = false, captureDraw = false, usedAlt = false;
     const bool eds3 = game_->gameCaps().extendedDynamicState3;
     // a variant combination whose pipeline exists is taken; a missing one is built in the background (this draw keeps
     // the engine's shaders). `writes`: the pixel shader writes the G-buffer (without EDS3 its write mask is in the pipeline)
@@ -1427,6 +1427,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     } else if (fsVariant != rhi::ShaderModule::None || vsVariant != rhi::ShaderModule::None) {
         if (tryVariant(vsVariant, fsVariant, false)) {
             giDraw = fsVariant != rhi::ShaderModule::None;
+            captureDraw = vsVariant != rhi::ShaderModule::None;
+        } else if (fsAlt != rhi::ShaderModule::None && tryVariant(vsVariant, fsAlt, false)) {
+            // WS40: the preferred GI-slot module has no pipeline yet: the other slot's (a GI toggle keeps drawing with what it had); not retained
+            giDraw = true;
+            usedAlt = true;
             captureDraw = vsVariant != rhi::ShaderModule::None;
         } else if (vsVariant != rhi::ShaderModule::None && fsVariant != rhi::ShaderModule::None) {
             if (tryVariant(vsVariant, rhi::ShaderModule::None, false)) {
@@ -1652,7 +1657,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (capture_ != nullptr) {
         // a plain draw: no enhancement took part in it (the retained packet replays exactly this)
         // (a draw with an enhancement variant is retained with its decision: lastVariant_; one offered a variant that is not built / has no pipeline yet is not)
-        const bool variantPending = (fsVariant != rhi::ShaderModule::None && !giDraw && !gbufWrite_) || (!retainVariants_ && (giDraw || cv.vsUsed != vs_->module));
+        const bool variantPending = (fsVariant != rhi::ShaderModule::None && !giDraw && !gbufWrite_) || usedAlt || (!retainVariants_ && (giDraw || cv.vsUsed != vs_->module));
         captureOk_ = !replaced && tint == 0 && !captureDraw && !variantPending && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
                      rep.action == DrawReplacement::Action::Engine && (uberBase == rhi::ShaderModule::None || pd.fs != fs) && fs == ps_->module && captureRequest_.null();  // (S-1a: with the ubershader on, a draw that took a module of ours (it, or a variant) is retained; one still on the translated module while the ubershader's pipeline builds is not)
         if (!captureOk_) {
@@ -1971,7 +1976,7 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     if (c.v.gate && !gbufTaken) {
         const bool wanted = c.v.staticOk && ambientLit();
         if (wanted != c.v.wanted) return fail(10);
-        if (wanted && variant(ps_, VariantSlot::Gi) != c.v.fsAsked) return fail(10);
+        if (wanted && giVariant(ps_) != c.v.fsAsked) return fail(10);
     }
     {
         rhi::ShaderModule vsM = vs_->module;
