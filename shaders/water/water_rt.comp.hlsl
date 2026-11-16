@@ -37,6 +37,9 @@ struct WaterRtParams {
     float4 plane[WATER_RT_MAX_BODIES];  // y = x * a + z * b + c (xyz), w the body's outdoor factor
     float4 box[WATER_RT_MAX_BODIES];    // min x, min z, max x, max z (world)
 };
+// plane[i] / box[i] are read with raw loads at these byte offsets (WS40: a dynamic index into the copied struct made 528 B of scratch per thread; abi_blocks.cpp checks them)
+static const uint WATER_RT_PLANE_OFFSET = 256u;                                    // 16 * (4 + 3 + 7 + 2)
+static const uint WATER_RT_BOX_OFFSET = WATER_RT_PLANE_OFFSET + WATER_RT_MAX_BODIES * 16u;
 
 struct WaterRtPush {
     RVK_PASS_PUSH_HEADER
@@ -80,8 +83,10 @@ float3 shadeHit(WaterRtParams p, RvkFrame f, RvkRtHit h, float3 dir, float width
             shadow = rvkRtVisibility(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, sflags);  // tweak 16: one query (A/B of the split)
         } else {
             shadow = rvkRtVisibilityOpaqueFirst(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, sflags);
+#ifdef RVK_WATER_RT_DEBUG
             // tweak 32: both forms on the same ray, a differing answer = cyan
             if ((p.trace.z & 32u) != 0u && rvkRtVisibility(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, sflags) != shadow) return float3(0.0, 1.0, 1.0);
+#endif
         }
     }
     float3 l = max(lerp(p.indoor.rgb, sh, outdoor), float3(0.0, 0.0, 0.0)) + p.sunColor.rgb * (nl * shadow);
@@ -108,21 +113,21 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
     float tBest = 1e30;
     int best = -1;
     for (uint i = 0u; i < min(p.info.w, WATER_RT_MAX_BODIES); ++i) {
-        float4 pl = p.plane[i];
+        float4 pl = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.params), WATER_RT_PLANE_OFFSET + i * 16u));
         if (cam.y <= pl.x * cam.x + pl.y * cam.z + pl.z) continue;  // the camera under this surface: no reflection
         float den = d.y - pl.x * d.x - pl.y * d.z;
         if (den >= -1e-5) continue;
         float t = (pl.x * cam.x + pl.y * cam.z + pl.z - cam.y) / den;
         if (t <= 0.0 || t >= tBest || t > tScene + 30.0) continue;
         float3 q = cam + d * t;
-        float4 b = p.box[i];
+        float4 b = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.params), WATER_RT_BOX_OFFSET + i * 16u));
         if (q.x < b.x - 60.0 || q.z < b.y - 60.0 || q.x > b.z + 60.0 || q.z > b.w + 60.0) continue;
         tBest = t;
         best = int(i);
     }
     float4 result = float4(0.0, 0.0, 0.0, 0.0);
     if (best >= 0 && rvkRtValid(f)) {
-        float4 pl = p.plane[best];
+        float4 pl = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.params), WATER_RT_PLANE_OFFSET + uint(best) * 16u));
         float3 n = normalize(float3(-pl.x, 1.0, -pl.y));
         float3 P = cam + d * tBest;
         float3 dir = reflect(d, n);
@@ -139,6 +144,7 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
         if ((p.trace.z & 16u) != 0u) h = rvkRtTraceClosest(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
         else h = rvkRtTraceClosestOpaqueFirst(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
         float4 differs = float4(0.0, 0.0, 0.0, 0.0);
+#ifdef RVK_WATER_RT_DEBUG
         if ((p.trace.z & 32u) != 0u) {
             RvkRtHit g = rvkRtTraceClosest(f, o, dir, 1.0, maxD, width0, spread, p.trace.x);
             if (g.hit != h.hit || (h.hit && asuint(g.t) != asuint(h.t))) {
@@ -162,6 +168,7 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
             }
             else if (h.hit && (g.record != h.record || g.primitive != h.primitive)) differs = float4(1.0, 1.0, 0.0, 1.0);
         }
+#endif
         if (differs.w > 0.0) {
             result = differs;
         } else if (h.hit) {

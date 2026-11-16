@@ -45,6 +45,8 @@ struct WaterRtParams {
     float box[kWaterRtMaxBodies][4];    // min x, min z, max x, max z
 };
 static_assert(sizeof(WaterRtParams) == 16 * (4 + 3 + 7 + 2 + 2 * kWaterRtMaxBodies));
+// water_rt.comp reads plane[i] / box[i] with raw loads at these offsets (WATER_RT_PLANE_OFFSET / WATER_RT_BOX_OFFSET)
+static_assert(offsetof(WaterRtParams, plane) == 256 && offsetof(WaterRtParams, box) == 256 + 16 * kWaterRtMaxBodies);
 
 // mirror of water_rt.comp WaterRtPush
 struct WaterRtPush {
@@ -89,18 +91,19 @@ public:
 
 private:
     void record(d3d9::PassContext& ctx);
-    bool pipelineReady();
+    rhi::Pipeline* pipelineReady();
+    std::future<std::unique_ptr<rhi::Pipeline>> buildPipeline(bool debug);
     void logStats();
 
     d3d9::Device& dev_;
     RtScene* scene_ = nullptr;
     int tier_ = 0, tweaks_ = 0, debug_ = 0;
-    bool held_ = false, failed_ = false;
+    bool held_ = false, failed_ = false, failedDebug_ = false;
     std::uint32_t passId_ = 0;
-    std::unique_ptr<rhi::Pipeline> pipeline_;
+    std::unique_ptr<rhi::Pipeline> pipeline_, pipelineDebug_;  // production / the compare variant (tweak 32, built on first use)
     std::unique_ptr<rhi::Buffer> diag_;  // tweak 32: the rays whose one-query and opaque-first hits differ (rvk.log `enh: water.rt: compare`)
     std::uint64_t diagFrame_ = 0, diagRays_ = 0;
-    std::future<std::unique_ptr<rhi::Pipeline>> building_;  // the compute pipeline, built in the background (no hitch when the tier is turned on)
+    std::future<std::unique_ptr<rhi::Pipeline>> building_, buildingDebug_;  // the compute pipeline, built in the background (no hitch when the tier is turned on)
     struct Seen {
         Body body;
         std::uint64_t frame = 0;
