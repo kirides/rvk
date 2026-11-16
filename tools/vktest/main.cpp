@@ -20,7 +20,7 @@
 //   reference of the engine's skinned vertex shader (two jobs of different vertex layouts, one dispatch), under validation
 //   rvk_vktest --names: debug object names (vk/debug_names.h) reach the validation layer: a deliberate misuse of a named image
 //   (never executed) must be reported with the image's name; the texture name scheme is checked
-//   rvk_vktest --shader-stats: the driver's register / spill / instruction statistics of the water pixel shader (in a
+//   rvk_vktest --shader-stats [--isa-dir <dir>]: the driver's register / spill / instruction statistics of the water pixel shader (in a
 //   pipeline like the renderer's) and of the ray-traced reflections' compute pass (VK_KHR_pipeline_executable_properties)
 //
 // Off-screen: assembles a D3D9 vs_3_0/ps_3_0 pair (D3DXAssembleShader), translates it (shader/glsl), renders a full-screen
@@ -53,6 +53,7 @@
 #include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
+#include "vk/isa_dump.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
 #include "vk/fg_swapchain.h"
@@ -851,6 +852,7 @@ int shaderStats() {
     vk::Bindless bindless;
     if (!frames.create(ctx) || !bindless.create(ctx, frames)) return 2;
     const auto report = [&](VkPipeline p, const char* what) {
+        if (vk::isa::enabled()) vk::isa::dump(ctx, p, what);  // (--isa-dir: statistics + internal representations to files)
         VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
         pi.pipeline = p;
         std::uint32_t n = 0;
@@ -874,6 +876,11 @@ int shaderStats() {
                 default: std::printf("    %-28s %.3f\n", s.name, s.value.f64); break;
                 }
             }
+            std::uint32_t r = 0;
+            vkGetPipelineExecutableInternalRepresentationsKHR(ctx.device(), &ei, &r, nullptr);
+            std::vector<VkPipelineExecutableInternalRepresentationKHR> irs(r, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR});
+            vkGetPipelineExecutableInternalRepresentationsKHR(ctx.device(), &ei, &r, irs.data());
+            for (const auto& ir : irs) std::printf("    internal representation '%s' (%s, %zu bytes)\n", ir.name, ir.isText ? "text" : "binary", static_cast<std::size_t>(ir.dataSize));
         }
     };
     int failures = 0;
@@ -916,7 +923,7 @@ int shaderStats() {
         ri.pColorAttachmentFormats = &color;
         ri.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
         VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
-        ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+        ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
         ci.stageCount = 2;
         ci.pStages = stages;
         ci.pVertexInputState = &vi;
@@ -946,7 +953,7 @@ int shaderStats() {
         VkShaderModule cs = vk::createShaderModule(ctx, shader::embedded::spirv("water/water_rt.comp"));
         if (layout.create(ctx, bindless, {&out, 1}) && cs != VK_NULL_HANDLE) {
             VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-            ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+            ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
             ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
             ci.stage.module = cs;
@@ -1562,6 +1569,8 @@ int main(int argc, char** argv) {
             return skinTest();
         } else if (a == "--names") {
             return namesTest();
+        } else if (a == "--isa-dir" && i + 1 < argc) {
+            SetEnvironmentVariableA("RVK_ISA_DUMP", argv[++i]);  // (vk/isa_dump.h: --shader-stats writes statistics + the driver's internal representations there)
         } else if (a == "--shader-stats") {
             return shaderStats();
         } else {

@@ -13,6 +13,7 @@
 #include "core/paths.h"
 #include "core/profile.h"
 #include "vk/debug_names.h"
+#include "vk/isa_dump.h"
 #include "vk/fg_trace.h"
 #include "vk/probe.h"
 
@@ -70,7 +71,7 @@ const char* resultString(VkResult r) {
 Context::~Context() { destroy(); }
 
 bool Context::create(const ContextOptions& options) {
-    wantPipelineStatistics_ = options.pipelineStatistics;
+    wantPipelineStatistics_ = options.pipelineStatistics || isa::enabled();
     wantFrameGenQueues_ = options.frameGenQueues;
     fgQueues_.requested = options.frameGenQueues;
     if (volkInitialize() != VK_SUCCESS) {

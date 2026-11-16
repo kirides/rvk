@@ -1,5 +1,7 @@
 #include "core/perf_window.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -166,9 +168,20 @@ bool gpuFrame(std::uint64_t frame, double mainMs, double uploadMs, const std::ve
     w->main.add(mainMs);
     w->uploads.add(uploadMs);
     std::map<std::string, std::pair<double, std::uint32_t>> perFrame;
+    // RVK_PERF_WINDOW_ORDINAL=1: passes of one shape (the z passes, the main colour passes, the cascades) keep their own rows: the 2nd one of a frame is "<key> #2" (docs/research/shader-isa.md)
+    static const bool ordinal = [] {
+        char e[4]{};
+        return GetEnvironmentVariableA("RVK_PERF_WINDOW_ORDINAL", e, sizeof e) > 0 && e[0] == '1';
+    }();
+    std::map<std::string, int> seen;
     for (const Segment& s : segments) {
         std::uint32_t d = 0;
-        auto& slot = perFrame[passKey(s.label, &d)];
+        std::string key = passKey(s.label, &d);
+        if (ordinal) {
+            const int k = ++seen[key];
+            if (k > 1) key += " #" + std::to_string(k);
+        }
+        auto& slot = perFrame[key];
         slot.first += s.ms;
         slot.second += d;
     }
