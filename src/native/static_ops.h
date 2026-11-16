@@ -1291,7 +1291,7 @@ private:
     std::uint64_t staleMarked_ = 0, staleRebuilds_ = 0;  // (run totals; the owned static line prints them)
     void ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw);
     bool ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p);
-    void ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in);
+    void ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in, float fade = 1.0f);  // (fade: the op's, for WS33's live mask reference)
     void ownedMissReport(const char* where, const Op* op, const orec::DrawRec& r, const d3d9::Device::OwnedPersist& fresh, std::uint32_t slot);
 public:
     // check frames (static_ops_records.cpp recDraw): the persistent content of the draw against the one the composition's derivation gives, when the owned path would reuse it

@@ -1556,6 +1556,8 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     d.alphaRef = rs.alphaRef;
     d.maskSet = recMask;
     d.maskValue = recMaskValue;
+    d.maskFading = rs.maskFading;
+    d.maskRef = rs.maskRef;
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
     d.drawClass = sc::passClass(pass.flags, overlay);

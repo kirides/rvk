@@ -144,7 +144,7 @@ int StaticOps::depFast(const Op& op, const orec::OpRecord& rec) {
                                         get<std::uint8_t>(list, 0x34));
         if (light != s.light) return 3;
     }
-    if (orec::fadeStampBits(op.raw.fade, s.fadeMasked) != s.fadeBits) return 7;
+    if (orec::fadeStampBits(op.raw.fade) != s.fadeBits) return 7;
     if (get<std::int32_t>(ptr(ctx, 0x18), 0x20) != s.switchValue) return 8;
     // the scene-table slot the record was made for: still the same entity at the same generation (a direct index: no hash)
     if (s.objSlot == 0xffffffffu) {

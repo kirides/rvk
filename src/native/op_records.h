@@ -27,6 +27,7 @@
 #include "gpuscene/bone_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/row_table.h"
+#include "native/static_compose.h"
 #include "native/static_ops_retained.h"
 
 namespace rvk::native::orec {
@@ -58,7 +59,6 @@ struct Stamp {
     std::uint32_t entityFlags = 0;      // entity +0x28 & 0xe00000 (overlay flags)
     const void* illumPs = nullptr;      // entity +0xf8
     std::uint32_t fadeBits = 0;         // the op's fade (fadeStampBits)
-    bool fadeMasked = false;            // a covered sub-mesh's shader is masked (blend mode 1): its alpha reference is maskRef * fade (fillBlending), so the exact fade is in the stamp
     std::int32_t switchValue = 0;       // ctx +0x18 +0x20
     std::uint32_t objSlot = 0xffffffffu, objGen = 0;  // the scene-table slot of the entity and its generation (the object record's identity)
     std::uint64_t variantEpoch = 0;     // Device::variantEpoch
@@ -69,14 +69,14 @@ struct Stamp {
 };
 // WS32 (frame-ownership.md 16.23): the stamp's fade is its CLASS (1 = opaque, 0.5 = fading), not its bits: the value itself reaches the draws only as c32.w of the object window,
 // which ownedDrawOp serves from the op's live fade at every replay (the pass states depend on fade < 1 only), so an alpha-list op fading in or out (its fade changes every frame
-// while the camera moves) kept its record instead of being composed + rebuilt each frame. RVK_FADE_STAMP=0 = the exact bits as before (A/B)
-inline std::uint32_t fadeStampBits(float fade, bool masked = false) {
+// while the camera moves) kept its record instead of being composed + rebuilt each frame. A masked shader's alpha reference (maskRef * fade, fillBlending) is the one other
+// fade-derived value: WS33 serves it live too (DrawRec::maskFading, liveMask, the derivation signature), so the class stands for every op. RVK_FADE_STAMP=0 = the exact bits (A/B)
+inline std::uint32_t fadeStampBits(float fade) {
     static const bool exact = [] {
         const char* v = std::getenv("RVK_FADE_STAMP");
         return v != nullptr && v[0] == '0';
     }();
-    // (a masked shader's alpha reference = maskRef * fade is baked into the draws' pass states: the exact fade, while fading)
-    return std::bit_cast<std::uint32_t>(exact || (masked && fade < 1.0f) ? fade : (fade >= 1.0f ? 1.0f : 0.5f));
+    return std::bit_cast<std::uint32_t>(exact ? fade : (fade >= 1.0f ? 1.0f : 0.5f));
 }
 inline constexpr const char* kStampNames[] = {"LOD resource", "entity", "geometry / material", "illumination", "lightmaps", "overlay flags", "illum pointer", "fade",
                                               "switch value", "object slot", "variant epoch", "registry generation", "view", "material structure"};
@@ -192,6 +192,9 @@ struct DrawRec {
     std::uint32_t alphaTestState = 0, alphaFunc = 8, alphaRef = 0;
     bool maskSet = false;
     float maskValue = 0.0f;
+    // WS33: a masked shader's pass at fade < 1: the alpha reference (alphaRef / maskValue above, as of the build) is maskFadeRef(maskRef, the op's fade) and is served live (liveMask)
+    bool maskFading = false;
+    std::uint32_t maskRef = 0;
     // tables
     std::uint32_t matSlot = 0xffffffffu, illumSlot = 0xffffffffu, lightN = 0, lightFirst = 0;
     bool lightTableLit = false, lightHoldsAll = false;
@@ -211,6 +214,24 @@ struct DrawRec {
     gpuscene::RowHandle row;
     const void* illumPtr = nullptr;
 };
+
+// WS33: the alpha reference / the c5.w mask of a draw at the op's current fade: the record's own for a draw that does not fade a mask, else computed as fillBlending does
+inline void liveMask(const DrawRec& r, float fade, std::uint32_t& alphaRef, float& maskValue) {
+    if (!r.maskFading) {
+        alphaRef = r.alphaRef;
+        maskValue = r.maskValue;
+        return;
+    }
+    alphaRef = sc::maskFadeRef(r.maskRef, fade);
+    maskValue = static_cast<float>(alphaRef) * (1.0f / 256.0f);
+}
+
+inline std::uint32_t maskRefLive(const DrawRec& r, float fade) {
+    std::uint32_t ref;
+    float mv;
+    liveMask(r, fade, ref, mv);
+    return ref;
+}
 
 // WS6: Store::lookup's memo, a direct-mapped table of the records by key hash (a record erases its own slot when it dies: ~OpRecord)
 constexpr std::size_t kRecMemo = 32768;
