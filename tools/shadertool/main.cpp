@@ -450,6 +450,7 @@ int cmdHlsl(int argc, char** argv) {
         if (a == "-o" && i + 1 < argc) out = argv[++i];
         else if (a == "--dxil" && i + 1 < argc) dxilOut = argv[++i];
         else if (a == "--debug") r.debugInfo = true;
+        else if (a == "--profile" && i + 1 < argc) r.profile = argv[++i];  // e.g. ps_6_5: discard = terminate (OpKill) instead of the SM 6.6 demote (frame-ownership.md 16.27)
         else if (a == "--half") r.half16 = true;  // the 16-bit build of the ubershader (RVK_HALF16, -enable-16bit-types)
         else if (a == "-D" && i + 1 < argc) {
             const std::string d = argv[++i];

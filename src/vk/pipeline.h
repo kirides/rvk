@@ -28,6 +28,8 @@ namespace rvk::vk {
 
 // WS35 diagnostics (frame-ownership.md 16.26): pipelines that are still unoptimised fast links (the picture check logs it with a FAILED window)
 inline std::atomic<std::int64_t> g_fastLinkLive{0};
+// frame-ownership.md 16.27: createShaderModule turns the SM 6.6 demote into OpKill (set when pipeline libraries are used; RVK_DEMOTE_KILL=0 keeps the demote)
+extern std::atomic<bool> g_demoteAsKill;
 
 class Context;
 
@@ -97,6 +99,10 @@ public:
     std::uint64_t prewarmed() const { return prewarmed_.load(std::memory_order_relaxed); }
     double prewarmMs() const { return static_cast<double>(prewarmNs_.load(std::memory_order_relaxed)) * 1e-6; }
     double optimizeMs() const { return static_cast<double>(optimizeNs_.load(std::memory_order_relaxed)) * 1e-6; }
+
+    // test hook (rvk_shadereq --gpl, frame-ownership.md 16.27): one pipeline of `desc` built a given way, not entered in the cache: 0 = fast link of the libraries, 1 = link-time
+    // optimised link, 2 = monolithic build; the caller destroys it (VK_NULL_HANDLE without libraries for 0 / 1)
+    VkPipeline buildVariantForTest(const PipelineDesc& desc, int kind);
 
     static std::vector<VkDynamicState> dynamicStates(const Context& ctx);
     // whether a pipeline of `desc` exists (built or prewarmed); any thread

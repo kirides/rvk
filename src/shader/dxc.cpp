@@ -538,6 +538,13 @@ std::vector<std::string> arguments(const Request& r) {
         // the sources carry [[vk::...]] attributes (locations, bindings, image formats, push constants): meaningless for DXIL, DXC ignores them
         a.push_back("-Wno-ignored-attributes");
     }
+    if (r.target == Target::Spirv) {
+        // diagnostics (frame-ownership.md 16.27): RVK_DXC_EXTRA="-fspv-extension=..." appends arguments (a module's cache key includes them)
+        char extra[256]{};
+        if (const DWORD n = GetEnvironmentVariableA("RVK_DXC_EXTRA", extra, sizeof extra); n > 0 && n < sizeof extra) {
+            for (char* tok = std::strtok(extra, " "); tok != nullptr; tok = std::strtok(nullptr, " ")) a.emplace_back(tok);
+        }
+    }
     if (r.half16) a.insert(a.end(), {"-enable-16bit-types", "-D", "RVK_HALF16=1"});  // (the ubershader text picks real half types by this define)
     if (r.debugInfo) {
         a.insert(a.end(), {"-Zi", "-Od"});

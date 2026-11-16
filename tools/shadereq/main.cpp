@@ -306,6 +306,8 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
     return badTrials == 0 && verrors == 0 ? 0 : 1;
 }
 
+#include "gpl_diff.inl"
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -316,9 +318,28 @@ int main(int argc, char** argv) {
     std::uint32_t seed = 1;
     float tol = 1e-4f;
     bool validation = true;
+    GplOptions gpl;
+    bool gplMode = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--vs" && i + 1 < argc) {
+        if (a == "--gpl" && i + 1 < argc) {
+            gplMode = true;
+            gpl.list = argv[++i];
+        } else if (a == "--format" && i + 1 < argc) {
+            gpl.format = argv[++i];
+        } else if (a == "--depth") {
+            gpl.depth = true;
+        } else if (a == "--verbose") {
+            gpl.verbose = true;
+        } else if (a == "--cross") {
+            gpl.cross = true;
+        } else if (a == "--no-lto") {
+            gpl.noLto = true;
+        } else if (a == "--alpha-func" && i + 1 < argc) {
+            gpl.alphaFunc = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        } else if (a == "--alpha-ref" && i + 1 < argc) {
+            gpl.alphaRef = static_cast<float>(std::atof(argv[++i]));
+        } else if (a == "--vs" && i + 1 < argc) {
             vsPath = argv[++i];
         } else if (a == "--fs" && i + 2 < argc) {
             fsA = argv[++i];
@@ -351,6 +372,13 @@ int main(int argc, char** argv) {
         } else if (a == "--probe-count" && i + 1 < argc) {
             probeCount = static_cast<std::uint32_t>(std::atoi(argv[++i]));
         }
+    }
+    if (gplMode) {
+        gpl.vs = vsPath;
+        gpl.trials = trials;
+        gpl.seed = seed;
+        gpl.validation = validation;
+        return gplDiff(gpl);
     }
     if (vsTestMode) {
         return vsTest(vsA, vsB, parseAttrs(attrsA), parseAttrs(attrsB), probePath, probeCount, trials, seed, tol, validation, billboardValid);

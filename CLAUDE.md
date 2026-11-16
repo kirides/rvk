@@ -31,6 +31,7 @@ cmake --preset default                                  # only after CMakeLists.
 cmake --build build --config RelWithDebInfo             # -> build\RelWithDebInfo\d3d9.dll, rvk_tests.exe
 build\RelWithDebInfo\rvk_tests.exe                      # unit tests (pure logic, no game)
 build\RelWithDebInfo\rvk_vktest.exe --rt                 # GPU: optional RT tier (BLAS/TLAS/ray query self-test; also --passes, --shader-stats)
+build\RelWithDebInfo\rvk_shadereq.exe --gpl list.txt --vs gpl_varyings.spv --cross   # GPU: pipeline library fast link vs monolithic build of each pixel shader, pixel diff (frame-ownership.md 16.27; 0 differ = ok)
 ```
 C++23, MSVC (VS 18 2026), CMake + vcpkg manifest (`vcpkg.json`, `builtin-baseline` = the user's vcpkg checkout; when they pull,
 take `git -C E:\git\github\vcpkg log -1 --format=%H`). Triplet `x64-windows-static-md`. New source files go into `CMakeLists.txt`.
