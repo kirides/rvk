@@ -26,6 +26,9 @@
 
 namespace rvk::vk {
 
+// WS35 diagnostics (frame-ownership.md 16.26): pipelines that are still unoptimised fast links (the picture check logs it with a FAILED window)
+inline std::atomic<std::int64_t> g_fastLinkLive{0};
+
 class Context;
 
 // rhi::ShaderModule <-> VkShaderModule (the Vulkan game device creates the modules; the handle value is the VkShaderModule)
@@ -168,6 +171,7 @@ private:
     void stopLibraries();
     void destroyLibraries();
     bool useLibraries_ = false;
+    char optMode_ = '1';       // WS35: RVK_GPL_OPTIMIZE: '1' (default) a fast link is swapped for its monolithic build, '0' it stays the pipeline, 'z' / 'c' = only depth-only / pixel-shader pipelines (experiments)
     bool prewarmLink_ = true;  // WS25: the prewarm workers fast-link first (RVK_PREWARM_LINK=0: whole builds)
     bool retainLto_ = false;  // true = the former library recipe (RVK_GPL_RECIPE=lto); false = DXVK's
     std::mutex libMutex_;

@@ -182,7 +182,13 @@ VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, 
         ci.stageCount = module != VK_NULL_HANDLE ? 1 : 0;
         ci.pStages = module != VK_NULL_HANDLE ? &stage : nullptr;
         ci.pDepthStencilState = &ds;
-        ci.pMultisampleState = retainLto_ ? &ms : nullptr;
+        {
+            static const bool fsMs = [] {
+                char v[4] = {};
+                return GetEnvironmentVariableA("RVK_GPL_FSMS", v, sizeof v) == 1 && v[0] == '1';  // experiment (16.26): the fragment shader library gets the multisample state too
+            }();
+            ci.pMultisampleState = (retainLto_ || fsMs) ? &ms : nullptr;
+        }
         ci.layout = layout_;
         break;
     case VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT:
@@ -309,6 +315,14 @@ void PipelineCache::optimizer() {
         optQueue_.pop_front();
         lock.unlock();
         {
+            // (WS35, frame-ownership.md 16.26: by default a fast link stays the pipeline; z / c = only the depth-only / only the pixel-shader pipelines are swapped: experiments)
+            const bool depthOnly = d.fs == rhi::ShaderModule::None;
+            if (optMode_ == '0' || (optMode_ == 'z' && !depthOnly) || (optMode_ == 'c' && depthOnly)) {
+                lock.lock();
+                continue;
+            }
+        }
+        {
             // (replaced meanwhile by a whole build of the prewarm workers: nothing to optimise)
             const std::lock_guard pl(mutex_);
             const auto it = pipelines_.find(d);
@@ -326,7 +340,7 @@ void PipelineCache::optimizer() {
             auto it = pipelines_.find(d);
             if (it != pipelines_.end() && it->second == fast) {
                 // command buffers may still use the fast-linked pipeline: it is kept until destroy()
-                fastLinks_.erase(fast);
+                if (fastLinks_.erase(fast) > 0) g_fastLinkLive.fetch_sub(1, std::memory_order_relaxed);
                 superseded_.push_back(it->second);
                 successor_[it->second] = p;
                 it->second = p;
@@ -344,8 +358,11 @@ void PipelineCache::startLibraries() {
     retainLto_ = GetEnvironmentVariableA("RVK_GPL_RECIPE", recipe, sizeof(recipe)) > 0 && std::strcmp(recipe, "lto") == 0;
     char pl[8]{};
     prewarmLink_ = !(GetEnvironmentVariableA("RVK_PREWARM_LINK", pl, sizeof(pl)) > 0 && pl[0] == '0');
-    spdlog::info("vulkan: pipeline libraries: {} recipe; prewarm requests {}", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)",
-                 prewarmLink_ ? "fast-linked first" : "built whole (RVK_PREWARM_LINK=0)");
+    char om[4]{};
+    optMode_ = GetEnvironmentVariableA("RVK_GPL_OPTIMIZE", om, sizeof(om)) == 1 ? om[0] : '1';
+    spdlog::info("vulkan: pipeline libraries: {} recipe; prewarm requests {}; a fast link {}", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)",
+                 prewarmLink_ ? "fast-linked first" : "built whole (RVK_PREWARM_LINK=0)",
+                 optMode_ == '0' ? "stays the pipeline (RVK_GPL_OPTIMIZE=0: no swap)" : "is swapped for its optimised build");
     optQuit_ = false;
     optThread_ = std::thread([this] { optimizer(); });
 }
