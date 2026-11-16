@@ -65,7 +65,7 @@ DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view 
 // (what a `discard` was before the demote) does not show it. Every `OpDemoteToHelperInvocation` directly followed by the `OpBranch` that ends its block
 // becomes `OpKill`; the capability goes when none is left (a demote in another position keeps the module as it is).
 bool demoteToKill(std::vector<std::uint32_t>& words) {
-    constexpr std::uint32_t kOpDemote = 5380, kOpBranch = 249, kOpKill = 252, kOpCapability = 17, kCapDemote = 5379;
+    constexpr std::uint32_t kOpDemote = 5380, kOpBranch = 249, kOpKill = 252, kOpCapability = 17, kCapDemote = 5379, kOpIsHelper = 5381;
     if (words.size() < 6 || words[0] != 0x07230203u) return false;
     std::vector<std::uint32_t> out(words.begin(), words.begin() + 5);
     out.reserve(words.size());
@@ -85,6 +85,7 @@ bool demoteToKill(std::vector<std::uint32_t>& words) {
             }
             ++kept;
         }
+        if (op == kOpIsHelper) ++kept;  // (needs the demote capability too: keep it)
         out.insert(out.end(), words.begin() + static_cast<std::ptrdiff_t>(i), words.begin() + static_cast<std::ptrdiff_t>(i + len));
         i += len;
     }
