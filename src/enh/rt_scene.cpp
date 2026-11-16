@@ -1,4 +1,5 @@
 #include "enh/rt_scene.h"
+#include "core/ws37.h"
 #include "gpuscene/verify.h"
 
 #include <windows.h>
@@ -3033,6 +3034,8 @@ void RtScene::evictOverBudget() {
     // without instances for long: dropped even under the budget
     // (the LRU list is only gathered when the memory is over the budget: the walk ran every frame, frame-ownership.md 14.30)
     const bool over = blasBytes_ > limits_.memoryBudget;
+    // WS37: the stale walk (every BLAS of the map, a cache miss each) every 8th frame: the limits are 3600 frames / 60 s, a drop 7 frames later changes nothing
+    if (!over && (frame & 7u) != 0 && (ws37Off() & 1u) == 0) return;
     staleScratch_.clear();
     std::vector<std::pair<std::uint64_t, std::uint64_t>> lru;  // last used frame, id: unused built BLASes
     for (const auto& [id, b] : blas_) {
@@ -4643,6 +4646,14 @@ void RtScene::record(d3d9::PassContext& ctx) {
     };
     auto& mutableList = registry_.instancesMutable();
     for (std::uint32_t k = 0; k < worldCount; ++k) {
+        if ((ws37Off() & 2u) == 0 && k + 6 < worldCount) {
+            // WS37: the instances come in selection order (scattered in the registry): the next ones' records, and the input row of the one after
+            prefetchLine(&mutableList[chosen[k + 6]]);
+            if (gpu && k + 3 < worldCount) {
+                const std::uint32_t gs = mutableList[chosen[k + 3]].gpuSlot;
+                if (gs != rtbuild::kNone) prefetchLine(&gpu_.inputs.shadow()[gs]);
+            }
+        }
         rt::Registry::Instance& in = mutableList[chosen[k]];
         Blas& b = *blasOf(in);
         // the material (M9 P2): the bindless slots of this frame (a texture that died is gone from the entry)

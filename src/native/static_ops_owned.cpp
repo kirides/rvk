@@ -20,6 +20,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/f2c4_measure.h"
+#include "core/ws37.h"
 #include "d3d9/defs.h"
 #include "engine/memread.h"
 #include "engine/scene_table.h"
@@ -883,6 +884,24 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     };
     for (std::size_t opIndex = 0; opIndex < ops.size(); ++opIndex) {
         Op& op = ops[opIndex];
+        if ((ws37Off() & 4u) == 0) {
+            // WS37: the ops' records are scattered heap objects (record -> draws array -> each draw's retained CachedDraw): three stages ahead, one level each
+            if (opIndex + 9 < ops.size()) prefetchLine(ownedRecPtrs_[opIndex + 9]);
+            if (opIndex + 6 < ops.size()) {
+                if (const orec::OpRecord* nr = ownedRecPtrs_[opIndex + 6]) prefetchLine(nr->draws.data());
+            }
+            if (opIndex + 3 < ops.size()) {
+                if (const orec::OpRecord* nr = ownedRecPtrs_[opIndex + 3]) {
+                    const std::size_t nd = std::min<std::size_t>(nr->draws.size(), 3);
+                    for (std::size_t j = 0; j < nd; ++j) {
+                        const char* cd = reinterpret_cast<const char*>(nr->draws[j].cd.get());
+                        prefetchLine(cd);
+                        prefetchLine(cd + 64);
+                        prefetchLine(cd + 128);
+                    }
+                }
+            }
+        }
         const orec::OpRecord* recPtr = ownedRecPtrs_[opIndex];
         tag = savedTag;
         tag.source = op.kind == OpKind::Animation ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
