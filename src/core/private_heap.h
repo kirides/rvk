@@ -24,5 +24,8 @@ bool owns(const void* p) noexcept;
 bool privateActive() noexcept;
 // The usable size of one of our blocks (0 for a foreign pointer).
 std::size_t usableSize(const void* p) noexcept;
+// Diagnostics: pointers that reached release() without our header (CRT-allocated blocks handed to us: msvcp140 strings) and the first 8 call sites (return addresses in d3d9.dll)
+std::uint64_t foreignFrees() noexcept;
+const void* foreignSite(std::uint32_t i) noexcept;
 
 }  // namespace rvk::pheap

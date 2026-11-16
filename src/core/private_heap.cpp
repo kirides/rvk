@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <intrin.h>
 #include <malloc.h>
 
 namespace rvk::pheap {
@@ -24,6 +25,8 @@ std::atomic<int> g_state{0};  // 0 = not created, 1 = being created, 2 = ready
 bool g_private = true;
 bool g_fill = false;  // RVK_HEAP_FILL=1 (debug): 0xCD into every new block, 0xDD over every freed one
 std::atomic<std::uint32_t> g_threads{0};
+std::atomic<std::uint64_t> g_foreign{0};
+void* g_foreignSite[8];
 thread_local std::uint32_t t_shard = 0xFFFFFFFFu;  // constant-initialised, no destructor: safe at any point of a thread's life
 
 void init() noexcept {
@@ -155,9 +158,18 @@ void release(void* p, bool alignedForm) noexcept {
         freeLocal(p);
         return;
     }
+    // a foreign block (the CRT's own operator new in msvcp140 / vcruntime140 handed it to us): counted, the first call sites kept (diagnostics; the reverse, a block of ours
+    // reaching the CRT's free, cannot be seen from here: it would be a heap fault)
+    {
+        const std::uint64_t i = g_foreign.fetch_add(1, std::memory_order_relaxed);
+        if (i < 8) g_foreignSite[i] = _ReturnAddress();
+    }
     if (alignedForm) _aligned_free(p);
     else std::free(p);
 }
+
+std::uint64_t foreignFrees() noexcept { return g_foreign.load(std::memory_order_relaxed); }
+const void* foreignSite(std::uint32_t i) noexcept { return i < 8 ? g_foreignSite[i] : nullptr; }
 
 bool owns(const void* p) noexcept { return headerOf(p) != nullptr; }
 bool privateActive() noexcept {

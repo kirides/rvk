@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/log.h"
+#include "core/private_heap.h"
 #include "core/ws19_small.h"
 #include "api/capture.h"
 #include "core/caps.h"
@@ -494,6 +495,9 @@ HalDevice::~HalDevice() {
     dev_.destroy();
     const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
     const auto shutdownT2 = std::chrono::steady_clock::now();
+    spdlog::info("heap: {} blocks reached our operator delete without our header (allocated by the CRT's operator new, e.g. msvcp140 strings); first call sites {} {} {}",
+                 rvk::pheap::foreignFrees(), static_cast<const void*>(rvk::pheap::foreignSite(0)), static_cast<const void*>(rvk::pheap::foreignSite(1)),
+                 static_cast<const void*>(rvk::pheap::foreignSite(2)));
     spdlog::info("hal: device shutdown complete in {:.0f} ms (features + native frame {:.0f} ms, device {:.0f} ms; {} process terminations of other threads waited for it)",
                  ms(shutdownT0, shutdownT2), ms(shutdownT0, enhT1), ms(enhT1, shutdownT2), crashdump::terminateWaits());
 }
