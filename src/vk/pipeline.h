@@ -80,6 +80,9 @@ public:
     void setBackgroundLimit(unsigned n, bool low);
     // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
+    // WS37: the module is being destroyed: its shader libraries are keyed by the handle, which the driver may hand out again; they leave the map (destroyed with the cache:
+    // a link on another thread may hold the handle)
+    void forgetShader(rhi::ShaderModule module);
     // device teardown, before the shader modules are destroyed: the prewarm workers and the library optimiser joined (queues dropped, a build in flight
     // finished); later prewarm requests are ignored. Idempotent (destroy() calls it too)
     void stopWorkers();
@@ -182,6 +185,7 @@ private:
     bool retainLto_ = false;  // true = the former library recipe (RVK_GPL_RECIPE=lto); false = DXVK's
     std::mutex libMutex_;
     std::map<LibKey, VkPipeline> shaderLibs_;
+    std::vector<VkPipeline> retiredLibs_;  // shader libraries of destroyed modules (under libMutex_)
     std::map<VkPrimitiveTopology, VkPipeline> vertexInputLibs_;
     std::map<OutputKey, VkPipeline> outputLibs_;
     std::unordered_map<VkPipeline, VkPipeline> successor_;  // a superseded fast link -> the pipeline that replaced it (under mutex_)

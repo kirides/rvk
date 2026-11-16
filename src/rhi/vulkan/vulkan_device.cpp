@@ -575,8 +575,13 @@ public:
         if (m == VK_NULL_HANDLE) return;
         if (deferred) {
             vk::Context* ctx = &ctx_;
-            defer([ctx, m] { vkDestroyShaderModule(ctx->device(), m, nullptr); });
+            vk::GameRecordHolder* rec = &record_;
+            defer([ctx, rec, module, m] {
+                rec->forgetShader(module);  // (WS37: before the handle can be reused)
+                vkDestroyShaderModule(ctx->device(), m, nullptr);
+            });
         } else {
+            record_.forgetShader(module);
             vkDestroyShaderModule(ctx_.device(), m, nullptr);
         }
     }
