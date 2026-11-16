@@ -182,7 +182,13 @@ VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, 
         ci.stageCount = module != VK_NULL_HANDLE ? 1 : 0;
         ci.pStages = module != VK_NULL_HANDLE ? &stage : nullptr;
         ci.pDepthStencilState = &ds;
-        ci.pMultisampleState = retainLto_ ? &ms : nullptr;
+        {
+            static const bool fsMs = [] {
+                char v[4] = {};
+                return GetEnvironmentVariableA("RVK_GPL_FSMS", v, sizeof v) == 1 && v[0] == '1';  // experiment (16.26): the fragment shader library gets the multisample state too
+            }();
+            ci.pMultisampleState = (retainLto_ || fsMs) ? &ms : nullptr;
+        }
         ci.layout = layout_;
         break;
     case VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT:
@@ -353,10 +359,10 @@ void PipelineCache::startLibraries() {
     char pl[8]{};
     prewarmLink_ = !(GetEnvironmentVariableA("RVK_PREWARM_LINK", pl, sizeof(pl)) > 0 && pl[0] == '0');
     char om[4]{};
-    optMode_ = GetEnvironmentVariableA("RVK_GPL_OPTIMIZE", om, sizeof(om)) == 1 ? om[0] : '0';
+    optMode_ = GetEnvironmentVariableA("RVK_GPL_OPTIMIZE", om, sizeof(om)) == 1 ? om[0] : '1';
     spdlog::info("vulkan: pipeline libraries: {} recipe; prewarm requests {}; a fast link {}", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)",
                  prewarmLink_ ? "fast-linked first" : "built whole (RVK_PREWARM_LINK=0)",
-                 optMode_ == '0' ? "stays the pipeline (no unoptimised -> optimised swap: the two draw different pixels, frame-ownership.md 16.26; RVK_GPL_OPTIMIZE=1 swaps)" : "is swapped for its optimised build");
+                 optMode_ == '0' ? "stays the pipeline (RVK_GPL_OPTIMIZE=0: no swap)" : "is swapped for its optimised build");
     optQuit_ = false;
     optThread_ = std::thread([this] { optimizer(); });
 }

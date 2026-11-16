@@ -16,6 +16,7 @@
 
 #include "core/log.h"
 #include "core/private_heap.h"
+#include "vk/pipeline.h"
 #include "core/ws19_small.h"
 #include "api/capture.h"
 #include "core/caps.h"
@@ -2281,6 +2282,7 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                      "background)",
                      p.libraries, p.libraryMs, p.optimized, p.optimizeMs);
     }
+    spdlog::info("perf: pipelines still fast-linked (unoptimised): {}", vk::g_fastLinkLive.load(std::memory_order_relaxed));
     if (p.pacerRate > 0.0) {
         const double w = std::max(1.0, static_cast<double>(p.pacer.waits));
         spdlog::info("perf: pacer {:.3f} fps{}: {} of {} frames waited, avg sleep {:.2f} ms + spin {:.3f} ms, timer late avg {:.3f} / "

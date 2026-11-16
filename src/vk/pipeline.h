@@ -171,7 +171,7 @@ private:
     void stopLibraries();
     void destroyLibraries();
     bool useLibraries_ = false;
-    char optMode_ = '0';       // WS35: RVK_GPL_OPTIMIZE: '0' (default) a fast link stays the pipeline, '1' it is swapped for its monolithic build, 'z' / 'c' = only depth-only / pixel-shader pipelines (experiments)
+    char optMode_ = '1';       // WS35: RVK_GPL_OPTIMIZE: '1' (default) a fast link is swapped for its monolithic build, '0' it stays the pipeline, 'z' / 'c' = only depth-only / pixel-shader pipelines (experiments)
     bool prewarmLink_ = true;  // WS25: the prewarm workers fast-link first (RVK_PREWARM_LINK=0: whole builds)
     bool retainLto_ = false;  // true = the former library recipe (RVK_GPL_RECIPE=lto); false = DXVK's
     std::mutex libMutex_;

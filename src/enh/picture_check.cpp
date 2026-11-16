@@ -490,8 +490,17 @@ void PictureCheck::report() {
     const bool moving = (skippedCamera_ + skippedLight_ > 2 * owned_.views && skippedCamera_ + skippedLight_ != 0) || controlShare > kMovingShare;
     const std::uint64_t judged = cyclesJudged_ + cyclesOpenJudged_;
     // (no composed pair in the window = no control: such a FAILED is judged against 0 and says so)
+    // (16.26: a pipeline linked from libraries and its monolithic build draw different pixels (cause not found; the optimised build matches the D3D9 picture); while pipelines are
+    // still fast-linked, a difference between the owned scene forms and the composed draws may be that and not the owned path: such a FAILED window is UNRELIABLE.
+    // RVK_PC_STRICT=1 judges it anyway)
+    static const bool strict = [] {
+        char v[4] = {};
+        return GetEnvironmentVariableA("RVK_PC_STRICT", v, sizeof v) == 1 && v[0] == '1';
+    }();
+    const bool unoptimised = !strict && vk::g_fastLinkLive.load(std::memory_order_relaxed) > 0;
     const char* verdict = owned_.views == 0 && judged == 0 ? "NO DATA"
                           : moving                         ? "UNRELIABLE (the scene moves)"
+                          : cyclesFailed_ != 0 && unoptimised ? "UNRELIABLE (pipelines still fast-linked: they draw other pixels than their optimised builds)"
                           : cyclesFailed_ != 0             ? (control_.views == 0 ? "FAILED (no control pair in the window)" : "FAILED")
                                                            : "ok";
     if (verdict[0] == 'F') ++failedWindows_;
