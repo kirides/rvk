@@ -29,12 +29,25 @@ RULES = [
     ('d3dx9 / texture decode', ['d3dx9']),
     ('HAL texture upload / lock', ['Texture::upload', 'convertLevel', 'Texture::lock']),
 ]
+def logLines(tag):
+    """the session's rvk.log lines; with ROUTE=1 only those inside the route (a 5 s spike report covers the 5 s before its stamp: [t0 + 5 s, t1 + 5 s])"""
+    path = os.path.join(D, tag + '_rvk.log')
+    if os.environ.get('ROUTE') != '1':
+        yield from open(path, encoding='utf-8', errors='replace')
+        return
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import census
+    _, _, t0, t1 = census.load(tag)
+    for l in open(path, encoding='utf-8', errors='replace'):
+        m = re.match(r'\[(\d\d:\d\d:\d\d\.\d+)\]', l)
+        if m and t0 + 5000 <= census.tod(m.group(1)) <= (t1 or 1e18) + 5000: yield l
+
 def analyse(tag):
     cats = collections.Counter()
     total = 0
     rows = []
     n = 0
-    for l in open(os.path.join(D, tag + '_rvk.log'), encoding='utf-8', errors='replace'):
+    for l in logLines(tag):
         m = re.search(r'diag: spike: (\d+) samples', l)
         if m:
             n = int(m.group(1)); total += n

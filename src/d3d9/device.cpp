@@ -371,6 +371,9 @@ bool Device::create(const DeviceOptions& options) {
         // present thread and AMD's frame generation threads)
         diag::startHangWatchdog(8.0, [](void* d) { return static_cast<Device*>(d)->stats_.frames; }, this);
     }
+    if (char e[16]; GetEnvironmentVariableA("RVK_STALL_MS", e, sizeof e) > 0 && std::atof(e) > 0.0) {  // WS34: every thread's stack when a frame stalls (stall_sampler.cpp)
+        diag::startStallWatch(std::atof(e), [](void* d) { return static_cast<Device*>(d)->stats_.frames; }, this);
+    }
     if (options.perf && game_->enableTimestamps()) {
         spdlog::info("d3d9: [debug] perf: GPU timestamps on{}",
                      options.perfFrame != 0 ? std::format(", pass timings of frame {}", options.perfFrame) : std::string());
