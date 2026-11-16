@@ -240,6 +240,16 @@ VkPipeline PipelineCache::shaderLibrary(VkShaderModule module, bool vertex, VkPo
     return it->second;
 }
 
+void PipelineCache::forgetShader(rhi::ShaderModule module) {
+    if (!useLibraries_ || module == rhi::ShaderModule::None) return;
+    const std::uint64_t m = reinterpret_cast<std::uint64_t>(vkModule(module));
+    const std::lock_guard lock(libMutex_);
+    for (auto it = shaderLibs_.lower_bound(LibKey{m, 0}); it != shaderLibs_.end() && it->first.module == m;) {
+        if (it->second != VK_NULL_HANDLE) retiredLibs_.push_back(it->second);
+        it = shaderLibs_.erase(it);
+    }
+}
+
 void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage) {
     if (useLibraries_ && module != rhi::ShaderModule::None) {
         shaderLibrary(vkModule(module), stage == VK_SHADER_STAGE_VERTEX_BIT, VK_POLYGON_MODE_FILL);
@@ -397,6 +407,8 @@ void PipelineCache::destroyLibraries() {
         if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx_->device(), p, nullptr);
     }
     shaderLibs_.clear();
+    for (VkPipeline p : retiredLibs_) vkDestroyPipeline(ctx_->device(), p, nullptr);
+    retiredLibs_.clear();
     for (auto& [k, p] : vertexInputLibs_) {
         if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx_->device(), p, nullptr);
     }

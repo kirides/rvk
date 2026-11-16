@@ -92,6 +92,10 @@ void GameRecord::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits s
     pipelines_.prepareShader(module, stage);
 }
 
+void GameRecord::forgetShader(rhi::ShaderModule module) {
+    pipelines_.forgetShader(module);
+}
+
 void GameRecord::stopPipelineBuilds() {
     pipelines_.stopWorkers();
 }

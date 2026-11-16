@@ -95,6 +95,7 @@ public:
     void prewarmOncePipeline(const PipelineDesc& desc);
     void setPipelineBackgroundLimit(unsigned n, bool low);
     void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
+    void forgetShader(rhi::ShaderModule module);
     void saveCache();
     void stopPipelineBuilds();  // the pipeline cache's prewarm / optimiser threads joined (device teardown, before the modules go)
     rhi::PipelineStats stats() const;

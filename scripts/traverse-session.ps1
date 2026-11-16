@@ -10,7 +10,8 @@ param(
     [string[]]$Env = @(),
     [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     [int]$Instance = 0,
-    [string]$LockName = 'rvk-test-copy'
+    [string]$LockName = 'rvk-test-copy',
+    [string]$Config = 'RelWithDebInfo'
 )
 $repo = Split-Path -Parent $PSScriptRoot
 $sc = if ($env:WS26) { $env:WS26 } else { 'B:' + [char]92 + 'DevDrive' + [char]92 + 'rvk-work' + [char]92 + 'scratch' + [char]92 + 'ws26' }  # <tag>_rvk.log / _spass.log / _frames.csv / _load.csv / _run.txt
@@ -37,7 +38,7 @@ $block = {
     }
     $envs = @("RVK_HITCH_MS=$Hitch", "RVK_FRAME_CSV=$($sc -replace '\\','/')/${Tag}_frames.csv") + $Env
     $a = @{
-        GameDir = $GameDir; Mode = $Mode; Api = $Api; PlayerDefaults = $true; Exe = 'RisenTest.exe'; Vsync = 'off'; Perf = $true
+        GameDir = $GameDir; Config = $Config; Mode = $Mode; Api = $Api; PlayerDefaults = $true; Exe = 'RisenTest.exe'; Vsync = 'off'; Perf = $true
         Environment = $envs; Mods = @('rvk_traverse'); Scenario = 'rvk_traverse'; WaitForResult = $true
         Seconds = $Seconds + 150; Param = @("seconds=$Seconds", 'log=5')
     }
@@ -48,5 +49,5 @@ $block = {
     Copy-Item (Join-Path $GameDir 'bin\rvk\rvk.log') "$sc\${Tag}_rvk.log" -Force
     Copy-Item (Join-Path $GameDir 'bin\spass\spass.log') "$sc\${Tag}_spass.log" -Force
 }
-& "$repo\scripts\with-test-lock.ps1" -Name $LockName -Who ws26 -Run $block.GetNewClosure()
+& "$repo\scripts\with-test-lock.ps1" -Name $LockName -Who $(if ($env:WS_WHO) { $env:WS_WHO } else { 'ws26' }) -Run $block.GetNewClosure()
 "session $Tag done"
