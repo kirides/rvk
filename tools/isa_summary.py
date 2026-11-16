@@ -10,7 +10,7 @@ Output: a markdown table per input (sorted by VGPRs), occupancy = waves per SIMD
 Occupancy model (vector registers only; LDS / SGPR limits are noted separately):
   RDNA2 (gfx103x, Radeon 680M = gfx1035): 1024 VGPRs per SIMD lane slot, allocation granule 8, max 16 waves / SIMD
   RDNA3 (gfx1100, RX 7900 XTX):           1536 VGPRs per SIMD, granule 8 (wave32), max 16 waves / SIMD
-  wave64 holds two halves per register: it consumes 2x the file per wave.
+  wave64 holds two halves per register: it consumes 2x the file per wave (pixel / vertex stages are wave64 on the 7900 XTX driver, compute wave32).
 """
 import argparse
 import csv
@@ -158,7 +158,9 @@ def main():
                     continue
                 st = r['stage']
                 v = int(r['vgprs'])
-                cells += ['%s / %s / %s / %s / %s' % (v, r['sgprs'], r['lds'], r['scratch'], r['isa_instr']), str(occupancy(v, asic))]
+                # (the driver compiles pixel and vertex stages as wave64, compute as wave32: measured with RVK_ISA_DUMP, docs/research/shader-isa.md)
+                wave = 32 if r['stage'] == 'comp' else 64
+                cells += ['%s / %s / %s / %s / %s' % (v, r['sgprs'], r['lds'], r['scratch'], r['isa_instr']), str(occupancy(v, asic, wave))]
             print('| %s | %s | %s | %s | %s | %s |' % (name, st, *cells))
 
 

@@ -491,6 +491,12 @@ std::string uberVariantDefines(const std::string& kind, const UberRequest& q) {
     if (lit) pnt = std::atoi(macro("XFX_PNTLIGHTCOUNT").c_str());
     std::string d;
     if (kind == "plain" || kind == "scene2") return d;
+    if (kind == "clonly") {
+        // the light table's variant WITHOUT the ambient / GI hooks (what a Full session with gi.enabled = off could build; docs/research/shader-isa.md)
+        if (pnt >= 1) d += std::format("#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG 25\n#define RVK_MV_CL_COUNT {}\n#define RVK_MV_CL_PARAM 4\n", std::min(3, pnt));
+        d += "#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n";
+        return d;
+    }
     if (!ambient && kind != "gbuf") return d;
     if (ambient) d += "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n";
     const bool cl = pnt >= 1 && kind.find("cl") != std::string::npos;
