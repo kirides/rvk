@@ -194,6 +194,7 @@ void PipelineCache::destroy() {
     }
     pipelines_.clear();
     fastLinks_.clear();
+    g_fastLinkLive.store(0, std::memory_order_relaxed);
     destroyLibraries();
     if (cache_ != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(ctx_->device(), cache_, nullptr);
@@ -269,7 +270,7 @@ void PipelineCache::prewarmWorker() {
             const std::lock_guard pl(mutex_);
             const auto it = pipelines_.find(d);
             // (a fast link is replaced by this whole build: the optimiser then skips it)
-            const bool missing = it == pipelines_.end() || fastLinks_.contains(it->second);
+            const bool missing = it == pipelines_.end() || (optMode_ != '0' && fastLinks_.contains(it->second));
             claimed = missing && building_.insert(d).second;
         }
         if (claimed) {
@@ -289,6 +290,7 @@ void PipelineCache::prewarmWorker() {
                 const auto [it, inserted] = pipelines_.emplace(d, p);
                 if (inserted) {
                     fastLinks_.insert(p);
+                    g_fastLinkLive.fetch_add(1, std::memory_order_relaxed);
                     fastLinkedCount_.fetch_add(1, std::memory_order_relaxed);
                 } else if (fastLinks_.contains(it->second)) {
                     vkDestroyPipeline(ctx_->device(), p, nullptr);  // (a draw's own fast link arrived meanwhile)
@@ -380,7 +382,10 @@ VkPipeline PipelineCache::get(const PipelineDesc& desc, bool* created) {
         return result;
     }
     // (the map also caches failures (VK_NULL_HANDLE) so they are logged once)
-    if (linked) fastLinks_.insert(p);
+    if (linked) {
+        fastLinks_.insert(p);
+        g_fastLinkLive.fetch_add(1, std::memory_order_relaxed);
+    }
     building_.erase(desc);
     lock.unlock();
     builtCv_.notify_all();
@@ -419,6 +424,7 @@ VkPipeline PipelineCache::getNoWait(const PipelineDesc& desc, bool* created) {
                     return existing;
                 }
                 fastLinks_.insert(p);
+                g_fastLinkLive.fetch_add(1, std::memory_order_relaxed);
             }
             built_.fetch_add(1, std::memory_order_relaxed);
             fastLinkedCount_.fetch_add(1, std::memory_order_relaxed);
@@ -450,7 +456,12 @@ void PipelineCache::insertBuilt(const PipelineDesc& d, VkPipeline p) {
         pipelines_.emplace(d, p);
         return;
     }
+    if (optMode_ == '0' && fastLinks_.contains(it->second)) {
+        vkDestroyPipeline(ctx_->device(), p, nullptr);  // (WS35: a fast link stays the pipeline: the whole build is dropped, never handed out)
+        return;
+    }
     if (fastLinks_.erase(it->second) > 0) {
+        g_fastLinkLive.fetch_sub(1, std::memory_order_relaxed);
         // command buffers may still use the fast link: kept until destroy()
         superseded_.push_back(it->second);
         successor_[it->second] = p;

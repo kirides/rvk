@@ -15,6 +15,7 @@
 #include "core/paths.h"
 #include "engine/hemisphere.h"
 #include "shader/embedded.h"
+#include "vk/pipeline.h"
 
 namespace rvk::enh {
 
@@ -494,6 +495,7 @@ void PictureCheck::report() {
                           : cyclesFailed_ != 0             ? (control_.views == 0 ? "FAILED (no control pair in the window)" : "FAILED")
                                                            : "ok";
     if (verdict[0] == 'F') ++failedWindows_;
+    if (verdict[0] == 'F') spdlog::info("native: owned picture check: pipelines still fast-linked (unoptimised): {}", vk::g_fastLinkLive.load(std::memory_order_relaxed));
     if (verdict[0] == 'o') ++okWindows_;
     failLines_ = 0;
     const auto box = [](const Window& w) {
