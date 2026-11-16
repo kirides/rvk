@@ -56,6 +56,8 @@ PictureCheck::PictureCheck(d3d9::Device& device) : dev_(device) {
     openWorst_ = GetEnvironmentVariableA("RVK_PICTURE_OPEN_WORST", nullptr, 0) != 0;
     if (GetEnvironmentVariableA("RVK_PICTURE_FAKE_OWNED", buf, sizeof(buf)) != 0) fakeOwned_ = static_cast<std::uint32_t>(std::max(0, std::atoi(buf)));
     if (GetEnvironmentVariableA("RVK_PICTURE_TRACE", buf, sizeof(buf)) != 0) traceLeft_ = std::max(0, std::atoi(buf));
+    dumpAny_ = GetEnvironmentVariableA("RVK_PICTURE_DUMP_ANY", buf, sizeof(buf)) != 0;  // RVK_PICTURE_DUMP_ANY=<n>: the dump also before the first ok window (owned views only), every n-th qualifying view
+    if (dumpAny_) dumpStride_ = static_cast<std::uint32_t>(std::max(1, std::atoi(buf)));
     dumpEver_ = dumpLeft_ > 0 || dumpTo_ != 0;
 }
 
@@ -436,7 +438,7 @@ void PictureCheck::collectSlot(Slot& s) {
     }
     // (not the views of a scene that moves: a camera cut / the unfreeze differ on most of the picture)
     const bool inRange = dumpTo_ != 0 && frame >= dumpFrom_ && frame <= dumpTo_ && share >= dumpMin_ && rangeLeft_ > 0;
-    if (dumped && s.dump && (inRange || (dumpLeft_ > 0 && outlier && share < 0.2 && okWindows_ > 0))) {
+    if (dumped && s.dump && (inRange || (dumpLeft_ > 0 && outlier && share < 0.2 && (okWindows_ > 0 || (dumpAny_ && !control))) && (!dumpAny_ || (dumpSeen_++ % dumpStride_) == 0))) {
         if (inRange) --rangeLeft_;
         else --dumpLeft_;
         s.dump->invalidate();

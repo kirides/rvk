@@ -116,7 +116,6 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
     st.light = mix(mix(mixPtr(mixPtr(0, illum), list), get<std::uint8_t>(list, 0) | (get<std::uint8_t>(illum, 0xc) << 8) | (get<std::uint8_t>(illum, 0xd) << 16)),
                    get<std::uint8_t>(list, 0x34));
     st.switchValue = get<std::int32_t>(ptr(ctx, 0x18), 0x20);
-    st.fadeBits = orec::fadeStampBits(op.raw.fade);
     {
         std::uint64_t h = 0;
         for (std::uint32_t i = 0; i < 2; ++i) {
@@ -145,7 +144,9 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
                            (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2d8)) << 32) | (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x78)) << 40) |
                            (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2b8)) << 48) | (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2a8)) << 56));
             h = mixPtr(mix(h, static_cast<std::uint32_t>(get<std::int32_t>(sh, 0x68))), ptr(sh, 0x220));
+            if (get<std::int32_t>(sh, 0x50) == 1) st.fadeMasked = true;
         }
+        st.fadeBits = orec::fadeStampBits(op.raw.fade, st.fadeMasked);
         const std::uint32_t node = op.raw.desc >> 8;
         if (node != 0 && node != kStaticOpNone && sub != 0xffu && static_cast<std::int32_t>(sub) < count) {
             // F2d: a hierarchy node op draws the node's index range of its sub-mesh (subMeshDraws: sub +0x40 table of 0x28-byte nodes, +0x20 = first index, the

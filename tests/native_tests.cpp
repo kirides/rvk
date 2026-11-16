@@ -1379,6 +1379,8 @@ TEST(op_record_fade_stamp_is_a_class) {
     CHECK(fadeStampBits(1.0f) == fadeStampBits(1.5f));
     CHECK(fadeStampBits(0.9999f) != fadeStampBits(1.0f));
     CHECK(fadeStampBits(0.0f) == fadeStampBits(0.3f));
+    CHECK(fadeStampBits(0.25f, true) != fadeStampBits(0.9f, true));  // masked shader: alphaRef = maskRef * fade is baked into the draws
+    CHECK(fadeStampBits(1.0f, true) == fadeStampBits(1.5f, true));
 }
 
 // F2c-2 (op_records.h): the stamp's field-wise comparison names the first differing field; the key hashes by all of its parts

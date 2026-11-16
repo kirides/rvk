@@ -57,7 +57,8 @@ struct Stamp {
     std::uint64_t lightmaps = 0;        // res +0x90 / +0x98: image pointers + residency
     std::uint32_t entityFlags = 0;      // entity +0x28 & 0xe00000 (overlay flags)
     const void* illumPs = nullptr;      // entity +0xf8
-    std::uint32_t fadeBits = 0;         // the op's fade
+    std::uint32_t fadeBits = 0;         // the op's fade (fadeStampBits)
+    bool fadeMasked = false;            // a covered sub-mesh's shader is masked (blend mode 1): its alpha reference is maskRef * fade (fillBlending), so the exact fade is in the stamp
     std::int32_t switchValue = 0;       // ctx +0x18 +0x20
     std::uint32_t objSlot = 0xffffffffu, objGen = 0;  // the scene-table slot of the entity and its generation (the object record's identity)
     std::uint64_t variantEpoch = 0;     // Device::variantEpoch
@@ -69,12 +70,13 @@ struct Stamp {
 // WS32 (frame-ownership.md 16.23): the stamp's fade is its CLASS (1 = opaque, 0.5 = fading), not its bits: the value itself reaches the draws only as c32.w of the object window,
 // which ownedDrawOp serves from the op's live fade at every replay (the pass states depend on fade < 1 only), so an alpha-list op fading in or out (its fade changes every frame
 // while the camera moves) kept its record instead of being composed + rebuilt each frame. RVK_FADE_STAMP=0 = the exact bits as before (A/B)
-inline std::uint32_t fadeStampBits(float fade) {
+inline std::uint32_t fadeStampBits(float fade, bool masked = false) {
     static const bool exact = [] {
         const char* v = std::getenv("RVK_FADE_STAMP");
         return v != nullptr && v[0] == '0';
     }();
-    return std::bit_cast<std::uint32_t>(exact ? fade : (fade >= 1.0f ? 1.0f : 0.5f));
+    // (a masked shader's alpha reference = maskRef * fade is baked into the draws' pass states: the exact fade, while fading)
+    return std::bit_cast<std::uint32_t>(exact || (masked && fade < 1.0f) ? fade : (fade >= 1.0f ? 1.0f : 0.5f));
 }
 inline constexpr const char* kStampNames[] = {"LOD resource", "entity", "geometry / material", "illumination", "lightmaps", "overlay flags", "illum pointer", "fade",
                                               "switch value", "object slot", "variant epoch", "registry generation", "view", "material structure"};
