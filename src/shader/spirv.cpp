@@ -59,4 +59,39 @@ DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view 
     return result;
 }
 
+// frame-ownership.md 16.27. SM 6.6 `discard` is OpDemoteToHelperInvocation; a fast-linked pipeline library pixel shader of the AMD driver
+// (the fragment-shader library + the separately compiled output part) exports the demoted lanes of a quad that still has live lanes whenever the shader
+// also takes a derivative (a texture sample with implicit LOD, fwidth): foliage cut-outs come out wider than the optimised monolithic build's. OpKill
+// (what a `discard` was before the demote) does not show it. Every `OpDemoteToHelperInvocation` directly followed by the `OpBranch` that ends its block
+// becomes `OpKill`; the capability goes when none is left (a demote in another position keeps the module as it is).
+bool demoteToKill(std::vector<std::uint32_t>& words) {
+    constexpr std::uint32_t kOpDemote = 5380, kOpBranch = 249, kOpKill = 252, kOpCapability = 17, kCapDemote = 5379;
+    if (words.size() < 6 || words[0] != 0x07230203u) return false;
+    std::vector<std::uint32_t> out(words.begin(), words.begin() + 5);
+    out.reserve(words.size());
+    std::size_t capability = 0;  // index in `out` of the demote capability instruction (0 = none)
+    std::size_t converted = 0, kept = 0;
+    for (std::size_t i = 5; i < words.size();) {
+        const std::uint32_t op = words[i] & 0xFFFFu, len = words[i] >> 16;
+        if (len == 0 || i + len > words.size()) return false;  // malformed: leave it
+        if (op == kOpCapability && len == 2 && words[i + 1] == kCapDemote) capability = out.size();
+        if (op == kOpDemote && len == 1) {
+            const std::size_t n = i + 1;
+            if (n < words.size() && (words[n] & 0xFFFFu) == kOpBranch && (words[n] >> 16) == 2) {
+                out.push_back((1u << 16) | kOpKill);
+                i = n + 2;
+                ++converted;
+                continue;
+            }
+            ++kept;
+        }
+        out.insert(out.end(), words.begin() + static_cast<std::ptrdiff_t>(i), words.begin() + static_cast<std::ptrdiff_t>(i + len));
+        i += len;
+    }
+    if (converted == 0) return false;
+    if (kept == 0 && capability != 0) out.erase(out.begin() + static_cast<std::ptrdiff_t>(capability), out.begin() + static_cast<std::ptrdiff_t>(capability + 2));
+    words = std::move(out);
+    return true;
+}
+
 }  // namespace rvk::shader

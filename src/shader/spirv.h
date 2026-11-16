@@ -28,6 +28,11 @@ struct DxilResult {
 };
 DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view name = "translated.hlsl", bool half16 = false, bool refresh = false);
 
+// OpDemoteToHelperInvocation + the OpBranch ending its block -> OpKill (and the capability dropped when none is left); true when the module changed.
+// Used for shader modules that run in fast-linked pipeline libraries (frame-ownership.md 16.27: the AMD driver exports demoted lanes of a quad with live
+// lanes there when the shader takes derivatives).
+bool demoteToKill(std::vector<std::uint32_t>& words);
+
 // Debug info in the SPIR-V DXC produces (config.toml [debug] shader_debug_info, run.ps1 -ShaderDebug): -Zi -Od with OpName / OpLine and the HLSL source text,
 // so RenderDoc / PIX show names and source lines and allow stepping through the translated D3D9 shaders, the material shaders and the embedded ones.
 // Set before the first compile; part of the SPIR-V cache keys.

@@ -12,6 +12,7 @@
 
 #include "vk/context.h"
 #include "core/profile.h"
+#include "shader/spirv.h"
 
 namespace rvk::vk {
 
@@ -37,10 +38,23 @@ bool PipelineCache::Eq::operator()(const PipelineDesc& a, const PipelineDesc& b)
     return std::memcmp(&a, &b, sizeof(PipelineDesc)) == 0;
 }
 
+std::atomic<bool> g_demoteAsKill{false};
+
 VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    ci.codeSize = spirv.size_bytes();
-    ci.pCode = spirv.data();
+    // (16.27: with pipeline libraries a `discard` is OpKill, not the SM 6.6 demote: the fast-linked AMD pixel shaders export demoted lanes)
+    std::vector<std::uint32_t> patched;
+    if (g_demoteAsKill.load(std::memory_order_relaxed)) {
+        patched.assign(spirv.begin(), spirv.end());
+        if (!shader::demoteToKill(patched)) {
+            patched.clear();
+        } else {
+            static std::atomic<int> n{0};
+            if (n.fetch_add(1) == 0) spdlog::info("vulkan: shader modules: `discard` as OpKill instead of the demote (pipeline libraries, frame-ownership.md 16.27)");
+        }
+    }
+    ci.codeSize = patched.empty() ? spirv.size_bytes() : patched.size() * sizeof(std::uint32_t);
+    ci.pCode = patched.empty() ? spirv.data() : patched.data();
     VkShaderModule m = VK_NULL_HANDLE;
     if (const VkResult r = vkCreateShaderModule(ctx.device(), &ci, nullptr, &m); r != VK_SUCCESS) {
         spdlog::error("vulkan: vkCreateShaderModule: {}", resultString(r));

@@ -302,6 +302,11 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize, bool compil
     return p;
 }
 
+VkPipeline PipelineCache::buildVariantForTest(const PipelineDesc& d, int kind) {
+    if (kind == 2) return build(d);
+    return useLibraries_ ? link(d, kind == 1) : VK_NULL_HANDLE;
+}
+
 void PipelineCache::optimizer() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline optimizer");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);  // (WS12: background work, the engine thread keeps its core)
@@ -360,6 +365,10 @@ void PipelineCache::startLibraries() {
     prewarmLink_ = !(GetEnvironmentVariableA("RVK_PREWARM_LINK", pl, sizeof(pl)) > 0 && pl[0] == '0');
     char om[4]{};
     optMode_ = GetEnvironmentVariableA("RVK_GPL_OPTIMIZE", om, sizeof(om)) == 1 ? om[0] : '1';
+    // 16.27: a `discard` is OpKill while libraries are in use (shader modules created from here on; RVK_DEMOTE_KILL=0 keeps the SM 6.6 demote)
+    char dk[4]{};
+    const bool demoteKill = !(GetEnvironmentVariableA("RVK_DEMOTE_KILL", dk, sizeof(dk)) > 0 && dk[0] == '0');
+    g_demoteAsKill.store(demoteKill, std::memory_order_relaxed);
     spdlog::info("vulkan: pipeline libraries: {} recipe; prewarm requests {}; a fast link {}", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)",
                  prewarmLink_ ? "fast-linked first" : "built whole (RVK_PREWARM_LINK=0)",
                  optMode_ == '0' ? "stays the pipeline (RVK_GPL_OPTIMIZE=0: no swap)" : "is swapped for its optimised build");

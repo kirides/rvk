@@ -19,6 +19,7 @@
 #include "shader/abi.h"
 #include "shader/dxc.h"
 #include "shader/embedded.h"
+#include "shader/spirv.h"
 #include "spirv_offsets.h"
 #include "test.h"
 
@@ -80,6 +81,46 @@ TEST(dxc_private_heap_blocks_and_foreign_pointers) {
         CHECK(!dxc::privateHeapOwns(region + 4096));
         VirtualFree(region, 0, MEM_RELEASE);
     }
+}
+
+// frame-ownership.md 16.27: the demote -> OpKill rewrite keeps the module valid (a real DXC fragment shader with a discard) and only converts demotes that
+// end their block
+TEST(spirv_demote_to_kill) {
+    if (!dxc::available()) return;
+    dxc::Request r;
+    r.file = "test/demote_probe.frag.hlsl";
+    r.entry = "PSMain";
+    r.profile = "ps_6_6";
+    r.source =
+        "struct PsIn { float4 pos : SV_Position; [[vk::location(0)]] float4 v0 : VARY0; };\n"
+        "float4 PSMain(PsIn i) : SV_Target0 {\n"
+        "    float w = fwidth(i.v0.y);\n"
+        "    if (i.v0.x < 0.5) discard;\n"
+        "    return float4(i.v0.x, w, 0.0, 1.0);\n"
+        "}\n";
+    r.optLevel = 0;
+    const dxc::Result c = dxc::compile(r);
+    CHECK(!c.words.empty());
+    if (c.words.empty()) return;
+    auto demotes = [](const std::vector<std::uint32_t>& w) {
+        int n = 0, kills = 0;
+        for (std::size_t i = 5; i < w.size(); i += w[i] >> 16) {
+            if ((w[i] & 0xFFFFu) == 5380) ++n;
+            if ((w[i] & 0xFFFFu) == 252) ++kills;
+            if ((w[i] >> 16) == 0) break;
+        }
+        return std::pair{n, kills};
+    };
+    const auto before = demotes(c.words);
+    CHECK(before.first == 1 && before.second == 0);
+    std::vector<std::uint32_t> patched = c.words;
+    CHECK(demoteToKill(patched));
+    const auto after = demotes(patched);
+    CHECK(after.first == 0 && after.second == 1);
+    CHECK(patched.size() + 4 == c.words.size());  // the demote + branch (3 words) became 1, the capability (2 words) went
+    std::string msg;
+    CHECK_MSG(validSpirv(patched, &msg), msg);
+    CHECK(!demoteToKill(patched));  // idempotent: nothing left to convert
 }
 
 TEST(dxc_embedded_sources) {
