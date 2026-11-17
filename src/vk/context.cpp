@@ -375,7 +375,7 @@ bool Context::createDevice(bool withRayTracing) {
     // RVK_PASS_STATS=1 (debug, off = nothing exists): per-pass pipeline statistics + precise occlusion queries (vk/gputimer.*, docs/research/full-solid-pass.md)
     {
         char e[4]{};
-        if (GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && e[0] == '1' && sup2.features.pipelineStatisticsQuery == VK_TRUE &&
+        if (GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && (e[0] == '1' || e[0] == '2') && sup2.features.pipelineStatisticsQuery == VK_TRUE &&
             sup2.features.occlusionQueryPrecise == VK_TRUE) {
             f2.features.pipelineStatisticsQuery = VK_TRUE;
             f2.features.occlusionQueryPrecise = VK_TRUE;

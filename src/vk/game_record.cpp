@@ -465,7 +465,7 @@ GameRecord::~GameRecord() {
 
 // RVK_PASS_STATS=1: the per-scope draw counters below (off = one predictable branch per packet, nothing counted)
 static bool passStatsOn() {  // (read at first use: the proxy sets the Win32 environment after the DLL's static initialisers)
-    static const bool on = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && e[0] == '1'; }();
+    static const bool on = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && (e[0] == '1' || e[0] == '2'); }();
     return on;
 }
 
