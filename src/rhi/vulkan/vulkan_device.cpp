@@ -676,6 +676,7 @@ public:
                 const double v[6] = {double(s.stat.iaVertices), double(s.stat.iaPrimitives), double(s.stat.vsInvocations), double(s.stat.clipPrimitives),
                                      double(s.stat.fsInvocations), double(s.stat.samples)};
                 std::copy(std::begin(v), std::end(v), seg.stat);
+                for (int i = 0; i < 4; ++i) seg.stat[6 + i] = double(s.stat.calls[i]);
             }
             out.segments.push_back(std::move(seg));
         }
@@ -704,7 +705,14 @@ public:
         if (statScope_) gpuTimer_.passBegin(frames_.cmd(), frames_.currentSlot());
     }
     void endScope() override {
-        if (statScope_) gpuTimer_.passEnd(frames_.cmd(), frames_.currentSlot());
+        if (statScope_) {
+            std::uint64_t calls[4], z[16];
+            record_.takePassCounts(calls, z);
+            if (gpuTimer_.details(frames_.currentSlot()) && calls[0] + calls[2] > 0) {
+                spdlog::info("perf: passz draws: EQUAL w0 {} w1 {} | LEQUAL w0 {} w1 {} | LESS w0 {} w1 {} | other w0 {} w1 {} | no depth test {} {}", z[2], z[3], z[4], z[5], z[6], z[7], z[8], z[9], z[0], z[1]);
+            }
+            gpuTimer_.passEnd(frames_.cmd(), frames_.currentSlot(), calls);
+        }
         statScope_ = false;
         record_.endScope();
     }

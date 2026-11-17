@@ -24,8 +24,8 @@ namespace rvk::perfwin {
 struct Segment {
     std::string_view label;
     double ms = 0.0;
-    bool hasStat = false;  // RVK_PASS_STATS: {IA vertices, IA primitives, VS invocations, clipped primitives, FS invocations, samples passed}
-    double stat[6] = {};
+    bool hasStat = false;  // RVK_PASS_STATS: {IA vertices, IA primitives, VS invocations, clipped primitives, FS invocations, samples passed, direct draws, indirect packets, indirect records, pipeline binds}
+    double stat[10] = {};
 };
 
 // arms a window of `frames` frames (1 .. 100000) tagged `tag` (no spaces); false + why when one is already armed / running

@@ -405,8 +405,29 @@ void GameRecord::beginScope(const rhi::RenderingInfo& info, bool secondary) {
     ri.pStencilAttachment = stencilOn ? &stencil : nullptr;
     if (secondary) ri.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
     vkCmdBeginRendering(cmd, &ri);
+    {
+        static const std::uint8_t ablMode = [] {
+            char e[8]{};
+            if (GetEnvironmentVariableA("RVK_ABL_SKIP", e, sizeof e) == 0) return std::uint8_t{0};
+            return std::uint8_t(e[0] == 'e' ? 1 : e[0] == 'n' ? 2 : 0);
+        }();
+        rec_.ablSkip = ablMode != 0 && !secondary && info.colorCount == 1 && info.depth.texture != nullptr &&
+                               rhi::vulkan::imageOf(*info.color[0].texture).format() == VK_FORMAT_R16G16B16A16_SFLOAT ? ablMode : 0;
+    }
     scopeSecondary_ = secondary;
     if (secondary) startRecordThreads();  // the first threaded scope starts the workers (idempotent)
+}
+
+void GameRecord::takePassCounts(std::uint64_t out[4], std::uint64_t z[16]) {
+    for (int i = 0; i < 16; ++i) {
+        if (z != nullptr) z[i] = rec_.passZ[i];
+        rec_.passZ[i] = 0;
+    }
+    out[0] = rec_.passDirect;
+    out[1] = rec_.passIndPackets;
+    out[2] = rec_.passIndRecords;
+    out[3] = rec_.passBinds;
+    rec_.passDirect = rec_.passIndPackets = rec_.passIndRecords = rec_.passBinds = 0;
 }
 
 std::uint64_t GameRecord::takePipelineBinds() {
@@ -442,7 +463,14 @@ GameRecord::~GameRecord() {
     shutdown();
 }
 
+// RVK_PASS_STATS=1: the per-scope draw counters below (off = one predictable branch per packet, nothing counted)
+static bool passStatsOn() {  // (read at first use: the proxy sets the Win32 environment after the DLL's static initialisers)
+    static const bool on = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && e[0] == '1'; }();
+    return on;
+}
+
 void GameRecord::applyPacket(const PipelineCache& pipelines, GameRecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const rhi::DrawPacket& p) {
+    if (rs.ablSkip != 0 && p.dyn != nullptr && ((p.dyn->depthTest != 0 && p.dyn->depthCompare == VK_COMPARE_OP_EQUAL) == (rs.ablSkip == 1))) return;
     if (p.vi != rs.lastVi) {
         applyVertexInput(rs, cmd, *p.vi);
         rs.lastVi = p.vi;
@@ -458,26 +486,49 @@ void GameRecord::applyPacket(const PipelineCache& pipelines, GameRecordState& rs
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         rs.bound = pipeline;
         ++rs.pipelineBinds;
+        if (passStatsOn()) ++rs.passBinds;
     }
     if (p.dyn != rs.lastDyn) {
         applyDynamicState(rs, cmd, *p.dyn);
         rs.lastDyn = p.dyn;
     }
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p.push), &p.push);
+    if (passStatsOn()) {
+        const bool ind = p.op == rhi::DrawPacket::Op::DrawIndexedIndirectCount || p.op == rhi::DrawPacket::Op::DrawIndexedIndirect;
+        const rhi::DynamicStateValues& dv = *p.dyn;
+        const std::uint32_t cc = dv.depthTest == 0 ? 0u : dv.depthCompare == VK_COMPARE_OP_EQUAL ? 1u : dv.depthCompare == VK_COMPARE_OP_LESS_OR_EQUAL ? 2u : dv.depthCompare == VK_COMPARE_OP_LESS ? 3u : 4u;
+        rs.passZ[cc * 2 + (dv.depthWrite != 0 ? 1 : 0)] += ind ? p.count : 1;
+    }
     if (p.op == rhi::DrawPacket::Op::DrawIndexedIndirectCount) {
         // F2c-4c: GPU-compacted arguments, the count in the same buffer at `first` (frame-ownership.md 7.32)
         bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
         const VkBuffer ib = reinterpret_cast<VkBuffer>(p.indirectBuffer);
         vkCmdDrawIndexedIndirectCount(cmd, ib, p.indirectOffset, ib, p.first, p.count, rhi::kIndirectStride);
+        if (passStatsOn()) {
+            ++rs.passIndPackets;
+            rs.passIndRecords += p.count;
+        }
+
     } else if (p.op == rhi::DrawPacket::Op::DrawIndexedIndirect) {
         // F2b-1 scene draws: p.count records in a ring block (frame-ownership.md 7.11)
         bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
         vkCmdDrawIndexedIndirect(cmd, reinterpret_cast<VkBuffer>(p.indirectBuffer), p.indirectOffset, p.count, rhi::kIndirectStride);
+        if (passStatsOn()) {
+            ++rs.passIndPackets;
+            rs.passIndRecords += p.count;
+        }
+
     } else if (p.op == rhi::DrawPacket::Op::DrawIndexed) {
         bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
         vkCmdDrawIndexed(cmd, p.count, p.instances, p.first, p.vertexOffset, 0);
+        if (passStatsOn()) {
+            ++rs.passDirect;
+        }
     } else {
         vkCmdDraw(cmd, p.count, p.instances, p.first, 0);
+        if (passStatsOn()) {
+            ++rs.passDirect;
+        }
     }
 }
 

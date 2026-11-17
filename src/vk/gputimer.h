@@ -31,6 +31,7 @@ public:
     struct PassStat {
         bool valid = false;
         std::uint64_t iaVertices = 0, iaPrimitives = 0, vsInvocations = 0, clipPrimitives = 0, fsInvocations = 0, samples = 0;
+        std::uint64_t calls[4] = {};  // GPU draw calls {direct, indirect packets, indirect records, pipeline binds} (vk::GameRecord)
     };
     struct Segment {
         std::string label;
@@ -56,7 +57,7 @@ public:
     bool createPassStats(Context& ctx, std::uint32_t slots);
     bool passStatsEnabled() const { return statPool_ != VK_NULL_HANDLE; }
     void passBegin(VkCommandBuffer cmd, std::uint32_t slot);
-    void passEnd(VkCommandBuffer cmd, std::uint32_t slot);
+    void passEnd(VkCommandBuffer cmd, std::uint32_t slot, const std::uint64_t calls[4]);
     bool details(std::uint32_t slot) const { return slot < slots_.size() && slots_[slot].details; }
 
 private:
@@ -74,6 +75,7 @@ private:
     static constexpr std::uint32_t kPassQueriesPerSlot = 256;
     Context* ctx_ = nullptr;
     VkQueryPool statPool_ = VK_NULL_HANDLE, occPool_ = VK_NULL_HANDLE;
+    std::vector<std::uint64_t> passCalls_;  // 4 per query
     std::vector<std::uint32_t> passCount_;  // per slot: scopes with a query this submission
     VkQueryPool pool_ = VK_NULL_HANDLE;
     double nsPerTick_ = 1.0;

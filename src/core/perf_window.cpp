@@ -33,7 +33,7 @@ struct PassAcc {
     Acc ms;
     std::uint64_t frames = 0;  // frames that had the key
     double draws = 0.0;
-    double stat[6] = {};  // RVK_PASS_STATS sums over the frames that had the key
+    double stat[10] = {};  // RVK_PASS_STATS sums over the frames that had the key
     std::uint64_t statFrames = 0;
 };
 
@@ -69,8 +69,8 @@ void finish(Window* w) {
         if (p->second.statFrames > 0) {
             const double k = 1.0 / static_cast<double>(p->second.statFrames);
             const double* st = p->second.stat;
-            spdlog::info("perf: window {} pass stats per frame: iaVerts {:.0f} iaPrims {:.0f} vs {:.0f} clipPrims {:.0f} fs {:.0f} samples {:.0f} | {}", w->tag,
-                         st[0] * k, st[1] * k, st[2] * k, st[3] * k, st[4] * k, st[5] * k, p->first);
+            spdlog::info("perf: window {} pass stats per frame: iaVerts {:.0f} iaPrims {:.0f} vs {:.0f} clipPrims {:.0f} fs {:.0f} samples {:.0f} calls {:.0f} indPk {:.0f} indRec {:.0f} binds {:.0f} | {}", w->tag,
+                         st[0] * k, st[1] * k, st[2] * k, st[3] * k, st[4] * k, st[5] * k, st[6] * k, st[7] * k, st[8] * k, st[9] * k, p->first);
         }
     }
     delete w;
@@ -178,7 +178,7 @@ bool gpuFrame(std::uint64_t frame, double mainMs, double uploadMs, const std::ve
     struct FrameSlot {
         double ms = 0.0;
         std::uint32_t draws = 0;
-        double stat[6] = {};
+        double stat[10] = {};
         bool hasStat = false;
     };
     std::map<std::string, FrameSlot> perFrame;
@@ -200,7 +200,7 @@ bool gpuFrame(std::uint64_t frame, double mainMs, double uploadMs, const std::ve
         slot.draws += d;
         if (s.hasStat) {
             slot.hasStat = true;
-            for (int i = 0; i < 6; ++i) slot.stat[i] += s.stat[i];
+            for (int i = 0; i < 10; ++i) slot.stat[i] += s.stat[i];
         }
     }
     for (const auto& [k, v] : perFrame) {
@@ -210,7 +210,7 @@ bool gpuFrame(std::uint64_t frame, double mainMs, double uploadMs, const std::ve
         p.draws += v.draws;
         if (v.hasStat) {
             ++p.statFrames;
-            for (int i = 0; i < 6; ++i) p.stat[i] += v.stat[i];
+            for (int i = 0; i < 10; ++i) p.stat[i] += v.stat[i];
         }
     }
     reap();

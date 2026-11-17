@@ -51,6 +51,7 @@ bool GpuTimer::createPassStats(Context& ctx, std::uint32_t slots) {
     vkResetQueryPool(ctx.device(), statPool_, 0, ci.queryCount);
     vkResetQueryPool(ctx.device(), occPool_, 0, oi.queryCount);
     passCount_.assign(slots, 0);
+    passCalls_.assign(std::size_t{kPassQueriesPerSlot} * slots * 4, 0);
     spdlog::info("vulkan: RVK_PASS_STATS: per-pass pipeline statistics + occlusion queries on (timings with it on are not the shipped ones)");
     return true;
 }
@@ -62,9 +63,10 @@ void GpuTimer::passBegin(VkCommandBuffer cmd, std::uint32_t slot) {
     vkCmdBeginQuery(cmd, occPool_, q, VK_QUERY_CONTROL_PRECISE_BIT);
 }
 
-void GpuTimer::passEnd(VkCommandBuffer cmd, std::uint32_t slot) {
+void GpuTimer::passEnd(VkCommandBuffer cmd, std::uint32_t slot, const std::uint64_t calls[4]) {
     if (statPool_ == VK_NULL_HANDLE || slot >= passCount_.size() || passCount_[slot] >= kPassQueriesPerSlot) return;
     const std::uint32_t q = slot * kPassQueriesPerSlot + passCount_[slot]++;
+    for (int i = 0; i < 4; ++i) passCalls_[std::size_t{q} * 4 + i] = calls[i];
     vkCmdEndQuery(cmd, occPool_, q);
     vkCmdEndQuery(cmd, statPool_, q);
 }
@@ -132,9 +134,12 @@ GpuTimer::Result GpuTimer::collect(std::uint32_t slot) {
         if (r.valid && !r.segments.empty() && (a == VK_SUCCESS || a == VK_NOT_READY) && b == VK_SUCCESS) {
             std::uint32_t next = 0;
             for (Segment& sg : r.segments) {
-                if (!sg.label.starts_with("pass ") || next >= k) continue;
+                if (!sg.label.starts_with("pass ") || sg.label.size() < 6 || sg.label[5] < '0' || sg.label[5] > '9' || next >= k) continue;  // (the engine's scopes "pass N: ...", not the injected "pass <name> at <point>")
                 const std::uint64_t* v = &st[std::size_t{next} * 6];
-                if (v[5] != 0) sg.stat = {true, v[0], v[1], v[2], v[3], v[4], oc[next]};
+                if (v[5] != 0) {
+                    sg.stat = {true, v[0], v[1], v[2], v[3], v[4], oc[next] >= (1ull << 62) ? 0 : oc[next], {}};  // (all ones = the counter returned nothing for that scope)
+                    for (int i = 0; i < 4; ++i) sg.stat.calls[i] = passCalls_[std::size_t{slot * kPassQueriesPerSlot + next} * 4 + i];
+                }
                 ++next;
             }
         }

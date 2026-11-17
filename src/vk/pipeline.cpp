@@ -486,8 +486,20 @@ void PipelineCache::insertBuilt(const PipelineDesc& d, VkPipeline p) {
     vkDestroyPipeline(ctx_->device(), p, nullptr);  // (an equal pipeline exists: never handed out)
 }
 
-VkPipeline PipelineCache::build(const PipelineDesc& d) {
+// RVK_ABL_HDR_NOPS=1 (debug ablation, docs/research/full-solid-pass.md): every pipeline that writes the scene HDR format (RGBA16F) is built without a fragment shader
+// (solid / alpha / sky draws; the colour output is undefined): the geometry / front end / raster floor of those passes
+const PipelineDesc& ablateNoPs(const PipelineDesc& d, PipelineDesc& tmp) {
+    static const bool on = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_ABL_HDR_NOPS", e, sizeof e) > 0 && e[0] == '1'; }();
+    if (!on || d.fs == rhi::ShaderModule::None || d.colorCount != 1 || d.colorFormats[0] != VK_FORMAT_R16G16B16A16_SFLOAT) return d;
+    tmp = d;
+    tmp.fs = rhi::ShaderModule::None;
+    return tmp;
+}
+
+VkPipeline PipelineCache::build(const PipelineDesc& d0) {
     RVK_ZONE("vk::PipelineCache::build");
+    PipelineDesc ablTmp;
+    const PipelineDesc& d = ablateNoPs(d0, ablTmp);
     const bool eds3 = ctx_->features().extendedDynamicState3;
     const bool dynVertexInput = ctx_->features().vertexInputDynamicState;
 

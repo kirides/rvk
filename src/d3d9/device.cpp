@@ -917,8 +917,8 @@ void Device::beginFrame(bool continuation) {
                              r.mainMs, r.uploadMs);
                 for (const auto& seg : r.segments) {
                     if (seg.hasStat) {
-                        spdlog::info("perf:   {:8.3f} ms  {}  [stats: iaVerts {:.0f} iaPrims {:.0f} vs {:.0f} clipPrims {:.0f} fs {:.0f} samples {:.0f}]", seg.ms,
-                                     seg.label, seg.stat[0], seg.stat[1], seg.stat[2], seg.stat[3], seg.stat[4], seg.stat[5]);
+                        spdlog::info("perf:   {:8.3f} ms  {}  [stats: iaVerts {:.0f} iaPrims {:.0f} vs {:.0f} clipPrims {:.0f} fs {:.0f} samples {:.0f} calls {:.0f} indPk {:.0f} indRec {:.0f} binds {:.0f}]", seg.ms,
+                                     seg.label, seg.stat[0], seg.stat[1], seg.stat[2], seg.stat[3], seg.stat[4], seg.stat[5], seg.stat[6], seg.stat[7], seg.stat[8], seg.stat[9]);
                     } else {
                         spdlog::info("perf:   {:8.3f} ms  {}", seg.ms, seg.label);
                     }
