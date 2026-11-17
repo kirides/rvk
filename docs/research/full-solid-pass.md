@@ -7,7 +7,7 @@ the same fragments; with the light table removed from the material shaders Full'
 Machine / method: RX 7900 XTX, `RisenTest.exe`, 1600x900 (the window of the private copy; WS39's 720p numbers are ~0.64x of these), vsync off, `-PlayerDefaults`, `RVK_PERF_WINDOW_ORDINAL=1`,
 `perf-ab.ps1` sessions (one session per mode and scene, 2 windows x 120 frames, ordinal 2500 frames lead; shader-ablation sessions 20000 frames lead after the variant queue reached 0),
 `debug.record_threads=false` (the statistics queries need inline scopes), private copy `risen-test-vk-ws41`, scratch `B:\DevDrive\rvk-work\scratch\ws41` (logs, helper scripts `runstats.ps1`, `tab.py`, `summ.py`, the ablated `shaders-*` trees).
-**Superseded by section 7: `RVK_PASS_STATS=1`'s occlusion query forces late Z, the invocation counts and the Full gap of this document are inflated; use `RVK_PASS_STATS=2`.** Timings of runs with `RVK_PASS_STATS=1` carry the cost of the queries (small: Wrapper jungle solid 0.60 ms with, 0.68 without in WS39 clocks): all comparisons below are inside the same kind of session.
+**Section 8 (WS43) re-measures the light-table prologue without queries (0.16-0.26 ms of the solid pass) and shrinks it (driver VGPR median 140 -> 99 on the lit light-table pixel shaders).** **Superseded by section 7: `RVK_PASS_STATS=1`'s occlusion query forces late Z, the invocation counts and the Full gap of this document are inflated; use `RVK_PASS_STATS=2`.** Timings of runs with `RVK_PASS_STATS=1` carry the cost of the queries (small: Wrapper jungle solid 0.60 ms with, 0.68 without in WS39 clocks): all comparisons below are inside the same kind of session.
 No Radeon GPU Profiler / Radeon Developer Panel is installed on the machine (searched Program Files, scoop, `B:\D`, `C:\`): the evidence is query counters + ablations.
 
 ## 1. Tooling added (debug only, off = nothing exists / one predictable branch)
@@ -139,3 +139,66 @@ D3D12: the PSO bakes depth state, the game issues no occlusion queries there eit
 ### What changed in the code
 `RVK_PASS_STATS=2` (statistics without the occlusion query; `=1` keeps both: timings and fs counts of `=1` runs are NOT the shipped ones, use `=2` for invocation counts). Everything else of the experiment is reverted
 (`debug.early_equal_z`, `PipelineDesc::earlyZ`, twins): zero effect without queries, see the table. Recipe: `.\scripts\perf-ab.ps1 ... -Environment 'RVK_PERF_WINDOW_ORDINAL=1','RVK_PASS_STATS=2' -Setting 'debug.record_threads=false'`.
+
+
+## 8. WS43: the light-table prologue re-measured without queries, and shrunk (2026-11-17)
+
+Task (fix 2 of section 4, "shrink the lamp-light code"), measure first. Machine / method: RX 7900 XTX, `RisenTest.exe`, 1600x900 windowed, vsync off, `-PlayerDefaults`, record threads on (default sessions, **no occlusion / statistics query**), private copy `risen-test-vk-ws43`, `perf-ab.ps1` sessions with `-Key overlay.compile_progress -A true -B true -Pairs 3 -Settle 120 -Window 120 -Lead 20000 -Seconds 800` (6 windows of 120 frames per session; 20000 frames lead = the variant queue is empty; a cold shader tree needs the longer watchdog: the default 300 s killed two cold sessions), **one session per arm and scene, arms interleaved scene by scene** (main, ablations, Wrapper, new), 2-3 rounds (sessions below). Arms are `RVK_SHADER_DIR` trees (no rebuild; the text equals the embedded one): `main` = the tree before this work, `cl0` = `rvkMvCluster` returns at its first line (what Wrapper-like shading costs in Full's forms), `cl1` = header + cluster id + occupancy loads, then return, `cl2` = the whole heavy path compiled in behind a run-time-true / compile-time-unknown early return (registers and code paid, never run), `e3` = the change of this section. The trees and drivers are in `B:\DevDrive\rvk-work\scratch\ws43` (`runms.ps1`, `sum43.py`, `shaders-*`). GPU clock state moves whole sessions (hold: the passes this work does not touch, "frame minus solid", were 1.8 / 2.0 / 2.3 ms in different sessions), so the table gives the sessions' values and the ratio solid / (frame - solid).
+
+### 8.1 Decomposition (solid pass ms; session values in brackets; Wrapper in the last column)
+
+| scene | main | cl0 (no table) | cl1 (+ loads) | cl2 (+ footprint) | **e3 (new)** | Wrapper |
+|---|---|---|---|---|---|---|
+| jungle (2 sessions) | 0.767 (0.794 0.741) | 0.507 (0.558 0.455) | 0.483 (r1) | 0.601 (0.559 0.642) | **0.638** (0.631 0.645) | 0.587 |
+| hold (3) | 0.596 (0.525 0.589 0.676) | 0.436 (0.400 0.455 0.452) | 0.445 (r1) | 0.541 (r1) | **0.595** (0.564 0.628 0.593) | 0.536 (0.439 0.562 0.607) |
+| harbour_night (3) | 0.585 (0.567 0.611 0.577) | 0.405 (0.362 0.399 0.454) | 0.431 (r1) | 0.507 (0.461 0.553) | **0.535** (0.515 0.545 0.545) | 0.539 (0.455 0.589 0.573) |
+| pub_interior (2) | 0.306 (0.310 0.302) | 0.129 (0.129 0.129) | 0.156 (r1) | 0.198 (0.197 0.199) | **0.234** (0.232 0.235) | 0.076 |
+| solid / (frame - solid), main -> e3 -> cl0 -> Wrapper | 0.347 -> 0.295 -> 0.195 -> 0.227 | hold 0.308 -> 0.263 -> 0.212 -> 0.198 | harbour 0.413 -> 0.348 -> 0.243 -> 0.281 | pub 0.470 -> 0.365 -> 0.201 -> 0.243 | | |
+
+Split of the prologue (round 1, one session per arm; noise of one session pair +-0.03 .. 0.06 ms in the vegetation scenes, +-0.003 in pub_interior):
+
+| ms | (a) table header / cluster / occupancy loads (cl1 - cl0) | (b) code + register footprint of the heavy path, compiled in, not executed (cl2 - cl1) | (c) the heavy path executing (main - cl2) | total (main - cl0, round 1) | total over all sessions |
+|---|---|---|---|---|---|
+| jungle | -0.075 (noise: the loads cost less than the noise) | +0.076 | **+0.235** | 0.236 | 0.26 |
+| hold | +0.045 | +0.096 | -0.016 (noise) | 0.125 | 0.16 |
+| harbour_night | +0.069 | +0.030 | +0.106 | 0.205 | 0.18 |
+| pub_interior | +0.027 | +0.041 | +0.113 | 0.181 | 0.18 |
+
+So **in default sessions (no query) the whole light-table prologue is 0.16-0.26 ms of the solid pass (0.18 in pub, where Wrapper's solid is 0.076)**, not 0.4-0.9 ms as WS41 measured under the occlusion query; (b) + (c) is above 0.1 ms in jungle (0.31), harbour_night (0.14), pub_interior (0.15), about 0.08 in hold: the stop condition ("(b)+(c) below 0.1 ms in every scene AND no RDNA2 occupancy gain") was not met, the RDNA2 gain being large (8.3). (c), the executing path, is the largest part wherever lamps exist; (a) is small everywhere (a dependent chain, but 3 of its 5 loads are uniform), (b) is a 7900 XTX effect only through occupancy of the executing waves.
+
+### 8.2 Registers and occupancy (what the driver and RGA say)
+
+Driver numbers (`RVK_ISA_DUMP`, 7900 XTX, wave64, `rvkcompare` jungle spot, Full, 26.11.1; lit light-table pixel shaders = the `cl-cl` variants, the GI-off variant of a default session; occupancy model waves/SIMD = floor(768 / VGPRs rounded up to 8) as in shader-isa.md):
+
+| | main | e3 |
+|---|---|---|
+| lit `cl-cl` pixel shaders | 507 | 596 (a different session builds a different set) |
+| VGPR mean / median / p90 / max | 127.0 / 140 / 151 / 170 | **103.1 / 99 / 142 / 148** |
+| share above 128 VGPRs / at most 96 | 67 % / 20 % | **25 % / 41 %** |
+| waves per SIMD, mean (histogram) | 5.99 (4: 32, 5: 306, 6: 67, 8: 25, >=9: 77) | **7.41** (5: 151, 6: 111, 7: 89, 8: 129, >=9: 116) |
+| instructions, median | 2798 | 2759 |
+
+RDNA2 estimate (Radeon 680M, gfx1035, wave64 = floor(512 / VGPRs rounded up to 8) waves per SIMD): RGA 2.9.1 on the 18 lit requests of the 28-request census (`scripts/rga-quick.ps1`-style, `--half`): `clonly` mean 130.0 -> 94.7 (max 163 -> 142), i.e. **3 -> 5 waves per SIMD on average** (the unlit-prologue `scene2` form of the same requests: 84.4). On gfx1100 RGA (runs ~15 % above the driver): 142.5 -> 98.0 mean (max 187 -> 144), `scene2` 97.6: **against its unlit form the lit shader now spans -13 .. +16 VGPRs (median about -1 for the 18 lit requests; 4 of 18 still +10 or more: the prologue's own peak), on average the table no longer adds registers**. The ablation says the 7900 XTX itself gains little from occupancy (WS39), so this is mostly a 680M result (not measurable here).
+
+### 8.3 What changed (shaders only; picture-neutral)
+
+1. **`RVK_CL_EARLY` defaults to 1 when the variant has no ambient hooks** (`ge_default.frag.hlsl`): the cluster selection runs at the entry, where little else is live, and leaves 6 compact words (3 x source / factor) for the texture phase; with the hooks (`gi_cl`) the entry stays crowded by the GI lookup and the old place stays (measured: `gi_cl` 126.4 -> 133.5 mean VGPR with it on). Biggest single step: `clonly` 130 -> 98.6 (gfx1035).
+2. **The selection's bookkeeping is one word** (`rvk_clWord`: count, used, kept state, shadow tested / minimum visibility): seven statics (count, used, kept state, shadow, shadow tested, physical flag, default roughness) stayed live through the whole shader because the debug views read them in the epilogue. `rvkMvPbr` reads the physical flag and the default roughness from the frame block. Shadow minimum is quantised to 8 bits (debug view only). -4 VGPR (gfx1035 98.6 -> 94.7).
+3. **The table header's fallback base is the frame block address** (`pc.frame`), not the per-lane draw window: `base` / the header, grid and slice loads are wave-uniform by construction; RGA ISA of one request: `s_load` 9 -> 21, `global_load` 112 -> 91, `v_readfirstlane` 163 -> 100, ISA -4 % (WS41 fix 4).
+Not changed: the algorithm, the twin test, the scoring, the slot filling, the occupancy shortcut.
+
+### 8.4 Measured gain (Full, solid pass, sessions as above)
+jungle -0.129 ms (-17 %; frame GPU 2.97 -> 2.80 ms, the untouched passes 2.21 -> 2.17), hold -0.001 raw but its sessions ran on different clocks (solid / rest 0.308 -> 0.263 = -15 %), harbour_night -0.050 (-8.5 %; solid / rest 0.413 -> 0.348), pub_interior -0.072 (-24 %; frame 0.958 -> 0.874, untouched 0.652 / 0.640). That is **28 .. 50 % of the prologue's total cost removed** (50 % jungle, 41 % pub, 38 % harbour normalised, 47 % hold normalised); Full / Wrapper solid: jungle 1.31 -> 1.09, harbour_night 1.08 -> 0.99, pub_interior 4.0 -> 3.1 (Wrapper's solid there 0.076 ms), hold ~1.1 -> 1.1 (raw, clock-skewed). What is left against `cl0`: +0.13 jungle, +0.16 hold, +0.13 harbour_night, +0.105 pub = the executing path (c) and the loads (a).
+
+### 8.5 Tried and dropped (measured, no gain)
+* **Software-pipelined light records** (next light's index -> position / colour / shadow id requested at the top of the iteration; `e4`): +1 VGPR, solid jungle 0.630 vs 0.631, harbour_night 0.516 vs 0.515, pub 0.229 vs 0.232, hold 0.509 vs 0.564 (noise): not kept.
+* **Waterfall over the wave's clusters so the loop's loads see a wave-uniform address** (`WaveActiveMin` + `WaveReadLaneFirst`, `rvkLightClusterAddrOfId`; the P4b idea of WS39 on a uniform base): RGA ISA unchanged (`s_load` 21 / `global_load` 95): LLPC still emits `global_load` with an SGPR base + VGPR offset for the loop's reads (confirms shader-isa.md 4.2); not kept.
+* Re-reading the engine positions instead of the `ePos` array: not tried again (S-2b: it hangs the GPU-assisted validation layer, 14.7b).
+
+### 8.6 Picture evidence and gates
+* **In-run anchored shot A/B** (`scratch/ws43/ab_shots.ps1`, a toggle tree: both call sites compiled, early when `lighting.occupancy` is on, late when off; `freeze+100/130` on, `+150: set lighting.occupancy off`, `+210/240` off, `+260` on, `+320/350` on; the occupancy shortcut is exact by WS20, so on vs off = early-without-shortcut vs late): the share of pixels differing by more than 2 levels, between the two arms / between two shots of the same arm (drift): pub_interior 0.03 % vs 0.04-0.07 %, monastery_hall 0.46 % vs 0.47-0.59 %, harbour_night 0.002 % vs 0.004-0.009 %, crystal_cave 0.06 % vs 0.07-0.09 % (the third pair of crystal_cave shows a scene change between the shots `b2` and `c1`, 4.6 % in `a1 vs c1` as well, i.e. not the toggle). Maximum differences 8 .. 47 levels in single pixels, the same as the drift. The lamp lighting is the same (pub_interior shot checked by eye).
+* `native.picture_check` with `RVK_PC_STRICT=1` (`pcA`, six spots, `pc43.ps1`): three runs PASS (`pcA1`, `pcA2`, `pcA3b`: 8 checks, 0 failed; windows FAILED 0 of 33 / 33 / 47; `DIFFERING` 0, `MISS` 0, 0 error lines; the control with the `main` tree `pcM1` the same, worst "ok" window 0.47 % vs 0.16 / 0.45 / 0.49 %). **One run (`pcA3`, the third try) crashed 7 s after the start**: `Texture::prepareForSampling` (`resources.cpp:460`, `tex_` null) through `Device::ownedPrepTexture` <- `StaticOps::ownedPass`, right after owned-trees "DIFFERING ... retained template" errors; a CPU-side owned-path race, not shader text (a null texture object), not reproduced in the rerun (`pcA3b`); not investigated further here, `ownedTextureNeedsPrep` / `valid_` with a null `tex_` needs its own look.
+* Builds / tests: `rvk_tests` 371 / 0 failures; `rvk_d3d9test --validation` Vulkan and `--backend d3d12` PASS 0 / 0; `rvk_rhitest` PASS (D3D12 and Vulkan); `dxil-check embedded` 191 / 191; `dxil-check uber-spv --variants clonly,gi_cl,scene2 --dxil` (stride 2 of the census, float and `--half`) 489 / 489 each; `dxil-check corpus corpus --gi` 2246 / 2246; a short Full run with `-Validation` + GPU-assisted validation (jungle, pub_interior, monastery_hall): PASS, 0 errors, no VUIDs. No C++ changed, so the pedantic clang-cl build was not rerun.
+
+### 8.7 Left
+The executing path (c) is the remaining cost (+0.1 .. 0.2 ms over `cl0`): the per-light loop is latency bound (index -> record -> shadow id per light, up to 63 lights) and LLPC will not scalarise it (8.5); the twin test per (draw, light), the per-light baked-shade read and the sorted insertion are per pixel. Candidates: a per-(draw, light) twin mask from the cluster pass, a typed / buffer-descriptor read of the cluster list (SMEM-eligible), or per-wave clusters scored once (a compute pre-pass writing the 3 slots per cluster x draw class is not possible: the slots depend on the pixel's position and normal). Reproduce: `runms.ps1 -Arms main,e3,wrapper,cl0 -Scenes jungle,hold -Rounds 1,2` (scratch `ws43`), `python sum43.py ms`; static: `static.ps1 -Name x -Asic gfx1100 -Variants clonly -Tree <tree>` + `lit.py`.
