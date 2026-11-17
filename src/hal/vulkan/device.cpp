@@ -914,6 +914,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                                                                   return enh::materialVariantOptions(s, enh::MaterialVariant::ClusterOnly, o);
                                                               }});
             dev_.setGiClusterOnly(true);
+            spdlog::info("enh: lights: the light table's variants carry no GI hooks while GI is off (cluster-only slot; the hooked slot is built once GI is on)");
         }
         if (!matPack_) {
             dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
