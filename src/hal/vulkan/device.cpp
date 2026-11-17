@@ -907,7 +907,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                                                             return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
                                                         }});
         // WS40 (shader-isa.md 8): the light table alone, no PBR code: lit draws take the variant without the GI hooks while GI is off (the Gi slot's hooked form is built once GI is on)
-        if (!enh::pbrVariants()) {
+        // (RVK_GI_HOOKS_ALWAYS=1: the former behaviour, the hooked variant for every lit draw: the A arm of the perf A/B)
+        char hooksAlways[4]{};
+        if (!enh::pbrVariants() && !(GetEnvironmentVariableA("RVK_GI_HOOKS_ALWAYS", hooksAlways, sizeof(hooksAlways)) > 0 && hooksAlways[0] == '1')) {
             dev_.setVariantProvider(d3d9::VariantSlot::GiCl, {enh::materialVariantTag("cl"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
                                                                   return enh::materialVariantOptions(s, enh::MaterialVariant::ClusterOnly, o);
                                                               }});
