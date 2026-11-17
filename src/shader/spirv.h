@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +33,12 @@ DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view 
 // Used for shader modules that run in fast-linked pipeline libraries (frame-ownership.md 16.27: the AMD driver exports demoted lanes of a quad with live
 // lanes there when the shader takes derivatives).
 bool demoteToKill(std::vector<std::uint32_t>& words);
+
+// OpExecutionMode EarlyFragmentTests on the fragment entry (WS42); true when the module changed.
+bool addEarlyFragmentTests(std::vector<std::uint32_t>& words);
+
+// A fragment module with a discard that does not write FragDepth (WS42: the modules that get an early-tests twin).
+bool fragmentDiscards(std::span<const std::uint32_t> words);
 
 // Debug info in the SPIR-V DXC produces (config.toml [debug] shader_debug_info, run.ps1 -ShaderDebug): -Zi -Od with OpName / OpLine and the HLSL source text,
 // so RenderDoc / PIX show names and source lines and allow stepping through the translated D3D9 shaders, the material shaders and the embedded ones.

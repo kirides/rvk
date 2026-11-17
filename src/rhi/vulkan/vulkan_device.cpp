@@ -568,7 +568,8 @@ public:
     std::uint32_t refShift() const override { return 0; }  // a GpuRef is the buffer device address
     ShaderModule createShaderModule(const Shader& code, const char* name) override {
         if (code.spirv.empty()) return ShaderModule::None;
-        return vk::rhiModule(vk::createShaderModule(ctx_, code.spirv, name != nullptr ? std::string_view(name) : std::string_view()));
+        VkShaderModule twin = VK_NULL_HANDLE;  // (WS42: a fragment module with a discard also gets its early-tests twin, kept in vk::earlyTwinOf)
+        return vk::rhiModule(vk::createShaderModule(ctx_, code.spirv, name != nullptr ? std::string_view(name) : std::string_view(), &twin));
     }
     void destroyShaderModule(ShaderModule module, bool deferred) override {
         const VkShaderModule m = vk::vkModule(module);
@@ -576,13 +577,23 @@ public:
         if (deferred) {
             vk::Context* ctx = &ctx_;
             vk::GameRecordHolder* rec = &record_;
-            defer([ctx, rec, module, m] {
+            const VkShaderModule twin = vk::takeEarlyTwin(m);  // (WS42: the early-tests twin goes with its module)
+            defer([ctx, rec, module, m, twin] {
                 rec->forgetShader(module);  // (WS37: before the handle can be reused)
                 vkDestroyShaderModule(ctx->device(), m, nullptr);
+                if (twin != VK_NULL_HANDLE) {
+                    rec->forgetShader(vk::rhiModule(twin));
+                    vkDestroyShaderModule(ctx->device(), twin, nullptr);
+                }
             });
         } else {
+            const VkShaderModule twin = vk::takeEarlyTwin(m);
             record_.forgetShader(module);
             vkDestroyShaderModule(ctx_.device(), m, nullptr);
+            if (twin != VK_NULL_HANDLE) {
+                record_.forgetShader(vk::rhiModule(twin));
+                vkDestroyShaderModule(ctx_.device(), twin, nullptr);
+            }
         }
     }
 

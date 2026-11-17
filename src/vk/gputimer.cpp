@@ -40,16 +40,19 @@ bool GpuTimer::createPassStats(Context& ctx, std::uint32_t slots) {
         statPool_ = VK_NULL_HANDLE;
         return false;
     }
+    // RVK_PASS_STATS=2: the pipeline statistics only, no occlusion query (WS42: an active occlusion query makes the driver run the depth test after a discarding shader: late Z)
+    char mode[4]{};
+    const bool occlusion = !(GetEnvironmentVariableA("RVK_PASS_STATS", mode, sizeof mode) > 0 && mode[0] == '2');
     VkQueryPoolCreateInfo oi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     oi.queryType = VK_QUERY_TYPE_OCCLUSION;
     oi.queryCount = kPassQueriesPerSlot * slots;
-    if (vkCreateQueryPool(ctx.device(), &oi, nullptr, &occPool_) != VK_SUCCESS) {
+    if (occlusion && vkCreateQueryPool(ctx.device(), &oi, nullptr, &occPool_) != VK_SUCCESS) {
         vkDestroyQueryPool(ctx.device(), statPool_, nullptr);
         statPool_ = occPool_ = VK_NULL_HANDLE;
         return false;
     }
     vkResetQueryPool(ctx.device(), statPool_, 0, ci.queryCount);
-    vkResetQueryPool(ctx.device(), occPool_, 0, oi.queryCount);
+    if (occPool_ != VK_NULL_HANDLE) vkResetQueryPool(ctx.device(), occPool_, 0, oi.queryCount);
     passCount_.assign(slots, 0);
     passCalls_.assign(std::size_t{kPassQueriesPerSlot} * slots * 4, 0);
     spdlog::info("vulkan: RVK_PASS_STATS: per-pass pipeline statistics + occlusion queries on (timings with it on are not the shipped ones)");
@@ -60,21 +63,21 @@ void GpuTimer::passBegin(VkCommandBuffer cmd, std::uint32_t slot) {
     if (statPool_ == VK_NULL_HANDLE || slot >= passCount_.size() || passCount_[slot] >= kPassQueriesPerSlot) return;
     const std::uint32_t q = slot * kPassQueriesPerSlot + passCount_[slot];
     vkCmdBeginQuery(cmd, statPool_, q, 0);
-    vkCmdBeginQuery(cmd, occPool_, q, VK_QUERY_CONTROL_PRECISE_BIT);
+    if (occPool_ != VK_NULL_HANDLE) vkCmdBeginQuery(cmd, occPool_, q, VK_QUERY_CONTROL_PRECISE_BIT);
 }
 
 void GpuTimer::passEnd(VkCommandBuffer cmd, std::uint32_t slot, const std::uint64_t calls[4]) {
     if (statPool_ == VK_NULL_HANDLE || slot >= passCount_.size() || passCount_[slot] >= kPassQueriesPerSlot) return;
     const std::uint32_t q = slot * kPassQueriesPerSlot + passCount_[slot]++;
     for (int i = 0; i < 4; ++i) passCalls_[std::size_t{q} * 4 + i] = calls[i];
-    vkCmdEndQuery(cmd, occPool_, q);
+    if (occPool_ != VK_NULL_HANDLE) vkCmdEndQuery(cmd, occPool_, q);
     vkCmdEndQuery(cmd, statPool_, q);
 }
 
 void GpuTimer::destroy() {
     if (statPool_ != VK_NULL_HANDLE) {
         vkDestroyQueryPool(ctx_->device(), statPool_, nullptr);
-        vkDestroyQueryPool(ctx_->device(), occPool_, nullptr);
+        if (occPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(ctx_->device(), occPool_, nullptr);
         statPool_ = occPool_ = VK_NULL_HANDLE;
     }
     if (pool_ != VK_NULL_HANDLE) {
@@ -129,8 +132,9 @@ GpuTimer::Result GpuTimer::collect(std::uint32_t slot) {
         std::vector<std::uint64_t> st(std::size_t{k} * 6), oc(k);  // (5 statistics + availability per query; sample count)
         const VkResult a = vkGetQueryPoolResults(ctx_->device(), statPool_, slot * kPassQueriesPerSlot, k, st.size() * 8, st.data(), 6 * 8,
                                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        const VkResult b = vkGetQueryPoolResults(ctx_->device(), occPool_, slot * kPassQueriesPerSlot, k, oc.size() * 8, oc.data(), 8,
-                                                 VK_QUERY_RESULT_64_BIT);
+        const VkResult b = occPool_ == VK_NULL_HANDLE ? VK_SUCCESS
+                                                      : vkGetQueryPoolResults(ctx_->device(), occPool_, slot * kPassQueriesPerSlot, k, oc.size() * 8, oc.data(), 8,
+                                                                              VK_QUERY_RESULT_64_BIT);
         if (r.valid && !r.segments.empty() && (a == VK_SUCCESS || a == VK_NOT_READY) && b == VK_SUCCESS) {
             std::uint32_t next = 0;
             for (Segment& sg : r.segments) {
@@ -144,7 +148,7 @@ GpuTimer::Result GpuTimer::collect(std::uint32_t slot) {
             }
         }
         vkResetQueryPool(ctx_->device(), statPool_, slot * kPassQueriesPerSlot, k);
-        vkResetQueryPool(ctx_->device(), occPool_, slot * kPassQueriesPerSlot, k);
+        if (occPool_ != VK_NULL_HANDLE) vkResetQueryPool(ctx_->device(), occPool_, slot * kPassQueriesPerSlot, k);
         passCount_[slot] = 0;
     }
     if (n > 0) {

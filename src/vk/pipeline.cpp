@@ -41,7 +41,43 @@ bool PipelineCache::Eq::operator()(const PipelineDesc& a, const PipelineDesc& b)
 
 std::atomic<bool> g_demoteAsKill{false};
 
-VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name) {
+namespace {
+std::mutex g_twinMutex;
+std::unordered_map<VkShaderModule, VkShaderModule> g_earlyTwins;
+}  // namespace
+
+VkShaderModule earlyTwinOf(VkShaderModule module) {
+    const std::lock_guard lock(g_twinMutex);
+    const auto it = g_earlyTwins.find(module);
+    return it == g_earlyTwins.end() ? VK_NULL_HANDLE : it->second;
+}
+
+namespace {
+std::mutex g_earlyPipeMutex;
+std::unordered_set<VkPipeline> g_earlyPipes;
+}  // namespace
+
+void noteEarlyPipeline(const PipelineDesc& d, VkPipeline p) {
+    if (!d.earlyZ || p == VK_NULL_HANDLE) return;
+    const std::lock_guard lock(g_earlyPipeMutex);
+    g_earlyPipes.insert(p);
+}
+
+bool isEarlyPipeline(VkPipeline p) {
+    const std::lock_guard lock(g_earlyPipeMutex);
+    return g_earlyPipes.contains(p);
+}
+
+VkShaderModule takeEarlyTwin(VkShaderModule module) {
+    const std::lock_guard lock(g_twinMutex);
+    const auto it = g_earlyTwins.find(module);
+    if (it == g_earlyTwins.end()) return VK_NULL_HANDLE;
+    const VkShaderModule t = it->second;
+    g_earlyTwins.erase(it);
+    return t;
+}
+
+VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name, VkShaderModule* earlyTwin) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     // (16.27: with pipeline libraries a `discard` is OpKill, not the SM 6.6 demote: the fast-linked AMD pixel shaders export demoted lanes)
     std::vector<std::uint32_t> patched;
@@ -54,6 +90,12 @@ VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> s
             if (n.fetch_add(1) == 0) spdlog::info("vulkan: shader modules: `discard` as OpKill instead of the demote (pipeline libraries, frame-ownership.md 16.27)");
         }
     }
+    // WS42 experiment (RVK_EARLY_ALL=1, picture changes for discarding shaders): every fragment module runs the depth tests first
+    static const bool earlyAll = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_EARLY_ALL", e, sizeof e) > 0 && e[0] == '1'; }();
+    if (earlyAll) {
+        if (patched.empty()) patched.assign(spirv.begin(), spirv.end());
+        if (!shader::addEarlyFragmentTests(patched) && spirv.size() == patched.size()) patched.clear();
+    }
     ci.codeSize = patched.empty() ? spirv.size_bytes() : patched.size() * sizeof(std::uint32_t);
     ci.pCode = patched.empty() ? spirv.data() : patched.data();
     VkShaderModule m = VK_NULL_HANDLE;
@@ -62,6 +104,28 @@ VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> s
         return VK_NULL_HANDLE;
     }
     if (!name.empty()) names::shaderModule(ctx, m, name);
+    // WS42: a fragment module with a discard also gets the twin that runs the depth tests first (used for draws that test depth EQUAL against a z pre-pass)
+    if (earlyTwin != nullptr) {
+        *earlyTwin = VK_NULL_HANDLE;
+        std::span<const std::uint32_t> code = patched.empty() ? spirv : std::span<const std::uint32_t>(patched);
+        if (shader::fragmentDiscards(code)) {
+            std::vector<std::uint32_t> twinCode(code.begin(), code.end());
+            if (shader::addEarlyFragmentTests(twinCode)) {
+                VkShaderModuleCreateInfo tci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+                tci.codeSize = twinCode.size() * sizeof(std::uint32_t);
+                tci.pCode = twinCode.data();
+                VkShaderModule t = VK_NULL_HANDLE;
+                if (vkCreateShaderModule(ctx.device(), &tci, nullptr, &t) == VK_SUCCESS) {
+                    if (!name.empty()) names::shaderModule(ctx, t, std::string(name) + " [early]");
+                    {
+                        const std::lock_guard lock(g_twinMutex);
+                        g_earlyTwins[m] = t;
+                    }
+                    *earlyTwin = t;
+                }
+            }
+        }
+    }
     return m;
 }
 
@@ -507,7 +571,7 @@ VkPipeline PipelineCache::build(const PipelineDesc& d0) {
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vkModule(d.vs), "main", nullptr};
     // (a description without a fragment shader: the colour-less z passes whose pixel shader only wrote colour, native.depth_z / S-6)
     const bool hasFs = d.fs != rhi::ShaderModule::None;
-    if (hasFs) stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, vkModule(d.fs), "main", nullptr};
+    if (hasFs) stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragmentModuleOf(d), "main", nullptr};
 
     VkVertexInputBindingDescription bindings[kMaxVertexBindings]{};
     VkVertexInputAttributeDescription attrs[kMaxVertexAttributes]{};
@@ -570,8 +634,9 @@ VkPipeline PipelineCache::build(const PipelineDesc& d0) {
         spdlog::error("vulkan: vkCreateGraphicsPipelines: {}", resultString(r));
         return VK_NULL_HANDLE;
     }
-    names::pipeline(*ctx_, p, vkModule(d.vs), vkModule(d.fs));
-    if (isa::enabled()) isa::dump(*ctx_, p, "pipe " + names::moduleLabel(vkModule(d.vs)) + " + " + names::moduleLabel(vkModule(d.fs)));
+    names::pipeline(*ctx_, p, vkModule(d.vs), fragmentModuleOf(d));
+    if (isa::enabled()) isa::dump(*ctx_, p, "pipe " + names::moduleLabel(vkModule(d.vs)) + " + " + names::moduleLabel(fragmentModuleOf(d)) + (d.earlyZ ? " early" : ""));
+    noteEarlyPipeline(d, p);
     return p;
 }
 

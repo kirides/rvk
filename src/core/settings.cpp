@@ -1130,6 +1130,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,
         .page = "Debug", .section = "Renderer internals",
     });
+    r.earlyEqualZ = &reg.add({
+        .key = "debug.early_equal_z",
+        .label = "Early depth test for draws after the z pre-pass",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Draws that test depth EQUAL against the z pre-pass (the engine's colour pass) run the depth test before a shader that "
+                       "can discard, so hidden fragments are not shaded (the driver cannot do it on its own while the depth state is dynamic). "
+                       "The picture is identical. Off = to compare.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
+    });
     r.recordThreads = &reg.add({
         .key = "debug.record_threads",
         .label = "Record draws on worker threads",

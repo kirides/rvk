@@ -60,28 +60,40 @@ bool GameRecord::create(Context& ctx, VkPipelineLayout layout, const std::filesy
     return pipelines_.create(ctx, layout, cacheFile, libraries);
 }
 
-rhi::GamePipeline GameRecord::resolvePipeline(const PipelineDesc& desc, bool* created, bool wait) {
+// WS42: `earlyZ` is only kept for a fragment module that has an early-tests twin (a shader with a discard); for the others the flag would only duplicate pipelines
+static const PipelineDesc& normalised(const PipelineDesc& d, PipelineDesc& tmp) {
+    if (d.earlyZ && vk::earlyTwinOf(vk::vkModule(d.fs)) == VK_NULL_HANDLE) return rhi::withoutEarlyZ(d, tmp);
+    return d;
+}
+
+rhi::GamePipeline GameRecord::resolvePipeline(const PipelineDesc& desc0, bool* created, bool wait) {
+    PipelineDesc tmp;
+    const PipelineDesc& desc = normalised(desc0, tmp);
     return rhiPipeline(wait ? pipelines_.get(desc, created) : pipelines_.getNoWait(desc, created));
 }
 
-rhi::GamePipeline GameRecord::findPipeline(const PipelineDesc& desc) const {
-    return rhiPipeline(pipelines_.find(desc));
+rhi::GamePipeline GameRecord::findPipeline(const PipelineDesc& desc0) const {
+    PipelineDesc tmp;
+    return rhiPipeline(pipelines_.find(normalised(desc0, tmp)));
 }
 
 rhi::GamePipeline GameRecord::currentPipeline(rhi::GamePipeline p) const {
     return rhiPipeline(pipelines_.current(reinterpret_cast<VkPipeline>(static_cast<std::uint64_t>(p))));
 }
 
-bool GameRecord::containsPipeline(const PipelineDesc& desc) const {
-    return pipelines_.contains(desc);
+bool GameRecord::containsPipeline(const PipelineDesc& desc0) const {
+    PipelineDesc tmp;
+    return pipelines_.contains(normalised(desc0, tmp));
 }
 
-void GameRecord::prewarmPipeline(const PipelineDesc& desc) {
-    pipelines_.prewarm(desc);
+void GameRecord::prewarmPipeline(const PipelineDesc& desc0) {
+    PipelineDesc tmp;
+    pipelines_.prewarm(normalised(desc0, tmp));
 }
 
-void GameRecord::prewarmOncePipeline(const PipelineDesc& desc) {
-    pipelines_.prewarmOnce(desc);
+void GameRecord::prewarmOncePipeline(const PipelineDesc& desc0) {
+    PipelineDesc tmp;
+    pipelines_.prewarmOnce(normalised(desc0, tmp));
 }
 
 void GameRecord::setPipelineBackgroundLimit(unsigned n, bool low) {
@@ -409,7 +421,8 @@ void GameRecord::beginScope(const rhi::RenderingInfo& info, bool secondary) {
         static const std::uint8_t ablMode = [] {
             char e[8]{};
             if (GetEnvironmentVariableA("RVK_ABL_SKIP", e, sizeof e) == 0) return std::uint8_t{0};
-            return std::uint8_t(e[0] == 'e' ? 1 : e[0] == 'n' ? 2 : 0);
+            // eq / ne: skip the draws with / without an EQUAL depth compare; eqk / eqo: skip the EQUAL draws with / without an early-tests twin (= shaders with a discard; needs debug.early_equal_z)
+            return std::uint8_t(e[0] == 'e' ? (e[1] == 'q' && e[2] == 'k' ? 3 : e[1] == 'q' && e[2] == 'o' ? 4 : 1) : e[0] == 'n' ? 2 : 0);
         }();
         rec_.ablSkip = ablMode != 0 && !secondary && info.colorCount == 1 && info.depth.texture != nullptr &&
                                rhi::vulkan::imageOf(*info.color[0].texture).format() == VK_FORMAT_R16G16B16A16_SFLOAT ? ablMode : 0;
@@ -465,12 +478,15 @@ GameRecord::~GameRecord() {
 
 // RVK_PASS_STATS=1: the per-scope draw counters below (off = one predictable branch per packet, nothing counted)
 static bool passStatsOn() {  // (read at first use: the proxy sets the Win32 environment after the DLL's static initialisers)
-    static const bool on = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && e[0] == '1'; }();
+    static const bool on = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && (e[0] == '1' || e[0] == '2'); }();
     return on;
 }
 
 void GameRecord::applyPacket(const PipelineCache& pipelines, GameRecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const rhi::DrawPacket& p) {
-    if (rs.ablSkip != 0 && p.dyn != nullptr && ((p.dyn->depthTest != 0 && p.dyn->depthCompare == VK_COMPARE_OP_EQUAL) == (rs.ablSkip == 1))) return;
+    if (rs.ablSkip != 0 && p.dyn != nullptr) {
+        const bool eq = p.dyn->depthTest != 0 && p.dyn->depthCompare == VK_COMPARE_OP_EQUAL;
+        if (rs.ablSkip <= 2 ? eq == (rs.ablSkip == 1) : eq && isEarlyPipeline(vkPipeline(p.pipeline)) == (rs.ablSkip == 3)) return;
+    }
     if (p.vi != rs.lastVi) {
         applyVertexInput(rs, cmd, *p.vi);
         rs.lastVi = p.vi;
