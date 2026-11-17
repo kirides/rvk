@@ -47,6 +47,9 @@ using rhi::kMaxVertexBindings;
 using rhi::kMaxVertexAttributes;
 using rhi::PipelineDesc;
 
+// RVK_ABL_HDR_NOPS=1 debug ablation (pipeline.cpp): the description without its fragment shader for scene-HDR pipelines, else `d` itself
+const PipelineDesc& ablateNoPs(const PipelineDesc& d, PipelineDesc& tmp);
+
 class PipelineCache {
 public:
     // libraries: use VK_EXT_graphics_pipeline_library when librariesSupported (pipeline_library.cpp)

@@ -721,6 +721,24 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     o.depthCompare = compareOp(rs_[RS_ZFUNC]);
     const bool reversed = boundDepthReversed();
     if (reversed) o.depthCompare = reverseCompareOp(o.depthCompare);
+    // RVK_ZEQ_LEQUAL=1 (debug experiment, docs/research/full-solid-pass.md): the main solid pass's EQUAL draws (against the z pre-pass) test (reversed) LESS_OR_EQUAL instead:
+    // the same picture where the z pass's depth is the nearest (the buffer holds the nearest depth, so nothing nearer exists), and a compare the early-Z / Hi-Z hardware can reject with
+    // RVK_EQ_NOWRITE=1: the same draws keep EQUAL but stop writing depth (the z pre-pass wrote exactly this value: the write is a no-op for them, and without it a pixel shader that
+    // discards no longer needs the depth write to wait for the shader: the early depth test can reject hidden fragments before they are shaded)
+    static const bool eqNoWrite = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_EQ_NOWRITE", e, sizeof e) > 0 && e[0] == '1'; }();
+    if (eqNoWrite && depth && o.depthCompare == VK_COMPARE_OP_EQUAL && colorCount_ == 1) {
+        const scene::Phase ezph = phases_.current();
+        if (ezph.view == scene::View::Main && ezph.pass == scene::Pass::Solid) o.depthWrite = VK_FALSE;
+    }
+    static const bool zeqLequal = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_ZEQ_LEQUAL", e, sizeof e) > 0 && e[0] == '1'; }();
+    if (zeqLequal && depth && o.depthCompare == VK_COMPARE_OP_EQUAL && colorCount_ == 1) {
+        const scene::Phase zph = phases_.current();
+        if (zph.view == scene::View::Main && zph.pass == scene::Pass::Solid) {
+            o.depthCompare = reversed ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
+            static const bool noWrite = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_ZEQ_NOWRITE", e, sizeof e) > 0 && e[0] == '1'; }();
+            if (noWrite) o.depthWrite = VK_FALSE;  // (RVK_ZEQ_NOWRITE=1: with it the pixel shader's discard no longer forces a late depth write)
+        }
+    }
     const bool stencil = stencilFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_STENCILENABLE] != 0;
     if (rs_[RS_STENCILENABLE] != 0 && depthFormat_ != VK_FORMAT_UNDEFINED) ++(stencilFormat_ != VK_FORMAT_UNDEFINED ? stats_.stencilPlaneDraws : stats_.stencilNoPlaneDraws);
     o.stencilTest = stencil ? VK_TRUE : VK_FALSE;
@@ -1528,6 +1546,13 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             ++depthZStats_.psKept;
             if (phase.view == scene::View::Main) ++depthZStats_.psKeptMain;
         }
+    }
+    // RVK_ABL_SOLID_NOPS=1 (debug ablation, docs/research/full-solid-pass.md): the main view's solid pass without any pixel shader (colour output undefined): what the pass costs
+    // without fragment shading (vertex / front end / raster / ROP floor)
+    static const bool ablSolidNoPs = [] { char e[4]{}; return GetEnvironmentVariableA("RVK_ABL_SOLID_NOPS", e, sizeof e) > 0 && e[0] == '1'; }();
+    if (ablSolidNoPs && colorCount_ == 1 && depthFormat_ != VK_FORMAT_UNDEFINED && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid && !replaced &&
+        tint == 0 && !gbufWrite_) {
+        pd.fs = rhi::ShaderModule::None;
     }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     GamePipeline pipeline = GamePipeline::None;

@@ -904,12 +904,24 @@ void Device::beginFrame(bool continuation) {
             perf_.gpuMs += r.mainMs;
             perf_.gpuUploadMs += r.uploadMs;
             std::vector<perfwin::Segment> windowSegs;  // (a perf window's frame: aggregated by core/perf_window, not logged per frame)
-            for (const auto& seg : r.segments) windowSegs.push_back({seg.label, seg.ms});
+            for (const auto& seg : r.segments) {
+                perfwin::Segment ps{seg.label, seg.ms};
+                if (seg.hasStat) {
+                    ps.hasStat = true;
+                    std::copy(std::begin(seg.stat), std::end(seg.stat), ps.stat);
+                }
+                windowSegs.push_back(ps);
+            }
             if (!r.segments.empty() && !perfwin::gpuFrame(gpuDetailFrame_[slot], r.mainMs, r.uploadMs, windowSegs)) {
                 spdlog::info("perf: GPU passes of frame {} (one submission: {:.3f} ms main, {:.3f} ms uploads)", gpuDetailFrame_[slot],
                              r.mainMs, r.uploadMs);
                 for (const auto& seg : r.segments) {
-                    spdlog::info("perf:   {:8.3f} ms  {}", seg.ms, seg.label);
+                    if (seg.hasStat) {
+                        spdlog::info("perf:   {:8.3f} ms  {}  [stats: iaVerts {:.0f} iaPrims {:.0f} vs {:.0f} clipPrims {:.0f} fs {:.0f} samples {:.0f} calls {:.0f} indPk {:.0f} indRec {:.0f} binds {:.0f}]", seg.ms,
+                                     seg.label, seg.stat[0], seg.stat[1], seg.stat[2], seg.stat[3], seg.stat[4], seg.stat[5], seg.stat[6], seg.stat[7], seg.stat[8], seg.stat[9]);
+                    } else {
+                        spdlog::info("perf:   {:8.3f} ms  {}", seg.ms, seg.label);
+                    }
                 }
             }
         }

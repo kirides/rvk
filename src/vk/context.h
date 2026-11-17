@@ -92,6 +92,7 @@ struct DeviceFeatures {
     float maxAnisotropy = 1.0f;
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
+    bool passStats = false;       // RVK_PASS_STATS=1: pipelineStatisticsQuery + occlusionQueryPrecise enabled (per-pass counts, vk/gputimer)
     bool pipelineStatistics = false;  // VK_KHR_pipeline_executable_properties enabled (ContextOptions::pipelineStatistics)
     bool fullScreenExclusive = false; // VK_EXT_full_screen_exclusive (+ instance VK_KHR_get_surface_capabilities2) enabled
     RayTracingFeatures rayTracing;

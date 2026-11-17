@@ -33,6 +33,8 @@ struct PassAcc {
     Acc ms;
     std::uint64_t frames = 0;  // frames that had the key
     double draws = 0.0;
+    double stat[10] = {};  // RVK_PASS_STATS sums over the frames that had the key
+    std::uint64_t statFrames = 0;
 };
 
 struct Window {
@@ -64,6 +66,12 @@ void finish(Window* w) {
         // (a key missing in a frame counted 0 there: sum of squares over the frames that had it, the others add 0)
         spdlog::info("perf: window {} pass mean {:.4f} ms sd {:.4f} n {} draws {:.1f} | {}", w->tag, p->second.ms.mean(n), p->second.ms.sd(n),
                      p->second.frames, p->second.frames > 0 ? p->second.draws / static_cast<double>(p->second.frames) : 0.0, p->first);
+        if (p->second.statFrames > 0) {
+            const double k = 1.0 / static_cast<double>(p->second.statFrames);
+            const double* st = p->second.stat;
+            spdlog::info("perf: window {} pass stats per frame: iaVerts {:.0f} iaPrims {:.0f} vs {:.0f} clipPrims {:.0f} fs {:.0f} samples {:.0f} calls {:.0f} indPk {:.0f} indRec {:.0f} binds {:.0f} | {}", w->tag,
+                         st[0] * k, st[1] * k, st[2] * k, st[3] * k, st[4] * k, st[5] * k, st[6] * k, st[7] * k, st[8] * k, st[9] * k, p->first);
+        }
     }
     delete w;
 }
@@ -167,7 +175,13 @@ bool gpuFrame(std::uint64_t frame, double mainMs, double uploadMs, const std::ve
     ++w->timed;
     w->main.add(mainMs);
     w->uploads.add(uploadMs);
-    std::map<std::string, std::pair<double, std::uint32_t>> perFrame;
+    struct FrameSlot {
+        double ms = 0.0;
+        std::uint32_t draws = 0;
+        double stat[10] = {};
+        bool hasStat = false;
+    };
+    std::map<std::string, FrameSlot> perFrame;
     // RVK_PERF_WINDOW_ORDINAL=1: passes of one shape (the z passes, the main colour passes, the cascades) keep their own rows: the 2nd one of a frame is "<key> #2" (docs/research/shader-isa.md)
     static const bool ordinal = [] {
         char e[4]{};
@@ -182,14 +196,22 @@ bool gpuFrame(std::uint64_t frame, double mainMs, double uploadMs, const std::ve
             if (k > 1) key += " #" + std::to_string(k);
         }
         auto& slot = perFrame[key];
-        slot.first += s.ms;
-        slot.second += d;
+        slot.ms += s.ms;
+        slot.draws += d;
+        if (s.hasStat) {
+            slot.hasStat = true;
+            for (int i = 0; i < 10; ++i) slot.stat[i] += s.stat[i];
+        }
     }
     for (const auto& [k, v] : perFrame) {
         PassAcc& p = w->passes[k];
-        p.ms.add(v.first);
+        p.ms.add(v.ms);
         ++p.frames;
-        p.draws += v.second;
+        p.draws += v.draws;
+        if (v.hasStat) {
+            ++p.statFrames;
+            for (int i = 0; i < 10; ++i) p.stat[i] += v.stat[i];
+        }
     }
     reap();
     return true;

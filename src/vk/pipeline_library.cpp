@@ -261,8 +261,10 @@ void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBit
     }
 }
 
-VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize, bool compileMissing) {
+VkPipeline PipelineCache::link(const PipelineDesc& d0, bool optimize, bool compileMissing) {
     RVK_ZONE("vk::PipelineCache::link");
+    PipelineDesc ablTmp;
+    const PipelineDesc& d = ablateNoPs(d0, ablTmp);
     VkPipeline libs[4]{};
     if (!compileMissing) {
         // only shader libraries that exist (the draw path: no shader compile on the render thread)
