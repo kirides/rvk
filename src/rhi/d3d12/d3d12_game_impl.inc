@@ -534,17 +534,13 @@ SamplerIndex D3D12DeviceImpl::createGameSampler(const GameSamplerDesc& d, const 
 
 bool D3D12DeviceImpl::createPipelineCaches(const std::filesystem::path&, bool) { return true; }
 
-GamePipeline D3D12DeviceImpl::findPipeline(const PipelineDesc& desc0) {
-    PipelineDesc noEarly;
-    const PipelineDesc& desc = withoutEarlyZ(desc0, noEarly);  // (WS42: the Vulkan backend's early-tests twin: a PSO carries the depth state here)
+GamePipeline D3D12DeviceImpl::findPipeline(const PipelineDesc& desc) {
     const std::shared_lock lock(entryMutex_);
     const auto it = entryIndex_.find(desc);
     return it == entryIndex_.end() ? GamePipeline::None : static_cast<GamePipeline>(it->second);
 }
 
-GamePipeline D3D12DeviceImpl::resolvePipeline(const PipelineDesc& desc0, bool* created, bool) {
-    PipelineDesc noEarly;
-    const PipelineDesc& desc = withoutEarlyZ(desc0, noEarly);
+GamePipeline D3D12DeviceImpl::resolvePipeline(const PipelineDesc& desc, bool* created, bool) {
     if (created != nullptr) *created = false;
     if (desc.vs == ShaderModule::None) return GamePipeline::None;  // (no pixel shader is valid: the colour-less z passes, native.depth_z / S-6)
     {

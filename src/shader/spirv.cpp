@@ -95,48 +95,4 @@ bool demoteToKill(std::vector<std::uint32_t>& words) {
     return true;
 }
 
-// OpExecutionMode <fragment entry> EarlyFragmentTests added (WS42, docs/research/full-solid-pass.md): the depth / stencil tests run before the shader, and a
-// fragment the shader discards has still written its depth / stencil. true when the module changed (a fragment entry without the mode).
-bool addEarlyFragmentTests(std::vector<std::uint32_t>& words) {
-    constexpr std::uint32_t kOpEntryPoint = 15, kOpExecutionMode = 16, kModeEarly = 9, kModelFragment = 4;
-    if (words.size() < 6 || words[0] != 0x07230203u) return false;
-    std::size_t at = 0;  // insertion index: after the last OpEntryPoint / OpExecutionMode of the preamble
-    std::uint32_t entry = 0;
-    for (std::size_t i = 5; i < words.size();) {
-        const std::uint32_t op = words[i] & 0xFFFFu, len = words[i] >> 16;
-        if (len == 0 || i + len > words.size()) return false;
-        if (op == kOpEntryPoint) {
-            if (words[i + 1] == kModelFragment) entry = words[i + 2];
-            at = i + len;
-        } else if (op == kOpExecutionMode) {
-            if (words[i + 1] == entry && words[i + 2] == kModeEarly) return false;  // already there
-            at = i + len;
-        } else if (at != 0 && op != kOpExecutionMode) {
-            break;
-        }
-        i += len;
-    }
-    if (entry == 0 || at == 0) return false;
-    const std::uint32_t ins[3] = {(3u << 16) | kOpExecutionMode, entry, kModeEarly};
-    words.insert(words.begin() + static_cast<std::ptrdiff_t>(at), ins, ins + 3);
-    return true;
-}
-
-// A fragment module that can discard (OpKill / OpTerminateInvocation / OpDemoteToHelperInvocation) and does not write FragDepth: the modules whose depth tests
-// run after the shader without EarlyFragmentTests (the others get the early tests from the driver anyway). Only these have an early twin.
-bool fragmentDiscards(std::span<const std::uint32_t> words) {
-    constexpr std::uint32_t kOpEntryPoint = 15, kOpDecorate = 71, kOpKill = 252, kOpTerminate = 4416, kOpDemote = 5380, kModelFragment = 4, kDecBuiltIn = 11, kFragDepth = 22;
-    if (words.size() < 6 || words[0] != 0x07230203u) return false;
-    bool fragment = false, discards = false;
-    for (std::size_t i = 5; i < words.size();) {
-        const std::uint32_t op = words[i] & 0xFFFFu, len = words[i] >> 16;
-        if (len == 0 || i + len > words.size()) return false;
-        if (op == kOpEntryPoint && words[i + 1] == kModelFragment) fragment = true;
-        if (op == kOpDecorate && len >= 4 && words[i + 2] == kDecBuiltIn && words[i + 3] == kFragDepth) return false;
-        if (op == kOpKill || op == kOpTerminate || op == kOpDemote) discards = true;
-        i += len;
-    }
-    return fragment && discards;
-}
-
 }  // namespace rvk::shader

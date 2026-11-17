@@ -641,13 +641,6 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setCrashMarkers(rs.debugCrashMarkers->asBool());
         reg.onChange(*rs.debugCrashMarkers, [this](const settings::Setting& s) { dev_.setCrashMarkers(s.asBool()); }, this);
     }
-    if (rs.earlyEqualZ != nullptr) {
-        dev_.setEarlyEqualZ(rs.earlyEqualZ->asBool());
-        reg.onChange(*rs.earlyEqualZ, [this](const settings::Setting& s) {
-            dev_.setEarlyEqualZ(s.asBool());
-            spdlog::info("hal: settings: early depth test for EQUAL draws {}", s.asBool() ? "on" : "off");
-        }, this);
-    }
     if (rs.recordThreads != nullptr) {
         dev_.setRecordThreads(rs.recordThreads->asBool());
         reg.onChange(*rs.recordThreads, [this](const settings::Setting& s) {

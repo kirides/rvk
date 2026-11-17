@@ -7,7 +7,7 @@ the same fragments; with the light table removed from the material shaders Full'
 Machine / method: RX 7900 XTX, `RisenTest.exe`, 1600x900 (the window of the private copy; WS39's 720p numbers are ~0.64x of these), vsync off, `-PlayerDefaults`, `RVK_PERF_WINDOW_ORDINAL=1`,
 `perf-ab.ps1` sessions (one session per mode and scene, 2 windows x 120 frames, ordinal 2500 frames lead; shader-ablation sessions 20000 frames lead after the variant queue reached 0),
 `debug.record_threads=false` (the statistics queries need inline scopes), private copy `risen-test-vk-ws41`, scratch `B:\DevDrive\rvk-work\scratch\ws41` (logs, helper scripts `runstats.ps1`, `tab.py`, `summ.py`, the ablated `shaders-*` trees).
-Timings of runs with `RVK_PASS_STATS=1` carry the cost of the queries (small: Wrapper jungle solid 0.60 ms with, 0.68 without in WS39 clocks): all comparisons below are inside the same kind of session.
+**Superseded by section 7: `RVK_PASS_STATS=1`'s occlusion query forces late Z, the invocation counts and the Full gap of this document are inflated; use `RVK_PASS_STATS=2`.** Timings of runs with `RVK_PASS_STATS=1` carry the cost of the queries (small: Wrapper jungle solid 0.60 ms with, 0.68 without in WS39 clocks): all comparisons below are inside the same kind of session.
 No Radeon GPU Profiler / Radeon Developer Panel is installed on the machine (searched Program Files, scoop, `B:\D`, `C:\`): the evidence is query counters + ablations.
 
 ## 1. Tooling added (debug only, off = nothing exists / one predictable branch)
@@ -96,3 +96,46 @@ Fix 1 is the answer but not small; fix 3 is a diagnosis task (the experiments ab
 # floors: add RVK_ABL_HDR_NOPS=1; shader ablation: RVK_SHADER_DIR=<copy of shaders with rvkMvCluster returning early>, -Lead 20000 (cold variants), same env
 # first run of new query code: add -Validation
 ```
+
+## 7. WS42: the "7x shading" is an artefact of RVK_PASS_STATS's occlusion query (2026-11-17)
+
+Question: why are the EQUAL draws (after the z pre-pass) not rejected before shading in both modes (jungle 13.4 M FS invocations for 1.87 M samples)? **Answer: in the shipped
+configuration they are. The surplus appeared only while an occlusion query was active (`RVK_PASS_STATS=1`, section 1); with it, this driver (AMD proprietary 26.11.1, RX 7900 XTX) runs the depth
+test after a shader that can `discard` (late Z) for the whole scope. The game itself never issues occlusion queries (occlusion.md), nor does the renderer.** Sections 3.5 / 4 item 3 / 5 above are superseded by this one.
+
+Method: Wrapper jungle 1600x900, `perf-ab.ps1` sessions, `debug.record_threads=false` where counters are read. New `RVK_PASS_STATS=2` = pipeline statistics only (no occlusion query; `samples` reads 0).
+Hypotheses tried with the experiment build (commit ccad4a8, reverted in the next commit): `PipelineDesc::earlyZ` = a twin of every fragment module that has a discard + `OpExecutionMode EarlyFragmentTests`, used for draws testing EQUAL
+without stencil (legal and picture-identical: a fragment passing EQUAL writes the depth already there; verified: in-run anchored `shot` A/B at 7 spots in Wrapper and Full, difference between flag off and on = the drift between two identical shots, <= 2 levels),
+`RVK_EARLY_ALL=1` (every fragment module early: bound), `RVK_ABL_SKIP=eqk|eqo` (EQUAL draws with / without a discarding shader).
+
+| jungle, Wrapper (Full) | FS invocations | solid ms |
+|---|---|---|
+| `RVK_PASS_STATS=1` (occlusion on), EQUAL draws as the engine has them | 13.4 M (13.3 M) | 0.66-0.78 (1.74) |
+| the same + early-tests twin on EQUAL draws | 2.46 M (2.47 M) | 0.51-0.60 (0.96) |
+| all fragment modules early (bound) | 1.79 M = samples passed | 0.555 |
+| `RVK_PASS_STATS=2` (statistics only), engine state | **2.46 M (2.46 M)** | **0.59 (0.84)** |
+| `RVK_PASS_STATS=2`, early twin on | 2.46 M | 0.59 |
+| no query at all, early twin off / on (in-session, 3 pairs, record threads on) | - | 0.603 / 0.610 (+1.2 %, z +0.9); Full 0.8135 / 0.8120; hold, night, pub within +-2 % |
+
+So hypotheses 1-3 are answered: the late Z was forced by the active occlusion query (not by discard + depth write, not by the dynamic depth state, not by HTILE, not by an incomplete pre-pass:
+removing the query gives the early reject; the early-tests twin cannot add anything). The 7x artefact costs jungle +0.17 ms in Wrapper (EQUAL class 0.29 -> 0.46 ms) and ~0.9 ms in Full (heavier shader pays more per wasted invocation),
+which inflated sections 2-3 of WS41 (Full solid 1.753 ms with the query; 0.84 without, RVK_PASS_STATS=2). The Full / Wrapper solid gap without queries (sessions of `RVK_PASS_STATS=2`, separate sessions, clocks differ by session): jungle 0.53 / 0.84, hold 0.32 / 0.57,
+harbour_night 0.34 / 0.64, pub_interior 0.079 / 0.32 ms: 1.6x, 1.8x, 1.9x, 4.1x; with default settings (record threads on, `pf` sessions) 1.35x, 1.27x, 1.22x, 3.9x. It is real, smaller in vegetation scenes than WS41 said, and its
+attribution (light-table prologue) was measured under late Z: **redo the cl0 ablation without a query before building fix 1 / 2 of section 4** (an in-session `lighting.clustered=false` A/B is not usable: the old light path is far slower, jungle 0.96 -> 2.4 ms).
+
+### Remaining surplus, decomposed (jungle Wrapper, `RVK_PASS_STATS=2` for fs / ms, `=1` for samples, `RVK_ABL_SKIP`)
+| class | draws | FS invocations | samples passed | solid ms (alone) |
+|---|---|---|---|---|
+| EQUAL (all are cut-out shaders with discard: `eqk` removes exactly the same draws as `eq`) | 667 | 0.93 M (11.9 M with the occlusion query) | 0.87 M | 0.29 (0.46 with the query) |
+| not EQUAL (LEQUAL, discard + depth write: no pre-pass, late Z is required) | 449 | 1.64 M | 0.94 M | 0.28 |
+| whole pass | | 2.46 M | 1.84 M | 0.59 |
+
+EQUAL draws shade 1.06x their passing samples in production; the whole pass shades 1.31x (hold 1.35x, harbour_night 1.34x, pub 1.2x). The 0.65 M surplus is the non-EQUAL cut-outs (shaded, then discarded or
+hidden; an early test is illegal for discard + depth write): at most ~0.12 ms (surplus share of that class's 0.28 ms), only reachable by giving those draws a pre-pass (changes the engine's order / picture risk): not done.
+Quad overshading: the FS counter counts covered pixels only (it equals samples when everything is early), helper lanes are invisible to it. Jungle averages 2.3 samples per clipped primitive (1.84 M / 0.78 M), so lanes launched are
+a multiple of the counted ones; it is inherent to the foliage meshes (detail distances) and was not measured (no lane counter without a material-shader write, forbidden by the rules).
+D3D12: the PSO bakes depth state, the game issues no occlusion queries there either; nothing to change (not measured: no pipeline statistics on that backend).
+
+### What changed in the code
+`RVK_PASS_STATS=2` (statistics without the occlusion query; `=1` keeps both: timings and fs counts of `=1` runs are NOT the shipped ones, use `=2` for invocation counts). Everything else of the experiment is reverted
+(`debug.early_equal_z`, `PipelineDesc::earlyZ`, twins): zero effect without queries, see the table. Recipe: `.\scripts\perf-ab.ps1 ... -Environment 'RVK_PERF_WINDOW_ORDINAL=1','RVK_PASS_STATS=2' -Setting 'debug.record_threads=false'`.

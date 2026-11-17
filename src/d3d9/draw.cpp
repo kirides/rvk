@@ -1554,13 +1554,6 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         tint == 0 && !gbufWrite_) {
         pd.fs = rhi::ShaderModule::None;
     }
-    // WS42 (docs/research/full-solid-pass.md): a draw that tests depth EQUAL (it follows a z pre-pass) without stencil runs its depth test before the shader (the early-tests twin of a
-    // shader with `discard`): picture-identical (a fragment that passes EQUAL writes the depth that is already there), and the driver cannot reject hidden fragments early on its own
-    // while the depth compare / write are dynamic state and the shader may discard
-    if (earlyEqualZ_ && pd.fs != rhi::ShaderModule::None && depthFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_ZENABLE] != ZB_FALSE && rs_[RS_ZFUNC] == CMP_EQUAL &&
-        !(stencilFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_STENCILENABLE] != 0)) {
-        pd.earlyZ = true;
-    }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     GamePipeline pipeline = GamePipeline::None;
     if (lastPipelineValid_ && sameDesc(pd, lastPipelineDesc_)) {

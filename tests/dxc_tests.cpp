@@ -123,38 +123,6 @@ TEST(spirv_demote_to_kill) {
     CHECK(!demoteToKill(patched));  // idempotent: nothing left to convert
 }
 
-// WS42 (full-solid-pass.md): the early-tests twin of a fragment module with a discard: the mode is added once, the module stays valid, a shader without a discard has no twin
-TEST(spirv_early_fragment_tests_twin) {
-    if (!dxc::available()) return;
-    const auto compile = [](const char* body) {
-        dxc::Request r;
-        r.file = "test/early_probe.frag.hlsl";
-        r.entry = "PSMain";
-        r.profile = "ps_6_6";
-        r.source = std::string("struct PsIn { float4 pos : SV_Position; [[vk::location(0)]] float4 v0 : VARY0; };") + body;
-        r.optLevel = 0;
-        return dxc::compile(r).words;
-    };
-    const std::vector<std::uint32_t> cut = compile("float4 PSMain(PsIn i) : SV_Target0 { if (i.v0.x < 0.5) discard; return i.v0; }");
-    const std::vector<std::uint32_t> plain = compile("float4 PSMain(PsIn i) : SV_Target0 { return i.v0; }");
-    CHECK(!cut.empty() && !plain.empty());
-    if (cut.empty() || plain.empty()) return;
-    CHECK(fragmentDiscards(cut));
-    CHECK(!fragmentDiscards(plain));
-    std::vector<std::uint32_t> twin = cut;
-    CHECK(addEarlyFragmentTests(twin));
-    CHECK(twin.size() == cut.size() + 3);
-    std::string msg;
-    CHECK_MSG(validSpirv(twin, &msg), msg);
-    int modes = 0;
-    for (std::size_t i = 5; i < twin.size(); i += twin[i] >> 16) {
-        if ((twin[i] & 0xFFFFu) == 16 && twin[i + 2] == 9) ++modes;  // OpExecutionMode ... EarlyFragmentTests
-        if ((twin[i] >> 16) == 0) break;
-    }
-    CHECK(modes == 1);
-    CHECK(!addEarlyFragmentTests(twin));  // idempotent
-}
-
 TEST(dxc_embedded_sources) {
     CHECK(!embedded::hlslSource("test/dxc_probe.comp.hlsl").empty());
     CHECK(!embedded::hlslSource("include/rvk_probe.hlsli").empty());

@@ -180,24 +180,12 @@ struct PipelineDesc {
     VkFormat colorFormats[kMaxColorTargets]{};
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
     VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
-    // WS42 (docs/research/full-solid-pass.md): the draw tests depth EQUAL against a z pre-pass without stencil: its fragment module may run the depth test BEFORE the
-    // shader (EarlyFragmentTests; a discarded fragment then still writes the depth it tested, which is the value already there). The Vulkan backend picks the module's
-    // early twin when it has one (a shader with `discard`), else the flag is dropped; D3D12 ignores it (its PSO carries the depth state).
-    bool earlyZ = false;
     BlendAttachment blend[kMaxColorTargets]{};  // ignored with EDS3
     std::uint32_t bindingCount = 0;
     VertexBinding bindings[kMaxVertexBindings]{};
     std::uint32_t attributeCount = 0;
     VertexAttribute attributes[kMaxVertexAttributes]{};
 };
-
-// `d` with `earlyZ` cleared (tmp is only written when it was set)
-inline const PipelineDesc& withoutEarlyZ(const PipelineDesc& d, PipelineDesc& tmp) {
-    if (!d.earlyZ) return d;
-    tmp = d;
-    tmp.earlyZ = false;
-    return tmp;
-}
 
 // ---- the draw packet model (d3d9 builds packets and chunks from its state; the backend records them: pipeline binds,
 // vertex input / dynamic state, push constants, draws. Virtual calls happen per chunk / scope / inline draw / pipeline

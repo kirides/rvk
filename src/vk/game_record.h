@@ -64,7 +64,7 @@ struct GameRecordState {
     const rhi::VertexInputValues* lastVi = nullptr;  // the packets' interned blocks last applied (equal pointer = equal contents)
     const rhi::DynamicStateValues* lastDyn = nullptr;
     std::uint64_t pipelineBinds = 0;
-    std::uint8_t ablSkip = 0;  // RVK_ABL_SKIP=eq|ne (debug ablation): the scene-HDR scope skips the draws with an EQUAL (1) / non-EQUAL (2) depth compare; EQUAL draws with (3) / without (4) a discarding shader (early-tests pipeline)
+    std::uint8_t ablSkip = 0;  // RVK_ABL_SKIP=eq|ne (debug ablation): the scene-HDR scope skips the draws with an EQUAL (1) / non-EQUAL (2) depth compare
     std::uint64_t passZ[16] = {};  // RVK_PASS_STATS: draw records by depth state: [compare class (0 none, 1 EQUAL, 2 LESS_OR_EQUAL, 3 LESS, 4 other)][depth write]
     std::uint64_t passDirect = 0, passIndPackets = 0, passIndRecords = 0, passBinds = 0;  // RVK_PASS_STATS: this scope's GPU draw calls / indirect packets / indirect records (max count) / pipeline binds
     void reset() {

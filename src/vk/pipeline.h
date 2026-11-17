@@ -230,20 +230,6 @@ private:
 };
 
 // `name` (when not empty and names are on): the module's debug name; pipelines built from it are named after it
-VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name = {}, VkShaderModule* earlyTwin = nullptr);
-
-// WS42: the early-tests twin of a fragment module with a `discard` (createShaderModule with `earlyTwin`: the same code + OpExecutionMode EarlyFragmentTests), VK_NULL_HANDLE
-// when the module has none. A pipeline description with `earlyZ` links / builds with the twin. The twin is destroyed with its module (takeEarlyTwin).
-VkShaderModule earlyTwinOf(VkShaderModule module);
-VkShaderModule takeEarlyTwin(VkShaderModule module);
-// debug (RVK_ABL_SKIP=eqk|eqo): pipelines built with an early twin (set when the description had earlyZ and the module has a twin)
-void noteEarlyPipeline(const PipelineDesc& d, VkPipeline p);
-bool isEarlyPipeline(VkPipeline p);  // removes the entry (the caller destroys the returned twin)
-// the fragment module a description uses (its twin for `earlyZ`)
-inline VkShaderModule fragmentModuleOf(const PipelineDesc& d) {
-    if (!d.earlyZ) return vkModule(d.fs);
-    const VkShaderModule t = earlyTwinOf(vkModule(d.fs));
-    return t != VK_NULL_HANDLE ? t : vkModule(d.fs);
-}
+VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name = {});
 
 }  // namespace rvk::vk

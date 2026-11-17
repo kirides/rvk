@@ -258,9 +258,6 @@ void PipelineCache::forgetShader(rhi::ShaderModule module) {
 void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage) {
     if (useLibraries_ && module != rhi::ShaderModule::None) {
         shaderLibrary(vkModule(module), stage == VK_SHADER_STAGE_VERTEX_BIT, VK_POLYGON_MODE_FILL);
-        if (stage != VK_SHADER_STAGE_VERTEX_BIT) {
-            if (const VkShaderModule twin = earlyTwinOf(vkModule(module)); twin != VK_NULL_HANDLE) shaderLibrary(twin, false, VK_POLYGON_MODE_FILL);  // (WS42)
-        }
     }
 }
 
@@ -277,7 +274,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d0, bool optimize, bool compi
             return it != shaderLibs_.end() && it->second != VK_NULL_HANDLE;
         };
         if (!have(LibKey{reinterpret_cast<std::uint64_t>(vkModule(d.vs)), static_cast<std::uint32_t>(d.polygonMode)})) return VK_NULL_HANDLE;
-        if (d.fs != rhi::ShaderModule::None && !have(LibKey{reinterpret_cast<std::uint64_t>(fragmentModuleOf(d)), 0xFFFFFFFFu})) return VK_NULL_HANDLE;
+        if (d.fs != rhi::ShaderModule::None && !have(LibKey{reinterpret_cast<std::uint64_t>(vkModule(d.fs)), 0xFFFFFFFFu})) return VK_NULL_HANDLE;
     }
     {
         // vertex input interface per topology class, fragment output per attachment formats (few of each)
@@ -301,7 +298,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d0, bool optimize, bool compi
         libs[3] = out;
     }
     libs[1] = shaderLibrary(vkModule(d.vs), true, d.polygonMode);
-    libs[2] = shaderLibrary(fragmentModuleOf(d), false, VK_POLYGON_MODE_FILL);  // (fs None: the empty fragment shader library)
+    libs[2] = shaderLibrary(vkModule(d.fs), false, VK_POLYGON_MODE_FILL);  // (fs None: the empty fragment shader library)
     for (VkPipeline l : libs) {
         if (l == VK_NULL_HANDLE) {
             return VK_NULL_HANDLE;
@@ -318,8 +315,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d0, bool optimize, bool compi
         spdlog::error("vulkan: pipeline link{}: {}", optimize ? " (optimised)" : "", resultString(r));
         return VK_NULL_HANDLE;
     }
-    names::pipeline(*ctx_, p, vkModule(d.vs), fragmentModuleOf(d));
-    noteEarlyPipeline(d, p);
+    names::pipeline(*ctx_, p, vkModule(d.vs), vkModule(d.fs));
     return p;
 }
 

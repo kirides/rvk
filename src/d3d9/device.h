@@ -1026,7 +1026,6 @@ public:
     void setBatching(bool on);
     // the opaque passes' draws recorded on worker threads (debug.record_threads); applies from the next rendering scope
     void setRecordThreads(bool on) { recordThreadsWanted_ = on; }
-    void setEarlyEqualZ(bool on) { if (on != earlyEqualZ_) ++variantEpoch_; earlyEqualZ_ = on; }  // debug.early_equal_z: EQUAL-depth draws get PipelineDesc::earlyZ (WS42)
     bool batching() const { return batching_; }
     // register setters compare a clean stage's registers first: a write that changes nothing keeps its constant block
     // (debug.constant_compare, vulkanize plan.md V1)
@@ -2495,7 +2494,6 @@ private:
     void scopeLabel(bool begin, const char* text);
     void finishSecondaryScope();                // endRendering: hand over the last open chunk (the backend waits + executes)
     bool recordThreadsWanted_ = false;          // debug.record_threads
-    bool earlyEqualZ_ = false;                  // debug.early_equal_z
     bool scopeSecondary_ = false;               // the current rendering scope is a secondary-contents one
     DrawChunk workChunk_;
     bool chunksOpen_ = false;
