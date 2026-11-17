@@ -332,7 +332,49 @@ rvk_shadertool dxil-check uber-spv <dir> --variants plain,scene2,clonly,gi_cl --
 ```
 
 Findings that are not shader candidates:
-- With `gi.enabled` off the pipelines `gi.blend`, `gi.trace`, `gi.screen trace`, `gi.screen resolve` are still built (4 compute pipelines in the dump; DXC + driver compile time at start-up, ~0.05 s each): "Off = nothing exists" does not hold for them.
-- The material `gi-cl` variants are built and used with GI off (hooks branch at run time), see 6.
+- (WS40: done, section 8) With `gi.enabled` off the pipelines `gi.blend`, `gi.trace`, `gi.screen trace`, `gi.screen resolve` are still built (4 compute pipelines in the dump; DXC + driver compile time at start-up, ~0.05 s each): "Off = nothing exists" does not hold for them.
+- (WS40: done, section 8) The material `gi-cl` variants were built and used with GI off (hooks branch at run time), see 6.
 - `native.picture_check` / `depth_z_compare` use one global atomic per differing / geometry pixel (`rvkBufAdd`): wave-reduce them (`WaveActiveCountBits` + one atomic per wave) before anyone leaves them on in a perf run
   (they are validation passes: 0.03 ms when idle).
+
+## 8. WS40: what was built from the candidates (branch worktree-agent-a0d265efaad100875)
+
+| candidate | state | what |
+|---|---|---|
+| 1 `water.rt` | **done** | the tweak 32 compare blocks (shadow + trace compare, the readback-buffer stores) are under `#ifdef RVK_WATER_RT_DEBUG`; `plane[i]` / `box[i]` are `rvkRawLoad`s at `WATER_RT_PLANE_OFFSET` 256 / `WATER_RT_BOX_OFFSET` 512 (`static_assert(offsetof)` in `enh/water_rt.h`, the `abi_blocks.cpp` probe covers the fields). Tweak 16 (one-query trace) stays a run-time branch. `rt.reflection_tweaks` bit 32 builds the debug variant on first use on a worker (`WaterRt::buildPipeline(true)`, `spirvVariant(..., "RVK_WATER_RT_DEBUG=1")`); the pass skips until it is ready. SPIR-V 93530 -> 69805 words. |
+| 2 `light_shadow_filter` | **already on main** | the taps-outer / entries-inner form (with the per-tap `nid[]` cache) was in `light_shadow_filter.comp.hlsl` before WS39's prototype (commit 42f3184); nothing to change. The LDS tile follow-up was not asked for. |
+| 4 no GI hooks with GI off | **done** | new variant slots `GiCl` / `SceneGiCl` / `SceneGiCl2` (`kVariantSlots` 35, `variantUrgent` / `uberSlots` 64-bit), `MaterialVariant::ClusterOnly` (= the `clonly` form of `dxil-check uber-spv`: `RVK_MV_CLUSTER` only, no ambient overrides, nothing for shaders without point lights). With the light table on and no pack / physical style (`!pbrVariants()`) lit draws take `Device::giSlotPreferred()` = `GiCl` while `giDraws_.on` is false, `Gi` (hooks) once GI is on. `RVK_GI_HOOKS_ALWAYS=1` = the former behaviour (A arm below). |
+| 9 gi.* pipelines | **done** | `Gi` builds nothing in its constructor; `startBuilds` (trace, blend) runs in `enable()`, `startScreenBuilds` (screen trace / resolve) when `gi.screen != 0`, `releasePipelines` in `disable()` and on every `apply` while off. A build still running at turn-off is dropped by the next `apply` (small known gap). |
+| 5 (P2 uniform record index) | not done | not proven safe in the time available. |
+
+### 8.1 Toggling GI at run time (what happens, what keeps drawing)
+
+`setGiDraws` (GI on / off) bumps `variantEpoch_`; `ownedDrawSig` / the retained-draw refusals hash `Device::giVariantPeek` (the module the draw would take now), so retained and owned records are remade at a switch.
+- A lit draw asks for the preferred slot (`giVariant`): its module when built, else the OTHER slot's module when that one is built (never requested: a session that starts with GI on builds no cluster-only forms, a session that starts with GI off builds no hooked forms), else the engine's own module (the first minutes of a session, as before). While the preferred module has no pipeline yet the push path tries the other slot's module (`usedAlt`, the draw is not retained). Scene forms: the preferred scene slot; pending = the draw goes through the push path (which has the fallback). So a toggle never skips a draw and never stalls the engine thread: the hooked variants build on the variant workers after the first draw that asks for them.
+- `pipelines.keys`: a key naming `Gi` / `SceneGi` / `SceneGi2` is prewarmed as `GiCl` / `SceneGiCl` / `SceneGiCl2` while GI is off (keys of earlier sessions keep working), a `GiCl` key is skipped while GI is on.
+- `gi.trace` / `gi.blend` / the screen probes' pipelines are built when GI turns on (the GI passes skip frames until they are ready, as at a session start), released when it turns off.
+
+### 8.2 Measured (1600x900, Vulkan, Full, `-PlayerDefaults`, `perf-ab.ps1 -Restart`: one session per arm, 2 + 2 sessions of 240-frame windows; GPU clock state differs between sessions: read the untouched passes next to the target)
+
+water.rt, A = main's shaders (`RVK_SHADER_DIR` = `git archive` of main), B = this branch (`scratch\ws40\pab_shader`):
+
+| scene | water.rt A -> B | GPU frame A -> B |
+|---|---|---|
+| harbour_docks | 0.824 -> 0.569 ms (**-30.9 %**) | 2.500 -> 2.196 (-12.1 %) |
+| beach_sun | 0.417 -> 0.143 ms (**-65.7 %**) | 2.017 -> 1.712 (-15.1 %) |
+| sea_cliff | 0.542 -> 0.331 ms (**-39.0 %**) | 2.478 -> 2.223 (-10.3 %) |
+| jungle | 0.650 -> 0.356 ms (**-45.2 %**) | 3.467 -> 3.123 (-9.9 %) |
+
+Untouched passes: main solid colour pass -1.7 .. -2.4 %, `light.shadow` / `light.shadow filter` -3.5 .. +1 % (noise level). Wrapper uses the same shader (same effect, not timed separately).
+
+GI hooks, A = `RVK_GI_HOOKS_ALWAYS=1` (hooked variant with GI off, the old behaviour), B = cluster-only (`scratch\ws40\pab_gi`): jungle GPU frame 3.340 -> 3.630 (+8.7 %, z 1.3), pub_interior 1.084 -> 1.102 (+1.7 %), harbour_night 2.268 -> 2.340 (+3.2 %); the main solid pass +7.7 / +0.4 / +3.3 % while `light.shadow` (untouched) moved +11 / +2 / +5 % in the same sessions: all inside the session-to-session clock noise, **no measurable change on the 7900 XTX** (as WS39 predicted: its `solid` pass is not occupancy bound). The static win (`gi_cl` 4124 -> 2333 instructions, VGPR 144 -> 133 on gfx1100; 131 -> 123 on gfx1035) is for the 680M and was not measurable here.
+
+### 8.3 Checks
+
+`rvk_tests` 371 / 0 failures; `rvk_d3d9test --validation` Vulkan and `--backend d3d12` 0 failures, 0 validation errors; `rvk_vktest --passes` 0 bad; `dxil-check embedded` 191 / 191; `dxil-check uber-spv --variants clonly --dxil` (27 jungle census requests) 27 / 27; `rvk_rhitest` PASS on both backends (water RT hits worst difference 2.9e-6). GPU-assisted validation, Full, GI off -> on -> off -> on at frames 4000 / 7000 / 10000 (jungle): 0 validation errors; the water.rt raw loads ran in it.
+
+GI toggle, Full, `native.picture_check=true` + `RVK_PC_STRICT=1`, a frozen scene, 4 toggles: Vulkan GI off at start (jungle) windows ok 63, FAILED 0 of 77; GI on at start (pub_interior) 63 ok, FAILED 0 of 75; D3D12 (no debug layer: with GPU-based validation the run is 5 fps and never reaches the toggles) GI off at start (pub_interior) 31 ok, FAILED 0 of 40; DIFFERING 0 / MISS 0 in all. Final binary (jungle): 46 ok, FAILED 0 of 58. pcA x3 (6 spots, `RVK_PC_STRICT=1`): windows ok 14, FAILED 0 of 33 each, DIFFERING 0, MISS 0.
+
+GI takes effect after a toggle: with `gi.debug=irradiance` (jungle) the toggled-on frames differ from the off frames by a mean 14.6 grey levels (71 % of the pixels), off vs off 0.33, on vs on 0.31, and the toggled-on frames match a session that started with GI on (mean difference 0.8 - 1.1, 2 % of the pixels over 8; on vs off in that session 15.1). Without the debug view GI barely changes the jungle / pub_interior frames (about 1 % luma: a shot review found no visible difference at those spots), so the debug view is the proof.
+
+refcompare, Wrapper, spots beach_sun / sea_cliff / harbour_docks / jungle against `out\refcompare\20261022-093252`: beach_sun WARN (37.8 dB), sea_cliff FAIL (29.7 dB, bad32 2.7 %: the same verdict as the stored main reports of 2026-11-05, 30.4 dB / 2.2 %), harbour_docks and jungle PASS. A control: the same refcompare with main's shaders (`RVK_SHADER_DIR`) gives the same verdicts (sea_cliff FAIL 30.2 dB, beach_sun WARN 37.1 dB), and two runs of the new build differ from each other as much as new differs from main (mean 1.6 .. 5.8 grey levels between runs: water animation), so the water spots are unchanged within the run-to-run noise.

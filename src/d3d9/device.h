@@ -299,7 +299,7 @@ private:
     bool texcoord4_ = false;
 };
 
-inline constexpr std::size_t kVariantSlots = 32;  // VariantSlot::Count
+inline constexpr std::size_t kVariantSlots = 35;  // VariantSlot::Count
 
 class Shader {
 public:
@@ -339,9 +339,9 @@ public:
     std::array<std::atomic<rhi::ShaderModule>, kVariantSlots> variants{};  // (VariantSlot::Count)
     std::array<std::atomic<std::uint8_t>, kVariantSlots> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
     std::array<std::atomic<std::uint32_t>, kVariantSlots> variantDemand{};  // WS12: draws that asked for variants[i] while it was queued (the workers build the most asked-for first)
-    std::atomic<std::uint32_t> variantUrgent{0};  // WS12: bit i = a draw asked for variants[i] while it was queued: moved ahead of the background (known-key) requests, once
+    std::atomic<std::uint64_t> variantUrgent{0};  // WS12: bit i = a draw asked for variants[i] while it was queued: moved ahead of the background (known-key) requests, once
     std::atomic<std::uint32_t> arrivals{0};  // WS29: bumped when any variantState[i] changes to ready / failed / reset: a pending draw decision (scenePending) holds while it is unchanged
-    std::atomic<std::uint32_t> uberSlots{0};  // S-1a: bit i = variants[i] was built from the HLSL ubershader (not the translated bytecode)
+    std::atomic<std::uint64_t> uberSlots{0};  // S-1a: bit i = variants[i] was built from the HLSL ubershader (not the translated bytecode)
 };
 
 // A non-owning reference to the device's current shader (setVertexShader / setPixelShader / a replacement's): switching
@@ -409,19 +409,26 @@ enum class VariantSlot : std::uint8_t {
     // push form by composed draws / replays; SceneVsWind2 = its scene ABI v2 form (the owned tree / grass flushes). Neither is a "+3" / "+7" form
     WindVs = 30,
     SceneVsWind2 = 31,
+    // WS40 (docs/research/shader-isa.md 8): with the light table on and no material pack / physical style, a lit material's variant without the GI hooks (GiCl = the provider slot:
+    // RVK_MV_CLUSTER alone, the `clonly` form; SceneGiCl / SceneGiCl2 its scene forms) is what the draws take while GI is off; the Gi slot (hooks + light table) is built only once GI is on
+    // (Device::setGiClusterOnly, giSlotPreferred). Neither is a "+7" form
+    GiCl = 32,
+    SceneGiCl = 33,
+    SceneGiCl2 = 34,
     Count
 };
 static_assert(static_cast<std::size_t>(VariantSlot::Count) == kVariantSlots, "Shader::variants / variantState sizes");
 // the slot a scene form is built from (its provider's options + sceneRecord); Count = none (SceneVs / ScenePs: sceneRecord alone)
 // a scene form (built by Device::variantWorker from its base slot's provider + sceneRecord); BoneVs is a provider slot only
-inline bool isSceneSlot(VariantSlot s) { return s >= VariantSlot::SceneVs && s != VariantSlot::BoneVs && s != VariantSlot::WindVs; }
+inline bool isSceneSlot(VariantSlot s) { return s >= VariantSlot::SceneVs && s != VariantSlot::BoneVs && s != VariantSlot::WindVs && s != VariantSlot::GiCl; }
 inline bool isBoneScene(VariantSlot s) { return s >= VariantSlot::SceneVsBone && s <= VariantSlot::SceneVsBonePull; }
 inline bool isSceneView(VariantSlot s) {
-    if (s == VariantSlot::SceneVsWind2) return true;  // (14.42: v2 only)
+    if (s == VariantSlot::SceneVsWind2 || s == VariantSlot::SceneGiCl2) return true;  // (14.42: v2 only; WS40)
     return isBoneScene(s) ? s >= VariantSlot::SceneVsBone2 : s >= VariantSlot::SceneVs2 && s <= VariantSlot::SceneVsPull;
 }
 // SceneVs..SceneGbufferA -> the v2 form (+7); SceneVsBone..SceneGbufferMotionM -> theirs (+3)
 inline VariantSlot sceneView2Of(VariantSlot v1) {
+    if (v1 == VariantSlot::SceneGiCl) return VariantSlot::SceneGiCl2;
     return static_cast<VariantSlot>(static_cast<std::uint8_t>(v1) + (isBoneScene(v1) ? 3 : 7));
 }
 // the v1 form of a v2 (or pulled) form
@@ -429,12 +436,14 @@ inline VariantSlot sceneView1Of(VariantSlot s) {
     if (s == VariantSlot::SceneVsPull) return VariantSlot::SceneVs;
     if (s == VariantSlot::SceneVsBonePull) return VariantSlot::SceneVsBone;
     if (s == VariantSlot::SceneVsWind2) return s;  // (14.42: no v1 form; Device::variantWorker treats it by name)
+    if (s == VariantSlot::SceneGiCl2) return VariantSlot::SceneGiCl;
     if (!isSceneView(s)) return s;
     return static_cast<VariantSlot>(static_cast<std::uint8_t>(s) - (isBoneScene(s) ? 3 : 7));
 }
 inline VariantSlot sceneBaseSlot(VariantSlot s) {
     switch (sceneView1Of(s)) {
     case VariantSlot::SceneGi: return VariantSlot::Gi;
+    case VariantSlot::SceneGiCl: return VariantSlot::GiCl;
     case VariantSlot::SceneGbuffer: return VariantSlot::Gbuffer;
     case VariantSlot::SceneGbufferM: return VariantSlot::GbufferM;
     case VariantSlot::SceneGbufferA: return VariantSlot::GbufferA;
@@ -450,6 +459,7 @@ inline VariantSlot sceneSlotOf(VariantSlot base) {
     switch (base) {
     case VariantSlot::Base: return VariantSlot::ScenePs;
     case VariantSlot::Gi: return VariantSlot::SceneGi;
+    case VariantSlot::GiCl: return VariantSlot::SceneGiCl;
     case VariantSlot::Gbuffer: return VariantSlot::SceneGbuffer;
     case VariantSlot::GbufferM: return VariantSlot::SceneGbufferM;
     case VariantSlot::GbufferA: return VariantSlot::SceneGbufferA;
@@ -1883,6 +1893,18 @@ public:
         if (g.on != giDraws_.on || g.replaceLightmaps != giDraws_.replaceLightmaps) ++variantEpoch_;
         giDraws_ = g;
     }
+    // WS40: the light table's variant without the GI hooks (VariantSlot::GiCl) is the one lit draws take while GI is off; decided once at start (the HAL: light table on, no material
+    // pack / physical style). Turning GI on at run time (setGiDraws) switches the preferred slot to Gi (hooks); until that variant (and its pipeline) is built the draws keep the module
+    // that is, and the other way round. Render thread (+ the key prewarm for the slot remap)
+    void setGiClusterOnly(bool on) { if (on != giClusterOnly_) ++variantEpoch_; giClusterOnly_ = on; }
+    bool giClusterOnly() const { return giClusterOnly_; }
+    // the slot a lit draw asks for now (Gi without the cluster-only form)
+    VariantSlot giSlotPreferred() const { return giClusterOnly_ && !giDraws_.on ? VariantSlot::GiCl : VariantSlot::Gi; }
+    // the GI-slot module of a draw's pixel shader: the preferred slot's when built (requests it otherwise), else the other slot's when that is built (never requested: a session
+    // that starts with GI on builds no cluster-only forms). `alt` = the other built module while the preferred one exists (a pipeline fallback), else None
+    rhi::ShaderModule giVariant(const ShaderRef& s, rhi::ShaderModule* alt = nullptr);
+    // the same, read only (the retained / owned checks)
+    rhi::ShaderModule giVariantPeek(const Shader& s) const;
     // ---- material pack (enh/material_pack, docs/research/material-pack.md) ----
     // With a provider set, the main view's lit material draws take the pixel shader's variant (like GI draws) and carry the provider's word for
     // their material in the DrawBlock (pad[1] = alpha.w; 0 = no entry: the variant leaves the pixels alone). `texture` (null: constants only)
@@ -2818,6 +2840,7 @@ private:
     std::array<std::uint32_t, 4> ao_{};
     std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
+    bool giClusterOnly_ = false;  // WS40 (setGiClusterOnly)
     PackProvider packProvider_;
     std::function<std::uint32_t()> packStamp_;
     bool packBypass_ = false;

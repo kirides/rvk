@@ -4,6 +4,7 @@
 // shaders/include/rvk_material_variant.glsl (after rvk_gi.glsl) pasted into the translated shader with a few defines; the
 // translated program itself is unchanged apart from its ambient constants (overrides) and one operand capture.
 //
+//   ClusterOnly     the light table's variant without any of the hooks below (WS40: what a lit draw takes while GI is off: no ambient overrides, no GI lookup code)
 //   Gi              every read of g_AmbientLight / g_IndoorAmbientColor = the GI probes' irradiance (enh/gi)
 //   Gbuffer         + the reprojected AO / screen probes and the thin G-buffer outputs the session reads (GbufferOutputs; enh/gbuffer)
 //   GbufferMotion   + per-object motion from the vertex capture's previous world position (location 15; only with the
@@ -18,7 +19,7 @@
 
 namespace rvk::enh {
 
-enum class MaterialVariant : std::uint8_t { Gi, Gbuffer, GbufferMotion };
+enum class MaterialVariant : std::uint8_t { Gi, Gbuffer, GbufferMotion, ClusterOnly };
 
 // The G-buffer targets a Gbuffer / GbufferMotion variant writes: only what a consumer of the session reads (no unread outputs):
 // None = AO / screen probes only (no attachments), Motion = FSR / frame generation (SV_Target1 motion), NormalMotion = traced material

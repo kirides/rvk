@@ -48,11 +48,18 @@ WaterRt::WaterRt(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
         return;
     }
     // the compute pipeline in the background from the start: turning the tier on later costs no frame (Device::createComputePipeline is thread-safe)
-    building_ = std::async(std::launch::async, [rdev]() {
+    building_ = buildPipeline(false);
+}
+
+std::future<std::unique_ptr<rhi::Pipeline>> WaterRt::buildPipeline(bool debug) {
+    rhi::Device* rdev = dev_.rhi();
+    return std::async(std::launch::async, [rdev, debug]() {
+        // the production shader has no compare code (tweak 32, RVK_WATER_RT_DEBUG): its scratch copy and debug arrays cost 20-30 % of the pass (shader-isa.md 8)
+        constexpr const char* kDebug = "RVK_WATER_RT_DEBUG=1";
         rhi::ComputePipelineDesc d;
-        d.cs.spirv = shader::embedded::spirv("water/water_rt.comp");
-        d.cs.dxil = shader::embedded::dxilOnDemand("water/water_rt.comp");
-        d.name = "water.rt";
+        d.cs.spirv = debug ? shader::embedded::spirvVariant("water/water_rt.comp", kDebug) : shader::embedded::spirv("water/water_rt.comp");
+        d.cs.dxil = debug ? shader::embedded::dxilVariantOnDemand("water/water_rt.comp", kDebug) : shader::embedded::dxilOnDemand("water/water_rt.comp");
+        d.name = debug ? "water.rt (compare)" : "water.rt";
         return rdev->createComputePipeline(d);
     });
 }
@@ -60,6 +67,7 @@ WaterRt::WaterRt(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
 WaterRt::~WaterRt() {
     configure(0, 0, 0);
     if (building_.valid()) building_.get();  // (retired with the device's frames)
+    if (buildingDebug_.valid()) buildingDebug_.get();
 }
 
 bool WaterRt::available() const { return scene_ != nullptr && scene_->supported() && !failed_; }
@@ -92,25 +100,31 @@ void WaterRt::seeBody(std::uint64_t id, const Body& b, std::uint64_t frame) {
     s.frame = frame;
 }
 
-bool WaterRt::pipelineReady() {
-    if (pipeline_) return true;
-    if (failed_ || !building_.valid()) return false;
-    if (building_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-    pipeline_ = building_.get();
-    if (!pipeline_) {
-        spdlog::error("enh: water.rt: the compute pipeline failed: rt.reflections stays off this session");
-        failed_ = true;
-        return false;
+rhi::Pipeline* WaterRt::pipelineReady() {
+    // tweak 32 (the compare) needs the variant with the compare code, built on first use in the background: the pass skips until it is ready
+    const bool debug = (tweaks_ & 32) != 0;
+    std::unique_ptr<rhi::Pipeline>& pipe = debug ? pipelineDebug_ : pipeline_;
+    std::future<std::unique_ptr<rhi::Pipeline>>& building = debug ? buildingDebug_ : building_;
+    if (pipe) return pipe.get();
+    if (debug && !building.valid() && !failedDebug_ && dev_.rhi() != nullptr) building = buildPipeline(true);
+    if (failed_ || failedDebug_ || !building.valid()) return nullptr;
+    if (building.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
+    pipe = building.get();
+    if (!pipe) {
+        spdlog::error("enh: water.rt: the compute pipeline{} failed: rt.reflections stays off this session", debug ? " (compare)" : "");
+        (debug ? failedDebug_ : failed_) = true;
+        return nullptr;
     }
-    spdlog::info("enh: water.rt: compute pipeline ready");
-    return true;
+    spdlog::info("enh: water.rt: compute pipeline{} ready", debug ? " (compare)" : "");
+    return pipe.get();
 }
 
 void WaterRt::record(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || tier_ == 0) return;
     const std::uint64_t frame = dev_.frameValue();
     // the RT scene of this submission, the engine's depth map and refraction copy, the compute pipeline
-    if (!dev_.rtSceneValid() || ctx.depthMap == nullptr || ctx.refraction == nullptr || ctx.sceneHdr == nullptr || !pipelineReady()) {
+    rhi::Pipeline* const pipeline = dev_.rtSceneValid() && ctx.depthMap != nullptr && ctx.refraction != nullptr && ctx.sceneHdr != nullptr ? pipelineReady() : nullptr;
+    if (pipeline == nullptr) {
         ++skipped_;
         return;
     }
@@ -236,7 +250,7 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     rhi::CommandList& cl = rs.cl();
     rhi::Texture* outT = rs.wrap(*out);
     cl.transition(*outT, VK_IMAGE_LAYOUT_GENERAL);
-    cl.bindPipeline(*pipeline_);
+    cl.bindPipeline(*pipeline);
     rhi::Texture* const storage[] = {outT};
     cl.setStorageTextures(storage);
     cl.setPushConstants(&push, sizeof(push));

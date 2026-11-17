@@ -146,7 +146,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
                       ((actor && owned_->w[0][2].kind == OwnedWindows::Kind::Bones) ||
                        (rigidMotionOn() && staticLike && (owned_->w[0][2].kind == OwnedWindows::Kind::Object || !rigidPrev_.null())));  // (14.22: or a per-frame previous block)
     if (gbufWrite_) base = gbufferSlot(bone);
-    else if (giDraw) base = VariantSlot::Gi;
+    else if (giDraw) base = giSlotPreferred();  // (WS40: GiCl while GI is off with the light table alone)
     const VariantSlot sceneFs = sceneSlotOf(base);
     const VariantSlot vsSlot1 = bone ? VariantSlot::SceneVsBone : VariantSlot::SceneVs, vsSlot2 = bone ? VariantSlot::SceneVsBone2 : VariantSlot::SceneVs2,
                       vsSlotPull = bone ? VariantSlot::SceneVsBonePull : VariantSlot::SceneVsPull;
@@ -564,8 +564,7 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out,
     }
     if (c.v.gate && c.v.wanted && !gbufTaken) {
         // the variant the draw was offered (None while it was still being built): a module that exists now makes the draw take another pixel shader and pipeline (variant(): read only)
-        const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
-        const rhi::ShaderModule now = c.ps->variantState[vi].load(std::memory_order_acquire) == 2 ? c.ps->variants[vi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+        const rhi::ShaderModule now = giVariantPeek(*c.ps);
         if (now != c.v.fsAsked) return variantRefusal(5, c);
     }
     {
