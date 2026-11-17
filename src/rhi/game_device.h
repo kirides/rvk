@@ -336,6 +336,8 @@ enum class TimestampStream : std::uint8_t { Main, Upload };
 struct TimestampSegment {
     std::string label;
     double ms = 0.0;
+    bool hasStat = false;  // RVK_PASS_STATS=1: the scope's counts {IA vertices, IA primitives, VS invocations, clipped primitives, FS invocations, samples passed}
+    double stat[6] = {};
 };
 struct TimestampResult {
     bool valid = false;

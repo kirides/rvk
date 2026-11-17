@@ -647,7 +647,11 @@ public:
     }
 
     // ---- GPU timestamps ([debug] perf): the renderer's query pool over the frame's two command streams ----
-    bool enableTimestamps() override { return gpuTimer_.create(ctx_, rhi::kFramesInFlight); }
+    bool enableTimestamps() override {
+        const bool ok = gpuTimer_.create(ctx_, rhi::kFramesInFlight);
+        if (ok) gpuTimer_.createPassStats(ctx_, rhi::kFramesInFlight);  // (RVK_PASS_STATS=1 only)
+        return ok;
+    }
     bool timestampsEnabled() const override { return gpuTimer_.enabled(); }
     void timestampStart(std::uint32_t slot, bool details) override { gpuTimer_.start(slot, details); }
     bool timestampDetails(std::uint32_t slot) const override { return gpuTimer_.details(slot); }
@@ -665,7 +669,16 @@ public:
         out.valid = r.valid;
         out.mainMs = r.mainMs;
         out.uploadMs = r.uploadMs;
-        for (const vk::GpuTimer::Segment& s : r.segments) out.segments.push_back({s.label, s.ms});
+        for (const vk::GpuTimer::Segment& s : r.segments) {
+            TimestampSegment seg{s.label, s.ms};
+            if (s.stat.valid) {
+                seg.hasStat = true;
+                const double v[6] = {double(s.stat.iaVertices), double(s.stat.iaPrimitives), double(s.stat.vsInvocations), double(s.stat.clipPrimitives),
+                                     double(s.stat.fsInvocations), double(s.stat.samples)};
+                std::copy(std::begin(v), std::end(v), seg.stat);
+            }
+            out.segments.push_back(std::move(seg));
+        }
         return out;
     }
 
@@ -685,8 +698,16 @@ public:
     void savePipelineCache() override { record_.saveCache(); }
     void stopPipelineBuilds() override { record_.stopPipelineBuilds(); }
     PipelineStats pipelineStats() override { return record_.stats(); }
-    void beginScope(const RenderingInfo& info, bool secondary) override { record_.beginScope(info, secondary); }
-    void endScope() override { record_.endScope(); }
+    void beginScope(const RenderingInfo& info, bool secondary) override {
+        record_.beginScope(info, secondary);
+        statScope_ = gpuTimer_.passStatsEnabled() && !secondary;  // (secondary command buffers would need inherited queries: RVK_PASS_STATS runs with record threads off)
+        if (statScope_) gpuTimer_.passBegin(frames_.cmd(), frames_.currentSlot());
+    }
+    void endScope() override {
+        if (statScope_) gpuTimer_.passEnd(frames_.cmd(), frames_.currentSlot());
+        statScope_ = false;
+        record_.endScope();
+    }
     void scopeChunk(rhi::DrawChunk&& chunk) override { record_.scopeChunk(std::move(chunk)); }
     void applyDrawPacket(const DrawPacket& packet) override { record_.applyDrawPacket(packet); }
     void scopeLabel(bool begin, const char* text) override { record_.scopeLabel(begin, text); }
@@ -1029,6 +1050,7 @@ private:
     DeviceCaps caps_;
     bool bindlessInit_ = false;
     vk::MeshArena* arena_ = nullptr;
+    bool statScope_ = false;  // the open scope has a pass-statistics query (RVK_PASS_STATS)
     vk::GpuTimer gpuTimer_;  // [debug] perf timestamps (enableTimestamps creates it)
     std::unique_ptr<VkCommandListImpl> mainList_, uploadList_;  // the frame's persistent lists (frameCommands / uploadCommands)
     CommandList& listFor(std::unique_ptr<VkCommandListImpl>& slot, VkCommandBuffer cmd, bool reset) {

@@ -1,6 +1,8 @@
 #include "vk/context.h"
 #include "vk/pipeline.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cstring>
 #include <format>
@@ -370,6 +372,16 @@ bool Context::createDevice(bool withRayTracing) {
     f2.features.shaderInt64 = sup2.features.shaderInt64;
     features_.shaderInt64 = sup2.features.shaderInt64 == VK_TRUE;
     features_.samplerAnisotropy = sup2.features.samplerAnisotropy == VK_TRUE;
+    // RVK_PASS_STATS=1 (debug, off = nothing exists): per-pass pipeline statistics + precise occlusion queries (vk/gputimer.*, docs/research/full-solid-pass.md)
+    {
+        char e[4]{};
+        if (GetEnvironmentVariableA("RVK_PASS_STATS", e, sizeof e) > 0 && e[0] == '1' && sup2.features.pipelineStatisticsQuery == VK_TRUE &&
+            sup2.features.occlusionQueryPrecise == VK_TRUE) {
+            f2.features.pipelineStatisticsQuery = VK_TRUE;
+            f2.features.occlusionQueryPrecise = VK_TRUE;
+            features_.passStats = true;
+        }
+    }
     features_.maxAnisotropy = features_.samplerAnisotropy ? props_.limits.maxSamplerAnisotropy : 1.0f;
 
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
