@@ -11,7 +11,14 @@
 // the shader; the RVK_MV_* defines select what they do (the same defines enh/material_variant.cpp sets for the translated shaders).
 
 #ifndef RVK_CL_EARLY
-#define RVK_CL_EARLY 0  // 1: the light table's cluster selection runs at the entry instead of right before the point-light loop
+// 1: the light table's cluster selection runs at the entry instead of right before the point-light loop. Without the ambient hooks (`clonly`, the GI-off variant
+// of a default Full session) it is the smaller shader (WS43, full-solid-pass.md 8: RGA gfx1035, 18 lit requests, mean 130 -> 99 VGPRs; the selection no longer
+// overlaps the lit core's state); with the ambient hooks the entry is crowded by the GI lookup (S-2b: 126 -> 134) and the old place stays.
+#ifdef RVK_MV_AMBIENT
+#define RVK_CL_EARLY 0
+#else
+#define RVK_CL_EARLY 1
+#endif
 #endif
 #ifndef RVK_GI_LATE
 #define RVK_GI_LATE 0  // 1: the ambient (GI / AO / screen probes) is read at the lit core's ambient term, 0: at the entry (the texture phase carries the packed result)
